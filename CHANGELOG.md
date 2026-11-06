@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.24.2
+
+**Fixed**
+
+- Tests run as root in a container -- a sealed worker running Playwright by `docker exec` -- wrote their evidence readable by root alone, so the run, as the checkout's user, stopped at each file with "Permission denied (os error 13)" and recorded no run. Evidence a container writes is now readable by every user, and when the run ends, whatever a container left that another user owns in the copy and the run's directory -- Playwright's `test-results`, `.last-run.json` -- is opened to the run's user, so it is read and removed.
+
 ## 4.24.1
 
 **Fixed**
