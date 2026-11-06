@@ -64,14 +64,16 @@ function run(root) {
   return readFileSync(loaded, "utf8").split("\n").filter(Boolean).sort();
 }
 
-test("only the runner's test workers load the Playwright wrapper", t => {
+// The runner lists the tests with the wrapper's fixtures, as its workers run
+// them; the servers it starts never load it.
+test("only the runner and its test workers load the Playwright wrapper", t => {
   const root = project(t, "node_modules/playwright/lib/worker/workerProcessEntry.js");
-  assert.deepEqual(run(root), ["worker"]);
+  assert.deepEqual(run(root), ["runner", "worker"]);
 });
 
 test("a worker installed outside node_modules still loads it", t => {
   // Yarn Plug'n'Play keeps packages in zip archives, with no node_modules path
   // to recognise Playwright's files by: the runner's mark is what tells.
   const root = project(t, ".yarn/unplugged/playwright/lib/worker/workerProcessEntry.js");
-  assert.deepEqual(run(root), ["worker"]);
+  assert.deepEqual(run(root), ["runner", "worker"]);
 });
