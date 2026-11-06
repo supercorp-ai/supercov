@@ -180,6 +180,67 @@ try {
     'rust-direct-playwright-default-require',
     1,
   );
+  // An ES module spec and a CommonJS spec of one project, importing
+  // @playwright/test itself, in one worker: each must get the same wrapper,
+  // or the worker's fixtures differ from those the runner listed the tests
+  // with (`Playwright detected inconsistent test.use() options`).
+  const mixed = resolve(temporary, 'mixed');
+  mkdirSync(resolve(mixed, 'tests'), { recursive: true });
+  mkdirSync(resolve(mixed, 'node_modules/.bin'), { recursive: true });
+  mkdirSync(resolve(mixed, 'node_modules/@playwright'), { recursive: true });
+  symlinkSync(
+    resolve(repository, 'node_modules/@playwright/test'),
+    resolve(mixed, 'node_modules/@playwright/test'),
+  );
+  symlinkSync(
+    resolve(repository, 'node_modules/.bin/playwright'),
+    resolve(mixed, 'node_modules/.bin/playwright'),
+  );
+  writeFileSync(
+    resolve(mixed, 'package.json'),
+    JSON.stringify({ name: 'supercov-mixed-specs', private: true, scripts: { test: 'playwright test' } }) + '\n',
+  );
+  writeFileSync(
+    resolve(mixed, 'playwright.config.mjs'),
+    "export default { testDir: './tests', workers: 1, reporter: 'line' };\n",
+  );
+  writeFileSync(
+    resolve(mixed, 'tests/a-module.spec.mjs'),
+    "import { test, expect } from '@playwright/test';\ntest('module', () => expect(1).toBe(1));\n",
+  );
+  writeFileSync(
+    resolve(mixed, 'tests/b-commonjs.spec.cjs'),
+    "const { test, expect } = require('@playwright/test');\ntest('commonjs', () => expect(2).toBe(2));\n",
+  );
+  // And the facade project's ES module spec, through @acme/browser-fixtures,
+  // beside its CommonJS spec importing @playwright/test itself.
+  writeFileSync(
+    resolve(project, 'tests/permission.spec.js'),
+    [
+      "import { browserTest as test, expect } from '@acme/browser-fixtures';",
+      "import { permission } from '../src/permission.js';",
+      "test('admin', () => expect(permission(true, false)).toBe('allowed'));",
+      '',
+    ].join('\n'),
+  );
+  const outcomes = [
+    [mixed, 'rust-direct-playwright-mixed', 2],
+    [project, 'rust-direct-playwright-mixed-facade', 2],
+  ].map(([root, runId, tests]) => {
+    const run = rust('__run-js-direct', {
+      root,
+      command: ['npm', 'test'],
+      runId,
+      startedAt: '2026-08-25T00:00:05.000Z',
+    });
+    const passed =
+      run.exitCode === 0 &&
+      rust('__query-stored-run', { root, query: { runId: run.runId, filter: 'passed', command: 'summary' } })
+        .data.tests === tests;
+    console.log(`[rust-direct-playwright] ${runId}: ${passed ? 'passed' : `failed\n${run.diagnosticOutput}`}`);
+    return passed;
+  });
+  assert.deepEqual(outcomes, [true, true]);
   console.log(
     '[rust-direct-playwright] Rust-owned npm test run preserves multi-worker Playwright attribution',
   );
