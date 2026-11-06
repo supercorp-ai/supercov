@@ -991,13 +991,23 @@ if (missingFile) {
         }
     };
 }
-register(new URL("./resolve-loader.mjs", import.meta.url), {
-    data: {
-        typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
-        supportFile,
-        missingFile,
-    },
-});
+const loaderData = {
+    typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
+    supportFile,
+    missingFile,
+};
+// Where Node can (22.15, 23.5), the hooks run in this thread. Off it, every
+// Node process started a thread of its own and compiled a module loader
+// there, and each import and require waited on a message to it: on Bulletproof
+// React's Vitest suite on one worker, a third of the time a measured run added.
+if (typeof Module.registerHooks === "function") {
+    const hooks = await import("./resolve-loader.mjs");
+    hooks.initialize(loaderData);
+    Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
+}
+else {
+    register(new URL("./resolve-loader.mjs", import.meta.url), { data: loaderData });
+}
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
 }
