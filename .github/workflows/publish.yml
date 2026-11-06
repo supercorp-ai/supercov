@@ -36,7 +36,8 @@ jobs:
   publish:
     needs: native-artifacts
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The wait below allows npm 45 minutes to serve every native package.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -66,6 +67,8 @@ jobs:
       # and on 0.0.50 a platform package was visible to `npm publish` four
       # minutes before it was visible to `npm install`. Anyone installing in
       # that window resolved the primary package and could not fetch its binary.
+      # Up to 45 minutes: 4.24.1 waited 16 for one package, and the ten minutes
+      # this used to allow failed four releases that npm completed later.
       - name: Wait until a reader would find every native package
         run: node scripts/await-native-release.mjs native-release
       - name: Publish the primary package only after every native package exists

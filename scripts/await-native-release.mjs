@@ -26,7 +26,11 @@ import { resolve } from "node:path";
 const args = process.argv.slice(2);
 const directory = resolve(args.find((a) => !a.startsWith("--")) ?? "native-release");
 const flag = args.indexOf("--timeout-seconds");
-const timeoutSeconds = flag === -1 ? 600 : Number(args[flag + 1]);
+// Ten minutes was too few: a native package took 16 minutes to become
+// readable on 4.24.1, and 4.24.0, 4.11.0 and 3.0.5 each needed the job run
+// again. The wait costs nothing when npm is quick, and holding the primary
+// back is still what keeps an install from finding no binary.
+const timeoutSeconds = flag === -1 ? 45 * 60 : Number(args[flag + 1]);
 const releaseSet = JSON.parse(readFileSync(resolve(directory, "release-set.json"), "utf8"));
 
 async function readable({ package: name, version }) {
@@ -42,6 +46,7 @@ async function readable({ package: name, version }) {
 const started = Date.now();
 const waiting = new Map(releaseSet.packages.map((p) => [`${p.package}@${p.version}`, p]));
 let delay = 2000;
+let reported = started;
 
 while (waiting.size > 0) {
   for (const [specifier, entry] of [...waiting]) {
@@ -69,6 +74,13 @@ while (waiting.size > 0) {
       "[native-release] the primary package was not published, so nothing resolves to a version whose binaries cannot be fetched.",
     );
     process.exit(1);
+  }
+  // Said every two minutes, so a long wait reads as one, not as a hang.
+  if (Date.now() - reported >= 120_000) {
+    reported = Date.now();
+    console.log(
+      `[native-release] after ${Math.round((Date.now() - started) / 1000)}s still waiting for ${[...waiting.keys()].join(", ")}`,
+    );
   }
   await new Promise((r) => setTimeout(r, delay));
   delay = Math.min(delay * 2, 15000);
