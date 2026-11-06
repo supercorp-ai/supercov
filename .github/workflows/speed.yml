@@ -65,6 +65,7 @@ jobs:
           SPEED_ROUNDS: 3
           SPEED_REPEAT: 10
           SPEED_OUTPUT: ${{ runner.temp }}/speed
+          SPEED_DIAGNOSE: 1
         run: node scripts/speed-benchmark.mjs
       - if: always()
         uses: actions/upload-artifact@v4

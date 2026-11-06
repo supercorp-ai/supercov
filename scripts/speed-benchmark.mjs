@@ -207,6 +207,15 @@ for (let round = 1; round <= rounds; round += 1) {
   }
 }
 
+// One more measured pass, counted in no median, with Supercov's timing on:
+// where each run's setup went, and every browser round-trip of each test.
+if (process.env.SPEED_DIAGNOSE === '1') {
+  const { name, path } = binaries.at(-1);
+  rmSync(join(project, '.supercov'), { recursive: true, force: true });
+  for (const suite of suites)
+    run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+}
+
 const median = (values) => {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
