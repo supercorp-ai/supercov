@@ -31,7 +31,13 @@ runs:
         # out on 2026-11-05); and failing both, the CDN's current 1.10 release,
         # which has every task the tests use. The CDN keeps only the newest:
         # 1.10.15 was gone from it by the time 1.10.18 was out.
-        zip=$(ls "$kept"/apache-ant-*-bin.zip 2>/dev/null | head -1)
+        # A glob, not `ls`: with nothing kept yet `ls` fails, and the step
+        # runs under pipefail.
+        zip=""
+        for found in "$kept"/apache-ant-*-bin.zip; do
+          [ -e "$found" ] && zip="$found"
+          break
+        done
         if [ -z "$zip" ]; then
           name="apache-ant-$VERSION-bin.zip"
           fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name" \
