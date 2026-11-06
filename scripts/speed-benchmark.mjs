@@ -217,13 +217,21 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
+  // A pool that ends its workers with a signal leaves them no profile to
+  // write, and a plain Vitest run's workers wrote none: each process here
+  // exits on the signal instead, plain and measured alike.
+  const exitOnSignal = join(output, 'exit-on-signal.cjs');
+  writeFileSync(
+    exitOnSignal,
+    "for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => process.exit(0));\n",
+  );
   const profiled = {};
   for (const [variant, binary] of [['plain'], [name, path]]) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
       const directory = join(output, 'profiles', `${variant}-${suite.name}`);
       mkdirSync(directory, { recursive: true });
-      const options = `${process.env.NODE_OPTIONS ?? ''} --cpu-prof --cpu-prof-dir=${directory}`.trim();
+      const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
       run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options }, true);
       const { totals, functions } = profileSelfTime(directory);
