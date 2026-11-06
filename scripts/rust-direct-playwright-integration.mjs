@@ -215,7 +215,11 @@ try {
     "const { test, expect } = require('@playwright/test');\nconst value = require('../src/value.js');\ntest('commonjs', () => expect(value(0)).toBe(1));\n",
   );
   // And the facade project's ES module spec, through @acme/browser-fixtures,
-  // beside its CommonJS spec importing @playwright/test itself.
+  // beside its CommonJS spec importing @playwright/test itself, on one worker.
+  writeFileSync(
+    resolve(project, 'playwright.config.mjs'),
+    "export default { testDir: './tests', workers: 1, reporter: 'line' };\n",
+  );
   writeFileSync(
     resolve(project, 'tests/permission.spec.js'),
     [
