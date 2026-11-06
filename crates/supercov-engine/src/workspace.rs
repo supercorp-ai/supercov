@@ -2226,7 +2226,7 @@ pub fn prune_cached_workspace_sources(
         if keep.contains(&name) {
             continue;
         }
-        remove_stored_tree_deferred(root, &entry.path())?;
+        crate::lifecycle::remove_scratch_tree_deferred(root, &entry.path())?;
         removed.push(name);
     }
     // The configurations and helpers each run writes into the copy's

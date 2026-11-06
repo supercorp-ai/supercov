@@ -282,6 +282,27 @@ pub fn remove_stored_tree_deferred(
     project_root: &Path,
     target: &Path,
 ) -> Result<Option<PathBuf>, LifecycleError> {
+    move_to_trash(project_root, target, true)
+}
+
+/// [`remove_stored_tree_deferred`] for scratch no crash needs undone: the
+/// tree moves into the trash without syncing either directory. A workspace
+/// copy is written without syncing too; pruning its sources synced two
+/// directories per entry, a quarter of a second of every run's end.
+#[track_caller]
+pub fn remove_scratch_tree_deferred(
+    project_root: &Path,
+    target: &Path,
+) -> Result<Option<PathBuf>, LifecycleError> {
+    move_to_trash(project_root, target, false)
+}
+
+#[track_caller]
+fn move_to_trash(
+    project_root: &Path,
+    target: &Path,
+    durable: bool,
+) -> Result<Option<PathBuf>, LifecycleError> {
     let root = absolute_root(project_root);
     let target = if target.is_absolute() {
         target.to_owned()
@@ -304,7 +325,11 @@ pub fn remove_stored_tree_deferred(
     reject_linked_ancestors(&root, &trash, true)?;
     fs::create_dir_all(&trash).map_err(|source| io_error(&trash, source))?;
     let destination = trash.join(unique_name());
-    atomic_rename(&target, &destination)?;
+    if durable {
+        atomic_rename(&target, &destination)?;
+    } else {
+        fs::rename(&target, &destination).map_err(|source| io_error(&destination, source))?;
+    }
     Ok(Some(destination))
 }
 
@@ -1666,7 +1691,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1478", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1503", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1691,7 +1716,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1213", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1238", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1699,7 +1724,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1288", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1313", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
