@@ -186,6 +186,8 @@ try {
   // with (`Playwright detected inconsistent test.use() options`).
   const mixed = resolve(temporary, 'mixed');
   mkdirSync(resolve(mixed, 'tests'), { recursive: true });
+  mkdirSync(resolve(mixed, 'src'), { recursive: true });
+  writeFileSync(resolve(mixed, 'src/value.js'), 'module.exports = (n) => (n > 1 ? n : 1);\n');
   mkdirSync(resolve(mixed, 'node_modules/.bin'), { recursive: true });
   mkdirSync(resolve(mixed, 'node_modules/@playwright'), { recursive: true });
   symlinkSync(
@@ -206,11 +208,11 @@ try {
   );
   writeFileSync(
     resolve(mixed, 'tests/a-module.spec.mjs'),
-    "import { test, expect } from '@playwright/test';\ntest('module', () => expect(1).toBe(1));\n",
+    "import { test, expect } from '@playwright/test';\nimport value from '../src/value.js';\ntest('module', () => expect(value(2)).toBe(2));\n",
   );
   writeFileSync(
     resolve(mixed, 'tests/b-commonjs.spec.cjs'),
-    "const { test, expect } = require('@playwright/test');\ntest('commonjs', () => expect(2).toBe(2));\n",
+    "const { test, expect } = require('@playwright/test');\nconst value = require('../src/value.js');\ntest('commonjs', () => expect(value(0)).toBe(1));\n",
   );
   // And the facade project's ES module spec, through @acme/browser-fixtures,
   // beside its CommonJS spec importing @playwright/test itself.
