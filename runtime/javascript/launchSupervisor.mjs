@@ -628,6 +628,10 @@ function inspectExports(value, depth = 0) {
     exportedValues.add(object);
     if (typeof value === "function")
         patchBuilder(value);
+    // What sits below this depth is never inspected: listing it cost every
+    // process a descriptor read per key of every export's members.
+    if (depth === 2)
+        return;
     for (const key of Reflect.ownKeys(object).slice(0, 200)) {
         if (key === "prototype" || key === "caller" || key === "callee")
             continue;
