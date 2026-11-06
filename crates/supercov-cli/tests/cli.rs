@@ -17074,11 +17074,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2488", "jvm_run.rs:2488"),
-        ("fs.create_dir_all#jvm_run.rs:2504", "jvm_run.rs:2504"),
-        ("fs.create_dir_all#jvm_run.rs:2514", "jvm_run.rs:2514"),
-        ("fs.write#jvm_run.rs:2488", "jvm_run.rs:2488"),
-        ("fs.write#jvm_run.rs:2504", "jvm_run.rs:2504"),
+        ("fs.create_dir_all#jvm_run.rs:2489", "jvm_run.rs:2489"),
+        ("fs.create_dir_all#jvm_run.rs:2505", "jvm_run.rs:2505"),
+        ("fs.create_dir_all#jvm_run.rs:2515", "jvm_run.rs:2515"),
+        ("fs.write#jvm_run.rs:2489", "jvm_run.rs:2489"),
+        ("fs.write#jvm_run.rs:2505", "jvm_run.rs:2505"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18444,7 +18444,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1961", "jvm_run.rs:1961"),
+                ("fs.canonicalize#jvm_run.rs:1962", "jvm_run.rs:1962"),
                 ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
