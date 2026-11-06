@@ -12,6 +12,16 @@ import path, { basename, dirname, isAbsolute, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
+// Supercov runs Node with --enable-source-maps so a stack through an
+// instrumented copy names the project's file. The flag also reads the maps
+// every package ships, which a plain run never does: a third of the CPU a
+// measured Vitest suite added. Where Node can, Supercov's flag maps the
+// project's files alone, unless the command asked for maps itself: a second
+// flag in NODE_OPTIONS, or one on its own command line.
+if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === "--enable-source-maps").length === 1 &&
+    !process.execArgv.includes("--enable-source-maps") &&
+    typeof Module.setSourceMapsSupport === "function")
+    Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
 installLaunchSupervisor();
 // Instrumented sources import the browser-safe capability seam; bind the
 // real supervisor implementation before any user module evaluates.
