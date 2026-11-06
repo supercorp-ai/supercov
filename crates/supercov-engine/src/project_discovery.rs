@@ -280,7 +280,7 @@ struct PlaywrightAdapter {
 
 /// Other runners' own test APIs, never a Playwright fixture: a suite's unit
 /// tests import `test` and `expect` from them beside its specs. On
-/// 2026-11-06 essential-upsell's 390 Vitest files outscored its fixture
+/// 2026-11-06 a suite's 390 Vitest files outscored its fixture
 /// module 6,210 to 2,470, and every Playwright test crashed loading
 /// Vitest's `expect` beside Playwright's.
 const OTHER_RUNNER_APIS: &[&str] = &[

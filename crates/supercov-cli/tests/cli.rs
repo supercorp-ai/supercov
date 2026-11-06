@@ -5971,8 +5971,8 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
     );
     assert!(!said.contains("starts without build output"), "{said}");
 
-    // A build the command starts from its own code, as essential-upsell's
-    // test harness does, failed: the build is named, not taken for one the
+    // A build the command starts from its own code, as a test harness
+    // may, failed: the build is named, not taken for one the
     // command never ran.
     project.write(
         "package.json",
@@ -8986,7 +8986,7 @@ fn a_playwright_suite_reads_back_by_its_tags() {
 
 /// Unit tests beside the specs import `test` and `expect` from their own
 /// runner more often than the specs import them from their fixture module.
-/// On 2026-11-06 essential-upsell's Vitest files outscored its fixture
+/// On 2026-11-06 a suite's Vitest files outscored its fixture
 /// module, Supercov wrapped Vitest as the Playwright fixture, and every
 /// Playwright test crashed loading Vitest's `expect`. Another runner's API
 /// is never the fixture.
