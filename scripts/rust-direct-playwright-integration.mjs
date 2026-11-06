@@ -230,12 +230,12 @@ try {
       '',
     ].join('\n'),
   );
-  // Diagnostic, temporary: the facade case once more with the hooks off the
-  // loading thread, as before 4.25.
+  // Diagnostic, temporary: the facade case once more, the wrapper tracing
+  // where each process extends Playwright's test.
   const outcomes = [
     [mixed, 'rust-direct-playwright-mixed', 2],
     [project, 'rust-direct-playwright-mixed-facade', 2],
-    [project, 'rust-direct-playwright-mixed-facade-off-thread', 2, { SUPERCOV_DIAGNOSE_OFF_THREAD_HOOKS: '1' }],
+    [project, 'rust-direct-playwright-mixed-facade-traced', 2, { SUPERCOV_DIAGNOSE_WRAPPER_FILE: resolve(temporary, 'wrapper.jsonl') }],
   ].map(([root, runId, tests, environment]) => {
     const run = rust(
       '__run-js-direct',
@@ -249,6 +249,11 @@ try {
     console.log(`[rust-direct-playwright] ${runId}: ${passed ? 'passed' : `failed\n${run.diagnosticOutput}`}`);
     return passed;
   });
+  try {
+    console.log(readFileSync(resolve(temporary, 'wrapper.jsonl'), 'utf8'));
+  } catch (error) {
+    console.log(`no wrapper trace: ${error.message}`);
+  }
   assert.deepEqual(outcomes, [true, true, true]);
   console.log(
     '[rust-direct-playwright] Rust-owned npm test run preserves multi-worker Playwright attribution',
