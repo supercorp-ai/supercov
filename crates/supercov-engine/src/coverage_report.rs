@@ -855,14 +855,18 @@ enum ExecutionTraceEvent {
         method: String,
         command: ExecutionSafeArgument,
     },
-    /// A child a crash signal ended; the JavaScript run names it.
+    /// A child a crash signal ended, or that exited non-zero; the
+    /// JavaScript run names the crashes and the builds that failed.
     ChildExit {
         at: String,
         pid: u32,
         ppid: u32,
         #[serde(default)]
         child: Option<u32>,
-        signal: String,
+        #[serde(default)]
+        signal: Option<String>,
+        #[serde(default)]
+        code: Option<i64>,
         command: ExecutionSafeArgument,
         ran_ms: u64,
     },

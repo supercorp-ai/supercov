@@ -5983,6 +5983,9 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
     assert!(!said.contains("starts without build output"), "{said}");
+    // The failed build's record reads back as one, not as a malformed line.
+    let report = project.supercov(&["runs", "latest"]).exits(0);
+    assert!(!report.contains("malformed"), "{report}");
 }
 
 #[cfg(unix)]
