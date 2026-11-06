@@ -32,6 +32,7 @@
 
 use crate::fault_fs as fs;
 use crate::fault_process::Launch;
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Write},
@@ -299,6 +300,10 @@ impl DockerProxy {
                     None,
                 );
             }
+        }
+        // The run's user is the copy's owner.
+        if let Ok(copy) = std::fs::metadata(&self.shared.settings.copy) {
+            open_what_containers_wrote(&self.upstream, &self.shared.settings, copy.uid());
         }
         self.stop.store(true, Ordering::Release);
         // Always there: only `finish`, which takes the relay, takes it.
@@ -924,6 +929,14 @@ impl Shared {
             environment.retain(|entry| entry.split_once('=').is_none_or(|(key, _)| key != name));
             environment.push(format!("{name}={value}"));
         }
+        // The runtime there writes for the run, a user of its own: one in a
+        // container the run did not create learns it is in one here.
+        environment.retain(|entry| {
+            entry
+                .split_once('=')
+                .is_none_or(|(key, _)| key != CONTAINER_VARIABLE)
+        });
+        environment.push(format!("{CONTAINER_VARIABLE}=1"));
         config["Env"] = json!(environment);
         let line = json!({
             "exec": container,
@@ -1140,6 +1153,98 @@ fn add_settings(
         Some(existing) => existing.extend(binds),
         None => host["Binds"] = json!(binds),
     }
+}
+
+/// What the measured containers wrote into the copy and the run's own
+/// directory, opened to every user. A container runs as root, as sealed
+/// workers do, and what it makes there -- its evidence, a test runner's
+/// `test-results` -- the run, as another user, could neither read nor
+/// remove: 4.24.1 recorded no run, "Permission denied". A container of each
+/// image that ran opens them, `chmod`, not `chown`: under rootless Docker a
+/// container's root is the user already, and a chown would hand the files to
+/// another. The suite's own containers may be gone by now; these are new, and
+/// removed once done. An image with no `chmod` leaves things as they were.
+///
+/// Only when something there belongs to a user other than `owner`, the
+/// run's: Docker Desktop gives a container's files to the user already, and
+/// there a container that mounted the copy just before the next run replaced
+/// it showed that run the old, emptied copy.
+fn open_what_containers_wrote(upstream: &Path, settings: &ProxySettings, owner: u32) {
+    let Ok(text) = fs::read_to_string(&settings.state) else {
+        return;
+    };
+    let paths = [
+        Some(settings.copy.as_path()),
+        settings.state.parent().and_then(Path::parent),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !paths.iter().any(|path| another_owns_something(path, owner)) {
+        return;
+    }
+    let images = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["measured"] == true)
+        .filter_map(|line| line["image"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let command = ["-R", "a+rwX"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(paths.iter().cloned())
+        .collect::<Vec<_>>();
+    let binds = paths
+        .iter()
+        .map(|path| format!("{path}:{path}"))
+        .collect::<Vec<_>>();
+    for image in images {
+        let config = json!({
+            "Image": image,
+            "User": "0:0",
+            "Entrypoint": ["chmod"],
+            "Cmd": command,
+            "HostConfig": {"Binds": binds},
+        })
+        .to_string();
+        let Some(id) = daemon_request(
+            upstream,
+            "POST",
+            "/containers/create",
+            Some(config.as_bytes()),
+        )
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|created| created["Id"].as_str().map(str::to_owned)) else {
+            continue;
+        };
+        let _ = daemon_request(upstream, "POST", &format!("/containers/{id}/start"), None);
+        let _ = daemon_request(upstream, "POST", &format!("/containers/{id}/wait"), None);
+        let _ = daemon_request(
+            upstream,
+            "DELETE",
+            &format!("/containers/{id}?force=true"),
+            None,
+        );
+    }
+}
+
+/// Whether anything at or below `path`, links not followed, belongs to a user
+/// other than `owner`; it stops at the first that does.
+fn another_owns_something(path: &Path, owner: u32) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.uid() != owner
+        || (metadata.is_dir()
+            && std::fs::read_dir(path).is_ok_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| another_owns_something(&entry.path(), owner))
+            }))
 }
 
 /// The container a `POST /containers/{id}/exec` creates an exec in.
@@ -1981,6 +2086,40 @@ mod tests {
         );
         drop(stream);
         proxy.finish();
+        // Everything there is the run's user's: nothing is opened.
+        let chmods = |created: &mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| created.recv_timeout(Duration::from_secs(2)).ok())
+                .filter(|sent| sent["Entrypoint"] == json!(["chmod"]))
+                .collect::<Vec<_>>()
+        };
+        assert!(chmods(&created).is_empty());
+        // Something another user's -- a container's root -- and a container of
+        // each image that ran, as root, opens the copy and the run's directory
+        // to every user.
+        let mine = std::fs::metadata(&directory).unwrap().uid();
+        open_what_containers_wrote(
+            &daemon,
+            &crate::docker_proxy::tests::settings(&directory),
+            mine + 1,
+        );
+        let opened = chmods(&created);
+        assert_eq!(
+            opened
+                .iter()
+                .map(|sent| sent["Image"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["playwright", "pulled-outer", "pulled-playwright"]
+        );
+        let copied = copy.display().to_string();
+        assert_eq!(opened[0]["User"], "0:0");
+        assert_eq!(
+            opened[0]["Cmd"],
+            json!(["-R", "a+rwX", copied, directory.display().to_string()])
+        );
+        assert_eq!(
+            opened[0]["HostConfig"]["Binds"][0],
+            json!(format!("{copied}:{copied}"))
+        );
         let journal = journal(&directory.join("state/containers.jsonl"));
         assert_eq!(
             journal.execs,
@@ -2706,7 +2845,7 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:147", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:148", || {
                 socket_path(&directory.join("state"))
             })
             .is_err()
@@ -2714,13 +2853,13 @@ mod tests {
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:158", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:159", || {
                 socket_path(&directory.join("state").join("d".repeat(120)))
             })
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:219", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:220", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()
