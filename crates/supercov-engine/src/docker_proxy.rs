@@ -2224,6 +2224,37 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Nothing is opened when no measured container ran, and an image whose
+    /// container the daemon refuses is passed over for the next.
+    #[test]
+    fn what_another_owns_is_opened_only_by_a_container_the_daemon_makes() {
+        let directory = temporary("opened");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let settings = settings(&directory);
+        fs::create_dir_all(&settings.copy).unwrap();
+        fs::create_dir_all(settings.state.parent().unwrap()).unwrap();
+        let theirs = std::fs::metadata(&directory).unwrap().uid() + 1;
+        fs::write(&settings.state, "").unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        fs::write(
+            &settings.state,
+            [
+                json!({"id": "a1", "image": "refused-api", "measured": true}),
+                json!({"id": "b2", "image": "worker", "measured": true}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        let sent = std::iter::from_fn(|| created.recv_timeout(Duration::from_secs(2)).ok())
+            .map(|sent| sent["Image"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(sent, ["refused-api", "worker"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     /// A container a client waited on and that exited 0 ran to its end -- an
     /// install, a migration -- and had nothing to send back; a wait the
     /// daemon answered with no status records nothing.
@@ -3252,6 +3283,7 @@ mod tests {
             .as_bytes(),
             exec,
             b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"POST /containers/one/wait HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
             b"GET /logs HTTP/1.1\r\n\r\n",
         ]
         .concat();
@@ -3262,6 +3294,7 @@ mod tests {
             b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
             b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\n\r\n{\"Id\":\"e1\"}",
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}",
             b"HTTP/1.1 200 OK\r\n\r\nall of it",
         ]
         .concat();
@@ -3276,6 +3309,7 @@ mod tests {
                     answered.contains("c\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n"),
                     "{answered}"
                 );
+                assert!(answered.contains("{\"StatusCode\":0}"), "{answered}");
                 break;
             }
             assert!(relayed.is_err(), "{nth}");
