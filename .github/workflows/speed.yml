@@ -1,6 +1,6 @@
 name: Speed
 
-# How much longer a real Next.js application's tests take under Supercov than
+# How much longer real Next.js applications' tests take under Supercov than
 # without it, for the pull request's base and its head on one machine, taking
 # turns (scripts/speed-benchmark.mjs). Add the `speed` label to a pull request;
 # each push to a labelled pull request measures again.
@@ -46,13 +46,50 @@ jobs:
 
   measure:
     needs: build
+    name: Measure ${{ matrix.app }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: bulletproof
+            node: 22
+            rounds: 3
+            diagnose: 1
+            binaries: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
+          # 170 Playwright tests on one worker: two rounds, no diagnostic pass.
+          # Against plain alone: a Supercov without f8f3d872 cannot build it
+          # (its instrumentation.ts guards Node-only imports with NEXT_RUNTIME).
+          - app: rallly
+            node: 24
+            rounds: 2
+            diagnose: 0
+            binaries: new=binaries/supercov-new/supercov
+    # Rallly's tests reach Postgres and Mailpit where its .env.test says.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rallly
+        ports:
+          - 5450:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      mailpit:
+        image: axllent/mailpit
+        ports:
+          - 1025:1025
+          - 8025:8025
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
       - uses: actions/download-artifact@v4
         with:
           pattern: supercov-*
@@ -61,16 +98,17 @@ jobs:
       - run: npx -y playwright@1.49.1 install-deps chromium
       - name: Measure
         env:
-          SUPERCOV_BINARIES: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
-          SPEED_ROUNDS: 3
+          SUPERCOV_BINARIES: ${{ matrix.binaries }}
+          SPEED_APP: ${{ matrix.app }}
+          SPEED_ROUNDS: ${{ matrix.rounds }}
           SPEED_REPEAT: 10
           SPEED_OUTPUT: ${{ runner.temp }}/speed
-          SPEED_DIAGNOSE: 1
+          SPEED_DIAGNOSE: ${{ matrix.diagnose }}
         run: node scripts/speed-benchmark.mjs
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: speed
+          name: speed-${{ matrix.app }}
           path: |
             ${{ runner.temp }}/speed/samples.jsonl
             ${{ runner.temp }}/speed/summary.md

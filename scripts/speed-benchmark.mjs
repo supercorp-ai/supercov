@@ -1,7 +1,7 @@
 // How much longer a real Next.js application's tests take under Supercov
-// than without it: Bulletproof React's Next.js app, its Vitest suite and its
-// Playwright flow against a production build and the app's own mock API,
-// all offline. Each round runs the plain suites, then every binary named in
+// than without it: the application SPEED_APP names (see `applications`),
+// its Vitest suite and its Playwright suite against a production build. Each
+// round runs the plain suites, then every binary named in
 // SUPERCOV_BINARIES (`name=path,...`) in an order that turns each round, so
 // no binary always runs on a warmer machine. A Supercov run starts with no
 // `.supercov`, as on a fresh CI checkout, and ends with a merge of its two
@@ -42,7 +42,7 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
   const started = process.hrtime.bigint();
   const result = spawnSync(command, args, {
     cwd,
-    env: { ...process.env, CI: '1', ...extra },
+    env: { ...process.env, CI: 'true', ...extra },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 256 * 1024 * 1024,
@@ -54,40 +54,32 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
   return { seconds, stdout: result.stdout };
 }
 
-const app = join(output, 'bulletproof-react');
-if (!existsSync(app)) {
-  mkdirSync(app);
-  run(app, 'git', ['init', '-q'], 'git-init');
-  run(
-    app,
-    'git',
-    [
-      'fetch',
-      '-q',
-      '--depth',
-      '1',
-      'https://github.com/alan2207/bulletproof-react.git',
-      '9506629ed003a561c6627735480cce4994244bb4',
-    ],
-    'git-fetch',
-  );
-  run(app, 'git', ['checkout', '-q', '--detach', 'FETCH_HEAD'], 'git-checkout');
+function checkout(directory, repository, commit) {
+  if (existsSync(directory)) return;
+  mkdirSync(directory);
+  run(directory, 'git', ['init', '-q'], 'git-init');
+  run(directory, 'git', ['fetch', '-q', '--depth', '1', repository, commit], 'git-fetch');
+  run(directory, 'git', ['checkout', '-q', '--detach', 'FETCH_HEAD'], 'git-checkout');
 }
-const project = join(app, 'apps/nextjs-app');
-run(
-  project,
-  'npx',
-  ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'],
-  'install',
-);
-copyFileSync(join(project, '.env.example'), join(project, '.env'));
-// One worker: the flow's user shares one team, whose discussion list each
-// repetition empties again. A production build, as CI serves it, without
-// the lint \`next build\` runs first: the same for every variant, and a
-// release before 4.25 failed it on the test files it rewrote.
-writeFileSync(
-  join(project, 'playwright.speed.config.ts'),
-  `import { defineConfig, devices } from '@playwright/test';
+
+// Each application at a fixed commit: where its suites run, what prepares
+// it once, and what puts its state back before each run.
+const applications = {
+  // Bulletproof React's Next.js app: its Vitest suite, and one Playwright
+  // flow repeated against a production build and the app's own mock API.
+  bulletproof() {
+    const root = join(output, 'bulletproof-react');
+    checkout(root, 'https://github.com/alan2207/bulletproof-react.git', '9506629ed003a561c6627735480cce4994244bb4');
+    const project = join(root, 'apps/nextjs-app');
+    run(project, 'npx', ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'], 'install');
+    copyFileSync(join(project, '.env.example'), join(project, '.env'));
+    // One worker: the flow's user shares one team, whose discussion list each
+    // repetition empties again. A production build, as CI serves it, without
+    // the lint \`next build\` runs first: the same for every variant, and a
+    // release before 4.25 failed it on the test files it rewrote.
+    writeFileSync(
+      join(project, 'playwright.speed.config.ts'),
+      `import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
@@ -111,30 +103,87 @@ export default defineConfig({
   ],
 });
 `,
-);
-run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
-
-const suites = [
-  // The app's own unit tests compare a time to the minute, and fail now and
-  // then as the minute turns: plain or measured alike.
-  { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
-  {
-    name: 'e2e',
-    // On a shared runner the flow now and then misses a timeout, and the
-    // repetition after it finds that one's discussion left behind: a
-    // failure is counted, and the passing repetitions are what is timed.
-    mayFail: true,
-    command: [
-      'npx',
-      'playwright',
-      'test',
-      '--config',
-      'playwright.speed.config.ts',
-      '--repeat-each',
-      String(repeat),
-    ],
+    );
+    run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
+    return {
+      project,
+      description: `the e2e flow repeated ${repeat} times`,
+      suites: [
+        // The app's own unit tests compare a time to the minute, and fail now
+        // and then as the minute turns: plain or measured alike.
+        { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
+        {
+          name: 'e2e',
+          // On a shared runner the flow now and then misses a timeout, and the
+          // repetition after it finds that one's discussion left behind: a
+          // failure is counted, and the passing repetitions are what is timed.
+          mayFail: true,
+          command: ['npx', 'playwright', 'test', '--config', 'playwright.speed.config.ts', '--repeat-each', String(repeat)],
+        },
+      ],
+      reset() {},
+    };
   },
-];
+  // Rallly, a pnpm monorepo on Next 16 and Turbopack: the web app's 1,100
+  // Vitest tests, and its 170 Playwright tests against a production build,
+  // Postgres on localhost:5450 and Mailpit on localhost:8025, as its .env.test
+  // says.
+  rallly() {
+    const root = join(output, 'rallly');
+    checkout(root, 'https://github.com/lukevella/rallly.git', '26111d7e993d2e7016810f68bcad139393644db0');
+    const project = join(root, 'apps/web');
+    const pnpm = ['-y', 'pnpm@12.14.0'];
+    run(root, 'npx', [...pnpm, 'install', '--frozen-lockfile'], 'install');
+    run(root, 'npx', [...pnpm, 'db:generate'], 'db-generate');
+    // Its own configuration, with the build in the command (Supercov measures
+    // the server it builds) and the one worker its suite is written for: the
+    // tests share one database and one mailbox.
+    writeFileSync(
+      join(project, 'playwright.speed.config.ts'),
+      `import base from './playwright.config';
+
+export default {
+  ...base,
+  workers: 1,
+  retries: 0,
+  reporter: [['list'], ['json']],
+  webServer: {
+    ...base.webServer,
+    command: 'NODE_ENV=test npx next build && npx next start --port 3002',
+    timeout: 900_000,
+  },
+};
+`,
+    );
+    run(project, 'npx', ['playwright', 'install', 'chromium'], 'browser');
+    return {
+      project,
+      description: 'the e2e suite once',
+      suites: [
+        { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
+        // A slow runner times a test out now and then: counted, and the
+        // passing tests are what is timed.
+        { name: 'e2e', command: ['npx', 'playwright', 'test', '--config', 'playwright.speed.config.ts'], mayFail: true },
+      ],
+      // Every run starts from an empty database and mailbox, as each of
+      // rallly's CI shards does.
+      reset(label) {
+        const database = 'postgres://postgres:postgres@localhost:5450/rallly';
+        run(
+          root,
+          'npx',
+          [...pnpm, '--filter', '@rallly/database', 'exec', 'prisma', 'migrate', 'reset', '--force'],
+          `${label}-db-reset`,
+          { DATABASE_URL: database, DIRECT_DATABASE_URL: database },
+        );
+        run(root, 'curl', ['-fsS', '-X', 'DELETE', 'http://localhost:8025/api/v1/messages'], `${label}-mail-reset`);
+      },
+    };
+  },
+};
+const application = process.env.SPEED_APP ?? 'bulletproof';
+assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
+const { project, description, suites, reset } = applications[application]();
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so
@@ -170,6 +219,7 @@ function sample(round, variant, suite, seconds, extra = {}) {
 }
 
 function suiteRun(round, variant, suite, binary) {
+  reset(`${round}-${variant}-${suite.name}`);
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
   const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report };
   const [command, ...args] = binary
@@ -216,8 +266,10 @@ for (let round = 1; round <= rounds; round += 1) {
 if (process.env.SPEED_DIAGNOSE === '1') {
   const { name, path } = binaries.at(-1);
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
-  for (const suite of suites)
+  for (const suite of suites) {
+    reset(`diagnose-${name}-${suite.name}`);
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+  }
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
   // A pool that ends its workers with a signal leaves them no profile to
@@ -232,6 +284,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   for (const [variant, binary] of [['plain'], [name, path]]) {
     rmSync(join(project, '.supercov'), { recursive: true, force: true });
     for (const suite of suites) {
+      reset(`profile-${variant}-${suite.name}`);
       const directory = join(output, 'profiles', `${variant}-${suite.name}`);
       mkdirSync(directory, { recursive: true });
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
@@ -318,7 +371,7 @@ for (const { name } of binaries) {
     `| ${name} | ${of(name, 'unit').toFixed(2)} | ${of(name, 'e2e').toFixed(2)} | ${of(name, 'e2e', 'testSeconds').toFixed(2)} | ${failures(name)} | ${of(name, 'merge').toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} | ${(of(name, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |`,
   );
 }
-const table = `Medians of ${rounds} rounds, e2e flow repeated ${repeat} times.\n\n${rows.join('\n')}\n`;
+const table = `${application}: medians of ${rounds} rounds, ${description}.\n\n${rows.join('\n')}\n`;
 writeFileSync(join(output, 'summary.md'), table);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
 console.log(table);
