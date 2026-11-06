@@ -8,7 +8,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 };
 import { createHash, randomBytes } from "node:crypto";
 import childProcess from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -1667,8 +1667,6 @@ const instrumentedFixtures = {
         { auto: true },
     ],
 };
-if (process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE)
-    appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ pid: process.pid, entry: process.argv[1], worker: process.env.TEST_WORKER_INDEX, stack: new Error().stack }) + "\n");
 const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
 // `export *` passes no default on, and `import test from "@playwright/test"`

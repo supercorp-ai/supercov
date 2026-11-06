@@ -1000,7 +1000,7 @@ const loaderData = {
 // Node process started a thread of its own and compiled a module loader
 // there, and each import and require waited on a message to it: on Bulletproof
 // React's Vitest suite on one worker, a third of the time a measured run added.
-if (typeof Module.registerHooks === "function" && process.env.SUPERCOV_DIAGNOSE_OFF_THREAD_HOOKS !== "1") {
+if (typeof Module.registerHooks === "function") {
     const hooks = await import("./resolve-loader.mjs");
     hooks.initialize(loaderData);
     Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
@@ -1153,15 +1153,19 @@ if (generatedPlaywrightConfig &&
 }
 // A process the runner marked as not a test worker skips the wrapper, unless
 // it was started from Playwright's own files: a worker Playwright starts some
-// other way than its worker entry still has the wrapper, only later.
+// other way than its worker entry still has the wrapper, only later. The
+// runner itself has it too: it lists each test with the fixtures its spec's
+// `test` carries, and puts tests with the same worker fixtures in one worker.
+// A CommonJS spec it listed with Playwright's own `test` ran in the worker
+// with the wrapper's, beside a spec through a facade that has Playwright's
+// own in both, and the worker refused the pair: "Playwright detected
+// inconsistent test.use() options". An ES module spec already had the wrapper
+// in the runner, through the module hooks.
 const isPlaywrightProcess = /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint);
-if (process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE)
-    fs.appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ how: "preload", pid: process.pid, entry: process.argv[1], inside: process.env.SUPERCOV_INSIDE_PLAYWRIGHT, worker: process.env.SUPERCOV_PLAYWRIGHT_WORKER, cjs: process.env.SUPERCOV_CJS_INTERCEPT, isPlaywrightEntrypoint, isPlaywrightProcess, syncHooks: typeof Module.registerHooks === "function" }) + "\n");
 const mayBePlaywrightWorker = process.env.SUPERCOV_PLAYWRIGHT_WORKER !== "0" || isPlaywrightProcess;
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
-    !isPlaywrightEntrypoint &&
-    mayBePlaywrightWorker &&
+    (isPlaywrightEntrypoint || mayBePlaywrightWorker) &&
     process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
     process.env.VITEST !== "true") {
     const target = playwrightTarget ?? "@playwright/test";
@@ -1195,8 +1199,6 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
             (normalizedRoot
                 ? parentFile.startsWith(`${normalizedRoot}/`)
                 : parentFile.includes("/tests/"));
-        if (request === target && process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE)
-            fs.appendFileSync(process.env.SUPERCOV_DIAGNOSE_WRAPPER_FILE, JSON.stringify({ how: "cjs", pid: process.pid, entry: process.argv[1], parent: parentFile, belongsToProject }) + "\n");
         if (request === target && belongsToProject)
             return commonjsWrapper;
         return originalLoad.call(this, request, parent, isMain);
