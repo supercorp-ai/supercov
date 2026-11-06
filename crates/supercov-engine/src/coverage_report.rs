@@ -20,7 +20,7 @@ use crate::coverage_analysis::{
 use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::interned::{FastMap, Id, Interner};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionMeta {
     pub id: String,
@@ -130,7 +130,11 @@ pub struct LogicalSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RuntimeSnapshotWire"
+)]
 pub struct RuntimeSnapshot {
     #[serde(default)]
     pub decisions: Vec<DecisionSnapshot>,
@@ -149,6 +153,122 @@ pub struct RuntimeSnapshot {
     pub phase_id: Option<String>,
 }
 
+/// A snapshot as a frontend writes it: its events either one record each, or
+/// as columns (`eventColumns`), which a page's thousands of hits per test make
+/// a quarter of the size. The columns decode to exactly the events they hold,
+/// so nothing that reads a snapshot sees which form it was written in.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeSnapshotWire {
+    #[serde(default)]
+    decisions: Vec<DecisionSnapshot>,
+    #[serde(default)]
+    hits: Vec<String>,
+    #[serde(default)]
+    events: Vec<RuntimeEvent>,
+    #[serde(default)]
+    event_columns: Option<EventColumns>,
+    #[serde(default)]
+    logicals: Vec<LogicalSnapshot>,
+    #[serde(default)]
+    phase_id: Option<String>,
+}
+
+/// Events by column. `type`, `phase` and `environment` index the tables of
+/// their names (a phase of -1 is none), `t` holds each timestamp as its
+/// difference from the one before it (the first from 0), and `vector` holds
+/// each decision event's vector under its position.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventColumns {
+    types: Vec<String>,
+    phases: Vec<String>,
+    environments: Vec<String>,
+    id: Vec<String>,
+    #[serde(rename = "type")]
+    event_type: Vec<usize>,
+    phase: Vec<i64>,
+    environment: Vec<usize>,
+    t: Vec<i64>,
+    #[serde(default)]
+    vector: BTreeMap<usize, McdcVector>,
+}
+
+impl EventColumns {
+    fn decode(self) -> Result<Vec<RuntimeEvent>, String> {
+        let count = self.id.len();
+        if [
+            self.event_type.len(),
+            self.phase.len(),
+            self.environment.len(),
+            self.t.len(),
+        ]
+        .iter()
+        .any(|length| *length != count)
+        {
+            return Err("event columns of different lengths".into());
+        }
+        let mut vectors = self.vector;
+        let mut timestamp = 0_i64;
+        let mut events = Vec::with_capacity(count);
+        for (index, id) in self.id.into_iter().enumerate() {
+            timestamp = timestamp
+                .checked_add(self.t[index])
+                .ok_or("an event timestamp overflows")?;
+            let event_type = self
+                .types
+                .get(self.event_type[index])
+                .ok_or("an event type outside its table")?
+                .clone();
+            let phase_id = match self.phase[index] {
+                -1 => None,
+                phase => Some(
+                    usize::try_from(phase)
+                        .ok()
+                        .and_then(|phase| self.phases.get(phase))
+                        .ok_or("an event phase outside its table")?
+                        .clone(),
+                ),
+            };
+            let environment = self
+                .environments
+                .get(self.environment[index])
+                .ok_or("an event environment outside its table")?
+                .clone();
+            events.push(RuntimeEvent {
+                event_type,
+                id,
+                vector: vectors.remove(&index),
+                timestamp_ms: timestamp,
+                phase_id,
+                environment,
+            });
+        }
+        if !vectors.is_empty() {
+            return Err("an event vector without its event".into());
+        }
+        Ok(events)
+    }
+}
+
+impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
+    type Error = String;
+
+    fn try_from(wire: RuntimeSnapshotWire) -> Result<Self, Self::Error> {
+        let mut events = wire.events;
+        if let Some(columns) = wire.event_columns {
+            events.extend(columns.decode()?);
+        }
+        Ok(Self {
+            decisions: wire.decisions,
+            hits: wire.hits,
+            events,
+            logicals: wire.logicals,
+            phase_id: wire.phase_id,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionScope {
@@ -161,7 +281,7 @@ pub struct ExecutionScope {
     pub attempt_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServerRecord {
     #[serde(rename = "type")]
@@ -1961,6 +2081,15 @@ fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifes
     Some(manifest)
 }
 
+/// Each number once: a test's or phase's hits name a point at each event
+/// that reached it, often thousands of times, and what is built from them
+/// names each point once.
+fn distinct(mut numbers: Vec<usize>) -> Vec<usize> {
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
 fn create_coverage_view_with_model(
     manifest: &CoverageManifest,
     raw_results: &[&RawTestResult],
@@ -2051,13 +2180,6 @@ fn create_coverage_view_with_model(
                 },
             );
         }
-
-        let correlate = |event: &RuntimeEvent| {
-            event
-                .phase_id
-                .clone()
-                .or_else(|| phase_at(&ordered_phases, event.timestamp_ms).map(str::to_owned))
-        };
 
         let snapshots = raw
             .runtime
@@ -2201,73 +2323,72 @@ fn create_coverage_view_with_model(
             }
         }
 
+        // A record's ids and vector are borrowed, not copied into an event
+        // of their own: a run's millions of server records each made four
+        // or five strings here.
         for record in &raw.server {
-            let (record_id, decision) = if record.record_type == "decision" {
-                let decision = record.id.as_ref().ok_or_else(|| {
-                    ReportError::InvalidServerRecord("missing decision id".into())
-                })?;
-                let vector = record
-                    .vector
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                if !decision_indexes.contains_key(decision) {
-                    continue;
-                }
-                let key = vector_key(vector);
-                let indexes = vector_indexes.entry(decision.clone()).or_default();
-                let observations = vectors_by_decision.entry(decision.clone()).or_default();
-                let index = *indexes.entry(key).or_insert_with(|| {
-                    observations.push(MutableObservation {
-                        vector: vector.clone(),
-                        tests: Vec::new(),
-                        phases: Vec::new(),
-                        explicit_phases: Vec::new(),
+            let (record_id, decision): (&str, Option<&McdcVector>) =
+                if record.record_type == "decision" {
+                    let decision = record.id.as_deref().ok_or_else(|| {
+                        ReportError::InvalidServerRecord("missing decision id".into())
+                    })?;
+                    let vector = record
+                        .vector
+                        .as_ref()
+                        .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
+                    if !decision_indexes.contains_key(decision) {
+                        continue;
+                    }
+                    let key = vector_key(vector);
+                    let indexes = hash_slot(&mut vector_indexes, decision);
+                    let observations = hash_slot(&mut vectors_by_decision, decision);
+                    let index = *indexes.entry(key).or_insert_with(|| {
+                        observations.push(MutableObservation {
+                            vector: vector.clone(),
+                            tests: Vec::new(),
+                            phases: Vec::new(),
+                            explicit_phases: Vec::new(),
+                        });
+                        observations.len() - 1
                     });
-                    observations.len() - 1
-                });
-                observations[index]
-                    .tests
-                    .push(tests_by_hit.number(&id, ids));
-                tests_by_id
-                    .get_mut(&id)
-                    .expect("registered test")
-                    .decisions
-                    .entry(decision.clone())
-                    .or_default()
+                    observations[index]
+                        .tests
+                        .push(tests_by_hit.number(&id, ids));
+                    tree_slot(
+                        &mut tests_by_id.get_mut(&id).expect("registered test").decisions,
+                        decision,
+                    )
                     .insert(vector);
-                hash_slot(&mut tests_by_decision, decision).push(tests_by_hit.number(&id, ids));
-                (decision.clone(), Some(vector.clone()))
-            } else if record.record_type == "hit" {
-                let hit = record
-                    .id
-                    .as_ref()
-                    .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
-                let number = hit_ids.number(hit, ids);
-                tests_by_hit.add(number, &id, ids);
-                tests_by_id
-                    .get_mut(&id)
-                    .expect("registered test")
-                    .hits
-                    .push(number);
-                (hit.clone(), None)
-            } else {
-                return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
-            };
+                    hash_slot(&mut tests_by_decision, decision).push(tests_by_hit.number(&id, ids));
+                    (decision, Some(vector))
+                } else if record.record_type == "hit" {
+                    let hit = record
+                        .id
+                        .as_ref()
+                        .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
+                    let number = hit_ids.number(hit, ids);
+                    tests_by_hit.add(number, &id, ids);
+                    tests_by_id
+                        .get_mut(&id)
+                        .expect("registered test")
+                        .hits
+                        .push(number);
+                    (hit.as_str(), None)
+                } else {
+                    return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
+                };
             let Some(timestamp_ms) = record.timestamp_ms else {
                 continue;
             };
-            let event = RuntimeEvent {
-                event_type: record.record_type.clone(),
-                id: record_id,
-                vector: decision,
-                timestamp_ms,
-                phase_id: record.phase_id.clone(),
-                environment: "server".into(),
+            let explicit = record.phase_id.is_some();
+            let Some(phase_id) = record
+                .phase_id
+                .as_deref()
+                .or_else(|| phase_at(&ordered_phases, timestamp_ms))
+            else {
+                continue;
             };
-            let explicit = event.phase_id.is_some();
-            let phase_id = correlate(&event);
-            let Some(phase_id) = phase_id else { continue };
-            let Some(phase) = phases_by_id.get_mut(phase_id.as_str()) else {
+            let Some(phase) = phases_by_id.get_mut(phase_id) else {
                 continue;
             };
             phase.server_events += 1;
@@ -2280,30 +2401,24 @@ fn create_coverage_view_with_model(
             }
             // A record is a hit or a decision, and only a decision carries a
             // vector.
-            let Some(vector) = &event.vector else {
-                let hit = hit_ids.number(&event.id, ids);
+            let Some(vector) = decision else {
+                let hit = hit_ids.number(record_id, ids);
                 phase.hits.push(hit);
-                phases_by_hit.add(hit, &phase_id, ids);
+                phases_by_hit.add(hit, phase_id, ids);
                 if explicit {
-                    explicit_phases_by_hit.add(hit, &phase_id, ids);
+                    explicit_phases_by_hit.add(hit, phase_id, ids);
                 }
                 continue;
             };
-            phase
-                .decisions
-                .entry(event.id.clone())
-                .or_default()
-                .insert(vector);
+            tree_slot(&mut phase.decisions, record_id).insert(vector);
             let observation =
-                observation_of(&vector_indexes, &mut vectors_by_decision, &event.id, vector)
+                observation_of(&vector_indexes, &mut vectors_by_decision, record_id, vector)
                     .expect("the record registered its vector above");
-            observation
-                .phases
-                .push(phases_by_hit.number(&phase_id, ids));
+            observation.phases.push(phases_by_hit.number(phase_id, ids));
             if explicit {
                 observation
                     .explicit_phases
-                    .push(explicit_phases_by_hit.number(&phase_id, ids));
+                    .push(explicit_phases_by_hit.number(phase_id, ids));
             }
         }
     }
@@ -2663,8 +2778,9 @@ fn create_coverage_view_with_model(
         .map(|id| {
             let test = tests_by_id.remove(&id).expect("test order references test");
             let outcome = test_outcome(&test);
-            let lines = lines_of(&test.hits);
-            let hits = hit_ids.sorted_by(test.hits, &hit_ranks);
+            let hits = distinct(test.hits);
+            let lines = lines_of(&hits);
+            let hits = hit_ids.sorted_by(hits, &hit_ranks);
             TestCoverageResult {
                 id: test.id,
                 name: test.name,
@@ -2733,8 +2849,9 @@ fn create_coverage_view_with_model(
     let phases = phases
         .into_iter()
         .map(|phase| {
-            let lines = lines_of(&phase.hits);
-            let hits = hit_ids.sorted_by(phase.hits, &hit_ranks);
+            let hits = distinct(phase.hits);
+            let lines = lines_of(&hits);
+            let hits = hit_ids.sorted_by(hits, &hit_ranks);
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
@@ -3019,16 +3136,19 @@ pub fn analyze_coverage_results(
     })
 }
 
-/// Parse each entry on its own, a share of them on each core, keeping their
-/// order. Every test's record is a JSON document of its own: one after another
-/// they were a fifth of re-indexing a 1,100-test run.
+/// Parse each entry on its own, on every core, keeping their order. Every
+/// test's record is a JSON document of its own: one after another they were a
+/// fifth of re-indexing a 1,100-test run. Each worker takes the next entry
+/// when it is done with one: entries run from bytes to tens of megabytes, and
+/// an equal share of them each left one worker parsing long after the rest.
+/// What fails is the first entry, in order, that fails.
 fn parse_in_parallel<T: Send>(
     entries: &[&EvidenceArchiveEntry],
     parse: impl Fn(&&EvidenceArchiveEntry) -> Result<Vec<T>, ReportError> + Sync,
 ) -> Result<Vec<T>, ReportError> {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len().div_ceil(64))
+        .min(entries.len().div_ceil(4))
         .max(1);
     if threads == 1 {
         return entries.iter().try_fold(Vec::new(), |mut parsed, entry| {
@@ -3036,30 +3156,42 @@ fn parse_in_parallel<T: Send>(
             Ok(parsed)
         });
     }
-    let chunk = entries.len().div_ceil(threads);
-    let parse = &parse;
-    let parts = std::thread::scope(|scope| {
-        let handles = entries
-            .chunks(chunk)
-            .map(|part| {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (parse, next) = (&parse, &next);
+    let mut parts = std::thread::scope(|scope| {
+        let handles = (0..threads)
+            .map(|_| {
                 scope.spawn(move || {
-                    part.iter().try_fold(Vec::new(), |mut parsed, entry| {
-                        parsed.extend(parse(entry)?);
-                        Ok::<_, ReportError>(parsed)
-                    })
+                    let mut parts = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(entry) = entries.get(index) else {
+                            break parts;
+                        };
+                        let part = parse(entry);
+                        let failed = part.is_err();
+                        parts.push((index, part));
+                        // Those after it are not needed; others may still
+                        // fail before it.
+                        if failed {
+                            break parts;
+                        }
+                    }
                 })
             })
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
+            .flat_map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
             .collect::<Vec<_>>()
     });
-    // One part a worker, and there is always a worker.
-    parts.into_iter().try_fold(Vec::new(), |mut parsed, part| {
-        parsed.extend(part?);
-        Ok(parsed)
-    })
+    parts.sort_unstable_by_key(|(index, _)| *index);
+    parts
+        .into_iter()
+        .try_fold(Vec::new(), |mut parsed, (_, part)| {
+            parsed.extend(part?);
+            Ok(parsed)
+        })
 }
 
 fn parse_entry<T: for<'de> Deserialize<'de>>(
@@ -3144,6 +3276,71 @@ fn parse_server_json_lines<'a, T: for<'de> Deserialize<'de>>(
     parsed
 }
 
+/// An attempt's server records. A compact file names its scope on a
+/// writer's first line only, and each line without one is of the attempt of
+/// the line before it in the same file.
+/// A record's hash, its scope left out: the records compared are those of
+/// one result, which share it.
+fn record_hash(record: &ServerRecord) -> u64 {
+    use std::hash::{BuildHasher as _, Hash as _, Hasher as _};
+    let mut hasher = crate::interned::FastHash::default().build_hasher();
+    record.record_type.hash(&mut hasher);
+    record.vector.hash(&mut hasher);
+    record.id.hash(&mut hasher);
+    record.timestamp_ms.hash(&mut hasher);
+    record.phase_id.hash(&mut hasher);
+    record.request.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn parse_scoped_server_records<'a>(
+    entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
+) -> TolerantJsonLines<ServerRecord> {
+    // A file's records are parsed on their own: a record without a scope has
+    // its file's, so a file is never split. The files are many, a test's
+    // attempt each, and parsed side by side, in order.
+    let entries = entries.collect::<Vec<_>>();
+    let files = parse_in_parallel(&entries, |entry| {
+        let mut file = TolerantJsonLines {
+            records: Vec::new(),
+            corrupt_records: 0,
+            corrupt_files: 0,
+        };
+        let mut current: Option<ExecutionScope> = None;
+        for line in entry.contents.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<ServerRecord>(line) {
+                Ok(mut record) => {
+                    match &record.scope {
+                        Some(scope) => current = Some(scope.clone()),
+                        None => record.scope.clone_from(&current),
+                    }
+                    file.records.push(record);
+                }
+                Err(_) => file.corrupt_records += 1,
+            }
+        }
+        if file.corrupt_records > 0 {
+            file.corrupt_files = 1;
+        }
+        Ok(vec![file])
+    })
+    .expect("a file's parse never fails: a corrupt record is counted");
+    let mut parsed = TolerantJsonLines {
+        records: Vec::new(),
+        corrupt_records: 0,
+        corrupt_files: 0,
+    };
+    for file in files {
+        parsed.records.extend(file.records);
+        parsed.corrupt_records += file.corrupt_records;
+        parsed.corrupt_files += file.corrupt_files;
+    }
+    parsed
+}
+
 fn is_mcdc_result(path: &str) -> bool {
     path == "mcdc.json" || path.ends_with("/mcdc.json")
 }
@@ -3156,6 +3353,13 @@ pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
     let (_, normalized, transport, _) = archive_request(request)?;
+    finish_archive_analysis(normalized, transport)
+}
+
+fn finish_archive_analysis(
+    normalized: CoverageReportRequest,
+    transport: TransportStats,
+) -> Result<CoverageReport, ReportError> {
     let report = analyze_coverage_results(&normalized).map(|mut report| {
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
@@ -3180,6 +3384,47 @@ pub fn archive_request(
         CoverageReportRequest,
         TransportStats,
         crate::evidence_archive::ArchiveDigest,
+    ),
+    ReportError,
+> {
+    archive_request_from(request, |visit| {
+        crate::evidence_archive::read_archive_each(
+            Path::new(&request.archive_path),
+            |_| true,
+            visit,
+        )
+    })
+}
+
+/// A run's evidence, still in memory as the archive is written from it, as
+/// the request its views are built from: what `analyze_coverage_archive`
+/// makes of the archive, without waiting for it to be compressed and read
+/// back. `entries` are in the archive's order (`canonicalize_entries`).
+pub fn analyze_coverage_entries(
+    request: &ArchiveReportRequest,
+    entries: &[EvidenceArchiveEntry],
+) -> Result<CoverageReport, ReportError> {
+    let (_, normalized, transport, ()) = archive_request_from(request, |mut visit| {
+        entries.iter().cloned().try_for_each(&mut visit)
+    })?;
+    finish_archive_analysis(normalized, transport)
+}
+
+/// `archive_request`, from entries `read` hands to the visitor in the
+/// archive's order.
+fn archive_request_from<D>(
+    request: &ArchiveReportRequest,
+    read: impl FnOnce(
+        &mut dyn FnMut(
+            EvidenceArchiveEntry,
+        ) -> Result<(), crate::evidence_archive::EvidenceArchiveError>,
+    ) -> Result<D, crate::evidence_archive::EvidenceArchiveError>,
+) -> Result<
+    (
+        FrontendRunDeclaration,
+        CoverageReportRequest,
+        TransportStats,
+        D,
     ),
     ReportError,
 > {
@@ -3217,23 +3462,19 @@ pub fn archive_request(
         results.clear();
         journals.clear();
     };
-    let digest = crate::evidence_archive::read_archive_each(
-        Path::new(&request.archive_path),
-        |_| true,
-        |entry| {
-            if is_mcdc_result(&entry.path) {
-                results.push(entry);
-            } else if is_mcdc_journal(&entry.path) {
-                journals.push(entry);
-            } else {
-                entries.push(entry);
-            }
-            if results.len() + journals.len() >= BATCH {
-                flush(&mut results, &mut journals, &mut failure);
-            }
-            Ok(())
-        },
-    )
+    let digest = read(&mut |entry| {
+        if is_mcdc_result(&entry.path) {
+            results.push(entry);
+        } else if is_mcdc_journal(&entry.path) {
+            journals.push(entry);
+        } else {
+            entries.push(entry);
+        }
+        if results.len() + journals.len() >= BATCH {
+            flush(&mut results, &mut journals, &mut failure);
+        }
+        Ok(())
+    })
     .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     flush(&mut results, &mut journals, &mut failure);
     if let Some(error) = failure {
@@ -3250,7 +3491,7 @@ pub fn archive_request(
     };
     let manifest = parse_entry::<CoverageManifest>(held("manifest.json"))?;
 
-    let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+    let scoped = parse_scoped_server_records(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
             && !entry.path.starts_with("server/background/")
             && entry.path.ends_with(".jsonl")
@@ -3270,24 +3511,47 @@ pub fn archive_request(
         .into_iter()
         .map(|(scope, index)| (scope.clone(), index))
         .collect();
-    let mut seen = std::collections::HashMap::<usize, std::collections::HashSet<Vec<u8>>>::new();
-    for record in &scoped_records {
+    // A record is compared as itself, by its hash and then in full, not as
+    // the JSON it would write, and is moved into its result: serializing
+    // each was most of the join on a large run.
+    let scoped_server_records = scoped_records.len();
+    // A file's records are together and share its scope: the result they
+    // join is looked up when the scope changes.
+    let mut last: Option<(ExecutionScope, usize)> = None;
+    let mut seen = FastMap::<usize, FastMap<u64, usize>>::default();
+    for record in scoped_records {
         let Some(scope) = &record.scope else { continue };
-        let Some(&index) = by_scope.get(scope) else {
-            continue;
+        let index = match &last {
+            Some((last_scope, index)) if last_scope == scope => *index,
+            _ => {
+                let Some(&index) = by_scope.get(scope) else {
+                    continue;
+                };
+                last = Some((scope.clone(), index));
+                index
+            }
         };
-        let raw = &mut raw_results[index];
+        let server = &mut raw_results[index].server;
         let known = seen.entry(index).or_insert_with(|| {
-            raw.server
-                .iter()
-                .filter_map(|existing| serde_json::to_vec(existing).ok())
-                .collect()
+            let mut known = FastMap::<u64, usize>::default();
+            for (position, existing) in server.iter().enumerate() {
+                known.entry(record_hash(existing)).or_insert(position);
+            }
+            known
         });
-        // A record is strings and numbers: it always serializes.
-        let key = serde_json::to_vec(record).unwrap_or_default();
-        if known.insert(key) {
-            raw.server.push(record.clone());
+        let hash = record_hash(&record);
+        match known.get(&hash) {
+            // The same hash is almost always the same record; when it is
+            // not, every record the result holds is compared.
+            Some(&position) if server[position] == record || server.contains(&record) => {
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                known.insert(hash, server.len());
+            }
         }
+        server.push(record);
     }
 
     // Background evidence by the process that wrote it: `<writer>-<n>.jsonl`.
@@ -3367,7 +3631,7 @@ pub fn archive_request(
         remote_launches: count_event("remote-launch"),
         workspace_capabilities: count_event("workspace-capability"),
         guest_processes: count_event("guest-process"),
-        scoped_server_records: scoped_records.len(),
+        scoped_server_records,
         background_server_records: background_records.len(),
         corrupt_records: scoped.corrupt_records
             + background.corrupt_records
@@ -3498,11 +3762,19 @@ fn release_leaked_phases(raw_results: &mut [RawTestResult]) {
             .iter()
             .map(|phase| phase.id.clone())
             .collect::<BTreeSet<_>>();
-        let leaked = |phase: &mut Option<String>| {
-            if phase
-                .as_ref()
-                .is_some_and(|id| !own.contains(id) && declared.contains(id))
-            {
+        // Events come in runs of one phase: the last id's answer is kept.
+        let mut last = None::<(String, bool)>;
+        let mut leaked = |phase: &mut Option<String>| {
+            let Some(id) = phase.as_ref() else { return };
+            let leaks = match &last {
+                Some((known, leaks)) if known == id => *leaks,
+                _ => {
+                    let leaks = !own.contains(id) && declared.contains(id);
+                    last = Some((id.clone(), leaks));
+                    leaks
+                }
+            };
+            if leaks {
                 *phase = None;
             }
         };
@@ -3555,6 +3827,50 @@ impl TransportStats {
 
 #[cfg(test)]
 mod tests {
+
+    /// A run's records and the same records with their browser events as
+    /// columns read as equal records, one by one (`SUPERCOV_COLUMNS_ORIGINAL`
+    /// and `SUPERCOV_COLUMNS_CONVERTED` name the two JSONL files).
+    #[test]
+    #[ignore = "reads a real run's records from the paths in its environment"]
+    fn a_real_runs_records_read_the_same_as_columns() {
+        use std::io::BufRead;
+        let open = |name: &str| {
+            std::io::BufReader::new(std::fs::File::open(std::env::var(name).unwrap()).unwrap())
+        };
+        let (mut records, mut events) = (0, 0);
+        for (original, converted) in open("SUPERCOV_COLUMNS_ORIGINAL")
+            .lines()
+            .zip(open("SUPERCOV_COLUMNS_CONVERTED").lines())
+        {
+            let original: RawTestResult = serde_json::from_str(&original.unwrap()).unwrap();
+            let converted: RawTestResult = serde_json::from_str(&converted.unwrap()).unwrap();
+            assert_eq!(converted, original, "record {records}");
+            records += 1;
+            events += original
+                .browser
+                .iter()
+                .map(|snapshot| snapshot.events.len())
+                .sum::<usize>();
+        }
+        eprintln!("{records} records, {events} browser events, all equal");
+    }
+
+    /// What the Playwright collector writes as columns (its own encoder made
+    /// this one) reads as exactly the events it was made of, in their order:
+    /// a phase or none, two environments, decisions with their vectors, and a
+    /// timestamp earlier than the one before it.
+    #[test]
+    fn columnar_events_read_as_the_events_they_were_made_of() {
+        let written: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"events":[{"type":"hit","id":"a","timestampMs":1793741378313,"phaseId":"p:1","environment":"browser"},{"type":"hit","id":"b","timestampMs":1793741378310,"environment":"browser"},{"type":"decision","id":"d","vector":{"values":[true,null,false],"outcome":true},"timestampMs":1793741378400,"phaseId":"p:2","environment":"browser"},{"type":"hit","id":"c","timestampMs":1793741378400,"phaseId":"p:1","environment":"server"},{"type":"decision","id":"d","vector":{"values":[false,null,false],"outcome":false},"timestampMs":1793741378401,"phaseId":null,"environment":"browser"}]}"#).unwrap();
+        let columnar: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":["a","b","d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
+        assert_eq!(columnar, written);
+        assert_eq!(columnar.events.len(), 5);
+        let uneven = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
+        let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(stray).is_err());
+    }
     /// No result passes or fails.
     #[test]
     fn no_result_passes_or_fails() {

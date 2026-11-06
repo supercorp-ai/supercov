@@ -93,12 +93,27 @@ export function callerLocation(boundary = callerLocation) {
         return {};
     }
 }
+/**
+ * A compact attempt file names its scope on a writer's first line only; each
+ * line without one is the attempt of the line before it.
+ */
+function inheritingScope() {
+    let current;
+    return (line) => {
+        const record = JSON.parse(line);
+        if (record.scope)
+            current = record.scope;
+        else if (current)
+            record.scope = current;
+        return record;
+    };
+}
 export function readScopedServerEvidence(scope, evidencePath = serverEvidencePath(scope)) {
     try {
         return readFileSync(evidencePath, "utf8")
             .split("\n")
             .filter(Boolean)
-            .map((line) => JSON.parse(line))
+            .map(inheritingScope())
             .filter((record) => record.scope?.attemptId === scope.attemptId);
     }
     catch {

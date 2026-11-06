@@ -275,18 +275,30 @@ fn require_exact_identities(
         }
     }
     for snapshot in raw.runtime.iter().chain(&raw.browser) {
+        // A snapshot's events nearly all name one phase: one found is not
+        // looked for again.
+        let mut known: Option<&str> = None;
         for event in &snapshot.events {
             if let Some(phase) = &event.phase_id {
+                if known == Some(phase.as_str()) {
+                    continue;
+                }
                 phase_reference(phase)?;
+                known = Some(phase);
             }
         }
         if let Some(phase) = &snapshot.phase_id {
             phase_reference(phase)?;
         }
     }
+    let mut known: Option<&str> = None;
     for record in &raw.server {
         if let Some(phase) = &record.phase_id {
+            if known == Some(phase.as_str()) {
+                continue;
+            }
             phase_reference(phase)?;
+            known = Some(phase);
         }
     }
     Ok(())

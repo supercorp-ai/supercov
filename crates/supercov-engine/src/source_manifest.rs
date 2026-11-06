@@ -523,6 +523,9 @@ pub fn executions(
     let mut files: Vec<&str> = Vec::new();
     let mut file_indexes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut probed: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    // Where each source's lines start, found once per file: walking the file
+    // for each of its points was most of publishing a run that ran no test.
+    let mut line_starts_by_file: crate::interned::FastMap<&str, Vec<usize>> = Default::default();
     for point in &coverage.view.points {
         let meta = &point.meta;
         let Some(code) = manifest
@@ -534,7 +537,11 @@ pub fn executions(
         };
         let column = if manifest.language == "javascript" {
             let source = sources?.get(&meta.file)?;
-            let Some(column) = byte_column(source, meta.line, meta.column, &manifest.language)
+            let starts = line_starts_by_file
+                .entry(meta.file.as_str())
+                .or_insert_with(|| line_starts(source));
+            let Some(column) =
+                byte_column_in(source, starts, meta.line, meta.column, &manifest.language)
             else {
                 continue;
             };
@@ -1334,6 +1341,7 @@ pub fn coverage(run: &StoredRun) -> Result<CoverageReport, String> {
     })
     .map_err(|e| format!("{e:?}"))
 }
+#[cfg(test)]
 fn byte_column(source: &str, line: usize, column: usize, language: &str) -> Option<usize> {
     byte_column_in(source, &line_starts(source), line, column, language)
 }

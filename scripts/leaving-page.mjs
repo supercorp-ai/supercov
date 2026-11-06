@@ -27,7 +27,7 @@ const files = {
   'server.mjs': `import { createServer } from 'node:http';\nimport { readFileSync } from 'node:fs';\n\ncreateServer((request, response) => {\n  const path = new URL(request.url, 'http://x').pathname;\n  const file = path === '/' ? 'index.html' : path.slice(1);\n  try {\n    const body = readFileSync(new URL(\`./public/\${file}\`, import.meta.url));\n    response.writeHead(200, { 'content-type': file.endsWith('.js') ? 'text/javascript' : 'text/html' });\n    response.end(body);\n  } catch {\n    response.writeHead(404);\n    response.end();\n  }\n}).listen(${port});\n`,
   'public/index.html': '<!doctype html><button id="same">same</button><button id="away">away</button><script type="module" src="/app.js"></script>\n',
   'public/done.html': '<!doctype html><p>done</p><script type="module" src="/app.js"></script>\n',
-  'public/app.js': "export function leaveFor(target) {\n  const marker = target.length;\n  if (marker > 0) {\n    window.location.href = target;\n  }\n}\n\nexport function leaveForAnotherOrigin(target) {\n  const marker = target.length;\n  if (marker > 0) {\n    window.location.href = target;\n    document.title = 'leaving';\n  }\n}\n\ndocument.getElementById('same')?.addEventListener('click', () => leaveFor('/done.html'));\ndocument.getElementById('away')?.addEventListener('click', () => leaveForAnotherOrigin(location.href.replace('127.0.0.1', 'localhost') + 'done.html'));\n",
+  'public/app.js': "export function leaveFor(target) {\n  const marker = target.length;\n  if (marker > 0) {\n    window.location.href = target;\n    document.title = 'leaving';\n  }\n}\n\nexport function leaveForAnotherOrigin(target) {\n  const marker = target.length;\n  if (marker > 0) {\n    window.location.href = target;\n    document.title = 'leaving';\n  }\n}\n\ndocument.getElementById('same')?.addEventListener('click', () => leaveFor('/done.html'));\ndocument.getElementById('away')?.addEventListener('click', () => leaveForAnotherOrigin(location.href.replace('127.0.0.1', 'localhost') + 'done.html'));\n",
   // A native dialog: Playwright's `Dialog` is answered as it is without
   // Supercov. Its `type()` returned a promise, and the dialog could not be
   // answered at all.
@@ -52,16 +52,17 @@ try {
   const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_SOURCE_ROOTS: 'public' });
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
   const runId = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
-  // What a handler runs after the assignment that starts the navigation
-  // (line 12) runs after `beforeunload`, and a page leaving for another
-  // origin is gone before anything it sends then reliably arrives: it is not
-  // asserted, and the docs say so.
-  for (const [title, file, line] of [['leaves for the same origin', 'app.js', 4], ['leaves for another origin', 'app.js', 11], ['a prompt is read and answered', 'ask.js', 3], ['an iframe is rated, then removed', 'inner.js', 2]]) {
+  // What a handler runs after the assignment that starts the navigation runs
+  // after `beforeunload`, once the page has handed its evidence over. On the
+  // page's own origin the next document takes it (line 5). A page leaving for
+  // another origin is gone before anything it sends then reliably arrives
+  // (line 13): that is not asserted, and the docs say so.
+  for (const [title, file, line] of [['leaves for the same origin', 'app.js', 4], ['leaves for the same origin', 'app.js', 5], ['leaves for another origin', 'app.js', 12], ['a prompt is read and answered', 'ask.js', 3], ['an iframe is rated, then removed', 'inner.js', 2]]) {
     const covered = run(binary, ['runs', runId, 'line', `public/${file}:${line}`]);
     assert.equal(covered.status, 0, covered.stdout + covered.stderr);
     assert.match(covered.stdout, new RegExp(title, 'u'), `${title}: what ran before the document left is not the test's\n${covered.stdout}`);
   }
-  console.log('[leaving-page] a handler that sends the page away, to its own origin or another, stays the test\'s, as does what a removed iframe ran, and a native dialog is answered as without Supercov');
+  console.log('[leaving-page] a handler that sends the page away, to its own origin or another, stays the test\'s, with what it ran after starting to leave its own origin, as does what a removed iframe ran, and a native dialog is answered as without Supercov');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'leaving-page-'))) rmSync(root, { recursive: true, force: true });
 }

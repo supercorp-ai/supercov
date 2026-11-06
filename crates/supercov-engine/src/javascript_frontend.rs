@@ -65,6 +65,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "resolve-loader.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
+    "snapshots.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
@@ -453,22 +454,18 @@ pub fn rewritten_files(workspace: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Keep `file` as its author wrote it, the first time it is rewritten.
-fn keep_authored(
+/// The copy of `file` as it was authored, beside the instrumented one.
+fn write_authored(
     workspace: &Path,
-    authored: &mut BTreeSet<String>,
     file: &str,
     source: &str,
 ) -> Result<(), JavascriptFrontendError> {
-    if authored.insert(file.to_owned()) {
-        let path = checked_source_path(&workspace.join(AUTHORED_DIRECTORY), file)?;
-        create_directory_all(
-            path.parent()
-                .expect("a path under the authored directory has a parent"),
-        )?;
-        atomic_write(&path, source.as_bytes())?;
-    }
-    Ok(())
+    let path = checked_source_path(&workspace.join(AUTHORED_DIRECTORY), file)?;
+    create_directory_all(
+        path.parent()
+            .expect("a path under the authored directory has a parent"),
+    )?;
+    atomic_write(&path, source.as_bytes())
 }
 
 fn write_javascript_frontend_cache(
@@ -479,26 +476,26 @@ fn write_javascript_frontend_cache(
 ) -> Result<(), JavascriptFrontendError> {
     let cache_directory = workspace.join(FRONTEND_CACHE_DIRECTORY);
     create_directory_all(&cache_directory)?;
-    let mut artifacts = Vec::new();
-    // Never empty: the frontend's own files are always among them.
-    frontend_artifact_paths(workspace, project)
-        .into_iter()
-        .try_for_each(|path| {
-            let contents = fs::read(workspace.join(&path))
-                .map_err(|source| io_error(&workspace.join(&path), source))?;
-            let sha256 = format!("{:x}", Sha256::digest(&contents));
-            let cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{sha256}");
-            let destination = workspace.join(&cache_file);
-            if !destination.is_file() {
-                atomic_write(&destination, &contents)?;
-            }
-            artifacts.push(JavascriptFrontendCacheArtifact {
-                path,
-                cache_file,
-                sha256,
-            });
-            Ok(())
-        })?;
+    // Never empty: the frontend's own files are always among them. Each read,
+    // digested and stored on its own, across the cores.
+    let paths = frontend_artifact_paths(workspace, project);
+    let artifacts = crate::threads::parallel_map(&paths, |path| {
+        let contents = fs::read(workspace.join(path))
+            .map_err(|source| io_error(&workspace.join(path), source))?;
+        let sha256 = format!("{:x}", Sha256::digest(&contents));
+        let cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{sha256}");
+        let destination = workspace.join(&cache_file);
+        if !destination.is_file() {
+            atomic_write(&destination, &contents)?;
+        }
+        Ok(JavascriptFrontendCacheArtifact {
+            path: path.clone(),
+            cache_file,
+            sha256,
+        })
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>, JavascriptFrontendError>>()?;
     let cache = JavascriptFrontendCache {
         schema_version: FRONTEND_CACHE_SCHEMA_VERSION,
         key: key.to_owned(),
@@ -713,6 +710,18 @@ fn generated_source_banner(code: &str) -> String {
     };
     let (line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
     format!("#!{line}\n{GENERATED_SOURCE_BANNER}{remainder}")
+}
+
+/// A rewritten test file exempt from the host project's lint, on its first
+/// line: a test file keeps its lines, which its runner's locations and stack
+/// traces name, so nothing is put above them. `next build` lints test files
+/// under the app's source directory, and their phase calls failed it.
+fn lint_exempt_first_line(code: &str) -> String {
+    let Some(rest) = code.strip_prefix("#!") else {
+        return format!("/* eslint-disable */ {code}");
+    };
+    let (line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+    format!("#!{line}\n/* eslint-disable */ {remainder}")
 }
 
 /// `source`, a runtime, with this run's collector in place of its instance
@@ -1181,11 +1190,79 @@ pub fn builds_images(root: &Path) -> bool {
             })
 }
 
+const SHARED_BROWSER_RUNTIME: &str = "browser-runtime.mjs";
+
+/// The shared fallback runtime: what the inline copy runs, once per page. In
+/// Node the preload and the bootstrap loader install the runtime with the
+/// run's settings, and this module, evaluated before a source's own body,
+/// would come first, so there it does nothing.
+fn shared_browser_runtime_source(runtime_source: &str) -> String {
+    let export_start = runtime_source
+        .rfind("\nexport {")
+        .expect("the runtime lists its exports");
+    format!(
+        "if (!globalThis.process?.versions?.node) (() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+        &runtime_source[..export_start]
+    )
+}
+
+/// The sources Next.js bundles: those whose nearest `package.json` depends
+/// on `next`, outside the `public/` it serves as they are. Only a bundled
+/// module may import the shared browser runtime: a server that sends files
+/// as they are cannot reach `.supercov/node_modules`, and a page whose
+/// module failed to import ran none of its code.
+fn next_bundled_sources(workspace: &Path, files: &[String]) -> BTreeSet<String> {
+    let mut manifests: BTreeMap<PathBuf, Option<bool>> = BTreeMap::new();
+    let mut bundled = BTreeSet::new();
+    for file in files {
+        let path = Path::new(file);
+        let mut directory = path.parent();
+        while let Some(current) = directory {
+            let next = *manifests.entry(current.to_path_buf()).or_insert_with(|| {
+                std::fs::read_to_string(workspace.join(current).join("package.json"))
+                    .ok()
+                    .map(|text| {
+                        serde_json::from_str(&text).is_ok_and(|manifest| {
+                            crate::source_discovery::depends_on_next(&manifest)
+                        })
+                    })
+            });
+            if let Some(next) = next {
+                if next
+                    && !path
+                        .strip_prefix(current)
+                        .is_ok_and(|below| below.starts_with("public"))
+                {
+                    bundled.insert(file.clone());
+                }
+                break;
+            }
+            directory = current.parent();
+        }
+    }
+    bundled
+}
+
+/// Whether a source is an ES module, which can import the shared runtime.
+fn is_es_module(path: &Path, code: &str) -> bool {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("mjs" | "mts") => true,
+        Some("cjs" | "cts") => false,
+        _ => code.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("import ")
+                || line.starts_with("import{")
+                || line.starts_with("export ")
+        }),
+    }
+}
+
 fn bootstrap_runtime(
     output: &mut crate::js_instrumenter::CandidateOutput,
     runtime_source: &str,
     browser_suite: bool,
     images: bool,
+    shared: Option<&str>,
 ) {
     let Some(binding) = output.runtime.as_ref() else {
         return;
@@ -1220,10 +1297,13 @@ fn bootstrap_runtime(
     let offset = output.code[..found]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
-    let prelude = format!(
-        "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
-        &runtime_source[..export_start]
-    );
+    let prelude = match shared {
+        Some(specifier) => format!("import {specifier:?};\n"),
+        None => format!(
+            "(() => {{ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {{\n{}\n}} if (globalThis.__supercovRuntime == null) globalThis.__supercovRuntime = globalThis.__SUPERCOV_DIRECT_RUNTIME__; }})();\n",
+            &runtime_source[..export_start]
+        ),
+    };
     let line = output.code[..offset].matches('\n').count();
     let added = prelude.matches('\n').count();
     edit_mappings(&mut output.map, |mappings| {
@@ -1638,6 +1718,191 @@ export function supercovBrowserCommands(root) {\n\
 }\n";
     atomic_write(&generated.join("vitestCommands.mjs"), adapter.as_bytes())
 }
+/// Tracks the assertions of one file in the source scope: the calls it
+/// made, once it was rewritten, or nothing for a file left as written.
+fn track_assertions(
+    workspace: &Path,
+    project: &CoverageProject,
+    kept: &BTreeSet<String>,
+    entry: &crate::source_discovery::SourceScopeEntry,
+) -> Result<Option<usize>, JavascriptFrontendError> {
+    let relative = project_relative(&entry.file)?;
+    let path = workspace.join(relative);
+    let Ok(source) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let capability_wrapper = (!project.source_files.contains(&entry.file))
+        .then(|| runtime_specifier(relative, "capability.mjs"));
+    let assertion_runtime = runtime_specifier(relative, "bootstrap.cjs");
+    let instrumented = crate::fault::or("instrument-test", injected_instrumentation_error, || {
+        crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
+            &source,
+            &entry.file,
+            std::slice::from_ref(&project.playwright_module),
+            capability_wrapper.as_deref(),
+            Some(&assertion_runtime),
+        )
+    });
+    let output = match instrumented {
+        Ok(output) => output,
+        // A test file the parser rejects is left as written; its runner
+        // reports it, and it has no assertions to track.
+        Err(crate::js_instrumenter::CandidateError::Parse(_)) => return Ok(None),
+        Err(source) => {
+            return Err(JavascriptFrontendError::Instrument {
+                file: entry.file.clone(),
+                source,
+            });
+        }
+    };
+    if output.assertions == 0 && output.capability_imports == 0 {
+        return Ok(None);
+    }
+    if !kept.contains(&entry.file) {
+        write_authored(workspace, &entry.file, &source)?;
+    }
+    atomic_write(&path, lint_exempt_first_line(&output.code).as_bytes())?;
+    Ok(Some(output.assertions))
+}
+
+/// What instrumenting one source gave: the file it wrote, or why it runs as
+/// written.
+enum InstrumentedSource {
+    Measured(Box<crate::js_instrumenter::CandidateOutput>),
+    Unmeasured(CandidateLimitation),
+}
+
+/// The options every source of a run is instrumented with.
+struct SourceInstrumentation<'a> {
+    workspace: &'a Path,
+    project: &'a CoverageProject,
+    command: &'a [String],
+    standalone_runtime: &'a str,
+    browser_suite: bool,
+    images: bool,
+    next_bundled: &'a BTreeSet<String>,
+}
+
+/// Instruments `file` in the workspace and keeps its authored copy. Each
+/// source is its own: nothing here reads or writes another's files.
+fn instrument_source(
+    options: &SourceInstrumentation,
+    file: &String,
+) -> Result<InstrumentedSource, JavascriptFrontendError> {
+    let SourceInstrumentation {
+        workspace,
+        project,
+        command,
+        standalone_runtime,
+        browser_suite,
+        images,
+        next_bundled,
+    } = *options;
+    let relative = project_relative(file)?;
+    let path = workspace.join(relative);
+    let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
+    let capability_wrapper = runtime_specifier(relative, "capability.mjs");
+    let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
+    let instrumented = timed(&SETUP.instrument_ns, || {
+        crate::fault::or("instrument-source", injected_instrumentation_error, || {
+            instrument_with_import_policy(&source, file, &capability_wrapper, elide)
+        })
+    });
+    let mut output = match instrumented {
+        Ok(output) => output,
+        // A file the parser rejects runs as written: the suite may never
+        // load it, and one that does fails there as it would without
+        // Supercov. Nothing in it is measured, and the run says so.
+        Err(
+            error @ (crate::js_instrumenter::CandidateError::Parse(_)
+            | crate::js_instrumenter::CandidateError::Internal(_)),
+        ) => {
+            let (id, reason) = match error {
+                crate::js_instrumenter::CandidateError::Parse(messages) => (
+                    "javascript-file-not-parsed",
+                    format!(
+                        "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
+                        messages.join("; ")
+                    ),
+                ),
+                // A bug in Supercov, kept to this file.
+                other => (
+                    "javascript-file-not-instrumented",
+                    format!(
+                        "Supercov hit {other} instrumenting this file, a bug to report; it runs as written and nothing in it is measured"
+                    ),
+                ),
+            };
+            let limitation = CandidateLimitation {
+                id: format!("{id}#{file}"),
+                kind: "source-scope".into(),
+                file: file.clone(),
+                line: 1,
+                column: 0,
+                source: String::new(),
+                reason,
+            };
+            return Ok(InstrumentedSource::Unmeasured(limitation));
+        }
+        Err(source) => {
+            return Err(JavascriptFrontendError::Instrument {
+                file: file.clone(),
+                source,
+            });
+        }
+    };
+    // A directly run TypeScript file names its helpers' types from the
+    // runtime's declarations, which sit beside the runtime in the
+    // workspace.
+    if output
+        .code
+        .contains(crate::js_instrumenter::RUNTIME_TYPES_MODULE)
+    {
+        output.code = output.code.replace(
+            crate::js_instrumenter::RUNTIME_TYPES_MODULE,
+            &runtime_specifier(relative, "runtime.mjs"),
+        );
+    }
+    // Host processes need the settings-aware loader first; browser pages
+    // and workers fall back to the embedded runtime when no preload exists.
+    bootstrap_loader(&mut output, relative, browser_suite);
+    let shared = (next_bundled.contains(file) && is_es_module(&path, &output.code))
+        .then(|| runtime_specifier(relative, SHARED_BROWSER_RUNTIME));
+    bootstrap_runtime(
+        &mut output,
+        standalone_runtime,
+        browser_suite,
+        images,
+        shared.as_deref(),
+    );
+    keep_directives_first(&source, &mut output);
+    // The command can compile TypeScript itself (`npm test` may begin
+    // with `tsc`), and a probe's own code is not the project's to have
+    // type-checked: the banner exempts the file, while what it exports
+    // keeps the types it has in the source.
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("ts" | "tsx" | "mts" | "cts")
+    ) {
+        output.code = generated_source_banner(&output.code);
+    }
+    // Attach the instrumentation source map inline, pointed at the
+    // ORIGINAL project file with the original text embedded. Node runs
+    // with --enable-source-maps, and tsx/esbuild chain input maps, so
+    // stack traces show the user's real path and line numbers instead
+    // of instrumented workspace positions -- Supercov stays invisible
+    // in errors. Without this the map was generated and then dropped.
+    let code = inline_instrumentation_map(
+        &output.code,
+        output.map.as_ref(),
+        &project.root.join(file),
+        &source,
+    )
+    .expect("the instrumenter gives every file a whole source map");
+    write_authored(workspace, file, &source)?;
+    atomic_write(&path, code.as_bytes())?;
+    Ok(InstrumentedSource::Measured(Box::new(output)))
+}
 
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
 /// The source project is read only through the copied workspace inventory.
@@ -1684,105 +1949,47 @@ pub fn prepare_javascript_frontend(
     // browser even when the measured command is a unit-test runner.
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
+    // One copy of the browser fallback runtime that the ES modules Next.js
+    // bundles import: a copy inlined in every source made a large app's
+    // client JavaScript 12.8 MB instead of 4.8 MB.
+    let next_bundled = if browser_suite {
+        next_bundled_sources(workspace, &project.source_files)
+    } else {
+        BTreeSet::new()
+    };
+    if !next_bundled.is_empty() {
+        let path = runtime_directory.join(SHARED_BROWSER_RUNTIME);
+        atomic_write(
+            &path,
+            shared_browser_runtime_source(&standalone_runtime).as_bytes(),
+        )?;
+    }
     let mut authored = BTreeSet::new();
     let sources_started = Instant::now();
-    for file in &project.source_files {
-        let relative = project_relative(file)?;
-        let path = workspace.join(relative);
-        let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let capability_wrapper = runtime_specifier(relative, "capability.mjs");
-        let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
-        let instrumented = timed(&SETUP.instrument_ns, || {
-            crate::fault::or("instrument-source", injected_instrumentation_error, || {
-                instrument_with_import_policy(&source, file, &capability_wrapper, elide)
-            })
-        });
-        let mut output = match instrumented {
-            Ok(output) => output,
-            // A file the parser rejects runs as written: the suite may never
-            // load it, and one that does fails there as it would without
-            // Supercov. Nothing in it is measured, and the run says so.
-            Err(
-                error @ (crate::js_instrumenter::CandidateError::Parse(_)
-                | crate::js_instrumenter::CandidateError::Internal(_)),
-            ) => {
-                let (id, reason) = match error {
-                    crate::js_instrumenter::CandidateError::Parse(messages) => (
-                        "javascript-file-not-parsed",
-                        format!(
-                            "Supercov could not parse this file ({}); it runs as written and nothing in it is measured",
-                            messages.join("; ")
-                        ),
-                    ),
-                    // A bug in Supercov, kept to this file.
-                    other => (
-                        "javascript-file-not-instrumented",
-                        format!(
-                            "Supercov hit {other} instrumenting this file, a bug to report; it runs as written and nothing in it is measured"
-                        ),
-                    ),
-                };
-                let limitation = CandidateLimitation {
-                    id: format!("{id}#{file}"),
-                    kind: "source-scope".into(),
-                    file: file.clone(),
-                    line: 1,
-                    column: 0,
-                    source: String::new(),
-                    reason,
-                };
+    // Every source on its own, spread over the cores: a project's sources were
+    // instrumented one after another, most of a second of every run. Merged in
+    // their order, so the manifest and the first error are as they were.
+    let options = SourceInstrumentation {
+        workspace,
+        project,
+        command,
+        standalone_runtime: &standalone_runtime,
+        browser_suite,
+        images,
+        next_bundled: &next_bundled,
+    };
+    let instrumented = crate::threads::parallel_map(&project.source_files, |file| {
+        instrument_source(&options, file)
+    });
+    for (file, instrumented) in project.source_files.iter().zip(instrumented) {
+        let output = match instrumented? {
+            InstrumentedSource::Measured(output) => *output,
+            InstrumentedSource::Unmeasured(limitation) => {
                 limitations.insert(limitation.id.clone(), limitation);
                 continue;
             }
-            Err(source) => {
-                return Err(JavascriptFrontendError::Instrument {
-                    file: file.clone(),
-                    source,
-                });
-            }
         };
-        // A directly run TypeScript file names its helpers' types from the
-        // runtime's declarations, which sit beside the runtime in the
-        // workspace.
-        if output
-            .code
-            .contains(crate::js_instrumenter::RUNTIME_TYPES_MODULE)
-        {
-            output.code = output.code.replace(
-                crate::js_instrumenter::RUNTIME_TYPES_MODULE,
-                &runtime_specifier(relative, "runtime.mjs"),
-            );
-        }
-        // Host processes need the settings-aware loader first; browser pages
-        // and workers fall back to the embedded runtime when no preload exists.
-        bootstrap_loader(&mut output, relative, browser_suite);
-        bootstrap_runtime(&mut output, &standalone_runtime, browser_suite, images);
-        keep_directives_first(&source, &mut output);
-        // The command can compile TypeScript itself (`npm test` may begin
-        // with `tsc`), and a probe's own code is not the project's to have
-        // type-checked: the banner exempts the file, while what it exports
-        // keeps the types it has in the source.
-        if matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("ts" | "tsx" | "mts" | "cts")
-        ) {
-            output.code = generated_source_banner(&output.code);
-        }
-        // Attach the instrumentation source map inline, pointed at the
-        // ORIGINAL project file with the original text embedded. Node runs
-        // with --enable-source-maps, and tsx/esbuild chain input maps, so
-        // stack traces show the user's real path and line numbers instead
-        // of instrumented workspace positions -- Supercov stays invisible
-        // in errors. Without this the map was generated and then dropped.
-        let code = inline_instrumentation_map(
-            &output.code,
-            output.map.as_ref(),
-            &project.root.join(file),
-            &source,
-        )
-        .expect("the instrumenter gives every file a whole source map");
-        keep_authored(workspace, &mut authored, file, &source)?;
-        atomic_write(&path, code.as_bytes())?;
+        authored.insert(file.clone());
         exclusions.extend(output.excluded_statements);
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
@@ -1801,42 +2008,17 @@ pub fn prepare_javascript_frontend(
     write_vitest_commands(&generated)?;
 
     let assertions_started = Instant::now();
+    // The test files too, each on its own; a file's authored copy is kept
+    // once, so one already kept as a source is not written again.
+    let kept = &authored;
+    let instrumented = crate::threads::parallel_map(&project.source_scope.entries, |entry| {
+        track_assertions(workspace, project, kept, entry)
+    });
     let mut assertion_calls = 0;
-    for entry in &project.source_scope.entries {
-        let relative = project_relative(&entry.file)?;
-        let path = workspace.join(relative);
-        let Ok(source) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let capability_wrapper = (!project.source_files.contains(&entry.file))
-            .then(|| runtime_specifier(relative, "capability.mjs"));
-        let assertion_runtime = runtime_specifier(relative, "bootstrap.cjs");
-        let instrumented =
-            crate::fault::or("instrument-test", injected_instrumentation_error, || {
-                crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
-                    &source,
-                    &entry.file,
-                    std::slice::from_ref(&project.playwright_module),
-                    capability_wrapper.as_deref(),
-                    Some(&assertion_runtime),
-                )
-            });
-        let output = match instrumented {
-            Ok(output) => output,
-            // A test file the parser rejects is left as written; its runner
-            // reports it, and it has no assertions to track.
-            Err(crate::js_instrumenter::CandidateError::Parse(_)) => continue,
-            Err(source) => {
-                return Err(JavascriptFrontendError::Instrument {
-                    file: entry.file.clone(),
-                    source,
-                });
-            }
-        };
-        if output.assertions > 0 || output.capability_imports > 0 {
-            keep_authored(workspace, &mut authored, &entry.file, &source)?;
-            atomic_write(&path, output.code.as_bytes())?;
-            assertion_calls += output.assertions;
+    for (entry, instrumented) in project.source_scope.entries.iter().zip(instrumented) {
+        if let Some(assertions) = instrumented? {
+            authored.insert(entry.file.clone());
+            assertion_calls += assertions;
         }
     }
 
@@ -1986,9 +2168,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:464",
-            "javascript-source-path#javascript_frontend.rs:1690",
-            "javascript-source-path#javascript_frontend.rs:1806",
+            "javascript-source-path#javascript_frontend.rs:463",
+            "javascript-source-path#javascript_frontend.rs:1801",
+            "javascript-source-path#javascript_frontend.rs:1729",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2924,16 +3106,29 @@ mod tests {
 
     #[test]
     fn a_file_is_kept_as_its_author_wrote_it_the_first_time_only() {
-        let workspace = temporary("authored-once");
-        let mut authored = BTreeSet::new();
-        keep_authored(&workspace, &mut authored, "src/a.js", "as written\n").unwrap();
-        // Its assertions are tracked in the text already instrumented.
-        keep_authored(&workspace, &mut authored, "src/a.js", "instrumented\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(authored_path(&workspace, Path::new("src/a.js"))).unwrap(),
-            "as written\n"
+        // A source is also in the source scope, where its assertions are
+        // tracked in the text already instrumented: its authored copy is
+        // still the text as written.
+        let (source_root, workspace, project) = frontend_fixture();
+        let written = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        assert!(
+            project
+                .source_scope
+                .entries
+                .iter()
+                .any(|entry| entry.file == "src/example.mjs")
         );
-        fs::remove_dir_all(workspace).unwrap();
+        assert_ne!(
+            fs::read_to_string(workspace.join("src/example.mjs")).unwrap(),
+            written
+        );
+        assert_eq!(
+            fs::read_to_string(authored_path(&workspace, Path::new("src/example.mjs"))).unwrap(),
+            written
+        );
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -3027,7 +3222,7 @@ mod tests {
         unprobed.runtime = None;
         bootstrap_loader(&mut unprobed, Path::new("src/a.ts"), false);
         assert_eq!(unprobed.code, output.code);
-        bootstrap_runtime(&mut unprobed, "runtime", false, false);
+        bootstrap_runtime(&mut unprobed, "runtime", false, false, None);
         assert_eq!(unprobed.code, output.code);
         let mut helperless = output.clone();
         let begin = helperless.runtime.as_ref().unwrap().mcdc_begin.clone();
@@ -3052,6 +3247,7 @@ mod tests {
             "const runtime = 1;\nexport { runtime };\n",
             true,
             true,
+            None,
         );
         assert_eq!(runtime_only.map.as_ref().unwrap()["mappings"], "");
         assert!(runtime_only.code.contains("const runtime = 1;"));
@@ -3134,6 +3330,19 @@ mod tests {
             "a();\n//# sourceMappingURL=a.js.map\nb();\n"
         );
         assert_eq!(strip("a();\n"), "a();\n");
+    }
+
+    /// A test file's exemption shares its first line, after a shebang.
+    #[test]
+    fn a_test_files_lint_exemption_keeps_its_lines() {
+        assert_eq!(
+            lint_exempt_first_line("a();\nb();\n"),
+            "/* eslint-disable */ a();\nb();\n"
+        );
+        assert_eq!(
+            lint_exempt_first_line("#!/usr/bin/env node\na();\n"),
+            "#!/usr/bin/env node\n/* eslint-disable */ a();\n"
+        );
     }
 
     /// The inlined map is shifted past banner lines, its first column mapped

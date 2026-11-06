@@ -213,8 +213,16 @@ const nodeAssertWrapper = new URL("./nodeAssert.mjs", import.meta.url).href;
 const nodeAssertStrictWrapper = new URL("./nodeAssertStrict.mjs", import.meta.url).href;
 const isPlaywrightEntrypoint = /\/(?:node_modules\/\.bin\/playwright|node_modules\/(?:@playwright\/test|playwright)\/(?:cli\.js|.*\/program\.js))$/.test(entrypoint);
 const isJestEntrypoint = /\/node_modules\/(?:\.bin\/jest|(?:jest|jest-cli)\/bin\/jest\.js)$/.test(entrypoint);
-if (generatedPlaywrightConfig && isPlaywrightEntrypoint)
+if (generatedPlaywrightConfig && isPlaywrightEntrypoint) {
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT = "1";
+    // Every process the runner starts inherits SUPERCOV_INSIDE_PLAYWRIGHT, the
+    // app server and each mock server too, and loading the wrapper cost each of
+    // them 190 ms before its first line: a server Playwright waits on missed its
+    // first look, about 4 s a run. The runner's children are marked as not test
+    // workers, and the launch supervisor marks the ones it forks from its worker
+    // entry as workers, so only those load the wrapper.
+    process.env.SUPERCOV_PLAYWRIGHT_WORKER = "0";
+}
 // Linters, formatters and type checks read the project to judge it, not to
 // run it. The workspace holds rewritten copies, and ESLint failed semver,
 // js-yaml and picomatch on code nobody wrote ("Strings must use singlequote",
@@ -1144,9 +1152,15 @@ if (generatedPlaywrightConfig &&
     }
     process.argv.push("--config", generatedPlaywrightConfig);
 }
+// A process the runner marked as not a test worker skips the wrapper, unless
+// it was started from Playwright's own files: a worker Playwright starts some
+// other way than its worker entry still has the wrapper, only later.
+const isPlaywrightProcess = /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint);
+const mayBePlaywrightWorker = process.env.SUPERCOV_PLAYWRIGHT_WORKER !== "0" || isPlaywrightProcess;
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
     !isPlaywrightEntrypoint &&
+    mayBePlaywrightWorker &&
     process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
     process.env.VITEST !== "true") {
     const target = playwrightTarget ?? "@playwright/test";

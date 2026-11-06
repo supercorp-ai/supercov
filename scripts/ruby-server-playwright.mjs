@@ -314,11 +314,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1332', 'javascript_run.rs:1332'],
-    ['fs.symlink_metadata#javascript_run.rs:1348', 'javascript_run.rs:1348'],
-    ['fs.symlink_metadata#javascript_run.rs:1350', 'javascript_run.rs:1350'],
-    ['fs.read#javascript_run.rs:1376', 'javascript_run.rs:1376'],
-    ['fs.symlink_metadata#javascript_run.rs:1388', 'javascript_run.rs:1388'],
+    ['fs.symlink_metadata#javascript_run.rs:1329', 'javascript_run.rs:1329'],
+    ['fs.symlink_metadata#javascript_run.rs:1345', 'javascript_run.rs:1345'],
+    ['fs.symlink_metadata#javascript_run.rs:1347', 'javascript_run.rs:1347'],
+    ['fs.read#javascript_run.rs:1373', 'javascript_run.rs:1373'],
+    ['fs.symlink_metadata#javascript_run.rs:1385', 'javascript_run.rs:1385'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);
@@ -330,10 +330,10 @@ test('a test that reaches no server', async () => {
   for (const [fault, place] of [
     ['fs.create_dir_all#python_run.rs:810', 'python_run.rs:810'],
     ['fs.create_dir_all#ruby_run.rs:643', 'ruby_run.rs:643'],
-    ['fs.rename#evidence_archive.rs:472', 'evidence_archive.rs:472'],
-    ['fs.rename#evidence_archive.rs:472@2', 'evidence_archive.rs:472'],
-    ['fs.rename#lifecycle.rs:1154', 'lifecycle.rs:1154'],
-    ['fs.rename#lifecycle.rs:1154@2', 'lifecycle.rs:1154'],
+    ['fs.rename#evidence_archive.rs:510', 'evidence_archive.rs:510'],
+    ['fs.rename#evidence_archive.rs:510@2', 'evidence_archive.rs:510'],
+    ['fs.rename#lifecycle.rs:1160', 'lifecycle.rs:1160'],
+    ['fs.rename#lifecycle.rs:1160@2', 'lifecycle.rs:1160'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.ok(failed.stderr.includes(`test fault at fs (${place}`), `${fault}: ${failed.stderr}`);

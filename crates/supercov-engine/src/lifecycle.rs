@@ -390,7 +390,7 @@ pub fn sweep_trash(project_root: &Path) -> Result<usize, LifecycleError> {
         };
         let removal = crate::fault::io("trash-remove", io::ErrorKind::NotFound, || {
             if metadata.file_type().is_dir() {
-                fs::remove_dir_all(&path)
+                remove_tree(&path)
             } else {
                 fs::remove_file(&path)
             }
@@ -1092,7 +1092,13 @@ pub(crate) fn publish_run_with_fault(
             scope.spawn(|| {
                 // Disposable, like every query index: one that failed to
                 // write is rebuilt by the first query.
-                if crate::run_store::write_query_index_from(&derived, report).is_err() {
+                if crate::run_store::write_query_index_from(
+                    &derived,
+                    report,
+                    Some((evidence_sha256, copied)),
+                )
+                .is_err()
+                {
                     let _ = fs::remove_file(&derived.query_index_path);
                 }
                 // Also disposable: the report analyses the evidence when the
@@ -1572,6 +1578,72 @@ pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
     }
 }
 
+/// `fs::remove_dir_all`, the tree split into parts removed side by side. A
+/// run's workspace copy, a project's build output and all, is hundreds of
+/// thousands of files: one thread unlinking them was most of the ten
+/// seconds a run waits at its end for the trash to empty.
+fn remove_tree(root: &Path) -> io::Result<()> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16);
+    let gone = |result: io::Result<()>| match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    // Breadth first, a few levels down, until there are parts enough.
+    let mut parts = Vec::<(PathBuf, bool)>::new();
+    let mut directories = vec![root.to_owned()];
+    for _ in 0..4 {
+        if threads <= 1 || directories.len() >= threads * 4 {
+            break;
+        }
+        let mut below = Vec::new();
+        for directory in directories {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let entry = entry?;
+                // Not followed: a link is removed, not what it names.
+                if fs::file_type(&entry)?.is_dir() {
+                    below.push(entry.path());
+                } else {
+                    parts.push((entry.path(), false));
+                }
+            }
+        }
+        directories = below;
+    }
+    parts.extend(directories.into_iter().map(|directory| (directory, true)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers = (0..threads.min(parts.len()).max(1))
+            .map(|_| {
+                scope.spawn(|| -> io::Result<()> {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((path, directory)) = parts.get(index) else {
+                            return Ok(());
+                        };
+                        gone(if *directory {
+                            fs::remove_dir_all(path)
+                        } else {
+                            fs::remove_file(path)
+                        })?;
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .try_for_each(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
+    })?;
+    // What is left is the directories the parts were in.
+    gone(fs::remove_dir_all(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1594,7 +1666,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1472", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1478", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1619,7 +1691,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1207", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1213", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1627,7 +1699,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1282", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1288", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

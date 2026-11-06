@@ -18,7 +18,8 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
+import { mergeSnapshots } from "./snapshots.mjs";
+import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -488,8 +489,10 @@ class CoveragePhaseController {
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
-        if (phaseId)
+        if (phaseId && this.adoptedContexts.has(context))
             await this.activatePage(page, phaseId);
+        else if (phaseId)
+            await this.activateFrames(phaseId, [page]);
         page.on("worker", (worker) => {
             void this.registerWorker(worker);
         });
@@ -564,6 +567,14 @@ class CoveragePhaseController {
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
         }).catch(() => undefined);
+        // A new document starts in the last action's phase, from the cookie
+        // each action sets: one script per context, where a script replaced on
+        // every page at every phase took two Playwright calls each time.
+        await context.addInitScript(startDocumentInPhase, {
+            attemptId: this.scope.attemptId,
+            phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
+            phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
+        }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -577,7 +588,7 @@ class CoveragePhaseController {
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         if (!adopted)
-            await this.updateContextHeaders(context, this.requestPhaseId());
+            await this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId);
         for (const page of context.pages())
             register(page);
     }
@@ -636,7 +647,7 @@ class CoveragePhaseController {
         const phase = this.createPhase("action", operation);
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
-        await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
+        await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id, phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
@@ -662,6 +673,11 @@ class CoveragePhaseController {
         }
         this.contextListeners.clear();
         for (const [page, cdp] of this.cdpSessions) {
+            // A closed page took its session with it: detaching it failed for
+            // every page a test closed, each failure a Playwright error with a
+            // stack, and was the only collector call on a slice that failed.
+            if (page.isClosed?.())
+                continue;
             const identifier = this.newDocumentScriptIds.get(page);
             if (identifier)
                 await cdp
@@ -818,18 +834,22 @@ class CoveragePhaseController {
      * the 43 extra seconds, with the database worker's bounded wait the
      * largest part).
      */
-    async activateInBrowser(phaseId) {
+    async activateInBrowser(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context))
-                .map((context) => this.updateContextHeaders(context, phaseId)))),
+                .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
-            timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)))),
+            // A context whose headers are not known gets no cookies, so its
+            // pages' new documents learn the phase from a script replaced here.
+            timed("activate.pageScript", () => Promise.all([...this.pages]
+                .filter((page) => this.adoptedContexts.has(page.context()))
+                .map((page) => this.activatePage(page, phaseId)))),
         ]);
     }
-    async activateFrames(phaseId) {
-        await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
+    async activateFrames(phaseId, pages = this.pages) {
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames()).map((frame) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
@@ -891,12 +911,14 @@ class CoveragePhaseController {
      * site from the first navigation on, and, on a secure origin, to frames
      * of the app's other hosts as well.
      */
-    async updateContextHeaders(context, phaseId) {
+    async updateContextHeaders(context, phaseId, documentPhaseId) {
         const scope = encodeURIComponent(encodeCoverageScope(this.scope));
         const phase = phaseId ? encodeURIComponent(phaseId) : undefined;
-        const pairs = (scopeName, phaseName) => [
+        const documentPhase = documentPhaseId ? encodeURIComponent(documentPhaseId) : undefined;
+        const pairs = (scopeName, phaseName, documentName) => [
             [scopeName, scope],
             ...(phase ? [[phaseName, phase]] : []),
+            ...(documentPhase ? [[documentName, documentPhase]] : []),
         ];
         // The context's own headers are left alone: they are the suite's, and
         // a test that sets more with `setExtraHTTPHeaders` keeps them. Setting
@@ -905,13 +927,13 @@ class CoveragePhaseController {
             ...this.appHosts.map((url) => {
                 const host = new URL(url);
                 // For the app's own site: requests, navigations and sockets.
-                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
                 // For its frames on another of its hosts: a cookie that
                 // crosses sites must be Secure, which needs https or a local
                 // host. Chromium keeps such a cookie only when it is given by
                 // domain; given by an http URL it is dropped without a word.
                 if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
-                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
                 }
                 // One host refused leaves the others theirs.
                 return context.addCookies(cookies).catch(() => undefined);
@@ -949,47 +971,6 @@ class CoveragePhaseController {
  * string), and doubled a 76-test suite's time.
  */
 const LEAVING_BINDING = "__supercovLeaving";
-/**
- * One snapshot holding everything in `snapshots`, each observation once: a
- * document that left gave its evidence, and the next one on its origin
- * restored the same evidence and added to it.
- */
-function mergeSnapshots(snapshots) {
-    const hits = new Set();
-    const events = new Map();
-    const decisions = new Map();
-    const logicals = new Map();
-    const vectorsOf = (map, key, initial) => {
-        let entry = map.get(key);
-        if (!entry) {
-            entry = { ...initial, seen: new Map() };
-            map.set(key, entry);
-        }
-        return entry;
-    };
-    for (const snapshot of snapshots) {
-        for (const id of snapshot?.hits ?? [])
-            hits.add(id);
-        for (const event of snapshot?.events ?? [])
-            events.set(JSON.stringify(event), event);
-        for (const decision of snapshot?.decisions ?? []) {
-            const entry = vectorsOf(decisions, decision.id, { id: decision.id });
-            for (const vector of decision.vectors ?? [])
-                entry.seen.set(JSON.stringify(vector), vector);
-        }
-        for (const logical of snapshot?.logicals ?? []) {
-            const entry = vectorsOf(logicals, logical.id, { id: logical.id });
-            for (const vector of logical.vectors ?? [])
-                entry.seen.set(JSON.stringify(vector), vector);
-        }
-    }
-    return {
-        decisions: [...decisions.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
-        hits: [...hits],
-        events: [...events.values()],
-        logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
-    };
-}
 function readSnapshot(target) {
     return target
         .evaluate(() => {
@@ -1090,7 +1071,7 @@ function patchBrowserPrototype(browser) {
  * way the page is gone by the time the test's snapshots are collected.
  */
 /** The cookies Supercov gives a context to carry the test's scope. */
-const OWN_COOKIES = new Set([COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE]);
+const OWN_COOKIES = new Set([COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE]);
 const suiteCookies = (cookies) => (Array.isArray(cookies) ? cookies.filter((cookie) => !OWN_COOKIES.has(cookie?.name)) : cookies);
 function patchContextPrototype(context) {
     // A test reads and saves the cookies it and its app set, never
@@ -1467,26 +1448,6 @@ function executionScope(testInfo) {
         attemptId,
     };
 }
-function readServerRecords(scope) {
-    try {
-        return readFileSync(serverEvidencePath(scope), "utf8")
-            .split("\n")
-            .filter(Boolean)
-            .flatMap((line) => {
-            try {
-                const record = JSON.parse(line);
-                return record.scope?.attemptId === scope.attemptId ? [record] : [];
-            }
-            catch {
-                // Ignore a final partial line if the server was writing during collection.
-                return [];
-            }
-        });
-    }
-    catch {
-        return [];
-    }
-}
 function phaseSourceLine(source) {
     return source?.replace(/:\d+$/, "");
 }
@@ -1523,6 +1484,48 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * written to one uniquely named, one-shot evidence file in the runner's shared
  * directory as well. No test streams into this path.
  */
+/**
+ * A snapshot's events as columns.
+ * A page records each hit once per test as an event of five fields, and its
+ * thousands of them were most of a test's record. The engine decodes the
+ * columns into exactly these events, in this order.
+ */
+function columnarEvents(snapshot) {
+    const events = snapshot?.events;
+    if (!Array.isArray(events) || events.length === 0)
+        return snapshot;
+    const tables = { types: new Map(), phases: new Map(), environments: new Map() };
+    const index = (table, value) => {
+        let found = table.get(value);
+        if (found === undefined) {
+            found = table.size;
+            table.set(value, found);
+        }
+        return found;
+    };
+    const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
+    let previous = 0;
+    events.forEach((event, position) => {
+        columns.id.push(event.id);
+        columns.type.push(index(tables.types, event.type));
+        columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
+        columns.environment.push(index(tables.environments, event.environment));
+        columns.t.push(event.timestampMs - previous);
+        previous = event.timestampMs;
+        if (event.vector !== undefined)
+            columns.vector[position] = event.vector;
+    });
+    const { events: _events, ...rest } = snapshot;
+    return {
+        ...rest,
+        eventColumns: {
+            types: [...tables.types.keys()],
+            phases: [...tables.phases.keys()],
+            environments: [...tables.environments.keys()],
+            ...columns,
+        },
+    };
+}
 function appendEvidenceLine(serialized) {
     const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
         (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
@@ -1593,7 +1596,7 @@ const instrumentedFixtures = {
                     status: "unknown",
                     provenance: { runner: "background", kind: "background", source: "explicit" },
                     role: "background",
-                    browser: [carried],
+                    browser: [columnarEvents(carried)],
                 })}\n`);
             }
             const serverOutput = serverEvidencePath(scope);
@@ -1610,7 +1613,6 @@ const instrumentedFixtures = {
                 const endedAtMs = Date.now();
                 try {
                     const browser = await controller.collectRuntimeSnapshots();
-                    const server = readServerRecords(scope);
                     // Emit an artifact even when this test touched no application source.
                     // A complete test-to-coverage matrix must also identify tests that are
                     // removable without changing coverage.
@@ -1635,8 +1637,7 @@ const instrumentedFixtures = {
                         }),
                         phases: mergeCollectedPhases(controller.phases, directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
                         ...(controller.workerEvidenceMissing ? { attribution: "partial" } : {}),
-                        browser,
-                        server,
+                        browser: browser.map(columnarEvents),
                         span: [startedAtMs, endedAtMs],
                     };
                     appendEvidenceLine(`${JSON.stringify(payload)}\n`);
