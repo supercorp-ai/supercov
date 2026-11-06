@@ -819,7 +819,8 @@ function flushOnTermination(flush) {
     }
   } catch (e) {
   }
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"]) {
+  const signals = ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"];
+  for (const signal of signals) {
     try {
       process.on(signal, () => {
         drain();
@@ -830,6 +831,24 @@ function flushOnTermination(flush) {
       });
     } catch (e) {
     }
+  }
+  // A listener keeps nothing alive, and a signal a process sends itself is
+  // handled on a later turn of its event loop: `process.kill(process.pid,
+  // "SIGTERM")` as a script's last line exited 0, once nothing else held the
+  // loop open, where alone it ended by the signal. A signal to itself that
+  // only this listener would take is drained and left to act at once.
+  try {
+    const kill = process.kill;
+    const numbered = { 1: "SIGHUP", 2: "SIGINT", 15: "SIGTERM", 21: "SIGBREAK" };
+    process.kill = function supercovKill(pid, signal) {
+      const name = signal === void 0 ? "SIGTERM" : typeof signal === "number" ? numbered[signal] : signal;
+      if (Number(pid) === process.pid && signals.indexOf(name) >= 0 && process.listenerCount(name) <= 1) {
+        drain();
+        process.removeAllListeners(name);
+      }
+      return kill.apply(this, arguments);
+    };
+  } catch (e) {
   }
 }
 // Rust compiled to wasm and measured by the Rust frontend keeps what it ran
