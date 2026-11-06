@@ -1646,7 +1646,6 @@ pub fn prepare_javascript_frontend(
     project: &CoverageProject,
     collector_id: &str,
     cache_key: &str,
-    command: &[String],
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     // Runtime code files live under a node_modules segment: Node attributes
@@ -1691,7 +1690,7 @@ pub fn prepare_javascript_frontend(
         let path = workspace.join(relative);
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
         let capability_wrapper = runtime_specifier(relative, "capability.mjs");
-        let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
+        let elide = crate::typescript_imports::elides_type_imports(workspace, file);
         let instrumented = timed(&SETUP.instrument_ns, || {
             crate::fault::or("instrument-source", injected_instrumentation_error, || {
                 instrument_with_import_policy(&source, file, &capability_wrapper, elide)
@@ -1945,7 +1944,7 @@ mod tests {
         workspace: &Path,
         project: &CoverageProject,
     ) -> Result<(), JavascriptFrontendError> {
-        prepare_javascript_frontend(workspace, project, "collector", "cache", &[])?;
+        prepare_javascript_frontend(workspace, project, "collector", "cache")?;
         let cache = read_javascript_frontend_cache(workspace, "cache")
             .ok_or(JavascriptFrontendError::UnsafeSourcePath("no cache".into()))?;
         load_cached_javascript_frontend(workspace, &cache).map(drop)
@@ -1987,8 +1986,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:464",
-            "javascript-source-path#javascript_frontend.rs:1690",
-            "javascript-source-path#javascript_frontend.rs:1806",
+            "javascript-source-path#javascript_frontend.rs:1689",
+            "javascript-source-path#javascript_frontend.rs:1805",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2001,7 +2000,7 @@ mod tests {
         for site in ["instrument-source", "instrument-test"] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(site, || {
-                prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+                prepare_javascript_frontend(&workspace, &project, "collector", "cache")
             });
             assert!(
                 matches!(prepared, Err(JavascriptFrontendError::Instrument { .. })),
@@ -2025,7 +2024,7 @@ mod tests {
         // and the authored copy precede the source's own atomic publication.
         let fault = format!("fs.rename@{}", RUNTIME_FILES.len() + 8);
         let prepared = crate::fault::during(&fault, || {
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache")
         });
         assert!(
             matches!(&prepared, Err(JavascriptFrontendError::Io { path: failed, .. }) if failed == &path),
@@ -2042,7 +2041,7 @@ mod tests {
                 .exists()
         );
         assert_eq!(fs::read_dir(workspace.join("src")).unwrap().count(), 1);
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         assert!(
             workspace
                 .join(".supercov/instrumentation-complete")
@@ -2497,7 +2496,7 @@ mod tests {
                 project.playwright_config.is_some(),
                 "the fixture's Playwright config was not discovered for {command:?}"
             );
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
             let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
             assert!(
                 transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2524,7 +2523,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2545,7 +2544,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         for file in &project.source_files {
             let transformed = fs::read_to_string(workspace.join(file)).unwrap();
             if !transformed.contains("globalThis.__SUPERCOV_DIRECT_RUNTIME__") {
@@ -2589,7 +2588,7 @@ mod tests {
         )
         .unwrap();
         assert!(project.playwright_config.is_some());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2614,7 +2613,7 @@ mod tests {
             &environment,
         );
         assert!(project.playwright_config.is_some());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2637,7 +2636,7 @@ mod tests {
                 source,
                 &BTreeMap::new(),
             );
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
             let transformed = fs::read_to_string(workspace.join("src").join(name)).unwrap();
             assert!(
                 transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2666,7 +2665,7 @@ mod tests {
             &BTreeMap::new(),
         );
         fs::write(workspace.join("Dockerfile"), "FROM scratch\n").unwrap();
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2686,7 +2685,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
         assert!(
             transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2718,7 +2717,7 @@ mod tests {
         )
         .unwrap();
         assert!(project.playwright_config.is_none());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START));
     }
@@ -2774,7 +2773,7 @@ mod tests {
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
         let prepared =
-            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test", &[])
+            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test")
                 .unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),
@@ -2838,8 +2837,7 @@ mod tests {
             ..project.clone()
         };
         let empty =
-            prepare_javascript_frontend(&workspace, &bare, "collector-bare", "cache-bare", &[])
-                .unwrap();
+            prepare_javascript_frontend(&workspace, &bare, "collector-bare", "cache-bare").unwrap();
         assert!(empty.manifest.points.is_empty());
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();

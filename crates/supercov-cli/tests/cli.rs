@@ -602,14 +602,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1101")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1095")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1101"),
+        seen.contains("test fault at fs (javascript_run.rs:1095"),
         "{seen}"
     );
 }
@@ -1241,6 +1241,73 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
         assert_ne!(refused.code(), 0, "{fault}: {output}");
         assert!(output.contains(said), "{fault}: {output}");
     }
+}
+
+/// Whether an import only types use is a line to run is the project's
+/// tsconfig's to say, not the command's: on 2026-11-06 a unit run and an
+/// end-to-end run (`node --import tsx …`) of one commit counted
+/// `import { type Funnel }` differently and could not be merged. Here one
+/// run's command is a `tsx` the old check took for the compiler.
+#[cfg(unix)]
+#[test]
+fn runs_of_two_commands_count_a_type_only_import_alike_and_merge() {
+    let project = Project::empty("type-import-merge");
+    project.write(
+        "package.json",
+        r#"{ "name": "rates", "private": true, "type": "module" }"#,
+    );
+    // Read as JSON with comments: a quote in a comment, an escape in a string.
+    project.write(
+        "tsconfig.json",
+        r#"{
+  // keeps "strict" on
+  "compilerOptions": { "strict": true, "rootDir": ".\\" }
+}
+"#,
+    );
+    project.write(
+        "src/rate.ts",
+        "export type Rate = { cents: number };\nexport const zero = 0;\n",
+    );
+    project.write(
+        "src/price.ts",
+        r#"import { type Rate } from "./rate.ts";
+
+export function price(rate: Rate, discount: boolean): number {
+  return discount ? rate.cents - 1 : rate.cents;
+}
+"#,
+    );
+    project.write(
+        "test/price.test.ts",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { price } from "../src/price.ts";
+
+test("full price", () => assert.equal(price({ cents: 5 }, false), 5));
+test("discount", () => assert.equal(price({ cents: 5 }, true), 4));
+"#,
+    );
+    project.write_script("tsx", "#!/bin/sh\nexec node --test \"$@\"\n");
+    project.git(&["init", "-q"]);
+    project.commit("rates");
+    project
+        .supercov(&["--", "node", "--test", "--test-name-pattern=full"])
+        .succeeds();
+    let unit = project.latest();
+    project
+        .supercov(&["--", "./tsx", "--test-name-pattern=discount"])
+        .succeeds();
+    let e2e = project.latest();
+    let lines = |run: &str| {
+        project.supercov(&["runs", run, "--json"]).json()["data"]["coverage"]["lines"]["total"]
+            .clone()
+    };
+    // The import is no line to run under either command.
+    assert_eq!(lines(&unit), 3);
+    assert_eq!(lines(&e2e), 3);
+    let merged = project.supercov(&["merge", &unit, &e2e]).exits(0);
+    assert!(merged.contains("merged run"), "{merged}");
 }
 
 #[test]
@@ -5903,6 +5970,29 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
     assert!(!said.contains("starts without build output"), "{said}");
+
+    // A build the command starts from its own code, as essential-upsell's
+    // test harness does, failed: the build is named, not taken for one the
+    // command never ran.
+    project.write(
+        "package.json",
+        r#"{ "name": "built", "scripts": { "build": "node build.js && exit 2", "test": "node harness.mjs" } }"#,
+    );
+    project.write(
+        "harness.mjs",
+        "import { execSync } from 'node:child_process';\nexecSync('npm run build', { stdio: 'inherit' });\n",
+    );
+    let harness = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(harness.code(), 0, "{}", harness.stdout());
+    let said = format!("{}{}", harness.stdout(), harness.stderr());
+    assert!(
+        said.contains("the build the command started, `npm run build`, exited 2"),
+        "{said}"
+    );
+    assert!(!said.contains("starts without build output"), "{said}");
+    // The failed build's record reads back as one, not as a malformed line.
+    let report = project.supercov(&["runs", "latest"]).exits(0);
+    assert!(!report.contains("malformed"), "{report}");
 }
 
 #[cfg(unix)]
@@ -8892,6 +8982,57 @@ fn a_playwright_suite_reads_back_by_its_tags() {
             "{tag}: {summary}"
         );
     }
+}
+
+/// Unit tests beside the specs import `test` and `expect` from their own
+/// runner more often than the specs import them from their fixture module.
+/// On 2026-11-06 essential-upsell's Vitest files outscored its fixture
+/// module, Supercov wrapped Vitest as the Playwright fixture, and every
+/// Playwright test crashed loading Vitest's `expect`. Another runner's API
+/// is never the fixture.
+#[cfg(unix)]
+#[test]
+fn a_playwright_fixture_is_not_taken_from_the_unit_tests_beside_it() {
+    let project = Project::empty("playwright-beside-vitest");
+    project.write(
+        "package.json",
+        r#"{ "name": "playwright-beside-vitest", "private": true, "type": "module" }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/ship.js",
+        "export const ship = (sum) => (sum > 100 ? 0 : 5);\n",
+    );
+    project.write(
+        "playwright.config.js",
+        "export default { testDir: \"tests/e2e\", reporter: \"line\" };\n",
+    );
+    project.write(
+        "tests/e2e/fixtures.js",
+        "import { test as base, expect } from \"@playwright/test\";\nexport const test = base.extend({ order: async ({}, use) => use(10) });\nexport { expect };\n",
+    );
+    project.write(
+        "tests/e2e/ship.spec.js",
+        "import { test, expect } from \"./fixtures.js\";\nimport { ship } from \"../../src/ship.js\";\ntest(\"small orders pay\", ({ order }) => expect(ship(order)).toBe(5));\n",
+    );
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        project.write(
+            &format!("tests/unit/{name}.test.js"),
+            "import { test, expect } from \"vitest\";\nimport { ship } from \"../../src/ship.js\";\ntest(\"free\", () => expect(ship(200)).toBe(0));\n",
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("playwright beside vitest");
+    let output = project
+        .supercov(&["--", "npx", "playwright", "test"])
+        .succeeds();
+    assert!(output.contains("1 passed"), "{output}");
 }
 
 #[test]
@@ -15028,15 +15169,15 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.rename@1",
             "fs.rename@2",
             "fs.copy@1",
-            "fs.read_dir@40",
-            "fs.read_dir@41",
-            "fs.read_dir@52",
+            "fs.read_dir@36 => workspace.rs:1156",
+            "fs.read_dir@37 => workspace.rs:706",
+            "fs.read_dir@48 => workspace.rs:1356",
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
             "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1679 => javascript_frontend.rs:1679",
+            "fs.read_to_string#javascript_frontend.rs:1678 => javascript_frontend.rs:1678",
         ],
     );
 }
@@ -16373,8 +16514,8 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
 #[test]
 fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
-        ("fs.read_dir@55", "workspaces"),
-        ("fs.read_dir@57", "/out"),
+        ("fs.read_dir@51", "workspaces"),
+        ("fs.read_dir@52", "/out"),
         ("fs.read@65", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
@@ -16410,43 +16551,43 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         // A listing's first entry unreadable: the copy's tree, the
         // project's dependencies, their tools, a scope, the outputs.
         (
-            "fs.read_dir entry#7",
+            "fs.read_dir entry#6",
             "injected fault at fs",
             "workspace.rs:706",
         ),
         (
-            "fs.read_dir entry#10",
+            "fs.read_dir entry#9",
             "injected fault at fs",
             "workspace.rs:1053",
+        ),
+        (
+            "fs.read_dir entry#10",
+            "injected fault at fs",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:990",
-        ),
-        (
-            "fs.read_dir entry#12",
-            "injected fault at fs",
             "workspace.rs:937",
         ),
         (
-            "fs.read_dir entry#16",
+            "fs.read_dir entry#15",
             "injected fault at fs",
             "workspace.rs:1356",
         ),
-        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:706"),
+        ("fs.read_dir@53", "injected fault at fs", "workspace.rs:706"),
         (
-            "fs.read_dir@66",
+            "fs.read_dir@62",
             "/node_modules: injected",
             "workspace.rs:1053",
         ),
         (
-            "fs.read_dir@67",
+            "fs.read_dir@63",
             "node_modules/.bin: injected",
             "workspace.rs:990",
         ),
         (
-            "fs.read_dir@68",
+            "fs.read_dir@64",
             "node_modules/@scope: injected",
             "workspace.rs:937",
         ),
@@ -16469,17 +16610,17 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
     ];
     let unlinkable = [
         (
-            "fs.read_dir entry#9",
+            "fs.read_dir entry#8",
             "injected fault at fs",
             "workspace.rs:769",
         ),
         (
-            "fs.read_dir@62",
+            "fs.read_dir@58",
             "packages/web/node_modules: injected",
             "workspace.rs:769",
         ),
         (
-            "fs.read_dir@63",
+            "fs.read_dir@59",
             "packages/web/node_modules/.bin: injected",
             "workspace.rs:990",
         ),
@@ -16601,17 +16742,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1307",
         "fs.create_dir_all#javascript_run.rs:677",
-        "fs.write#javascript_run.rs:978",
+        "fs.write#javascript_run.rs:972",
         "fs.canonicalize#process_supervision.rs:1719",
-        "fs.create_dir_all#javascript_run.rs:1049",
-        "fs.create_dir_all#javascript_run.rs:1220",
+        "fs.create_dir_all#javascript_run.rs:1043",
+        "fs.create_dir_all#javascript_run.rs:1214",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
+        "fs.create_dir_all#javascript_run.rs:1462",
         "fs.create_dir_all#javascript_run.rs:1464",
-        "fs.create_dir_all#javascript_run.rs:1466",
         "fs.create_dir_all#lifecycle.rs:1018",
+        "fs.create_dir_all#javascript_run.rs:1556",
         "fs.create_dir_all#javascript_run.rs:1558",
-        "fs.create_dir_all#javascript_run.rs:1560",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17143,12 +17284,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1808@2",
+            "fs.read_to_string#javascript_frontend.rs:1807@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1808"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1807"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -19687,8 +19828,8 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
 #[test]
 fn a_directory_discovery_cannot_list_holds_no_configuration() {
     for fault in [
-        "fs.read_dir#project_discovery.rs:330",
-        "fs.read_dir entry#project_discovery.rs:330",
+        "fs.read_dir#project_discovery.rs:349",
+        "fs.read_dir entry#project_discovery.rs:349",
     ] {
         let project = Project::cart("discovery-unlisted");
         let ran =
@@ -19696,7 +19837,7 @@ fn a_directory_discovery_cannot_list_holds_no_configuration() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{fault}: {said}");
         assert!(
-            fired_at(&said, "project_discovery.rs:330"),
+            fired_at(&said, "project_discovery.rs:349"),
             "{fault}: {said}"
         );
     }

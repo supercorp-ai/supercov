@@ -734,14 +734,24 @@ function injectChildEnvironment(method, args) {
 // right after it listened read as one that never became ready, and a
 // Playwright worker as one that "exited unexpectedly".
 const CRASH_SIGNALS = new Set(["SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGABRT", "SIGTRAP", "SIGSYS"]);
-function noteCrash(signal, child, command, started) {
-    if (!CRASH_SIGNALS.has(signal))
+// The command a child ran, its arguments too: `spawn("npm", ["run",
+// "build"])` names its build only with them.
+function commandLine(args) {
+    const words = Array.isArray(args[1]) ? args[1] : [];
+    return [args[0], ...words].map((word) => String(word ?? "")).join(" ");
+}
+// A child that a crash signal ended, or that exited non-zero: a build the
+// command started from its own code, which the command's words do not
+// name, is told apart from one it never ran by this.
+function noteExit(signal, code, child, args, started) {
+    const crashed = CRASH_SIGNALS.has(signal);
+    if (!crashed && !(signal == null && typeof code === "number" && code !== 0))
         return;
     record({
         event: "child-exit",
         ...(typeof child === "number" ? { child } : {}),
-        signal,
-        command: safeArgument(String(command ?? "")),
+        ...(crashed ? { signal } : { code }),
+        command: safeArgument(commandLine(args)),
         ranMs: Date.now() - started,
     });
 }
@@ -752,14 +762,14 @@ function watchChild(method, args, run) {
         launched = run();
     }
     catch (error) {
-        // execSync and execFileSync throw for a child a signal ended.
-        noteCrash(error?.signal, error?.pid, args[0], started);
+        // execSync and execFileSync throw for a child that failed.
+        noteExit(error?.signal, error?.status, error?.pid, args, started);
         throw error;
     }
     if (method === "spawnSync")
-        noteCrash(launched?.signal, launched?.pid, args[0], started);
+        noteExit(launched?.signal, launched?.status, launched?.pid, args, started);
     else if (typeof launched?.once === "function")
-        launched.once("exit", (_code, signal) => noteCrash(signal, launched.pid, args[0], started));
+        launched.once("exit", (code, signal) => noteExit(signal, code, launched.pid, args, started));
     return launched;
 }
 function patchChildProcesses() {
