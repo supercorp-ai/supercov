@@ -16376,7 +16376,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
         ("fs.read_dir@55", "workspaces"),
         ("fs.read_dir@57", "/out"),
-        ("fs.read#workspace.rs:1647", "workspaces"),
+        ("fs.read#workspace.rs:1649", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
@@ -16433,7 +16433,7 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         (
             "fs.read_dir entry#16",
             "injected fault at fs",
-            "workspace.rs:1356",
+            "workspace.rs:1358",
         ),
         ("fs.read_dir@57", "injected fault at fs", "workspace.rs:706"),
         (
@@ -16568,12 +16568,12 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
 #[test]
 fn a_run_that_cannot_reuse_the_last_copy_says_so() {
     for entry in [
-        "fs.canonicalize@10 => workspace.rs:1284",
-        "fs.create_dir_all@6 => workspace.rs:1299",
+        "fs.canonicalize@10 => workspace.rs:1286",
+        "fs.create_dir_all@6 => workspace.rs:1301",
         "fs.copy@1 => workspace.rs:551",
         "fs.rename@1 => workspace.rs:562",
-        "fs.rename@3 => workspace.rs:1318",
-        "fs.create_dir_all@10 => workspace.rs:1318",
+        "fs.rename@3 => workspace.rs:1320",
+        "fs.create_dir_all@10 => workspace.rs:1320",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::cart("reuse-copy");
@@ -17116,7 +17116,7 @@ fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
             "fs.read#javascript_frontend.rs:366",
             "javascript_frontend.rs:366",
         ),
-        ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
+        ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
         let project = Project::cart("frontend-cache-unread");
         project.supercov(&["--", "node", "--test"]).succeeds();
