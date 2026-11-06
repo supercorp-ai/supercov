@@ -1664,9 +1664,10 @@ fn with_ant_formatter(
     }
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
     let mut out = text.to_owned();
-    for (at, insert, replaced) in edits {
-        out.replace_range(at..at + replaced, &insert);
-    }
+    // Not empty: an empty list returned above.
+    edits
+        .into_iter()
+        .for_each(|(at, insert, replaced)| out.replace_range(at..at + replaced, &insert));
     Some(out)
 }
 
@@ -2790,11 +2791,14 @@ mod tests {
             name: name.to_owned(),
             ..Default::default()
         };
+        // A JVM that ran no test, as a batch matching no class forks, names
+        // nothing; nor does a build that forked none.
         let mut forked = [
             crate::owned_evidence::OwnedEvidence {
                 tests: vec![test("A#one"), test("A#two")],
                 ..Default::default()
             },
+            crate::owned_evidence::OwnedEvidence::default(),
             crate::owned_evidence::OwnedEvidence {
                 tests: vec![test("A#one")],
                 ..Default::default()
@@ -2806,6 +2810,35 @@ mod tests {
             .flat_map(|evidence| evidence.tests.iter().map(|test| test.name.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(names, ["A#one", "A#two", "A#one [2]"]);
+        number_repeated_runs(&mut []);
+    }
+
+    /// A file of no tags -- an XML declaration alone -- has no task to
+    /// change; a task the file never closes, at its top level, still gets
+    /// the compilation in front of it and the formatter inside.
+    #[test]
+    fn a_task_alone_or_unclosed_is_still_given_the_formatter() {
+        let formatted = |text: &str| {
+            with_ant_formatter(
+                text,
+                Path::new("/w/src"),
+                Path::new("/w/platform"),
+                Path::new("/w/testng"),
+                Path::new("/w/classes"),
+            )
+        };
+        assert_eq!(formatted("<?xml version=\"1.0\"?>"), None);
+        let unclosed = formatted("<junit>").expect("changed");
+        assert!(
+            unclosed.starts_with("<mkdir dir=\"/w/classes\"/><javac srcdir=\"/w/src\""),
+            "{unclosed}"
+        );
+        assert!(
+            unclosed.ends_with(&format!(
+                "<formatter classname=\"{ANT_FORMATTER_CLASS}\" usefile=\"false\"/>"
+            )),
+            "{unclosed}"
+        );
     }
 
     use super::*;
@@ -3954,6 +3987,187 @@ mod tests {
             });
             assert!(failed.is_err(), "{fault}");
             fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// An Ant build's copy: the runtime goes into the source root holding
+    /// most product code, a source that cannot be read counting for none,
+    /// and each file the instrumentation writes -- the runtime, the
+    /// formatter, the listeners and their settings, the build file given the
+    /// formatter -- that fails stops it.
+    #[test]
+    fn each_file_an_ant_instrumentation_writes_that_fails_stops_it() {
+        let make = || {
+            let root = temporary_root("ant-writes");
+            write(
+                &root.join("build.xml"),
+                r#"<project name="app" default="test">
+    <target name="test">
+        <javac srcdir="a/src:b/src" destdir="out/classes"/>
+        <javac srcdir="test/src" destdir="out/test-classes"/>
+        <junit fork="true"><batchtest><fileset dir="test/src" includes="**/*Test.java"/></batchtest></junit>
+    </target>
+</project>
+"#,
+            )
+            .unwrap();
+            for (file, class) in [
+                (
+                    "b/src/app/Calc.java",
+                    "package app;\npublic class Calc { int one() { return 1; } }\n",
+                ),
+                (
+                    "b/src/app/More.java",
+                    "package app;\npublic class More { int two() { return 2; } }\n",
+                ),
+                (
+                    "a/src/tool/Tool.java",
+                    "package tool;\npublic class Tool { int three() { return 3; } }\n",
+                ),
+                (
+                    "test/src/app/CalcTest.java",
+                    "package app;\npublic class CalcTest { void t() {} }\n",
+                ),
+            ] {
+                write(&root.join(file), class).unwrap();
+            }
+            root
+        };
+        let runtime_in = |root: &Path, source: &str| {
+            root.join(source)
+                .join(PACKAGE_DIRECTORY)
+                .join("Supercov.java")
+                .exists()
+        };
+        let root = make();
+        instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        assert!(runtime_in(&root, "b/src") && !runtime_in(&root, "a/src"));
+        fs::remove_dir_all(&root).ok();
+        // A source that cannot be read counts for no root: with one of
+        // b's two unread, the roots tie, and the first by name takes it.
+        let root = make();
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1734@2", || {
+            instrument_workspace(&root, &root.join("evidence"), true, None)
+        })
+        .expect("instrument");
+        assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
+        fs::remove_dir_all(&root).ok();
+        for line in [1751, 1771, 1777, 1781, 1787, 1793, 1799, 1873] {
+            let root = make();
+            let fault = format!("fs.write#jvm_run.rs:{line}");
+            let failed = crate::fault::during(&fault, || {
+                instrument_workspace(&root, &root.join("evidence"), true, None)
+            });
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// An Ant build whose harness lies beside the project, reached through
+    /// the links around Supercov's copy: the harness is given the formatter
+    /// in the copy's own version of it. A file beside the copy's tree with no
+    /// task is left alone; an import named by an absolute path, outside the
+    /// copy, is not changed at all; and each step of preparing the copy's
+    /// surroundings that fails stops the instrumentation.
+    #[cfg(unix)]
+    #[test]
+    fn an_ant_harness_beside_the_project_is_changed_in_the_copy_alone() {
+        let harness = r#"<project name="harness">
+    <target name="test">
+        <javac srcdir="main/src" destdir="out/classes"/>
+        <javac srcdir="test/src" destdir="out/test-classes"/>
+        <junit fork="true"><batchtest><fileset dir="test/src" includes="**/*Test.java"/></batchtest></junit>
+    </target>
+</project>
+"#;
+        // `wrapper` adds a build file with no task beside the copy's tree;
+        // `import` is how the project's build names the harness.
+        let make = |wrapper: bool, import: &dyn Fn(&Path) -> String| {
+            let top = temporary_root("ant-around");
+            write(&top.join("real/tools/common.xml"), harness).unwrap();
+            let copy = top.join("project/.supercov/workspaces/workspace");
+            let workspace = copy.join("tree/plugins/app");
+            std::os::unix::fs::symlink(top.join("real/tools"), copy.join("tree/tools"))
+                .or_else(|_| {
+                    fs::create_dir_all(copy.join("tree"))?;
+                    std::os::unix::fs::symlink(top.join("real/tools"), copy.join("tree/tools"))
+                })
+                .unwrap();
+            if wrapper {
+                write(
+                    &copy.join("tree/wrapper.xml"),
+                    "<project name=\"wrapper\"/>\n",
+                )
+                .unwrap();
+            }
+            write(
+                &workspace.join("build.xml"),
+                &format!(
+                    "<project name=\"app\" default=\"test\"><import file=\"{}\"/></project>\n",
+                    import(&top)
+                ),
+            )
+            .unwrap();
+            write(
+                &workspace.join("main/src/app/Calc.java"),
+                "package app;\npublic class Calc { int one() { return 1; } }\n",
+            )
+            .unwrap();
+            write(
+                &workspace.join("test/src/app/CalcTest.java"),
+                "package app;\npublic class CalcTest { void t() {} }\n",
+            )
+            .unwrap();
+            (top, copy, workspace)
+        };
+        let beside = |_: &Path| "../../tools/common.xml".to_owned();
+        let changed = |copy: &Path| {
+            fs::read_to_string(copy.join("tree/tools/common.xml"))
+                .unwrap()
+                .contains(ANT_FORMATTER_CLASS)
+        };
+        for wrapper in [false, true] {
+            let (top, copy, workspace) = make(wrapper, &beside);
+            instrument_workspace(&workspace, &top.join("evidence"), true, None)
+                .expect("instrument");
+            assert!(changed(&copy), "{wrapper}");
+            assert!(
+                !fs::read_to_string(top.join("real/tools/common.xml"))
+                    .unwrap()
+                    .contains(ANT_FORMATTER_CLASS),
+                "the checkout's harness is untouched"
+            );
+            fs::remove_dir_all(top).ok();
+        }
+        // Named by its absolute path, the harness is outside the copy.
+        let absolute = |top: &Path| top.join("real/tools/common.xml").display().to_string();
+        let (top, _, workspace) = make(false, &absolute);
+        let _ = instrument_workspace(&workspace, &top.join("evidence"), true, None);
+        assert!(
+            !fs::read_to_string(top.join("real/tools/common.xml"))
+                .unwrap()
+                .contains(ANT_FORMATTER_CLASS)
+        );
+        fs::remove_dir_all(top).ok();
+        // A harness that cannot be read is no task's file; each step that
+        // fails stops it.
+        let (top, copy, workspace) = make(false, &beside);
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1842", || {
+            instrument_workspace(&workspace, &top.join("evidence"), true, None)
+        });
+        assert!(!changed(&copy));
+        fs::remove_dir_all(top).ok();
+        for fault in [
+            "fs.read_dir#jvm_run.rs:1819",
+            "fs.read_dir#workspace.rs:2443",
+            "fs.symlink_metadata#workspace.rs:2328",
+        ] {
+            let (top, _, workspace) = make(false, &beside);
+            let failed = crate::fault::during(fault, || {
+                instrument_workspace(&workspace, &top.join("evidence"), true, None)
+            });
+            assert!(failed.is_err(), "{fault}");
+            fs::remove_dir_all(top).ok();
         }
     }
 
