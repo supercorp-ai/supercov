@@ -40,7 +40,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
@@ -56,6 +56,11 @@ pub const CONTAINER_VARIABLE: &str = "SUPERCOV_CONTAINER";
 /// evidence: one that never does -- a server stopped at its first probe, a
 /// directory it may not write -- is said to have sent nothing back.
 pub const MARK_VARIABLE: &str = "SUPERCOV_CONTAINER_MARK";
+
+/// How long Docker Desktop keeps a path it looked up pointing at what was
+/// there: about a second, measured; the copy goes in by a rename just before
+/// the relay starts.
+const SETTLE_MS: i64 = 1_500;
 
 /// Numbers each container's mark within a run.
 static MARKS: AtomicUsize = AtomicUsize::new(0);
@@ -190,6 +195,8 @@ struct Shared {
     upstream: PathBuf,
     socket: PathBuf,
     started_ms: i64,
+    /// Whether the daemon is Docker Desktop's, asked once.
+    desktop: OnceLock<bool>,
     /// Containers created through the relay, as recorded.
     created: Mutex<Vec<CreatedContainer>>,
     /// Compose services already built from the copy in this run.
@@ -232,6 +239,7 @@ impl DockerProxy {
             upstream: upstream.to_owned(),
             socket: socket.to_owned(),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::new(Vec::new()),
             built: Mutex::new(BTreeSet::new()),
             docker: PathBuf::from("docker"),
@@ -815,6 +823,9 @@ impl Shared {
         let service = label("com.docker.compose.service");
         self.rewrite_socket_mounts(&mut config);
         let mounted = mounted_copy(&create_binds(&config), &self.settings.copy);
+        if mounted.is_some() {
+            self.settle();
+        }
         let mut context = CreateContext {
             measured: false,
             image: image.clone(),
@@ -908,6 +919,28 @@ impl Shared {
         context.measured = true;
         context.mark = Some(mark);
         (config, context)
+    }
+
+    /// Docker Desktop shares the host's files into its machine and, for about
+    /// a second after it last looked a path up, keeps it pointing at what was
+    /// there. The run's copy is put in place by a rename, so a container that
+    /// mounted it at once saw the previous run's copy -- emptied, or gone --
+    /// and its tests found nothing to run. Such a container is created once
+    /// that second has passed.
+    fn settle(&self) {
+        let waited = now_ms() - self.started_ms;
+        if waited >= SETTLE_MS || !self.desktop() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis((SETTLE_MS - waited) as u64));
+    }
+
+    fn desktop(&self) -> bool {
+        *self.desktop.get_or_init(|| {
+            daemon_request(&self.upstream, "GET", "/info", None)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|info| info["OperatingSystem"] == "Docker Desktop")
+        })
     }
 
     /// An exec's configuration, with the test command's settings when the
@@ -1617,7 +1650,18 @@ mod tests {
                             )
                             .unwrap();
                         };
-                        if path.starts_with("/images/") {
+                        if path == "/info" {
+                            // Docker Desktop's, where the test asks for it.
+                            if socket_directory.join("desktop").exists() {
+                                respond(
+                                    &mut writer,
+                                    "200 OK",
+                                    r#"{"OperatingSystem":"Docker Desktop"}"#,
+                                );
+                            } else {
+                                respond(&mut writer, "200 OK", "OK");
+                            }
+                        } else if path.starts_with("/images/") {
                             // Built during the run, pulled long ago, or
                             // built by an earlier run.
                             let (id, created) = if path.contains("pulled") {
@@ -1931,6 +1975,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
@@ -2222,6 +2267,50 @@ mod tests {
         assert_eq!(journal.execs, ["`docker exec` in tests"]);
         assert_eq!(journal.silent, ["api", "app-worker"]);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// On Docker Desktop a container that mounts the copy is created once a
+    /// second and more has passed since the copy went in; elsewhere, and
+    /// after that, at once.
+    #[test]
+    fn on_docker_desktop_a_container_of_the_copy_waits_for_the_copy_to_show() {
+        for desktop in [true, false] {
+            let directory = temporary("settle");
+            let daemon = directory.join("d.sock");
+            if desktop {
+                fs::write(directory.join("desktop"), "").unwrap();
+            }
+            let _created = fake_daemon(&daemon);
+            let proxy =
+                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
+                    .unwrap();
+            let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let body = format!(
+                r#"{{"Image": "app", "HostConfig": {{"Binds": ["{}:/workspace"]}}}}"#,
+                directory.join("copy").display()
+            );
+            let mut create = || {
+                let begun = std::time::Instant::now();
+                let (head, _) = exchange(
+                    &mut stream,
+                    &mut reader,
+                    &format!(
+                        "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    ),
+                );
+                assert!(head.start.contains(" 201"), "{head:?}");
+                begun.elapsed()
+            };
+            let first = create();
+            let second = create();
+            assert_eq!(first >= Duration::from_millis(1_200), desktop, "{first:?}");
+            assert!(second < Duration::from_millis(1_200), "{second:?}");
+            drop(stream);
+            proxy.finish();
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     /// Nothing is opened when no measured container ran, and an image whose
@@ -2859,6 +2948,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
@@ -2883,6 +2973,7 @@ mod tests {
                 upstream: directory.join("d.sock"),
                 socket: directory.join("p.sock"),
                 started_ms: now_ms(),
+                desktop: OnceLock::new(),
                 created: Mutex::default(),
                 built: Mutex::default(),
             }
@@ -2995,7 +3086,7 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:148", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:153", || {
                 socket_path(&directory.join("state"))
             })
             .is_err()
@@ -3003,13 +3094,13 @@ mod tests {
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:159", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:164", || {
                 socket_path(&directory.join("state").join("d".repeat(120)))
             })
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:220", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:227", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()
@@ -3255,6 +3346,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
