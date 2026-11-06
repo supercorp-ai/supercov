@@ -47,7 +47,10 @@ test('a low score fails', () => {
   expect(grade(10)).toBe('fail');
 });
 `,
+  // A short container of the same image first, as an install is: Node runs
+  // there and loads nothing measured, so nothing is missing from it.
   'run-in-container.sh': `set -e
+docker run --rm --user ${user} -e HOME=/tmp -v "$PWD":/workspace -w /workspace ${IMAGE} node -e "require('node:fs').readdirSync('.')"
 docker run -d --name ${name} --user ${user} -e HOME=/tmp -v "$PWD":/workspace -w /workspace ${IMAGE} sleep infinity >/dev/null
 status=0
 docker exec ${name} node_modules/.bin/playwright test || status=$?
