@@ -1,0 +1,60 @@
+name: System packages
+description: >
+  Installs the system packages a command fetches through apt, kept in the
+  Actions cache between runs. A mirror that slows to a package every few
+  seconds, or stops answering, costs a bounded attempt, not the job.
+inputs:
+  command:
+    description: The command that installs them, such as `npx playwright install-deps`.
+    required: true
+  key:
+    description: The cache key; any earlier key with the same prefix is a head start.
+    required: true
+  prefix:
+    description: What every key of these packages starts with.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Restored from an earlier key too: a version bump changes the lockfile,
+    # and the 4.24.0 bump sent every package back to a mirror that stalled.
+    - id: kept
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/apt-archives
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.prefix }}
+    - shell: bash
+      env:
+        INSTALL: ${{ inputs.command }}
+      run: |
+        mkdir -p ~/apt-archives/partial
+        # Kept where the cache is; and a connection that stops sending is
+        # dropped after half a minute and tried again, on the next mirror.
+        printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\nAcquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' "$HOME/apt-archives" \
+          | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
+        for attempt in 1 2 3 4 5 6; do
+          timeout 8m bash -c "$INSTALL" && exit 0
+          echo "attempt $attempt did not finish; trying again"
+          # Four attempts at Azure's mirror fetched 27 MB each on 2026-10-27
+          # and still left 43 MB: the rest come from Ubuntu's.
+          echo http://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt > /dev/null
+          # The timeout ends the command, not the apt-get it started under
+          # sudo: left running, that holds dpkg's lock, and the next attempt
+          # failed at once on 2026-10-26. End what holds the locks, then let
+          # dpkg finish what was stopped part way.
+          sudo fuser -k /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
+          sleep 2
+          sudo dpkg --configure -a || true
+        done
+        exit 1
+    # Saved whether or not the install finished: what it fetched is the next
+    # run's head start. apt wrote it as root.
+    - if: always() && steps.kept.outputs.cache-hit != 'true'
+      shell: bash
+      run: sudo chown -R "$USER" ~/apt-archives
+    - if: always() && steps.kept.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/apt-archives
+        key: ${{ inputs.key }}

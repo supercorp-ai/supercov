@@ -748,7 +748,7 @@ fn explain_failed_command(
     unrun_build: &[String],
     command: &str,
 ) {
-    let failed = discover_runs(root)
+    let tests = discover_runs(root)
         .ok()
         .and_then(|inventory| {
             let run = select_run(&inventory, Some(run_id)).ok()?;
@@ -760,9 +760,12 @@ fn explain_failed_command(
         })
         .unwrap_or_default()
         .into_iter()
-        .filter(|test| {
-            test.role == "test" && matches!(test.outcome.as_str(), "failed" | "timedOut")
-        })
+        .filter(|test| test.role == "test")
+        .collect::<Vec<_>>();
+    let recorded = !tests.is_empty();
+    let failed = tests
+        .into_iter()
+        .filter(|test| matches!(test.outcome.as_str(), "failed" | "timedOut"))
         .map(|test| test.name)
         .collect::<Vec<_>>();
     if !failed.is_empty() {
@@ -784,8 +787,16 @@ fn explain_failed_command(
         );
     } else if !unrun_build.is_empty() {
         let build = unrun_build.join(" ");
+        // A run that recorded no test may have lost what its tests reported
+        // (a container that could not write it): it says so, rather than
+        // that none failed.
+        let tests = if recorded {
+            "no test it reported failed"
+        } else {
+            "the run recorded no test"
+        };
         eprintln!(
-            "[supercov] the command exited {exit_code} and no test it reported failed. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
         );
     }
 }

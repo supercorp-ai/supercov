@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { Buffer } from "node:buffer";
@@ -15,6 +15,22 @@ function makeDirectory(directory) {
     }
     finally {
         process.umask(previous);
+    }
+}
+
+// And a file made there is readable by every user, whatever the process's
+// mask: a container's root wrote evidence only it could read, and the run,
+// as another user, recorded nothing ("Permission denied", 4.24.1).
+const inContainer = () => process.env.SUPERCOV_CONTAINER === "1";
+const fileMode = () => (inContainer() ? 0o666 : 0o600);
+function openToAll(path) {
+    if (!inContainer())
+        return;
+    try {
+        chmodSync(path, 0o666);
+    }
+    catch {
+        // Left as the mask made it: the run says what it could not read.
     }
 }
 
@@ -38,7 +54,8 @@ export function atomicWriteFileSync(path, data, options) {
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     let descriptor;
     try {
-        descriptor = openSync(temporary, "wx", 0o600);
+        descriptor = openSync(temporary, "wx", fileMode());
+        openToAll(temporary);
         writeFileSync(descriptor, data, options);
         fsyncSync(descriptor);
         closeSync(descriptor);
@@ -59,7 +76,7 @@ export function atomicWriteFileSync(path, data, options) {
 export function appendJsonLineDurableSync(path, data) {
     makeDirectory(dirname(path));
     const existed = existsSync(path);
-    const descriptor = openSync(path, "a", 0o600);
+    const descriptor = openSync(path, "a", fileMode());
     try {
         writeFileSync(descriptor, data.endsWith("\n") ? data : `${data}\n`);
         fsyncSync(descriptor);
@@ -67,13 +84,18 @@ export function appendJsonLineDurableSync(path, data) {
     finally {
         closeSync(descriptor);
     }
-    if (!existed)
+    if (!existed) {
+        openToAll(path);
         fsyncDirectory(dirname(path));
+    }
 }
 /** Append a complete local record; process exit closes it before publication. */
 export function appendJsonLineSync(path, data) {
     makeDirectory(dirname(path));
-    appendFileSync(path, data.endsWith("\n") ? data : `${data}\n`, { mode: 0o600 });
+    const opening = inContainer() && !existsSync(path);
+    appendFileSync(path, data.endsWith("\n") ? data : `${data}\n`, { mode: fileMode() });
+    if (opening)
+        openToAll(path);
 }
 /** Atomically publish a fully prepared file or directory and persist its entry. */
 export function atomicRenameSync(source, destination) {

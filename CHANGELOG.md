@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.24.2
+
+**Fixed**
+
+- Tests run as root in a container -- a sealed worker running Playwright by `docker exec` -- wrote their evidence readable by root alone, so the run, as the checkout's user, stopped at each file with "Permission denied (os error 13)" and recorded no run. Evidence a container writes is now readable by every user, and when the run ends, whatever a container left that another user owns in the copy and the run's directory -- Playwright's `test-results`, `.last-run.json` -- is opened to the run's user, so it is read and removed.
+
+## 4.24.1
+
+**Fixed**
+
+- A container that mounts the project read-only (`.:/workspace:ro`) failed at its first recorded line with EROFS in 4.24.0: the run's evidence paths were moved under `/workspace/.supercov`, inside the read-only mount. Supercov's own directory is now mounted writable where the container sees it, and the rest of the mount stays read-only.
+- A container that ran with the run's settings and sent no coverage back -- a server that stopped at its first probe -- is now named when the run ends, whatever the tests did. Before, the warning came only when no test reported either. Tests started with `docker exec` that report nothing are named on their own.
+- A command that builds under another name (`npm run build:ci`, `turbo run build`) is no longer told to add `npm run build` when it fails, and a run that recorded no test says so instead of saying that none failed.
+
 ## 4.24.0
 
 **Added**

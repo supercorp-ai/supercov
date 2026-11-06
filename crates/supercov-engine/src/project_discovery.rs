@@ -705,6 +705,13 @@ fn has_tool(tokens: &[String], tool: &str) -> bool {
 
 /// `tokens` and the tokens of every package script they run, however deep:
 /// debug's `npm test` runs `npm run test:browser`, which runs karma.
+/// Whether a word of a command names a build: `build`, `build:web`,
+/// `web:build`, `--build`.
+pub(crate) fn names_a_build(word: &str) -> bool {
+    let word = word.trim_start_matches('-');
+    word == "build" || word.starts_with("build:") || word.ends_with(":build")
+}
+
 fn reachable_script_tokens(manifest: &Value, tokens: &[String]) -> Vec<String> {
     let mut all = tokens.to_vec();
     let mut visited = BTreeSet::new();
@@ -872,10 +879,14 @@ pub fn discover_coverage_project_of_any_size(
     let build_script = script(&manifest, "build")
         .map(command_tokens)
         .unwrap_or_default();
-    let command_builds = !build_script.is_empty()
+    // The build script itself, or any build the command or a script it runs
+    // names (`build:ci`, `turbo run build`): a command that already builds
+    // and whose build failed was told to add one.
+    let command_builds = (!build_script.is_empty()
         && build_script
             .iter()
-            .all(|token| script_tokens.contains(token));
+            .all(|token| script_tokens.contains(token)))
+        || script_tokens.iter().any(|token| names_a_build(token));
     let unrun_build = if !build_script.is_empty() && !command_builds && !executes_source_directly {
         vec![build_package_manager(command), "run".into(), "build".into()]
     } else {
@@ -1275,6 +1286,38 @@ mod tests {
             let discovered =
                 discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
                     .unwrap();
+            assert!(discovered.unrun_build.is_empty(), "{label}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// A command that builds by another name -- a CI variant of the build,
+    /// a task runner's -- is not told to build: its build is there to look
+    /// at when it fails.
+    #[test]
+    fn a_command_building_under_another_name_is_not_told_to_build() {
+        for (label, run) in [
+            (
+                "variant",
+                command(&["sh", "-c", "npm run build:ci && npm test"]),
+            ),
+            (
+                "runner",
+                command(&["sh", "-c", "npx turbo run build && npm test"]),
+            ),
+        ] {
+            let root = project(
+                &format!("other-build-{label}"),
+                &[
+                    (
+                        "package.json",
+                        r#"{"scripts":{"build":"tsc","build:ci":"tsc -p tsconfig.ci.json","test":"jest --runInBand"}}"#,
+                    ),
+                    ("src/index.ts", "export const ready = true"),
+                    ("test/index.test.js", "require('../dist/index.js')"),
+                ],
+            );
+            let discovered = discover_coverage_project(&root, &BTreeMap::new(), &run).unwrap();
             assert!(discovered.unrun_build.is_empty(), "{label}");
             fs::remove_dir_all(root).unwrap();
         }

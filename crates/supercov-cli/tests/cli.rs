@@ -602,14 +602,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1103")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1101")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1103"),
+        seen.contains("test fault at fs (javascript_run.rs:1101"),
         "{seen}"
     );
 }
@@ -5850,6 +5850,29 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         said.contains("starts without build output") && said.contains("npm run build && npm test"),
         "{said}"
     );
+
+    // A command that fails after its tests passed: no test failed, and the
+    // build the copy starts without is named as what may be missing.
+    project.write(
+        "test/plain.test.js",
+        "const { test } = require('node:test');\nconst { equal } = require('node:assert/strict');\nconst { fee } = require('../src/fee.js');\ntest('plain orders pay', () => equal(fee(1), 5));\n",
+    );
+    let after = project.supercov(&["--", "sh", "-c", "node --test test/plain.test.js && exit 3"]);
+    assert_eq!(after.code(), 3, "{}", after.stdout());
+    assert!(
+        after
+            .stderr()
+            .contains("exited 3 and no test it reported failed. It ran in a copy of the project that starts without build output"),
+        "{}",
+        after.stderr()
+    );
+
+    // A command that builds by another name, and whose build failed, is not
+    // told to add one: its own build is what to look at.
+    let elsewhere = project.supercov(&["--", "sh", "-c", "npm run build:ci; npm test"]);
+    assert_ne!(elsewhere.code(), 0, "{}", elsewhere.stdout());
+    let said = format!("{}{}", elsewhere.stdout(), elsewhere.stderr());
+    assert!(!said.contains("starts without build output"), "{said}");
 
     // With the build in the command, it compiles the instrumented copy, and
     // what the tests run is measured.
@@ -13377,13 +13400,13 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:203",
+                "fs.create_dir_all#docker_proxy.rs:212",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:203"), "{said}");
+    assert!(fired_at(&said, "docker_proxy.rs:212"), "{said}");
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
@@ -15011,7 +15034,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2464 => main.rs:2464",
+            "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:1679 => javascript_frontend.rs:1679",
         ],
@@ -16581,7 +16604,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.write#javascript_run.rs:978",
         "fs.canonicalize#process_supervision.rs:1719",
         "fs.create_dir_all#javascript_run.rs:1049",
-        "fs.create_dir_all#javascript_run.rs:1222",
+        "fs.create_dir_all#javascript_run.rs:1220",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:445",
         "fs.create_dir_all#javascript_run.rs:1461",
