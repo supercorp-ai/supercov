@@ -1167,6 +1167,14 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     const originalPlaywrightConfig = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG
         ?.replaceAll("\\", "/");
     const wrapper = await import(__rewriteRelativeImportExtension(new URL("./playwright.mjs", import.meta.url)));
+    // What @playwright/test's own index gives a CommonJS caller: the `test`
+    // function, carrying every export as a property. A spec transpiled from
+    // `import test from "@playwright/test"` calls the module itself as its
+    // default, and the wrapper's namespace was no function: rallly's i18n spec
+    // failed with `(0 , _test.default) is not a function`.
+    const commonjsWrapper = Object.assign(function test(...args) {
+        return Reflect.apply(wrapper.test, this, args);
+    }, wrapper.test, wrapper);
     const originalLoad = Module._load;
     Module._load = function supercovLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");
@@ -1184,7 +1192,7 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
                 ? parentFile.startsWith(`${normalizedRoot}/`)
                 : parentFile.includes("/tests/"));
         if (request === target && belongsToProject)
-            return wrapper;
+            return commonjsWrapper;
         return originalLoad.call(this, request, parent, isMain);
     };
 }
