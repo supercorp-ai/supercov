@@ -330,6 +330,17 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     ...kinds.map((kind) => `| ${kind} | ${Object.values(profiled).map((totals) => (totals[kind] ?? 0).toFixed(2)).join(' | ')} |`),
   ].join('\n');
   writeFileSync(join(output, 'profile.md'), `${table}\n`);
+  // What the browser loads: each build's client chunks, plain's in the
+  // project and the measured one's in Supercov's kept copy.
+  const bundles = run(
+    project,
+    'sh',
+    ['-c', "find . -path '*/.next/static' -prune -type d -exec du -sk {} \\; ; find . -path '*/.next/static/chunks/*.js' | xargs wc -c | sort -n | tail -15"],
+    'bundles',
+    {},
+    true,
+  ).stdout;
+  writeFileSync(join(output, 'bundles.txt'), bundles);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   console.log(table);
 }
