@@ -696,13 +696,7 @@ pub fn run_direct_javascript(
     let frontend = if let Some(cache) = &reusable_frontend {
         load_cached_javascript_frontend(&workspace, cache)
     } else {
-        prepare_javascript_frontend(
-            &workspace,
-            &project,
-            &collector_id,
-            &frontend_cache_key,
-            &request.command,
-        )
+        prepare_javascript_frontend(&workspace, &project, &collector_id, &frontend_cache_key)
     }
     .map_err(|error| error.to_string())?;
     crate::workspace::hide_rewritten_files(
