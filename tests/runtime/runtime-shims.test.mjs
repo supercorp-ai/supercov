@@ -464,12 +464,13 @@ test("a child a crash signal ends is noted, and one a teardown stops is not", {
       [
         "--input-type=module",
         "--eval",
-        `import { spawn, spawnSync, execSync } from "node:child_process";
+        `import { spawn, spawnSync, execFileSync } from "node:child_process";
          const { installLaunchSupervisor } = await import(${JSON.stringify(supervisor)});
          installLaunchSupervisor();
          const crash = (signal) => ["-e", "process.kill(process.pid, '" + signal + "')"];
          spawnSync(process.execPath, crash("SIGSEGV"));
-         try { execSync(JSON.stringify(process.execPath) + " -e \\"process.kill(process.pid, 'SIGABRT')\\""); } catch {}
+         // Through no shell: dash runs a command as its child and exits 134.
+         try { execFileSync(process.execPath, crash("SIGABRT")); } catch {}
          spawnSync(process.execPath, crash("SIGTERM"));
          const ended = (launched) => new Promise((done) => launched.once("exit", done));
          await ended(spawn(process.execPath, crash("SIGBUS")));
@@ -496,7 +497,7 @@ test("a child a crash signal ends is noted, and one a teardown stops is not", {
       assert.ok(exit.ranMs >= 0);
     }
     assert.equal(exits[0].command, process.execPath);
-    assert.match(exits[1].command, /SIGABRT/);
+    assert.equal(exits[1].command, process.execPath);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
