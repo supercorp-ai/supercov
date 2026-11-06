@@ -849,8 +849,15 @@ class CoveragePhaseController {
         ]);
     }
     async activateFrames(phaseId, pages = this.pages) {
-        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames()).map((frame) => frame
-            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
+        // The app's own hosts have the phase from the context's cookies, set
+        // beside this; a document there writing them again was a round trip
+        // to the cookie store per cookie, on every action. A context whose
+        // headers are not known gets none, so its documents still write them.
+        const covered = (page) => this.adoptedContexts.has(page.context())
+            ? []
+            : this.appHosts.map((url) => new URL(url).hostname);
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
+            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
             // A document that loaded under an earlier test's attempt (a page
@@ -860,6 +867,8 @@ class CoveragePhaseController {
             coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, id);
             try {
                 localStorage.setItem(storageKey, id);
+                if (coveredHosts.includes(location.hostname))
+                    return;
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
                 document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
                 if (globalThis.isSecureContext) {
@@ -879,6 +888,7 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_PHASE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
             phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
+            coveredHosts,
         })
             .catch(() => undefined))));
     }
@@ -923,22 +933,24 @@ class CoveragePhaseController {
         // The context's own headers are left alone: they are the suite's, and
         // a test that sets more with `setExtraHTTPHeaders` keeps them. Setting
         // them back at every phase dropped a test's `X-Forwarded-For`.
-        await Promise.all([
-            ...this.appHosts.map((url) => {
-                const host = new URL(url);
-                // For the app's own site: requests, navigations and sockets.
-                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
-                // For its frames on another of its hosts: a cookie that
-                // crosses sites must be Secure, which needs https or a local
-                // host. Chromium keeps such a cookie only when it is given by
-                // domain; given by an http URL it is dropped without a word.
-                if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
-                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
-                }
-                // One host refused leaves the others theirs.
-                return context.addCookies(cookies).catch(() => undefined);
-            }),
-        ]);
+        const byHost = this.appHosts.map((url) => {
+            const host = new URL(url);
+            // For the app's own site: requests, navigations and sockets.
+            const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+            // For its frames on another of its hosts: a cookie that
+            // crosses sites must be Secure, which needs https or a local
+            // host. Chromium keeps such a cookie only when it is given by
+            // domain; given by an http URL it is dropped without a word.
+            if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
+                cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+            }
+            return cookies;
+        });
+        // Every host's cookies in one call: a call per host, each its own
+        // round trip through Playwright, was most of what an action waited
+        // for. A cookie the browser refuses fails the whole call, so then
+        // each host is given its own and one refused leaves the others theirs.
+        await context.addCookies(byHost.flat()).catch(() => Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => undefined))));
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
