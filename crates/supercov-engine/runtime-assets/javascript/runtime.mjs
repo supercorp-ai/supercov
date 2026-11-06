@@ -651,7 +651,8 @@ function markContainerWriting(fs) {
   state.containerMarked = true;
   try {
     fs.mkdirSync(mark.slice(0, mark.lastIndexOf("/")), { recursive: true });
-    fs.writeFileSync(mark, "");
+    fs.writeFileSync(mark, "", { mode: 0o666 });
+    fs.chmodSync(mark, 0o666);
   } catch (e) {
   }
 }

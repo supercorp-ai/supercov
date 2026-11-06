@@ -10,7 +10,7 @@
 // CommonJS on purpose: Jest's module system loads setup files without the
 // ESM flag, and the runtime it needs is already on the sandbox global.
 const { createHash, randomUUID } = require("node:crypto");
-const { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, statSync, writeFileSync } = require("node:fs");
+const { appendFileSync, chmodSync, closeSync, fsyncSync, mkdirSync, openSync, statSync, writeFileSync } = require("node:fs");
 const { relative, resolve, sep } = require("node:path");
 const { Buffer } = require("node:buffer");
 
@@ -115,8 +115,13 @@ function writeEvidence(payload) {
         const writer = (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`).replace(/[^A-Za-z0-9_-]/g, "_");
         journal = { path: resolve(directory, `jest-worker-${writer}-${randomUUID()}.mcdc.jsonl`), size: 0 };
     }
+    // In a container its root writes the journal, and the run, as another
+    // user, reads it: opened to all there, as atomic.mjs opens its files.
+    const container = process.env.SUPERCOV_CONTAINER === "1";
+    const mode = container ? 0o666 : 0o600;
+    const opening = container && journal.size === 0;
     if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
-        const descriptor = openSync(journal.path, "a", 0o600);
+        const descriptor = openSync(journal.path, "a", mode);
         try {
             writeFileSync(descriptor, line);
             fsyncSync(descriptor);
@@ -126,7 +131,15 @@ function writeEvidence(payload) {
         }
     }
     else {
-        appendFileSync(journal.path, line, { mode: 0o600 });
+        appendFileSync(journal.path, line, { mode });
+    }
+    if (opening) {
+        try {
+            chmodSync(journal.path, 0o666);
+        }
+        catch {
+            // Left as the mask made it.
+        }
     }
     journal.size += Buffer.byteLength(line);
 }
