@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.24.3
+
+**Added**
+
+- A process the run measured that a crash signal ended -- SIGSEGV, SIGBUS, SIGABRT and the like -- is now named when the run ends, with the signal and how long it ran. Such a process says nothing itself: a backend that crashed right after it printed its URL read as one that never became ready, and a Playwright worker as one that "exited unexpectedly". Exits by SIGTERM or SIGKILL, which teardowns send, are not named.
+
+**Fixed**
+
+- A container that ran to its end with exit code 0 -- a short install step started with `docker run` or `docker compose run` from the same image as the servers -- is no longer named as one that sent no coverage back.
+- Playwright 1.59 could crash while loading its config under coverage (`Cannot add property metadata, object is not extensible`): it read a compiled file from its transform cache while another process was still writing it. Files go into that cache whole now.
+- On Docker Desktop a container created right after the run started could see the previous run's copy of the project, empty or with old files, so `docker exec` found no Playwright. Such a container now waits until the new copy shows, at most 1.5 s after the run starts; nothing waits elsewhere.
+
 ## 4.24.2
 
 **Fixed**
