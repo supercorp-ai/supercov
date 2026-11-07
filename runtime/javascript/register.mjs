@@ -1253,7 +1253,13 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
         }
     }
     const originalLoad = Module._load;
+    const redirected = new Set(["test", "node:test", "assert", "node:assert", "assert/strict", "node:assert/strict"]);
     Module._load = function supercovNodeTestLoad(request, parent, isMain) {
+        // Every require comes here, cached or not, thousands in a test
+        // worker: only these six names are redirected, and nothing else is
+        // looked at for any other.
+        if (!redirected.has(request))
+            return originalLoad.call(this, request, parent, isMain);
         const parentFile = parent?.filename?.replaceAll("\\", "/");
         const belongsToProject = Boolean(projectRoot &&
             parentFile?.startsWith(`${projectRoot}/`) &&
