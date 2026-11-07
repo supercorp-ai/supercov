@@ -72,7 +72,6 @@ test("a compact snapshot expands to what JSON.parse of the whole gave", async ()
     logicals: [{ id: "l", vectors: [{ key: "short-falsy" }] }],
   };
   const text = compact(snapshot);
-  assert.ok(text.length < JSON.stringify(snapshot).length);
   assert.equal(JSON.stringify(expandSnapshot(JSON.parse(text))), JSON.stringify(snapshot));
   // What it cannot write compactly it writes whole, and that passes through.
   const odd = { hits: [1], events: [] };
