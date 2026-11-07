@@ -225,6 +225,7 @@ class CoveragePhaseController {
     cdpSessions = new Map();
     newDocumentScriptIds = new Map();
     pendingRegistrations = new Set();
+    pendingAssertion;
     pageRegistrations = new WeakMap();
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
@@ -732,6 +733,28 @@ class CoveragePhaseController {
         void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
+    /**
+     * An instrumented assertion's phase, opened around its arguments as well
+     * as its matcher, which reaches the browser just before the first thing
+     * in it that can: a call on one of the test's Playwright objects, or a
+     * matcher that waits (promotePendingAssertion). Playwright sends calls in
+     * order, so the page has the phase before anything the assertion asks of
+     * it. One that asks nothing of the page sends nothing.
+     */
+    beginBridgedAssertion(operation, source) {
+        const phase = this.beginAssertion(operation, source, false);
+        this.pendingAssertion = phase;
+        return phase;
+    }
+    promotePendingAssertion() {
+        const phase = this.pendingAssertion;
+        if (!phase)
+            return;
+        this.pendingAssertion = undefined;
+        timingCount("assertion.promoted");
+        this.activePhaseId = phase.id;
+        void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
+    }
     requestPhaseId() {
         return this.activePhaseId;
     }
@@ -764,6 +787,8 @@ class CoveragePhaseController {
         }
     }
     finish(phase, error) {
+        if (this.pendingAssertion === phase)
+            this.pendingAssertion = undefined;
         phase.endedAtMs = Date.now();
         phase.status = error === undefined ? "passed" : "failed";
         if (error !== undefined)
@@ -786,6 +811,7 @@ class CoveragePhaseController {
                     return value;
                 const method = String(property);
                 return (...args) => {
+                    this.promotePendingAssertion();
                     const isRequest = REQUEST_METHODS.has(method) &&
                         isApiRequestContext(object);
                     if (ACTION_METHODS.has(method) || isRequest) {
@@ -1256,7 +1282,7 @@ globalThis.__SUPERCOV_ASSERTION_PHASE_BRIDGE__ = (operation, source, callback) =
     const runtime = directRuntime();
     if (!controller || !runtime)
         return { handled: false };
-    const phase = controller.beginAssertion(operation, source);
+    const phase = controller.beginBridgedAssertion(operation, source);
     bridgedAssertionDepth += 1;
     try {
         const value = runtime.withCoverageCarrier({ version: 1, scope: controller.scope, phaseId: phase.id }, callback);
@@ -1288,7 +1314,7 @@ globalThis.__SUPERCOV_ASSERTION_PHASE_OPENER__ = (operation, source) => {
     const controller = activeController;
     if (!controller || !directRuntime())
         return undefined;
-    const phase = controller.beginAssertion(operation, source);
+    const phase = controller.beginBridgedAssertion(operation, source);
     bridgedAssertionDepth += 1;
     let held = true;
     const release = () => {
@@ -1526,9 +1552,14 @@ function wrapMatchers(matchers, path = "expect", settles = false) {
                 return value;
             return (...args) => {
                 const controller = activeController;
+                const settled = settles && SETTLED_MATCHERS.has(name);
                 const phase = bridgedAssertionDepth === 0
-                    ? controller?.beginAssertion(`${path}.${name}`, undefined, !(settles && SETTLED_MATCHERS.has(name)))
+                    ? controller?.beginAssertion(`${path}.${name}`, undefined, !settled)
                     : undefined;
+                // Inside an instrumented assertion, a matcher that can wait
+                // takes the assertion's phase to the browser before it starts.
+                if (bridgedAssertionDepth > 0 && !settled)
+                    controller?.promotePendingAssertion();
                 try {
                     const result = Reflect.apply(value, target, args);
                     if (result instanceof Promise) {
