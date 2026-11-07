@@ -378,7 +378,8 @@ pub fn load_cached_javascript_frontend(
 fn frontend_artifact_paths(
     workspace: &Path,
     project: &CoverageProject,
-) -> Result<Vec<String>, JavascriptFrontendError> {
+    authored: &BTreeSet<String>,
+) -> Vec<String> {
     let mut artifacts = vec![
         ".supercov/node_modules/package.json".to_owned(),
         ".supercov/node_modules/runtime.d.mts".to_owned(),
@@ -418,13 +419,8 @@ fn frontend_artifact_paths(
             artifacts.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
-    let authored_list = workspace.join(AUTHORED_LIST);
-    let rewritten_files: Vec<String> = serde_json::from_slice(
-        &fs::read(&authored_list).map_err(|error| io_error(&authored_list, error))?,
-    )
-    .map_err(JavascriptFrontendError::Serialize)?;
-    artifacts.extend(rewritten_files.iter().cloned());
-    let rewritten = rewritten_files
+    artifacts.extend(authored.iter().cloned());
+    let rewritten = authored
         .iter()
         .map(|file| format!("{AUTHORED_DIRECTORY}/{file}"))
         .collect::<Vec<_>>();
@@ -433,7 +429,7 @@ fn frontend_artifact_paths(
     artifacts.sort();
     artifacts.dedup();
     artifacts.retain(|path| regular_file(workspace, path));
-    Ok(artifacts)
+    artifacts
 }
 
 /// Where the authored text of the rewritten project file `file` is kept.
@@ -545,12 +541,13 @@ fn write_javascript_frontend_cache(
     project: &CoverageProject,
     key: &str,
     assertion_calls: usize,
+    authored: &BTreeSet<String>,
 ) -> Result<(), JavascriptFrontendError> {
     let cache_directory = workspace.join(FRONTEND_CACHE_DIRECTORY);
     create_directory_all(&cache_directory)?;
     let mut artifacts = Vec::new();
     // Never empty: the frontend's own files are always among them.
-    frontend_artifact_paths(workspace, project)?
+    frontend_artifact_paths(workspace, project, authored)
         .into_iter()
         .try_for_each(|path| {
             let contents = fs::read(workspace.join(&path))
@@ -1968,7 +1965,7 @@ pub fn prepare_javascript_frontend(
         b"coverage-completeness-v2\n",
     )?;
     timed(&SETUP.cache_ns, || {
-        write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls)
+        write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls, &authored)
     })?;
     Ok(PreparedJavascriptFrontend {
         manifest,
@@ -2055,9 +2052,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:471",
-            "javascript-source-path#javascript_frontend.rs:1759",
-            "javascript-source-path#javascript_frontend.rs:1875",
+            "javascript-source-path#javascript_frontend.rs:467",
+            "javascript-source-path#javascript_frontend.rs:1756",
+            "javascript-source-path#javascript_frontend.rs:1872",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2099,6 +2096,7 @@ mod tests {
                 "preload = \"./first.ts\"\n[test]\ntimeout = 5000\npreload = [\"./a.ts\", \"./b.ts\"]\n",
             ),
             ("pkg/bunfig.toml", "[test]\npreload = \"./only.ts\"\n"),
+            ("top/bunfig.toml", "preload = [\"./top.ts\"]\n"),
             ("none/bunfig.toml", "[test]\ntimeout = 5000\n"),
             ("empty/bunfig.toml", "[test]\npreload = []\n"),
             ("number/bunfig.toml", "preload = 1\n"),
@@ -2142,16 +2140,18 @@ mod tests {
             preloads("pkg/bunfig.toml", Some("test")),
             [&adapter, "./only.ts"]
         );
+        assert_eq!(preloads("top/bunfig.toml", None), [&adapter, "./top.ts"]);
         assert!(
             fs::read_to_string(workspace.join("bunfig.toml"))
                 .unwrap()
                 .contains("timeout = 5000")
         );
-        for (file, text) in &configs[..2] {
+        let (rewritten, untouched) = configs.split_at(3);
+        for (file, text) in rewritten {
             let authored = authored_path(&workspace, Path::new(file));
             assert_eq!(fs::read_to_string(authored).unwrap(), *text, "{file}");
         }
-        for (file, text) in &configs[2..] {
+        for (file, text) in untouched {
             assert_eq!(fs::read_to_string(workspace.join(file)).unwrap(), *text);
             assert!(
                 !authored_path(&workspace, Path::new(file)).exists(),
@@ -2162,20 +2162,22 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
         // Each step of it failing stops the preparation: the configurations
         // looked for, one read, its authored copy kept or the rewritten text
-        // published, and the list of rewritten files read for the cache.
+        // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:517",
-            "javascript-source-path#javascript_frontend.rs:471",
-            "fs.rename@2",
-            "fs.read#javascript_frontend.rs:423",
+            "fs.read_to_string#javascript_frontend.rs:513",
+            "javascript-source-path#javascript_frontend.rs:467",
+            // Package and types, two Playwright adapters, two configurations
+            // and the bunfig's authored copy precede its rewrite's.
+            &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
         ] {
             let (source_root, workspace, project) = fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
             assert!(prepared.is_err(), "{fault}");
-            if fault == "fs.rename@2" {
+            if fault.starts_with("fs.rename") {
                 let config = fs::read_to_string(workspace.join("bunfig.toml")).unwrap();
                 assert_eq!(config, configs[0].1);
+                assert!(authored_path(&workspace, Path::new("bunfig.toml")).exists());
             }
             let _ = fs::remove_dir_all(source_root);
             let _ = fs::remove_dir_all(workspace);

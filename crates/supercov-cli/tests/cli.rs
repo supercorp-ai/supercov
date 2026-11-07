@@ -506,6 +506,12 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
     );
     repository.write("tsconfig.base.json", "{}\n");
     repository.commit("admin");
+    // A test that writes beside its package makes a directory there.
+    project.write(
+        "test/beside.test.js",
+        "import test from 'node:test';\nimport { mkdirSync } from 'node:fs';\ntest('beside', () => { mkdirSync('../made-by-a-test/inner', { recursive: true }); });\n",
+    );
+    project.commit("beside");
     let name = repository.root.file_name().unwrap();
     let around = project
         .root
@@ -514,13 +520,27 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
     for _ in 0..2 {
         project.supercov(&["--", "node", "--test"]).succeeds();
         assert!(around.join("web").is_dir(), "the package's copy is kept");
+        for left in ["admin", "tsconfig.base.json", "made-by-a-test"] {
+            assert!(
+                std::fs::symlink_metadata(around.join(left)).is_err(),
+                "{left} stayed beside the copy"
+            );
+        }
+    }
+    // Clearing is best effort: a level or an entry that cannot be read
+    // leaves it, and the run goes on.
+    for fault in [
+        "fs.read_dir#workspace.rs:2272",
+        "fs.read_dir entry#workspace.rs:2272",
+        "fs.symlink_metadata#workspace.rs:2277",
+    ] {
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        assert_eq!(ran.code(), 0, "{fault}: {}", ran.stderr());
         assert!(
-            std::fs::symlink_metadata(around.join("admin")).is_err(),
-            "another package stayed beside the copy"
-        );
-        assert!(
-            std::fs::symlink_metadata(around.join("tsconfig.base.json")).is_err(),
-            "a file of the repository stayed beside the copy"
+            fired_at(&ran.stderr(), &fault[fault.find('#').unwrap() + 1..]),
+            "{fault}: {}",
+            ran.stderr()
         );
     }
 }
@@ -15283,7 +15303,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1747 => javascript_frontend.rs:1747",
+            "fs.read_to_string#javascript_frontend.rs:1744 => javascript_frontend.rs:1744",
         ],
     );
 }
@@ -17390,12 +17410,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1877@2",
+            "fs.read_to_string#javascript_frontend.rs:1874@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1877"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1874"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
