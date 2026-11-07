@@ -375,7 +375,10 @@ pub fn load_cached_javascript_frontend(
     })
 }
 
-fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
+fn frontend_artifact_paths(
+    workspace: &Path,
+    project: &CoverageProject,
+) -> Result<Vec<String>, JavascriptFrontendError> {
     let mut artifacts = vec![
         ".supercov/node_modules/package.json".to_owned(),
         ".supercov/node_modules/runtime.d.mts".to_owned(),
@@ -415,10 +418,14 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
             artifacts.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
-    let rewritten = project
-        .source_files
+    let authored_list = workspace.join(AUTHORED_LIST);
+    let rewritten_files: Vec<String> = serde_json::from_slice(
+        &fs::read(&authored_list).map_err(|error| io_error(&authored_list, error))?,
+    )
+    .map_err(JavascriptFrontendError::Serialize)?;
+    artifacts.extend(rewritten_files.iter().cloned());
+    let rewritten = rewritten_files
         .iter()
-        .chain(project.source_scope.entries.iter().map(|entry| &entry.file))
         .map(|file| format!("{AUTHORED_DIRECTORY}/{file}"))
         .collect::<Vec<_>>();
     artifacts.extend(rewritten);
@@ -426,7 +433,7 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
     artifacts.sort();
     artifacts.dedup();
     artifacts.retain(|path| regular_file(workspace, path));
-    artifacts
+    Ok(artifacts)
 }
 
 /// Where the authored text of the rewritten project file `file` is kept.
@@ -471,6 +478,68 @@ fn keep_authored(
     Ok(())
 }
 
+fn prepend_bun_adapter(preload: Option<&mut toml_edit::Item>, adapter: &str) -> bool {
+    let Some(preload) = preload else {
+        return false;
+    };
+    if let Some(paths) = preload.as_array_mut() {
+        if paths.is_empty() {
+            return false;
+        }
+        paths.insert(0, adapter);
+        return true;
+    }
+    if let Some(path) = preload.as_str() {
+        let mut paths = toml_edit::Array::new();
+        paths.push(adapter);
+        paths.push(path);
+        *preload = toml_edit::value(paths);
+        return true;
+    }
+    false
+}
+
+/// Bun loads configured preloads before BUN_OPTIONS. Its first import of
+/// bun:test captures the native exports, so the adapter must precede it.
+/// Change only the isolated copy, keeping the authored config for tools.
+fn configure_bun_preloads(
+    workspace: &Path,
+    authored: &mut BTreeSet<String>,
+) -> Result<(), JavascriptFrontendError> {
+    let files = crate::integrity::walked_configuration_files(workspace)
+        .map_err(|error| io_error(workspace, io::Error::other(error)))?;
+    let adapter = workspace.join(".supercov/node_modules/bunTest.mjs");
+    let adapter = adapter.to_string_lossy();
+    for path in files
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "bunfig.toml"))
+    {
+        let source = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
+        // Leave malformed configs to the runner: a Node-only command may
+        // share a project with Bun without ever reading its config.
+        let Ok(mut document) = source.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let changed = prepend_bun_adapter(document.get_mut("preload"), &adapter);
+        let changed = prepend_bun_adapter(
+            document
+                .get_mut("test")
+                .and_then(|test| test.get_mut("preload")),
+            &adapter,
+        ) || changed;
+        if !changed {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(workspace)
+            .expect("configuration walked inside workspace");
+        let file = relative.to_string_lossy().replace('\\', "/");
+        keep_authored(workspace, authored, &file, &source)?;
+        atomic_write(&path, document.to_string().as_bytes())?;
+    }
+    Ok(())
+}
+
 fn write_javascript_frontend_cache(
     workspace: &Path,
     project: &CoverageProject,
@@ -481,7 +550,7 @@ fn write_javascript_frontend_cache(
     create_directory_all(&cache_directory)?;
     let mut artifacts = Vec::new();
     // Never empty: the frontend's own files are always among them.
-    frontend_artifact_paths(workspace, project)
+    frontend_artifact_paths(workspace, project)?
         .into_iter()
         .try_for_each(|path| {
             let contents = fs::read(workspace.join(&path))
@@ -1264,24 +1333,27 @@ fn write_vitest_config(
     let source = format!(
         "import {{ createRequire }} from 'node:module';\n\
          import {{ pathToFileURL }} from 'node:url';\n\
-         // pnpm's strict layout does not hoist vite to the project root: it\n\
-         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
-         // resolved from this generated file fails. Vitest depends on vite, so\n\
-         // fall back to resolving it through vitest's own tree rather than\n\
-         // requiring the project to hoist anything.\n\
+         // Resolve from the actual runner and original configuration, whose\n\
+         // package may be nested and have no dependencies hoisted to the root.\n\
+         // Resolving through Vitest's real entry also supports strict pnpm.\n\
+         const discoveredConfig = {original};\n\
          const supercovRequire = createRequire(import.meta.url);\n\
          const supercovLoadVite = async () => {{\n\
-           try {{\n\
-             return await import('vite');\n\
-           }} catch (error) {{\n\
+           const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
+           const anchors = [process.argv[1], originalPath].filter(Boolean);\n\
+           const resolvers = [...anchors.map(file => createRequire(resolve(file))), supercovRequire];\n\
+           for (const from of resolvers) {{\n\
              let entry;\n\
              try {{\n\
-               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
+               entry = createRequire(from.resolve('vitest')).resolve('vite');\n\
              }} catch {{\n\
-               throw error;\n\
+               try {{ entry = from.resolve('vite'); }} catch {{ continue; }}\n\
              }}\n\
+             // Initialization errors belong to this dependency; do not hide\n\
+             // them by falling back to another installed version.\n\
              return await import(pathToFileURL(entry).href);\n\
            }}\n\
+           return await import('vite');\n\
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
@@ -1289,7 +1361,6 @@ fn write_vitest_config(
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
-         const discoveredConfig = {original};\n\
          // Browser Mode runs the test file in the browser, so the node setup --\n\
          // which reaches node:fs to write evidence -- cannot load there. Vite\n\
          // externalises it and the suite fails before collecting a test.\n\
@@ -1684,6 +1755,7 @@ pub fn prepare_javascript_frontend(
     let browser_suite = project.playwright_config.is_some() || project.browser_runner;
     let images = builds_images(workspace);
     let mut authored = BTreeSet::new();
+    configure_bun_preloads(workspace, &mut authored)?;
     let sources_started = Instant::now();
     for file in &project.source_files {
         let relative = project_relative(file)?;
@@ -1985,9 +2057,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:464",
-            "javascript-source-path#javascript_frontend.rs:1689",
-            "javascript-source-path#javascript_frontend.rs:1805",
+            "javascript-source-path#javascript_frontend.rs:471",
+            "javascript-source-path#javascript_frontend.rs:1761",
+            "javascript-source-path#javascript_frontend.rs:1877",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
