@@ -14,6 +14,74 @@ use crate::{
     run_store::{RawEvidenceMetadata, RunMetadata, StoredRun, discover_runs},
 };
 
+/// A record's top-level entries as they were written, in their order: the
+/// scopes a merge rewrites are almost all at the top, and the browser events
+/// beside them, most of a record, need not be parsed and written again.
+struct TopLevel<'a>(Vec<(String, &'a serde_json::value::RawValue)>);
+
+impl<'de> serde::Deserialize<'de> for TopLevel<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> serde::de::Visitor<'de> for Entries {
+            type Value = TopLevel<'de>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries: Vec<(String, &'de serde_json::value::RawValue)> = Vec::new();
+                while let Some((key, value)) =
+                    map.next_entry::<String, &serde_json::value::RawValue>()?
+                {
+                    // As a parsed object keeps a repeated key: where it first
+                    // was, with the last value.
+                    match entries.iter_mut().find(|(seen, _)| *seen == key) {
+                        Some(entry) => entry.1 = value,
+                        None => entries.push((key, value)),
+                    }
+                }
+                Ok(TopLevel(entries))
+            }
+        }
+        deserializer.deserialize_map(Entries)
+    }
+}
+
+/// A record with every scope's run id rewritten, as `rewrite_scope_run_ids`
+/// rewrites its parsed value; each top-level entry that holds no scope is
+/// written as it was.
+fn rewritten_record(
+    entries: &TopLevel<'_>,
+    merged_run_id: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut written =
+        Vec::with_capacity(entries.0.iter().map(|(_, raw)| raw.get().len() + 16).sum());
+    written.push(b'{');
+    for (index, (key, raw)) in entries.0.iter().enumerate() {
+        if index > 0 {
+            written.push(b',');
+        }
+        serde_json::to_writer(&mut written, key)?;
+        written.push(b':');
+        let text = raw.get();
+        if key == "scope" && text.starts_with('{') {
+            let mut scope = serde_json::from_str::<serde_json::Map<String, Value>>(text)?;
+            scope.insert("runId".into(), Value::String(merged_run_id.into()));
+            serde_json::to_writer(&mut written, &scope)?;
+        } else if text.contains("\"scope\"") {
+            let mut value = serde_json::from_str::<Value>(text)?;
+            rewrite_scope_run_ids(&mut value, merged_run_id);
+            serde_json::to_writer(&mut written, &value)?;
+        } else {
+            written.extend_from_slice(text.as_bytes());
+        }
+    }
+    written.push(b'}');
+    Ok(written)
+}
+
 fn rewrite_scope_run_ids(value: &mut Value, merged_run_id: &str) {
     match value {
         Value::Array(values) => {
@@ -83,6 +151,43 @@ pub(crate) fn rewritten_contents(
     let mut current_test: Option<String> = None;
     for line in contents.split('\n') {
         if line.is_empty() {
+            continue;
+        }
+        // An object, nearly every record: its entries as written, its scope
+        // and test read from them alone.
+        if let Ok(entries) = serde_json::from_str::<TopLevel<'_>>(line) {
+            let entry = |name: &str| {
+                entries
+                    .0
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, raw)| raw.get())
+            };
+            let scope_test = entry("scope").and_then(|scope| {
+                serde_json::from_str::<Value>(scope)
+                    .ok()
+                    .and_then(|scope| scope["testId"].as_str().map(str::to_owned))
+            });
+            let own_test = entry("testId")
+                .and_then(|test| serde_json::from_str::<Value>(test).ok())
+                .and_then(|test| test.as_str().map(str::to_owned));
+            if entry("scope").is_some() {
+                current_test = own_test.clone().or_else(|| scope_test.clone());
+            }
+            let test = own_test.or(scope_test).or_else(|| current_test.clone());
+            if superseded
+                .is_some_and(|tests| test.as_ref().is_some_and(|test| tests.contains(test)))
+            {
+                left_out = true;
+                continue;
+            }
+            if kept {
+                rewritten.push(b'\n');
+            }
+            kept = true;
+            rewritten.extend(rewritten_record(&entries, merged_run_id).map_err(|error| {
+                format!("cannot merge malformed recognized JSON evidence: {error}")
+            })?);
             continue;
         }
         let parsed = serde_json::from_str::<Value>(line);
