@@ -307,9 +307,22 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     reset(`diagnose-${name}-${suite.name}`);
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
   }
-  // Supercov's own work, natively profiled: the merge of the two runs just
-  // made, which publishes the merged run.
+  // Supercov's own work, natively profiled: a whole measured unit run (its
+  // setup, evidence and publication beside Vitest), and the merge of the two
+  // runs just made, which publishes the merged run.
   if (process.env.SPEED_SAMPLY) {
+    const unit = suites.find((suite) => suite.name === 'unit');
+    if (unit) {
+      reset('samply-unit');
+      run(
+        project,
+        process.env.SPEED_SAMPLY,
+        ['record', '--save-only', '--unstable-presymbolicate', '-o', join(output, 'samply-unit.json.gz'), '--', path, '--', ...unit.command],
+        'samply-unit',
+        {},
+        true,
+      );
+    }
     run(
       project,
       process.env.SPEED_SAMPLY,
