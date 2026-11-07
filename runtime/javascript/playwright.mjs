@@ -548,18 +548,47 @@ class CoveragePhaseController {
         return internally(context, () => this.registerContextNow(context, adopted));
     }
     async registerContextNow(context, adopted) {
+        // What every new document of the context runs first, in this order, as
+        // one script: one call where four, each awaited, were most of what a
+        // test waited for before its page opened. Each part runs on its own,
+        // as separate scripts did, so one that throws leaves the others.
+        const parts = [];
         // A Rust crate compiled to wasm the run measures: pages remember
         // their wasm instances, so each test's work can be taken from them.
         if (process.env.SUPERCOV_WASM_REGIONS === "1")
-            await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(() => undefined);
-        await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
-        // A document that leaves hands its evidence over through this
-        // binding: the next one reads what it stored only on the same origin.
-        // One binding per context, which outlives a test in a shared
-        // context: the test that has the page now takes what it hands over.
-        if (!contextsWithLeavingBinding.has(context)) {
-            contextsWithLeavingBinding.add(context);
-            await context.exposeBinding(LEAVING_BINDING, (source, payload) => {
+            parts.push("globalThis.__SUPERCOV_WASM_REGIONS__ = true;");
+        parts.push(browserRuntimePrelude);
+        // A context that outlives its test (a worker-scoped browser fixture)
+        // is registered again by every later test, so this script accumulates
+        // on it and each new document runs every copy in registration order.
+        // That is made harmless rather than avoided: every copy publishes its
+        // own attempt, so the newest wins; the fetch patch is installed once
+        // and reads the attempt at call time, so a stale copy can never pin an
+        // old scope onto a request the way nested wrappers would.
+        parts.push(`(${announceAttempt})(${JSON.stringify({
+            attemptId: this.scope.attemptId,
+            scopeHeader: COVERAGE_SCOPE_HEADER,
+            scopeValue: encodeCoverageScope(this.scope),
+            scopeCookie: COVERAGE_SCOPE_COOKIE,
+            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
+        })});`);
+        // A new document starts in the last action's phase, from the cookie
+        // each action sets: one script per context, where a script replaced on
+        // every page at every phase took two Playwright calls each time.
+        parts.push(`(${startDocumentInPhase})(${JSON.stringify({
+            attemptId: this.scope.attemptId,
+            phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
+            phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
+        })});`);
+        const content = parts.map((part) => `try {\n${part}\n} catch (error) {}`).join("\n");
+        await Promise.all([
+            context.addInitScript({ content }).catch(() => undefined),
+            // A document that leaves hands its evidence over through this
+            // binding: the next one reads what it stored only on the same
+            // origin. One binding per context, which outlives a test in a
+            // shared context: the test that has the page now takes what it
+            // hands over.
+            contextsWithLeavingBinding.has(context) ? undefined : (contextsWithLeavingBinding.add(context), context.exposeBinding(LEAVING_BINDING, (source, payload) => {
                 const controller = source?.page ? controllerOwning(source.page) : undefined;
                 if (!controller || controller.runtimeSnapshots)
                     return;
@@ -570,72 +599,9 @@ class CoveragePhaseController {
                 catch {
                     // Not evidence.
                 }
-            }).catch(() => undefined);
-        }
-        // A context that outlives its test (a worker-scoped browser fixture)
-        // is registered again by every later test, so this script accumulates
-        // on it and each new document runs every copy in registration order.
-        // That is made harmless rather than avoided: every copy publishes its
-        // own attempt, so the newest wins; the fetch patch is installed once
-        // and reads the attempt at call time, so a stale copy can never pin an
-        // old scope onto a request the way nested wrappers would.
-        await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie, scopeSiteCookie }) => {
-            const coverageGlobal = globalThis;
-            coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
-            coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
-            try {
-                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
-                // And for this document's frames on another of the app's
-                // hosts, where crossing sites is allowed.
-                if (globalThis.isSecureContext)
-                    document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
-                if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
-                    const originalFetch = globalThis.fetch?.bind(globalThis);
-                    if (originalFetch) {
-                        coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__ = true;
-                        globalThis.fetch = ((input, init) => {
-                            // Only the page's own origin hears the scope. A
-                            // header on a request to another origin makes the
-                            // browser ask that origin first, and one that
-                            // allows only the headers it uses refuses: the
-                            // page's fetch failed under measurement alone.
-                            try {
-                                const target = new URL(input instanceof Request ? input.url : String(input), location.href);
-                                if (target.origin !== location.origin)
-                                    return originalFetch(input, init);
-                            }
-                            catch {
-                                return originalFetch(input, init);
-                            }
-                            const headers = new Headers(init?.headers ??
-                                (input instanceof Request ? input.headers : undefined));
-                            headers.set(scopeHeader, coverageGlobal.__SUPERCOV_ATTEMPT__?.scopeValue ?? scopeValue);
-                            const phase = coverageGlobal.__SUPERCOV_PHASE_ID__;
-                            if (phase)
-                                headers.set("x-supercov-phase", phase);
-                            return originalFetch(input, { ...init, headers });
-                        });
-                    }
-                }
-            }
-            catch {
-                // Browser instrumentation must not change application behavior.
-            }
-        }, {
-            attemptId: this.scope.attemptId,
-            scopeHeader: COVERAGE_SCOPE_HEADER,
-            scopeValue: encodeCoverageScope(this.scope),
-            scopeCookie: COVERAGE_SCOPE_COOKIE,
-            scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
-        }).catch(() => undefined);
-        // A new document starts in the last action's phase, from the cookie
-        // each action sets: one script per context, where a script replaced on
-        // every page at every phase took two Playwright calls each time.
-        await context.addInitScript(startDocumentInPhase, {
-            attemptId: this.scope.attemptId,
-            phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
-            phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
-        }).catch(() => undefined);
+            }).catch(() => undefined)),
+            adopted ? undefined : this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId),
+        ]);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -648,8 +614,6 @@ class CoveragePhaseController {
         this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker]]);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
-        if (!adopted)
-            await this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId);
         for (const page of context.pages())
             register(page);
     }
@@ -1099,6 +1063,53 @@ class CoveragePhaseController {
  * the end of every test (20,000 events: 470 ms, against 34 ms as one JSON
  * string), and doubled a 76-test suite's time.
  */
+/**
+ * The attempt a new document belongs to, for the app's server: its cookies,
+ * and the header its fetch sends to its own origin.
+ */
+function announceAttempt({ attemptId, scopeHeader, scopeValue, scopeCookie, scopeSiteCookie }) {
+    const coverageGlobal = globalThis;
+    coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
+    coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
+    try {
+        document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+        // And for this document's frames on another of the app's
+        // hosts, where crossing sites is allowed.
+        if (globalThis.isSecureContext)
+            document.cookie = `${scopeSiteCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=None; Secure`;
+        if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
+            const originalFetch = globalThis.fetch?.bind(globalThis);
+            if (originalFetch) {
+                coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__ = true;
+                globalThis.fetch = ((input, init) => {
+                    // Only the page's own origin hears the scope. A
+                    // header on a request to another origin makes the
+                    // browser ask that origin first, and one that
+                    // allows only the headers it uses refuses: the
+                    // page's fetch failed under measurement alone.
+                    try {
+                        const target = new URL(input instanceof Request ? input.url : String(input), location.href);
+                        if (target.origin !== location.origin)
+                            return originalFetch(input, init);
+                    }
+                    catch {
+                        return originalFetch(input, init);
+                    }
+                    const headers = new Headers(init?.headers ??
+                        (input instanceof Request ? input.headers : undefined));
+                    headers.set(scopeHeader, coverageGlobal.__SUPERCOV_ATTEMPT__?.scopeValue ?? scopeValue);
+                    const phase = coverageGlobal.__SUPERCOV_PHASE_ID__;
+                    if (phase)
+                        headers.set("x-supercov-phase", phase);
+                    return originalFetch(input, { ...init, headers });
+                });
+            }
+        }
+    }
+    catch {
+        // Browser instrumentation must not change application behavior.
+    }
+}
 const LEAVING_BINDING = "__supercovLeaving";
 const contextsWithLeavingBinding = new WeakSet();
 function readSnapshot(target) {
