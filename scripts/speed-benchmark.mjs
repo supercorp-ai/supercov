@@ -402,7 +402,7 @@ function profileSelfTime(directory) {
         .sort(([, a], [, b]) => b - a)
         .slice(0, count)
         .map(([what, seconds]) => `${seconds.toFixed(2)}s ${what}`);
-    processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 12) });
+    processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 30) });
   }
   return { totals, functions, processes };
 }
