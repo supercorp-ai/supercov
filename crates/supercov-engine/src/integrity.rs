@@ -590,6 +590,7 @@ pub(crate) fn configuration_file(path: &Path) -> bool {
         return false;
     }
     name == ".npmrc"
+        || name == "bunfig.toml"
         || (name.starts_with("tsconfig") && name.ends_with(".json"))
         || name.contains(".config.")
         || name.starts_with(".babelrc.")
@@ -1217,7 +1218,13 @@ mod tests {
         ] {
             assert!(!configuration_file(Path::new(inert)), "{inert}");
         }
-        for real in ["tsconfig.json", ".babelrc.js", "vite.config.ts", ".npmrc"] {
+        for real in [
+            "tsconfig.json",
+            ".babelrc.js",
+            "vite.config.ts",
+            ".npmrc",
+            "bunfig.toml",
+        ] {
             assert!(configuration_file(Path::new(real)), "{real}");
         }
     }

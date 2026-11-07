@@ -1,5 +1,6 @@
-// Bun does not load the Node --import preload. BUN_OPTIONS loads this before
-// its test files and their configured preloads. Older Bun versions create a
+// Bun does not load the Node --import preload. The isolated configuration
+// loads this before configured preloads; BUN_OPTIONS covers other commands.
+// Older Bun versions create a
 // native API per file; newer versions share one. Adapt the factory and the
 // existing API so both keep native test registration and execution semantics.
 import * as runtime from "./runtime.mjs";

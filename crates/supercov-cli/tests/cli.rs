@@ -5335,6 +5335,79 @@ describe('bounds', () => {
 
 #[cfg(unix)]
 #[test]
+fn bun_configured_preloads_importing_test_keep_exact_test_and_hook_scopes() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun configured preload attribution", false);
+    let config = "# Keep the project's settings and preload order.\n[test]\ntimeout = 5000\npreload = [\"./first.ts\", \"./second.ts\"]\n";
+    project.write("bunfig.toml", config);
+    project.write(
+        "src/setup-only.ts",
+        "export function setupOnly() {\n  return 7;\n}\n",
+    );
+    project.write("first.ts", "import { test, beforeEach } from 'bun:test';\nglobalThis.preloadOrder = ['first'];\nbeforeEach(async () => { const { setupOnly } = await import('./src/setup-only'); setupOnly(); });\n");
+    project.write("second.ts", "import { mock } from 'bun:test';\nimport * as native from 'bun:test';\nglobalThis.preloadOrder.push('second');\nmock.module('vitest', () => ({ ...native }));\n");
+    project.write("src/clamp.test.ts", "import { test, expect } from 'bun:test';\nimport { clamp } from './clamp';\ntest('ready slot', async () => { await Promise.resolve(); expect(globalThis.preloadOrder).toEqual(['first', 'second']); expect(clamp(11, 0, 10)).toBe(10); });\n");
+    project.write("src/compat.test.ts", "import { test, expect } from 'vitest';\nimport { clamp } from './clamp';\ntest('compatible slot', () => { expect(clamp(5, 0, 10)).toBe(5); });\n");
+    project.commit("configured preloads import the test module");
+    for _ in 0..2 {
+        project.supercov(&["--", "bun", "test"]).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(
+            &summary,
+            &["Exact for 2 test(s)", "Total       2", "Passed      2"],
+        );
+        let line = project
+            .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+            .succeeds();
+        contains_all(&line, &["ready slot", "compatible slot"]);
+        let setup = project
+            .supercov(&["runs", "latest", "line", "src/setup-only.ts:2"])
+            .succeeds();
+        contains_all(&setup, &["COVERED"]);
+        assert!(
+            !setup.contains("ready slot"),
+            "hook work was credited to a test body: {setup}"
+        );
+        assert!(
+            !setup.contains("compatible slot"),
+            "hook work was credited to a test body: {setup}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.root.join("bunfig.toml")).unwrap(),
+            config
+        );
+        assert!(project.git(&["status", "--porcelain"]).trim().is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_string_preload_keeps_named_tests_and_original_configuration() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-string-preload", false);
+    let config = "[test]\npreload = './preload.ts'\n";
+    project.write("bunfig.toml", config);
+    project.write("preload.ts", "import { test } from 'bun:test';\nif (typeof test !== 'function') throw new Error('test API missing');\n");
+    project.commit("string preload imports the test module");
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 1 test(s)", "Total       1", "Passed      1"],
+    );
+    let named = project
+        .supercov(&["runs", "latest", "test", "clamps below"])
+        .succeeds();
+    contains_all(&named, &["clamps below", "bun:test"]);
+    assert_eq!(project.read("bunfig.toml"), config);
+}
+
+#[cfg(unix)]
+#[test]
 fn bun_preloads_namespace_and_commonjs_imports_keep_named_test_scopes() {
     if !bun_is_available() {
         return;
