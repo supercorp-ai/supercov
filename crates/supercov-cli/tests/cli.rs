@@ -17118,18 +17118,18 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@32", "runtime.d.mts"),
-        ("fs.rename@33", "playwright.mjs"),
-        ("fs.rename@35", "playwright.config.mjs"),
-        ("fs.rename@36", "vitest.config.mjs"),
-        ("fs.rename@39", "vitestCommands.mjs"),
+        ("fs.rename@33", "runtime.d.mts"),
+        ("fs.rename@34", "playwright.mjs"),
+        ("fs.rename@36", "playwright.config.mjs"),
+        ("fs.rename@37", "vitest.config.mjs"),
+        ("fs.rename@40", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@41", "test/cart.test.js"),
-        ("fs.rename@42", "authored-sources.json"),
-        ("fs.rename@43", "statement-exclusions.json"),
-        ("fs.rename@44", "manifest.json"),
-        ("fs.rename@45", "instrumentation-complete"),
-        ("fs.rename@46", "injected fault at fs"),
+        ("fs.rename@42", "test/cart.test.js"),
+        ("fs.rename@43", "authored-sources.json"),
+        ("fs.rename@44", "statement-exclusions.json"),
+        ("fs.rename@45", "manifest.json"),
+        ("fs.rename@46", "instrumentation-complete"),
+        ("fs.rename@47", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
