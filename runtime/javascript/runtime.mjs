@@ -390,6 +390,78 @@ function resetCoverage(testId2) {
 }
 runtimeGlobal.__SUPERCOV_MCDC_SNAPSHOT__ = decisionSnapshot;
 runtimeGlobal.__SUPERCOV_COVERAGE_SNAPSHOT__ = coverageSnapshot;
+// A snapshot as the text the Playwright collector reads back. Its events
+// become rows over one table of the strings they repeat -- point ids, phase
+// ids, kinds -- each row in the key order of its event (`shapes`), and its
+// hits indexes into the same table; snapshots.mjs's expandSnapshot gives
+// back what JSON.parse of the whole would have. A large frontend's page
+// holds tens of thousands of events, each naming its point, phase and
+// environment in full, read back at the end of every test and from every
+// page that leaves: relaying them cost the browser's own process more than
+// its renderers spent running the app.
+function compactSnapshotText(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || !Array.isArray(snapshot.events) || !Array.isArray(snapshot.hits))
+    return JSON.stringify(snapshot);
+  const strings = [];
+  const stringIndexes = /* @__PURE__ */ new Map();
+  const intern = (value) => {
+    let index = stringIndexes.get(value);
+    if (index === void 0) {
+      index = strings.length;
+      strings.push(value);
+      stringIndexes.set(value, index);
+    }
+    return index;
+  };
+  const shapes = [];
+  const shapeIndexes = /* @__PURE__ */ new Map();
+  const rows = [];
+  for (let position = 0; position < snapshot.events.length; position += 1) {
+    const event = snapshot.events[position];
+    if (!event || typeof event !== "object" || Array.isArray(event))
+      return JSON.stringify(snapshot);
+    const fields = [];
+    const values = [];
+    const keys = Object.keys(event);
+    for (let index = 0; index < keys.length; index += 1) {
+      const value = event[keys[index]];
+      // What JSON.stringify leaves out of an object.
+      if (value === void 0 || typeof value === "function" || typeof value === "symbol")
+        continue;
+      if (typeof value === "string") {
+        fields.push(`s${keys[index]}`);
+        values.push(intern(value));
+      } else {
+        fields.push(`v${keys[index]}`);
+        values.push(value);
+      }
+    }
+    const name = fields.join("\0");
+    let shape = shapeIndexes.get(name);
+    if (shape === void 0) {
+      shape = shapes.length;
+      shapes.push(fields);
+      shapeIndexes.set(name, shape);
+    }
+    rows.push(shape);
+    for (let index = 0; index < values.length; index += 1)
+      rows.push(values[index]);
+  }
+  const hits = [];
+  for (let index = 0; index < snapshot.hits.length; index += 1) {
+    if (typeof snapshot.hits[index] !== "string")
+      return JSON.stringify(snapshot);
+    hits.push(intern(snapshot.hits[index]));
+  }
+  const rest = {};
+  const keys = Object.keys(snapshot);
+  for (let index = 0; index < keys.length; index += 1) {
+    if (keys[index] !== "events" && keys[index] !== "hits")
+      rest[keys[index]] = snapshot[keys[index]];
+  }
+  return JSON.stringify({ supercovCompactSnapshot: 1, order: keys, rest, strings, shapes, rows, hits });
+}
+runtimeGlobal.__SUPERCOV_COMPACT_SNAPSHOT__ = compactSnapshotText;
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
 // A dedicated worker blocked in `Atomics.wait` runs no evaluation, so the
 // test runner could not read its evidence and reported the test as a lower
@@ -504,7 +576,7 @@ function persistBrowserNow() {
 function handOverBrowser() {
   try {
     if (typeof runtimeGlobal.__supercovLeaving === "function") {
-      runtimeGlobal.__supercovLeaving(JSON.stringify(coverageSnapshot()));
+      runtimeGlobal.__supercovLeaving(compactSnapshotText(coverageSnapshot()));
       handedOverSize = evidenceSize();
     }
   } catch (e) {

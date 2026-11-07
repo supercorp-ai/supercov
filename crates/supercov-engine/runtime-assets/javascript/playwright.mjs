@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { mergeSnapshots } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -460,14 +460,15 @@ class CoveragePhaseController {
             if (String(coverageGlobal.__SUPERCOV_PHASE_ID__ ?? "").startsWith(prefix))
                 return undefined;
             const getSnapshot = coverageGlobal.__SUPERCOV_COVERAGE_SNAPSHOT__;
+            const compact = coverageGlobal.__SUPERCOV_COMPACT_SNAPSHOT__;
             const reset = coverageGlobal.__SUPERCOV_RESET__;
             if (!getSnapshot || !reset)
                 return undefined;
-            const snapshot = JSON.stringify(getSnapshot());
+            const snapshot = typeof compact === "function" ? compact(getSnapshot()) : JSON.stringify(getSnapshot());
             reset();
             return snapshot;
         }, prefix)
-            .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined))
+            .then((text) => (typeof text === "string" ? expandSnapshot(JSON.parse(text)) : undefined))
             .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
         const taken = await Promise.all(this.allPages().flatMap((page) => [
             ...page.frames().map(take),
@@ -563,7 +564,7 @@ class CoveragePhaseController {
                     return;
                 try {
                     timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
-                    controller.leftSnapshots.push(JSON.parse(payload));
+                    controller.leftSnapshots.push(expandSnapshot(JSON.parse(payload)));
                 }
                 catch {
                     // Not evidence.
@@ -1069,14 +1070,17 @@ function readSnapshot(target) {
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
-        return getSnapshot ? JSON.stringify(getSnapshot()) : undefined;
+        const compact = globalThis.__SUPERCOV_COMPACT_SNAPSHOT__;
+        if (!getSnapshot)
+            return undefined;
+        return typeof compact === "function" ? compact(getSnapshot()) : JSON.stringify(getSnapshot());
     })
         .then((text) => {
         if (typeof text !== "string")
             return undefined;
         // Phase timing counts the bytes each read carried, as its "ms".
         timingCount("transfer.snapshotBytes", text.length);
-        return JSON.parse(text);
+        return expandSnapshot(JSON.parse(text));
     });
 }
 let activeController;

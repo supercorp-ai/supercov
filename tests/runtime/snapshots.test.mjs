@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { mergeSnapshots } from "../../runtime/javascript/snapshots.mjs";
+import { expandSnapshot, mergeSnapshots } from "../../runtime/javascript/snapshots.mjs";
 
 // What every event's JSON names once, in first-seen order: the merge as it
 // was before it compared repeated prefixes.
@@ -53,4 +55,26 @@ test("hits, decisions and logicals are merged as before", () => {
   assert.deepEqual(merged.hits, ["a", "b", "c"]);
   assert.deepEqual(merged.decisions, [{ id: "d", vectors: [{ values: [true], outcome: true }, { values: [false], outcome: false }] }]);
   assert.deepEqual(merged.logicals, [{ id: "l", vectors: [[1], [2]] }]);
+});
+
+test("a compact snapshot expands to what JSON.parse of the whole gave", async () => {
+  await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href);
+  const compact = globalThis.__SUPERCOV_COMPACT_SNAPSHOT__;
+  const snapshot = {
+    decisions: [{ id: "d", vectors: [{ values: [true, null], outcome: false }] }],
+    hits: ["js:statement:a", "js:statement:b"],
+    events: [
+      { type: "hit", id: "js:statement:a", timestampMs: 1731000000000, phaseId: "attempt:phase:1", environment: "browser" },
+      { type: "hit", id: "js:statement:b", timestampMs: 1731000000001, environment: "browser" },
+      { type: "decision", id: "d", vector: { values: [true, null], outcome: false }, timestampMs: 1731000000002, phaseId: "attempt:phase:1", environment: "browser" },
+      { type: "hit", id: "js:statement:a", timestampMs: 1731000000003, phaseId: undefined, environment: "worker", note: null, flag: true },
+    ],
+    logicals: [{ id: "l", vectors: [{ key: "short-falsy" }] }],
+  };
+  const text = compact(snapshot);
+  assert.ok(text.length < JSON.stringify(snapshot).length);
+  assert.equal(JSON.stringify(expandSnapshot(JSON.parse(text))), JSON.stringify(snapshot));
+  // What it cannot write compactly it writes whole, and that passes through.
+  const odd = { hits: [1], events: [] };
+  assert.equal(JSON.stringify(expandSnapshot(JSON.parse(compact(odd)))), JSON.stringify(odd));
 });

@@ -81,3 +81,28 @@ export function mergeSnapshots(snapshots) {
         logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
     };
 }
+/**
+ * A snapshot as JSON.parse would give it from the text a page's runtime
+ * wrote compactly (runtime.mjs, compactSnapshotText): each event in its own
+ * key order, its strings from the shared table. Anything else is returned
+ * as it is.
+ */
+export function expandSnapshot(value) {
+    if (!value || typeof value !== "object" || value.supercovCompactSnapshot !== 1)
+        return value;
+    const { order, rest, strings, shapes, rows, hits } = value;
+    const events = [];
+    for (let position = 0; position < rows.length;) {
+        const fields = shapes[rows[position++]];
+        const event = {};
+        for (const field of fields) {
+            const raw = rows[position++];
+            event[field.slice(1)] = field[0] === "s" ? strings[raw] : raw;
+        }
+        events.push(event);
+    }
+    const snapshot = {};
+    for (const key of order)
+        snapshot[key] = key === "events" ? events : key === "hits" ? hits.map((index) => strings[index]) : rest[key];
+    return snapshot;
+}
