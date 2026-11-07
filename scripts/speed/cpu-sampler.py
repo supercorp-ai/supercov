@@ -20,7 +20,11 @@ def kind(comm, cmd):
             return 'browser renderer'
         if '--type=gpu-process' in cmd:
             return 'browser gpu'
-        return 'browser other'
+        if 'network.mojom.NetworkService' in cmd:
+            return 'browser network'
+        if '--type=' in cmd:
+            return 'browser utility'
+        return 'browser main'
     if 'postgres' in comm or 'postgres' in cmd:
         return 'postgres'
     if comm.startswith('node') or comm == 'MainThread' or 'node' in cmd.split(' ')[0]:
@@ -35,7 +39,7 @@ def kind(comm, cmd):
         return 'node other'
     if comm.startswith('supercov'):
         return 'supercov'
-    return 'other'
+    return f'other {comm}'
 
 
 def sample(first):
@@ -66,6 +70,10 @@ while True:
     totals = {}
     for what, used in seen.values():
         totals[what] = round(totals.get(what, 0) + used, 2)
+    # Other processes by name, the five busiest; the rest as one.
+    others = sorted((what for what in totals if what.startswith('other ')), key=lambda what: -totals[what])
+    for what in others[5:]:
+        totals['other rest'] = round(totals.get('other rest', 0) + totals.pop(what), 2)
     with open(out + '.tmp', 'w') as handle:
         json.dump(totals, handle)
     os.replace(out + '.tmp', out)

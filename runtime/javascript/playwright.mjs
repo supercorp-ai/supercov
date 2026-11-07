@@ -507,7 +507,15 @@ class CoveragePhaseController {
         await this.registerContext(context, {
             adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
-        const cdp = await page.context().newCDPSession(page).catch(() => undefined);
+        // A page of a context whose headers are not known learns each phase
+        // from a new-document script replaced through a session of its own
+        // (activatePage). Every other page needs none: a session with the
+        // Page domain on has the browser send it every event of the page a
+        // second time, and the browser's own process spent more on that than
+        // the renderers spent running the instrumented app.
+        const cdp = this.adoptedContexts.has(context)
+            ? await page.context().newCDPSession(page).catch(() => undefined)
+            : undefined;
         if (cdp) {
             // Chromium runs a session's new-document scripts only once the
             // session has enabled the Page domain. Without it the script that
@@ -515,20 +523,6 @@ class CoveragePhaseController {
             // learned its phase only from the next action, after it had
             // loaded, and everything it ran while loading was placed by time.
             await cdp.send("Page.enable").catch(() => undefined);
-            // A document that leaves hands its evidence over here: the
-            // next one reads what it stored only on the same origin.
-            cdp.on("Runtime.bindingCalled", ({ name, payload }) => {
-                if (name !== LEAVING_BINDING || this.runtimeSnapshots)
-                    return;
-                try {
-                    this.leftSnapshots.push(JSON.parse(payload));
-                }
-                catch {
-                    // Not evidence.
-                }
-            });
-            await cdp.send("Runtime.enable").catch(() => undefined);
-            await cdp.send("Runtime.addBinding", { name: LEAVING_BINDING }).catch(() => undefined);
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
@@ -549,11 +543,32 @@ class CoveragePhaseController {
         patchContextPrototype(context);
         if (adopted)
             this.adoptedContexts.add(context);
+        return internally(context, () => this.registerContextNow(context, adopted));
+    }
+    async registerContextNow(context, adopted) {
         // A Rust crate compiled to wasm the run measures: pages remember
         // their wasm instances, so each test's work can be taken from them.
         if (process.env.SUPERCOV_WASM_REGIONS === "1")
             await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(() => undefined);
         await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
+        // A document that leaves hands its evidence over through this
+        // binding: the next one reads what it stored only on the same origin.
+        // One binding per context, which outlives a test in a shared
+        // context: the test that has the page now takes what it hands over.
+        if (!contextsWithLeavingBinding.has(context)) {
+            contextsWithLeavingBinding.add(context);
+            await context.exposeBinding(LEAVING_BINDING, (source, payload) => {
+                const controller = source?.page ? controllerOwning(source.page) : undefined;
+                if (!controller || controller.runtimeSnapshots)
+                    return;
+                try {
+                    controller.leftSnapshots.push(JSON.parse(payload));
+                }
+                catch {
+                    // Not evidence.
+                }
+            }).catch(() => undefined);
+        }
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.
@@ -1038,6 +1053,7 @@ class CoveragePhaseController {
  * string), and doubled a 76-test suite's time.
  */
 const LEAVING_BINDING = "__supercovLeaving";
+const contextsWithLeavingBinding = new WeakSet();
 function readSnapshot(target) {
     return target
         .evaluate(() => {
