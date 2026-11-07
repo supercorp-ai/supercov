@@ -836,28 +836,19 @@ fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Progra
     program.body = separated;
 }
 
-/// Every one of Supercov's own names a program reads.
-struct ReferencedNames<'a>(HashSet<&'a str>);
-
-impl<'a> Visit<'a> for ReferencedNames<'a> {
-    fn visit_identifier_reference(&mut self, reference: &oxc_ast::ast::IdentifierReference<'a>) {
-        let name = reference.name.as_str();
-        if name.starts_with("__supercov") {
-            self.0.insert(name);
-        }
-    }
-}
-
 /// Bind only the runtime helpers the instrumented program calls. Every file
 /// bound all twenty of them, each with its type where TypeScript reads it:
 /// some 4 KB a file before its first line, which every bundler, transpiler
 /// and test runner then parsed. The locals are the file's own unique names,
 /// so one no reference reads is never called. `anchor` is kept.
-fn prune_unused_runtime_helpers<'a>(program: &mut Program<'a>, locals: &[String], anchor: &str) {
-    let mut referenced = ReferencedNames(HashSet::new());
-    referenced.visit_program(program);
+fn prune_unused_runtime_helpers(
+    program: &mut Program<'_>,
+    locals: &[String],
+    anchor: &str,
+    referenced: &[&str],
+) {
     let unused = |name: &str| {
-        name != anchor && locals.iter().any(|local| local == name) && !referenced.0.contains(name)
+        name != anchor && locals.iter().any(|local| local == name) && !referenced.contains(&name)
     };
     for statement in program.body.iter_mut() {
         match statement {
@@ -3595,6 +3586,9 @@ fn expression_is_anonymous_definition(expression: &Expression<'_>) -> bool {
 /// is printed without it.
 struct AssertedTargetTransformer<'a> {
     ast: AstBuilder<'a>,
+    /// Every one of Supercov's own names the program reads, gathered on this
+    /// last walk over it for `prune_unused_runtime_helpers`.
+    referenced: Vec<&'a str>,
 }
 
 impl<'a> AssertedTargetTransformer<'a> {
@@ -3627,6 +3621,17 @@ impl<'a> AssertedTargetTransformer<'a> {
 }
 
 impl<'a> VisitMut<'a> for AssertedTargetTransformer<'a> {
+    fn visit_identifier_reference(
+        &mut self,
+        reference: &mut oxc_ast::ast::IdentifierReference<'a>,
+    ) {
+        let name = reference.name.as_str();
+        // A file's probes read the same few names thousands of times.
+        if name.starts_with("__supercov") && !self.referenced.contains(&name) {
+            self.referenced.push(name);
+        }
+    }
+
     fn visit_simple_assignment_target(
         &mut self,
         target: &mut oxc_ast::ast::SimpleAssignmentTarget<'a>,
@@ -3934,6 +3939,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     branches.extend(switch_analysis.branches);
     AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
+        referenced: Vec::new(),
     }
     .visit_program(&mut parsed.program);
     let (generated, map) =
@@ -4675,13 +4681,19 @@ fn instrument_candidate_with_binding(
     }
     let limitations = Vec::new();
     mark_generated_statements(ast, &mut parsed.program);
-    AssertedTargetTransformer {
+    let mut asserted_targets = AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
-    }
-    .visit_program(&mut parsed.program);
+        referenced: Vec::new(),
+    };
+    asserted_targets.visit_program(&mut parsed.program);
     // The first helper stays whatever the file calls: the loaders the
     // JavaScript frontend adds find the declarations by it.
-    prune_unused_runtime_helpers(&mut parsed.program, &runtime_locals, &mcdc_begin);
+    prune_unused_runtime_helpers(
+        &mut parsed.program,
+        &runtime_locals,
+        &mcdc_begin,
+        &asserted_targets.referenced,
+    );
     let (code, map) =
         generate_candidate(&parsed.program, file, &safety.source_sensitive_functions)?;
     Ok(CandidateOutput {
