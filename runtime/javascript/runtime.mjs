@@ -37,7 +37,8 @@ var COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 var DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
 function configuredServerEvidenceRoot() {
   var _a8;
-  return typeof process !== "undefined" && ((_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"]) ? process.env["SUPERCOV_SERVER_EVIDENCE_ROOT"] : DEFAULT_SERVER_EVIDENCE_ROOT;
+  const configured = typeof process !== "undefined" ? (_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"] : void 0;
+  return configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT;
 }
 function nonEmpty(value) {
   return typeof value === "string" && value.length > 0;
@@ -116,6 +117,18 @@ function serverEvidenceDirectory(scope, root = configuredServerEvidenceRoot()) {
 }
 function serverEvidencePath(scope, root = configuredServerEvidenceRoot()) {
   return `${serverEvidenceDirectory(scope, root)}/${pathComponent(scope.attemptId)}.jsonl`;
+}
+// A scope's evidence directory and file, made once per scope and root: a
+// server works them out for every record it writes, thousands per test.
+var scopedEvidenceLocations = /* @__PURE__ */ new WeakMap();
+function scopedEvidenceLocation(scope) {
+  const root = configuredServerEvidenceRoot();
+  const known = scopedEvidenceLocations.get(scope);
+  if (known !== void 0 && known.root === root)
+    return known;
+  const location = { root, directory: serverEvidenceDirectory(scope, root), path: serverEvidencePath(scope, root) };
+  scopedEvidenceLocations.set(scope, location);
+  return location;
 }
 function backgroundEvidenceDirectory(runId, root = configuredServerEvidenceRoot()) {
   return `${serverRunEvidenceDirectory(runId, root)}/background`;
@@ -1114,8 +1127,9 @@ function appendServer(record) {
   if (!runId)
     return;
   try {
-    const directory = scope ? serverEvidenceDirectory(scope) : void 0;
-    const path = scope ? serverEvidencePath(scope) : void 0;
+    const location = scope ? scopedEvidenceLocation(scope) : void 0;
+    const directory = location == null ? void 0 : location.directory;
+    const path = location == null ? void 0 : location.path;
     // Work done while handling a request that named no test -- a webhook a
     // mock server sends -- says so, with the request's number.
     const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
