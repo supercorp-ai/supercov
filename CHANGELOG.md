@@ -15,6 +15,7 @@
 
 **Fixed**
 
+- Bun tests now keep their source files through proxied registration APIs, including `call`, `apply` and `bind`. Tests with the same title in different files no longer share an identity or collapse in a merge.
 - `merge` refused a unit run and an end-to-end run of the same commit for different denominators when a file had a type-only import (`import { type T }`): whether that import counted as a line depended on the test command, so `node --import tsx` dropped it and Vitest kept it. The file's nearest tsconfig alone decides now (`verbatimModuleSyntax`, `preserveValueImports`, `importsNotUsedAsValues`, `emitDecoratorMetadata`), as tsc, esbuild, swc, Babel and ts-node do, so every command counts it alike.
 - A Playwright suite with many Vitest files beside it could have Vitest taken for its test fixture module, and every Playwright test then crashed with `Cannot redefine property: Symbol($$jest-matchers-object)`. Another runner's own API (`vitest`, `@jest/globals`, `bun:test`, `node:test`, `mocha` and the like) is never taken for the fixture.
 - A run whose test harness started the build from its own code (`execSync('npm run build')`) and whose build failed was told to add `npm run build` to the command. The run now names the build it saw start and its exit code, and gives no such hint.

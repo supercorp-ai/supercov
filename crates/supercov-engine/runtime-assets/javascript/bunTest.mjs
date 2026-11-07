@@ -39,7 +39,9 @@ function adapt(api) {
             const index = callbackIndex(args);
             const callback = index < 0 ? undefined : args[index];
             const name = row.name ?? (typeof args[0] === "string" ? args[0] : callback?.name || "anonymous test");
-            const location = row.location ?? callerLocation(supercovBunRegistration);
+            // Bun gives a Proxy call an `unknown` frame when the target is the
+            // boundary. Pass the invoked Proxy itself to omit that frame.
+            const location = row.location ?? callerLocation(registration);
             if (kind === "suite") {
                 if (!callback) return Reflect.apply(original, this, args);
                 const next = [...args];
@@ -116,7 +118,7 @@ function adapt(api) {
             }
             return result;
         }
-        return new Proxy(supercovBunRegistration, {
+        const registration = new Proxy(supercovBunRegistration, {
             get(target, property) {
                 if (["call", "apply", "bind"].includes(property)) return Reflect.get(target, property);
 
@@ -166,6 +168,7 @@ function adapt(api) {
                 return member.bind(original);
             },
         });
+        return registration;
     }
 
     api.test = api.it = wrap(originals.test, "test");
