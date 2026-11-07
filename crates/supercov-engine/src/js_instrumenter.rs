@@ -849,12 +849,13 @@ impl<'a> Visit<'a> for ReferencedNames {
 /// bound all twenty of them, each with its type where TypeScript reads it:
 /// some 4 KB a file before its first line, which every bundler, transpiler
 /// and test runner then parsed. The locals are the file's own unique names,
-/// so one no reference reads is never called.
-fn prune_unused_runtime_helpers(program: &mut Program<'_>, locals: &[String]) {
+/// so one no reference reads is never called. `anchor` is kept.
+fn prune_unused_runtime_helpers(program: &mut Program<'_>, locals: &[String], anchor: &str) {
     let mut referenced = ReferencedNames(HashSet::new());
     referenced.visit_program(program);
-    let unused =
-        |name: &str| locals.iter().any(|local| local == name) && !referenced.0.contains(name);
+    let unused = |name: &str| {
+        name != anchor && locals.iter().any(|local| local == name) && !referenced.0.contains(name)
+    };
     for statement in program.body.iter_mut() {
         match statement {
             Statement::VariableDeclaration(declaration)
@@ -4675,7 +4676,9 @@ fn instrument_candidate_with_binding(
         ast: AstBuilder::new(&allocator),
     }
     .visit_program(&mut parsed.program);
-    prune_unused_runtime_helpers(&mut parsed.program, &runtime_locals);
+    // The first helper stays whatever the file calls: the loaders the
+    // JavaScript frontend adds find the declarations by it.
+    prune_unused_runtime_helpers(&mut parsed.program, &runtime_locals, &mcdc_begin);
     let (code, map) =
         generate_candidate(&parsed.program, file, &safety.source_sensitive_functions)?;
     Ok(CandidateOutput {
