@@ -1738,7 +1738,7 @@ const instrumentedFixtures = {
         const controller = controllers.get(scope.attemptId);
         if (!controller)
             throw new Error(`Supercov's automatic Playwright collector was not initialized for ${scope.attemptId}`);
-        await controller.registerPage(page);
+        await timed("fixture.pageSetup", () => controller.registerPage(page));
         try {
             await use(controller.wrap(page));
         }
@@ -1746,7 +1746,7 @@ const instrumentedFixtures = {
             // This fixture still owns a live page. The automatic test fixture tears
             // down after page dependencies and therefore cannot reliably evaluate
             // frames on every Playwright version.
-            await controller.collectRuntimeSnapshots();
+            await timed("fixture.pageTeardown", () => controller.collectRuntimeSnapshots());
         }
     },
     browser: [
@@ -1776,6 +1776,7 @@ const instrumentedFixtures = {
         async ({}, use, testInfo) => {
             const scope = executionScope(testInfo);
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
+            const setupStarted = performance.now();
             const controller = new CoveragePhaseController(scope, configuredHeaders, testInfo.project.use.baseURL);
             controllers.set(scope.attemptId, controller);
             activeController = controller;
@@ -1799,10 +1800,12 @@ const instrumentedFixtures = {
             // no test is credited by time to the one test running then, and a
             // test is running for all of this, not only during its actions.
             const startedAtMs = Date.now();
+            timingCount("fixture.testSetup", performance.now() - setupStarted);
             try {
                 await use();
             }
             finally {
+                const teardownStarted = performance.now();
                 const endedAtMs = Date.now();
                 try {
                     const browser = await controller.collectRuntimeSnapshots();
@@ -1837,6 +1840,7 @@ const instrumentedFixtures = {
                 }
                 finally {
                     await timed("controller.dispose", () => controller.dispose());
+                    timingCount("fixture.testTeardown", performance.now() - teardownStarted);
                     timingReport(testInfo.title);
                     directRuntime()?.activateCoverageScope();
                     if (activeController === controller)
