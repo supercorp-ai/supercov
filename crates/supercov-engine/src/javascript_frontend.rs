@@ -1333,24 +1333,27 @@ fn write_vitest_config(
     let source = format!(
         "import {{ createRequire }} from 'node:module';\n\
          import {{ pathToFileURL }} from 'node:url';\n\
-         // pnpm's strict layout does not hoist vite to the project root: it\n\
-         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
-         // resolved from this generated file fails. Vitest depends on vite, so\n\
-         // fall back to resolving it through vitest's own tree rather than\n\
-         // requiring the project to hoist anything.\n\
+         // Resolve from the actual runner and original configuration, whose\n\
+         // package may be nested and have no dependencies hoisted to the root.\n\
+         // Resolving through Vitest's real entry also supports strict pnpm.\n\
+         const discoveredConfig = {original};\n\
          const supercovRequire = createRequire(import.meta.url);\n\
          const supercovLoadVite = async () => {{\n\
-           try {{\n\
-             return await import('vite');\n\
-           }} catch (error) {{\n\
+           const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
+           const anchors = [process.argv[1], originalPath].filter(Boolean);\n\
+           const resolvers = [...anchors.map(file => createRequire(resolve(file))), supercovRequire];\n\
+           for (const from of resolvers) {{\n\
              let entry;\n\
              try {{\n\
-               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
+               entry = createRequire(from.resolve('vitest')).resolve('vite');\n\
              }} catch {{\n\
-               throw error;\n\
+               try {{ entry = from.resolve('vite'); }} catch {{ continue; }}\n\
              }}\n\
+             // Initialization errors belong to this dependency; do not hide\n\
+             // them by falling back to another installed version.\n\
              return await import(pathToFileURL(entry).href);\n\
            }}\n\
+           return await import('vite');\n\
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
@@ -1358,7 +1361,6 @@ fn write_vitest_config(
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
-         const discoveredConfig = {original};\n\
          // Browser Mode runs the test file in the browser, so the node setup --\n\
          // which reaches node:fs to write evidence -- cannot load there. Vite\n\
          // externalises it and the suite fails before collecting a test.\n\
@@ -2056,8 +2058,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:471",
-            "javascript-source-path#javascript_frontend.rs:1759",
-            "javascript-source-path#javascript_frontend.rs:1875",
+            "javascript-source-path#javascript_frontend.rs:1761",
+            "javascript-source-path#javascript_frontend.rs:1877",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
