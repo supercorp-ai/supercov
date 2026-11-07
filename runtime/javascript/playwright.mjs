@@ -52,6 +52,33 @@ const browserRuntimePrelude = `(() => { if (globalThis.__SUPERCOV_DIRECT_RUNTIME
 const WORKER_ACTIVATION_WAIT_MS = 250;
 const WORKER_SNAPSHOT_WAIT_MS = 5000;
 const WORKER_TIMED_OUT = Symbol("worker did not answer");
+/**
+ * Supercov's own Playwright calls, made as one internal API call. Each call a
+ * suite makes captures its stack, maps every frame through the runner's
+ * source maps, and reports a step and a trace event: the collector's calls at
+ * every action did all of that, and on a real suite they were most of what an
+ * action waited for, and showed up among the test's own steps. Inside one
+ * internal call the rest find its zone: they capture and report nothing. The
+ * one stack it captures names nothing anyone reads, so it is not formatted.
+ */
+const unformattedStack = () => "";
+function internally(owner, work) {
+    const wrapApiCall = owner?._wrapApiCall;
+    if (typeof wrapApiCall !== "function")
+        return work();
+    const prepareStackTrace = Error.prepareStackTrace;
+    Error.prepareStackTrace = unformattedStack;
+    try {
+        // `{ internal: true }`, or `true` where older releases take a flag.
+        return wrapApiCall.call(owner, () => {
+            Error.prepareStackTrace = prepareStackTrace;
+            return work();
+        }, { internal: true });
+    }
+    finally {
+        Error.prepareStackTrace = prepareStackTrace;
+    }
+}
 function bounded(promise, milliseconds) {
     let timer;
     return Promise.race([
@@ -258,12 +285,22 @@ class CoveragePhaseController {
     allPages() {
         return [...this.pages];
     }
+    /** Any Playwright object of this test's, to make internal calls through. */
+    anyOwner() {
+        for (const owners of [this.contexts, this.pages, this.workers])
+            for (const owner of owners)
+                return owner;
+        return undefined;
+    }
     allWorkers() {
         return [...this.workers];
     }
     async collectRuntimeSnapshots() {
         if (this.runtimeSnapshots)
             return this.runtimeSnapshots;
+        return internally(this.anyOwner() ?? [...liveTrackedContexts()][0], () => this.collectRuntimeSnapshotsNow());
+    }
+    async collectRuntimeSnapshotsNow() {
         timingCount("collectRuntimeSnapshots.cold");
         // Contexts the suite created without going through any fixture the
         // collector wraps (a raw `browser.newContext()` mid-test) are found
@@ -370,6 +407,9 @@ class CoveragePhaseController {
     async snapshotBeforeClose(page) {
         if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
             return;
+        return internally(page, () => this.snapshotBeforeCloseNow(page));
+    }
+    async snapshotBeforeCloseNow(page) {
         this.snapshottedPages.add(page);
         this.earlySnapshots.push(...(await this.snapshotPage(page)));
         // A dedicated worker ends with the page that owns it, so it is read
@@ -394,7 +434,7 @@ class CoveragePhaseController {
         for (const context of liveTrackedContexts()) {
             if (!this.contexts.has(context)) {
                 const headersKnown = trackedContextConfiguredHeaders.has(context);
-                await this.registerContext(context, { adopted: !headersKnown }).catch(() => undefined);
+                await internally(context, () => this.registerContext(context, { adopted: !headersKnown })).catch(() => undefined);
             }
         }
     }
@@ -410,6 +450,9 @@ class CoveragePhaseController {
      */
     async takeCarriedEvidence() {
         await Promise.all([...this.pendingRegistrations]);
+        return internally(this.anyOwner(), () => this.takeCarriedEvidenceNow());
+    }
+    async takeCarriedEvidenceNow() {
         const prefix = `${this.scope.attemptId}:`;
         const take = (target) => bounded(target
             .evaluate((prefix) => {
@@ -448,7 +491,7 @@ class CoveragePhaseController {
             return Promise.resolve();
         let registration = this.pageRegistrations.get(page);
         if (!registration) {
-            registration = this.registerNewPage(page);
+            registration = internally(page, () => this.registerNewPage(page));
             this.pageRegistrations.set(page, registration);
         }
         return registration;
@@ -596,6 +639,9 @@ class CoveragePhaseController {
         if (this.workers.has(worker))
             return;
         this.workers.add(worker);
+        return internally(worker, () => this.registerWorkerNow(worker));
+    }
+    async registerWorkerNow(worker) {
         const phaseId = this.requestPhaseId();
         const registration = await worker
             .evaluate(({ attemptId, scopeHeader, scopeValue, phaseHeader, phase }) => {
@@ -666,6 +712,9 @@ class CoveragePhaseController {
     async dispose() {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
+        return internally(this.anyOwner(), () => this.disposeNow());
+    }
+    async disposeNow() {
         await this.scriptUpdate;
         for (const [context, listeners] of this.contextListeners) {
             for (const [event, listener] of listeners)
@@ -834,7 +883,10 @@ class CoveragePhaseController {
      * the 43 extra seconds, with the database worker's bounded wait the
      * largest part).
      */
-    async activateInBrowser(phaseId, documentPhaseId) {
+    activateInBrowser(phaseId, documentPhaseId) {
+        return internally(this.anyOwner(), () => this.activateInBrowserNow(phaseId, documentPhaseId));
+    }
+    async activateInBrowserNow(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context))
