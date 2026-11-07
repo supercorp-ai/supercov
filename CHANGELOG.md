@@ -1,11 +1,15 @@
 # Changelog
 
-## Unreleased
+## 4.24.6
 
 **Fixed**
 
 - A Bun test could be recorded with no source file: Bun reported Supercov's wrapper around `test` as an `unknown` frame in front of the test's own, whether the test was registered directly or by `call`, `apply` or `bind`. Tests with the same title in different files then shared one identity, a file filter selected none, and `merge` collapsed them. Each keeps its file now ([#200](https://github.com/supercorp-ai/supercov/issues/200)).
 - A Vitest run of a package whose Vitest and Vite are installed only in that package, not at the repository root, failed loading Supercov's generated config because it looked for Vite from the copy's `.supercov`. It looks from the runner and the project's own config first, through Vitest's own dependencies under pnpm's strict layout, and an error Vite itself raises while loading is no longer hidden by trying another copy ([#199](https://github.com/supercorp-ai/supercov/issues/199)).
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
 
 ## 4.24.5
 
