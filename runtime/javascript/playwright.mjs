@@ -1781,8 +1781,8 @@ const instrumentedFixtures = {
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
-            await controller.adoptTrackedContexts().catch(() => undefined);
-            const carried = await controller.takeCarriedEvidence().catch(() => undefined);
+            await timed("fixture.adopt", () => controller.adoptTrackedContexts().catch(() => undefined));
+            const carried = await timed("fixture.carried", () => controller.takeCarriedEvidence().catch(() => undefined));
             if (carried) {
                 appendEvidenceLine(`${JSON.stringify({
                     testId: `__supercov_background__:playwright:${scope.attemptId}`,
