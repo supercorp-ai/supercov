@@ -903,11 +903,18 @@ class CoveragePhaseController {
         return internally(this.anyOwner(), () => this.activateInBrowserNow(phaseId, documentPhaseId));
     }
     async activateInBrowserNow(phaseId, documentPhaseId) {
+        // TEMPORARY speed diagnostic, removed before merge: what each part of
+        // an activation costs, by leaving it out. Never set outside the
+        // benchmark's diagnostic pass; the evidence of such a run is wrong.
+        const leaveOut = process.env.SUPERCOV_SPEED_LEAVE_OUT ?? "";
+        if (leaveOut === "activation")
+            return;
         await Promise.all([
+            leaveOut === "cookies" ? undefined :
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context))
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
-            this.activateFrames(phaseId),
+            leaveOut === "frames" ? undefined : this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
             // A context whose headers are not known gets no cookies, so its
             // pages' new documents learn the phase from a script replaced here.

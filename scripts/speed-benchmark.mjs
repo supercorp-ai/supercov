@@ -307,6 +307,24 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     reset(`diagnose-${name}-${suite.name}`);
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
   }
+  // TEMPORARY: the measured e2e suite with each part of an action's
+  // activation left out (SUPERCOV_SPEED_LEAVE_OUT), for what each costs. The
+  // evidence of these runs is wrong; only their times are read.
+  const e2e = suites.find((suite) => suite.name === 'e2e');
+  if (e2e) {
+    const leftOut = ['| Left out | E2e s | E2e mean test s | Failed |', '|---|---|---|---|'];
+    for (const part of ['cookies', 'frames', 'activation']) {
+      rmSync(join(project, '.supercov'), { recursive: true, force: true });
+      rmSync(join(project, '.next'), { recursive: true, force: true });
+      reset(`leave-out-${part}`);
+      const report = join(output, `report-leave-out-${part}.json`);
+      const { seconds } = run(project, path, ['--', ...e2e.command], `leave-out-${part}`, { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_SPEED_LEAVE_OUT: part }, true);
+      const times = existsSync(report) ? flowTimes(report) : {};
+      leftOut.push(`| ${part} | ${seconds.toFixed(2)} | ${(times.testSeconds ?? 0).toFixed(3)} | ${times.failed ?? '?'} |`);
+    }
+    writeFileSync(join(output, 'leave-out.md'), `${leftOut.join('\n')}\n`);
+    console.log(leftOut.join('\n'));
+  }
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
   // A pool that ends its workers with a signal leaves them no profile to
