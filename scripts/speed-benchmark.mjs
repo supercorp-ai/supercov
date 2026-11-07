@@ -7,7 +7,7 @@
 // `.supercov`, as on a fresh CI checkout, and ends with a merge of its two
 // runs, as a pipeline that measures suites apart does.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   copyFileSync,
@@ -251,6 +251,11 @@ function suiteRun(round, variant, suite, binary) {
   const [command, ...args] = binary
     ? [binary, '--', ...suite.command]
     : suite.command;
+  // CPU by kind of process (scripts/speed/cpu-sampler.py), on Linux.
+  const cpuFile = join(output, `cpu-${round}-${variant}-${suite.name}.json`);
+  const sampler = process.platform === 'linux'
+    ? spawn('python3', [new URL('./speed/cpu-sampler.py', import.meta.url).pathname, cpuFile], { stdio: 'ignore' })
+    : undefined;
   const { seconds } = run(
     project,
     command,
@@ -259,6 +264,7 @@ function suiteRun(round, variant, suite, binary) {
     env,
     suite.mayFail,
   );
+  sampler?.kill();
   const extra = existsSync(report) ? flowTimes(report) : {};
   sample(round, variant, suite.name, seconds, extra);
   keepTraces(`${round}-${variant}-${suite.name}`);
@@ -436,7 +442,20 @@ for (const { name } of binaries) {
     `| ${name} | ${of(name, 'unit').toFixed(2)} | ${of(name, 'e2e').toFixed(2)} | ${of(name, 'e2e', 'testSeconds').toFixed(2)} | ${failures(name)} | ${of(name, 'merge').toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} | ${(of(name, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |`,
   );
 }
-const table = `${application}: medians of ${rounds} rounds, ${description}.\n\n${rows.join('\n')}\n`;
+// CPU seconds by kind of process, for the first round's runs.
+const cpu = Object.fromEntries(
+  readdirSync(output)
+    .filter((name) => /^cpu-1-.*\.json$/.test(name))
+    .map((name) => [name.slice(6, -5), JSON.parse(readFileSync(join(output, name), 'utf8'))]),
+);
+const cpuKinds = [...new Set(Object.values(cpu).flatMap((totals) => Object.keys(totals)))].sort();
+const cpuTable = Object.keys(cpu).length === 0 ? '' : [
+  '',
+  `| CPU s, round 1 | ${Object.keys(cpu).join(' | ')} |`,
+  `|---|${Object.keys(cpu).map(() => '---').join('|')}|`,
+  ...cpuKinds.map((kind) => `| ${kind} | ${Object.values(cpu).map((totals) => (totals[kind] ?? 0).toFixed(1)).join(' | ')} |`),
+].join('\n');
+const table = `${application}: medians of ${rounds} rounds, ${description}.\n\n${rows.join('\n')}\n${cpuTable}\n`;
 writeFileSync(join(output, 'summary.md'), table);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
 console.log(table);
