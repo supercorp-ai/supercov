@@ -52,6 +52,33 @@ const browserRuntimePrelude = `(() => { if (globalThis.__SUPERCOV_DIRECT_RUNTIME
 const WORKER_ACTIVATION_WAIT_MS = 250;
 const WORKER_SNAPSHOT_WAIT_MS = 5000;
 const WORKER_TIMED_OUT = Symbol("worker did not answer");
+/**
+ * Supercov's own Playwright calls, made as one internal API call. Each call a
+ * suite makes captures its stack, maps every frame through the runner's
+ * source maps, and reports a step and a trace event: the collector's calls at
+ * every action did all of that, and on a real suite they were most of what an
+ * action waited for, and showed up among the test's own steps. Inside one
+ * internal call the rest find its zone: they capture and report nothing. The
+ * one stack it captures names nothing anyone reads, so it is not formatted.
+ */
+const unformattedStack = () => "";
+function internally(owner, work) {
+    const wrapApiCall = owner?._wrapApiCall;
+    if (typeof wrapApiCall !== "function")
+        return work();
+    const prepareStackTrace = Error.prepareStackTrace;
+    Error.prepareStackTrace = unformattedStack;
+    try {
+        // `{ internal: true }`, or `true` where older releases take a flag.
+        return wrapApiCall.call(owner, () => {
+            Error.prepareStackTrace = prepareStackTrace;
+            return work();
+        }, { internal: true });
+    }
+    finally {
+        Error.prepareStackTrace = prepareStackTrace;
+    }
+}
 function bounded(promise, milliseconds) {
     let timer;
     return Promise.race([
@@ -258,12 +285,22 @@ class CoveragePhaseController {
     allPages() {
         return [...this.pages];
     }
+    /** Any Playwright object of this test's, to make internal calls through. */
+    anyOwner() {
+        for (const owners of [this.contexts, this.pages, this.workers])
+            for (const owner of owners)
+                return owner;
+        return undefined;
+    }
     allWorkers() {
         return [...this.workers];
     }
     async collectRuntimeSnapshots() {
         if (this.runtimeSnapshots)
             return this.runtimeSnapshots;
+        return internally(this.anyOwner() ?? [...liveTrackedContexts()][0], () => this.collectRuntimeSnapshotsNow());
+    }
+    async collectRuntimeSnapshotsNow() {
         timingCount("collectRuntimeSnapshots.cold");
         // Contexts the suite created without going through any fixture the
         // collector wraps (a raw `browser.newContext()` mid-test) are found
@@ -370,6 +407,9 @@ class CoveragePhaseController {
     async snapshotBeforeClose(page) {
         if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
             return;
+        return internally(page, () => this.snapshotBeforeCloseNow(page));
+    }
+    async snapshotBeforeCloseNow(page) {
         this.snapshottedPages.add(page);
         this.earlySnapshots.push(...(await this.snapshotPage(page)));
         // A dedicated worker ends with the page that owns it, so it is read
@@ -394,7 +434,7 @@ class CoveragePhaseController {
         for (const context of liveTrackedContexts()) {
             if (!this.contexts.has(context)) {
                 const headersKnown = trackedContextConfiguredHeaders.has(context);
-                await this.registerContext(context, { adopted: !headersKnown }).catch(() => undefined);
+                await internally(context, () => this.registerContext(context, { adopted: !headersKnown })).catch(() => undefined);
             }
         }
     }
@@ -410,6 +450,9 @@ class CoveragePhaseController {
      */
     async takeCarriedEvidence() {
         await Promise.all([...this.pendingRegistrations]);
+        return internally(this.anyOwner(), () => this.takeCarriedEvidenceNow());
+    }
+    async takeCarriedEvidenceNow() {
         const prefix = `${this.scope.attemptId}:`;
         const take = (target) => bounded(target
             .evaluate((prefix) => {
@@ -448,7 +491,7 @@ class CoveragePhaseController {
             return Promise.resolve();
         let registration = this.pageRegistrations.get(page);
         if (!registration) {
-            registration = this.registerNewPage(page);
+            registration = internally(page, () => this.registerNewPage(page));
             this.pageRegistrations.set(page, registration);
         }
         return registration;
@@ -464,7 +507,15 @@ class CoveragePhaseController {
         await this.registerContext(context, {
             adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
-        const cdp = await page.context().newCDPSession(page).catch(() => undefined);
+        // A page of a context whose headers are not known learns each phase
+        // from a new-document script replaced through a session of its own
+        // (activatePage). Every other page needs none: a session with the
+        // Page domain on has the browser send it every event of the page a
+        // second time, and the browser's own process spent more on that than
+        // the renderers spent running the instrumented app.
+        const cdp = this.adoptedContexts.has(context)
+            ? await page.context().newCDPSession(page).catch(() => undefined)
+            : undefined;
         if (cdp) {
             // Chromium runs a session's new-document scripts only once the
             // session has enabled the Page domain. Without it the script that
@@ -472,20 +523,6 @@ class CoveragePhaseController {
             // learned its phase only from the next action, after it had
             // loaded, and everything it ran while loading was placed by time.
             await cdp.send("Page.enable").catch(() => undefined);
-            // A document that leaves hands its evidence over here: the
-            // next one reads what it stored only on the same origin.
-            cdp.on("Runtime.bindingCalled", ({ name, payload }) => {
-                if (name !== LEAVING_BINDING || this.runtimeSnapshots)
-                    return;
-                try {
-                    this.leftSnapshots.push(JSON.parse(payload));
-                }
-                catch {
-                    // Not evidence.
-                }
-            });
-            await cdp.send("Runtime.enable").catch(() => undefined);
-            await cdp.send("Runtime.addBinding", { name: LEAVING_BINDING }).catch(() => undefined);
             this.cdpSessions.set(page, cdp);
         }
         const phaseId = this.requestPhaseId();
@@ -506,11 +543,33 @@ class CoveragePhaseController {
         patchContextPrototype(context);
         if (adopted)
             this.adoptedContexts.add(context);
+        return internally(context, () => this.registerContextNow(context, adopted));
+    }
+    async registerContextNow(context, adopted) {
         // A Rust crate compiled to wasm the run measures: pages remember
         // their wasm instances, so each test's work can be taken from them.
         if (process.env.SUPERCOV_WASM_REGIONS === "1")
             await context.addInitScript({ content: "globalThis.__SUPERCOV_WASM_REGIONS__ = true;" }).catch(() => undefined);
         await context.addInitScript({ content: browserRuntimePrelude }).catch(() => undefined);
+        // A document that leaves hands its evidence over through this
+        // binding: the next one reads what it stored only on the same origin.
+        // One binding per context, which outlives a test in a shared
+        // context: the test that has the page now takes what it hands over.
+        if (!contextsWithLeavingBinding.has(context)) {
+            contextsWithLeavingBinding.add(context);
+            await context.exposeBinding(LEAVING_BINDING, (source, payload) => {
+                const controller = source?.page ? controllerOwning(source.page) : undefined;
+                if (!controller || controller.runtimeSnapshots)
+                    return;
+                try {
+                    timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
+                    controller.leftSnapshots.push(JSON.parse(payload));
+                }
+                catch {
+                    // Not evidence.
+                }
+            }).catch(() => undefined);
+        }
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.
@@ -596,6 +655,9 @@ class CoveragePhaseController {
         if (this.workers.has(worker))
             return;
         this.workers.add(worker);
+        return internally(worker, () => this.registerWorkerNow(worker));
+    }
+    async registerWorkerNow(worker) {
         const phaseId = this.requestPhaseId();
         const registration = await worker
             .evaluate(({ attemptId, scopeHeader, scopeValue, phaseHeader, phase }) => {
@@ -666,6 +728,9 @@ class CoveragePhaseController {
     async dispose() {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
+        return internally(this.anyOwner(), () => this.disposeNow());
+    }
+    async disposeNow() {
         await this.scriptUpdate;
         for (const [context, listeners] of this.contextListeners) {
             for (const [event, listener] of listeners)
@@ -834,7 +899,10 @@ class CoveragePhaseController {
      * the 43 extra seconds, with the database worker's bounded wait the
      * largest part).
      */
-    async activateInBrowser(phaseId, documentPhaseId) {
+    activateInBrowser(phaseId, documentPhaseId) {
+        return internally(this.anyOwner(), () => this.activateInBrowserNow(phaseId, documentPhaseId));
+    }
+    async activateInBrowserNow(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context))
@@ -849,8 +917,15 @@ class CoveragePhaseController {
         ]);
     }
     async activateFrames(phaseId, pages = this.pages) {
-        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames()).map((frame) => frame
-            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie }) => {
+        // The app's own hosts have the phase from the context's cookies, set
+        // beside this; a document there writing them again was a round trip
+        // to the cookie store per cookie, on every action. A context whose
+        // headers are not known gets none, so its documents still write them.
+        const covered = (page) => this.adoptedContexts.has(page.context())
+            ? []
+            : this.appHosts.map((url) => new URL(url).hostname);
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
+            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
             // A document that loaded under an earlier test's attempt (a page
@@ -860,6 +935,8 @@ class CoveragePhaseController {
             coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, id);
             try {
                 localStorage.setItem(storageKey, id);
+                if (coveredHosts.includes(location.hostname))
+                    return;
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
                 document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
                 if (globalThis.isSecureContext) {
@@ -879,8 +956,9 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_PHASE_COOKIE,
             scopeSiteCookie: COVERAGE_SCOPE_SITE_COOKIE,
             phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
+            coveredHosts,
         })
-            .catch(() => undefined))));
+            .catch(() => timingCount("activate.frameRefused")))));
     }
     async activateWorkers(phaseId) {
         await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
@@ -923,22 +1001,37 @@ class CoveragePhaseController {
         // The context's own headers are left alone: they are the suite's, and
         // a test that sets more with `setExtraHTTPHeaders` keeps them. Setting
         // them back at every phase dropped a test's `X-Forwarded-For`.
-        await Promise.all([
-            ...this.appHosts.map((url) => {
-                const host = new URL(url);
-                // For the app's own site: requests, navigations and sockets.
-                const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
-                // For its frames on another of its hosts: a cookie that
-                // crosses sites must be Secure, which needs https or a local
-                // host. Chromium keeps such a cookie only when it is given by
-                // domain; given by an http URL it is dropped without a word.
-                if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
-                    cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
-                }
-                // One host refused leaves the others theirs.
-                return context.addCookies(cookies).catch(() => undefined);
-            }),
-        ]);
+        const byHost = this.appHosts.map((url) => {
+            const host = new URL(url);
+            // For the app's own site: requests, navigations and sockets.
+            const cookies = pairs(COVERAGE_SCOPE_COOKIE, COVERAGE_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_COOKIE).map(([name, value]) => ({ name, value, url, sameSite: "Lax" }));
+            // For its frames on another of its hosts: a cookie that
+            // crosses sites must be Secure, which needs https or a local
+            // host. Chromium keeps such a cookie only when it is given by
+            // domain; given by an http URL it is dropped without a word.
+            if (host.protocol === "https:" || ["localhost", "127.0.0.1"].includes(host.hostname)) {
+                cookies.push(...pairs(COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE).map(([name, value]) => ({ name, value, domain: host.hostname, path: "/", sameSite: "None", secure: true })));
+            }
+            return cookies;
+        });
+        // Every host's cookies in one call: a call per host, each its own
+        // round trip through Playwright, was most of what an action waited
+        // for. A cookie is kept per host, for every port of it: hosts that
+        // differ only by port gave the same cookies twice, and each goes once.
+        // A cookie the browser refuses fails the whole call, so then each host
+        // is given its own and one refused leaves the others theirs.
+        const distinct = new Map();
+        for (const cookie of byHost.flat()) {
+            const target = cookie.url ? new URL(cookie.url) : undefined;
+            const where = target ? `${target.protocol}//${target.hostname}${target.pathname}` : `${cookie.domain}${cookie.path}`;
+            const key = JSON.stringify([cookie.name, cookie.value, where, cookie.sameSite, cookie.secure ?? false]);
+            if (!distinct.has(key))
+                distinct.set(key, cookie);
+        }
+        await context.addCookies([...distinct.values()]).catch(() => {
+            timingCount("activate.cookiesRefused");
+            return Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => timingCount("activate.hostCookiesRefused"))));
+        });
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);
@@ -971,13 +1064,20 @@ class CoveragePhaseController {
  * string), and doubled a 76-test suite's time.
  */
 const LEAVING_BINDING = "__supercovLeaving";
+const contextsWithLeavingBinding = new WeakSet();
 function readSnapshot(target) {
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
         return getSnapshot ? JSON.stringify(getSnapshot()) : undefined;
     })
-        .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined));
+        .then((text) => {
+        if (typeof text !== "string")
+            return undefined;
+        // Phase timing counts the bytes each read carried, as its "ms".
+        timingCount("transfer.snapshotBytes", text.length);
+        return JSON.parse(text);
+    });
 }
 let activeController;
 let bridgedAssertionDepth = 0;
@@ -1657,6 +1757,10 @@ const instrumentedFixtures = {
 };
 const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
+// `export *` passes no default on, and `import test from "@playwright/test"`
+// is Playwright's own default export: such a spec found none and failed with
+// `(0 , _test.default) is not a function`.
+export default instrumentedTest;
 /**
  * A Playwright `test` object: callable, and carrying the API a spec drives.
  * Facades export several -- one per fixture set -- and every one of them must

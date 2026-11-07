@@ -1123,6 +1123,7 @@ pub fn prepare_isolated_workspace(
     )?;
     link_node_modules(root, &workspace, &mut operations)?;
     link_repository_around(root, &workspace);
+    let_copy_be_scanned(&workspace);
     Ok(workspace)
 }
 
@@ -1234,6 +1235,7 @@ pub fn prepare_cached_workspace(
 ) -> Result<PathBuf, WorkspaceError> {
     let mut operations = SystemWorkspaceOperations;
     prepare_cached_workspace_with_operations(root, lock, reuse_paths, &mut operations)
+        .inspect(|workspace| let_copy_be_scanned(workspace))
 }
 
 fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
@@ -2226,7 +2228,7 @@ pub fn prune_cached_workspace_sources(
         if keep.contains(&name) {
             continue;
         }
-        remove_stored_tree_deferred(root, &entry.path())?;
+        crate::lifecycle::remove_scratch_tree_deferred(root, &entry.path())?;
         removed.push(name);
     }
     // The configurations and helpers each run writes into the copy's
@@ -2532,6 +2534,24 @@ fn relink_around(_root: &Path, workspace: &Path) {
         if level == copy {
             break;
         }
+    }
+}
+
+/// Supercov's store tells Git to ignore all of it (`*`), and a tool that
+/// finds a project's sources the way Git lists them walks up from the copy
+/// and meets that file: Tailwind's automatic source detection found no file
+/// at all, and rallly's measured build had none of the utility classes only
+/// its own components use. Beside the copy, above the copied project, the
+/// copy's directory lets everything back in, for a scan that starts inside.
+/// Git never reads it: the directories above it are ignored already. Best
+/// effort, and outside the counted filesystem calls: nothing depends on it.
+fn let_copy_be_scanned(workspace: &Path) {
+    let Some(copy) = copy_directory_of(workspace).filter(|copy| copy != workspace) else {
+        return;
+    };
+    let ignore = copy.join(".gitignore");
+    if std::fs::symlink_metadata(&ignore).is_err() {
+        let _ = std::fs::write(&ignore, "!*\n");
     }
 }
 
@@ -5521,7 +5541,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1156", || {
+        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1157", || {
             recover_cached_workspace(&root, &lock)
         });
         assert!(
@@ -5540,7 +5560,7 @@ mod tests {
         for (reused, clear) in [
             ("out.js", ""),
             ("build", ""),
-            ("out.js", "fs.create_dir_all#workspace.rs:1324"),
+            ("out.js", "fs.create_dir_all#workspace.rs:1326"),
         ] {
             let root = project();
             let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
@@ -5584,11 +5604,11 @@ mod tests {
     #[test]
     fn writeback_stops_at_a_file_it_cannot_read() {
         for (kind, fault) in [
-            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1378"),
-            (CommandOutputs::Go, "fs.metadata#workspace.rs:1643"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1647"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1749"),
-            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2197"),
+            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1380"),
+            (CommandOutputs::Go, "fs.metadata#workspace.rs:1645"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1649"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1751"),
+            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2199"),
         ] {
             let (root, workspace) = writeback_fixture("unreadable");
             let baseline = workspace_output_baseline(&workspace).unwrap();
@@ -5636,11 +5656,41 @@ mod tests {
             hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
         });
         fs::create_dir_all(root.join(".git")).unwrap();
-        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2049", || {
+        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2051", || {
             mirror_git_repository(&root, &workspace)
         });
         assert!(mirrored.is_err());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// A scan that finds sources the way Git lists them, as Tailwind's does,
+    /// starting inside the copy, finds the copied sources: the store's own
+    /// `*` hid every one. Git, from the project, still sees none of the store.
+    #[test]
+    fn a_scan_from_inside_the_copy_finds_its_sources() {
+        let root = project();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let scanned = ignore::WalkBuilder::new(&workspace)
+            .build()
+            .flatten()
+            .map(|entry| entry.into_path())
+            .collect::<Vec<_>>();
+        assert!(
+            scanned.contains(&workspace.join("src/index.js")),
+            "{scanned:?}"
+        );
+        let listed = ignore::WalkBuilder::new(&root)
+            .hidden(false)
+            .build()
+            .flatten()
+            .map(|entry| entry.into_path())
+            .filter(|path| path.starts_with(root.join(".supercov")))
+            .collect::<Vec<_>>();
+        assert_eq!(listed, [root.join(".supercov")], "{listed:?}");
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Pruning stops at an entry of the copy it cannot read.
@@ -5649,7 +5699,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2220", || {
+        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2222", || {
             prune_cached_workspace_sources(&root, &lock)
         });
         assert!(

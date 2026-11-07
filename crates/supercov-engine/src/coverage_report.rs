@@ -1755,13 +1755,18 @@ impl HitIds {
         rank
     }
 
-    /// `sorted`, by precomputed rank.
-    fn sorted_by(&self, mut numbers: Vec<usize>, rank: &[u32]) -> Vec<Id> {
+    /// Hit numbers, repeats included, once each in id order, by
+    /// precomputed rank: one sort of what a test or phase gathered.
+    fn distinct_by(&self, mut numbers: Vec<usize>, rank: &[u32]) -> Vec<usize> {
         numbers.sort_unstable_by_key(|number| rank[*number]);
         numbers.dedup();
         numbers
-            .into_iter()
-            .map(|number| self.names[number].clone())
+    }
+
+    fn names_of(&self, numbers: &[usize]) -> Vec<Id> {
+        numbers
+            .iter()
+            .map(|number| self.names[*number].clone())
             .collect()
     }
 
@@ -1820,7 +1825,7 @@ impl References {
         }
     }
 
-    fn into_relation(self, hits: &HitIds) -> Relation {
+    fn into_relation(self) -> Relation {
         let mut order = (0..self.names.len()).collect::<Vec<_>>();
         order.sort_unstable_by(|left, right| self.names[*left].cmp(&self.names[*right]));
         let mut rank = vec![0_u32; self.names.len()];
@@ -1830,17 +1835,14 @@ impl References {
         let mut relation = Relation {
             names: self.names,
             rank,
-            by_hit: HashMap::new(),
+            by_hit: Vec::new(),
             none: Reached::default(),
         };
-        for (obligation, reached) in self.by_obligation.into_iter().enumerate() {
-            if !reached.is_empty() {
-                let reached = relation.reached(reached);
-                relation
-                    .by_hit
-                    .insert(hits.names[obligation].to_string(), reached);
-            }
-        }
+        relation.by_hit = self
+            .by_obligation
+            .into_iter()
+            .map(|reached| relation.reached(reached))
+            .collect();
         relation
     }
 }
@@ -1851,14 +1853,18 @@ struct Relation {
     names: Vec<Id>,
     /// Each number's position in id order.
     rank: Vec<u32>,
-    by_hit: HashMap<String, Reached>,
+    /// By hit number: an obligation is looked up once by its id, not once
+    /// per relation.
+    by_hit: Vec<Reached>,
     none: Reached,
 }
 
 impl Relation {
-    /// What reached obligation `id`: nothing, for one no test reached.
-    fn of(&self, id: &str) -> &Reached {
-        self.by_hit.get(id).unwrap_or(&self.none)
+    /// What reached the obligation of hit number `hit`: nothing, for one no
+    /// test reached.
+    fn of(&self, hit: Option<usize>) -> &Reached {
+        hit.and_then(|hit| self.by_hit.get(hit))
+            .unwrap_or(&self.none)
     }
 
     /// Numbers of this relation as the ids they stand for, in id order and
@@ -2079,15 +2085,6 @@ fn whole_files_unmeasured(manifest: &CoverageManifest) -> Option<CoverageManifes
         ));
     }
     Some(manifest)
-}
-
-/// Each number once: a test's or phase's hits name a point at each event
-/// that reached it, often thousands of times, and what is built from them
-/// names each point once.
-fn distinct(mut numbers: Vec<usize>) -> Vec<usize> {
-    numbers.sort_unstable();
-    numbers.dedup();
-    numbers
 }
 
 fn create_coverage_view_with_model(
@@ -2429,9 +2426,9 @@ fn create_coverage_view_with_model(
             .then(left.line.cmp(&right.line))
             .then(left.column.cmp(&right.column))
     });
-    let tests_by_hit = tests_by_hit.into_relation(&hit_ids);
-    let phases_by_hit = phases_by_hit.into_relation(&hit_ids);
-    let explicit_phases_by_hit = explicit_phases_by_hit.into_relation(&hit_ids);
+    let tests_by_hit = tests_by_hit.into_relation();
+    let phases_by_hit = phases_by_hit.into_relation();
+    let explicit_phases_by_hit = explicit_phases_by_hit.into_relation();
     // A frontend may decline one outcome of a branch (a block that can never
     // be entered, a rescue that can never be reached) or the whole branch;
     // a branch whose every outcome is declined is declined itself.
@@ -2609,17 +2606,58 @@ fn create_coverage_view_with_model(
         });
     }
 
+    // Each point's hit number, and where it sits as (file rank, line): a
+    // line, test or phase gathers points by these numbers, in the order the
+    // `SourceLine`s they stand for sort in, and each point's id and file are
+    // looked up once.
+    let mut point_files = manifest
+        .points
+        .iter()
+        .map(|point| point.file.as_str())
+        .collect::<Vec<_>>();
+    point_files.sort_unstable();
+    point_files.dedup();
+    let mut file_rank = 0;
+    let point_locations = manifest
+        .points
+        .iter()
+        .map(|point| {
+            // A file's points arrive together.
+            if point_files[file_rank] != point.file {
+                file_rank = point_files
+                    .binary_search(&point.file.as_str())
+                    .expect("every point file is listed");
+            }
+            (file_rank as u32, point.line)
+        })
+        .collect::<Vec<_>>();
+    let point_files = point_files
+        .into_iter()
+        .map(|file| ids.id(file))
+        .collect::<Vec<_>>();
+    let point_hits = manifest
+        .points
+        .iter()
+        .map(|point| hit_ids.numbers.get(point.id.as_str()).copied())
+        .collect::<Vec<_>>();
+    let source_line = |(file, line): (u32, usize)| SourceLine {
+        file: point_files[file as usize].clone(),
+        line,
+    };
+
     let points = manifest
         .points
         .iter()
         .cloned()
-        .map(|meta| {
-            let tests = tests_by_hit.of(&meta.id);
-            let phases = phases_by_hit.of(&meta.id);
-            let explicit = explicit_phases_by_hit.of(&meta.id);
+        .zip(&point_hits)
+        .map(|(meta, hit)| {
+            let hit = *hit;
+            let tests = tests_by_hit.of(hit);
+            let phases = phases_by_hit.of(hit);
+            let explicit = explicit_phases_by_hit.of(hit);
             PointResult {
                 measured: !declined.contains(&meta.id),
-                covered: tests_by_hit.by_hit.contains_key(&meta.id),
+                covered: !tests.numbers.is_empty(),
                 confidence: confidence(tests, phases, explicit),
                 meta,
                 tests: tests.names.clone(),
@@ -2640,13 +2678,14 @@ fn create_coverage_view_with_model(
                 .alternatives
                 .iter()
                 .map(|alternative| {
-                    let tests = tests_by_hit.of(&alternative.id);
-                    let phases = phases_by_hit.of(&alternative.id);
-                    let explicit = explicit_phases_by_hit.of(&alternative.id);
+                    let hit = hit_ids.numbers.get(alternative.id.as_str()).copied();
+                    let tests = tests_by_hit.of(hit);
+                    let phases = phases_by_hit.of(hit);
+                    let explicit = explicit_phases_by_hit.of(hit);
                     AlternativeResult {
                         id: alternative.id.clone(),
                         label: alternative.label.clone(),
-                        covered: tests_by_hit.by_hit.contains_key(&alternative.id),
+                        covered: !tests.numbers.is_empty(),
                         tests: tests.names.clone(),
                         phases: phases.names.clone(),
                         confidence: confidence(tests, phases, explicit),
@@ -2672,28 +2711,19 @@ fn create_coverage_view_with_model(
     // limitation against. Only what was measured decides the line's state and
     // whether it counts. A line gathers its points' test and phase numbers,
     // which sort and deduplicate as numbers.
-    let mut line_aggregates = BTreeMap::<SourceLine, LineAggregate>::new();
-    for point in &points {
-        let aggregate = line_aggregates
-            .entry(SourceLine {
-                file: ids.id(&point.meta.file),
-                line: point.meta.line,
-            })
-            .or_default();
+    let mut line_aggregates = BTreeMap::<(u32, usize), LineAggregate>::new();
+    for ((point, location), hit) in points.iter().zip(&point_locations).zip(&point_hits) {
+        let aggregate = line_aggregates.entry(*location).or_default();
         if declined.contains(&point.meta.id) {
             continue;
         }
         aggregate.measured = true;
         aggregate.covered |= point.covered;
-        aggregate
-            .tests
-            .extend(&tests_by_hit.of(&point.meta.id).numbers);
-        aggregate
-            .phases
-            .extend(&phases_by_hit.of(&point.meta.id).numbers);
+        aggregate.tests.extend(&tests_by_hit.of(*hit).numbers);
+        aggregate.phases.extend(&phases_by_hit.of(*hit).numbers);
         aggregate
             .explicit_phases
-            .extend(&explicit_phases_by_hit.of(&point.meta.id).numbers);
+            .extend(&explicit_phases_by_hit.of(*hit).numbers);
     }
     let lines = line_aggregates
         .into_iter()
@@ -2722,8 +2752,8 @@ fn create_coverage_view_with_model(
                 .map(|traits| traits.kind)
                 .collect::<BTreeSet<_>>();
             LineResult {
-                file: location.file.to_string(),
-                line: location.line,
+                file: point_files[location.0 as usize].to_string(),
+                line: location.1,
                 covered,
                 measured,
                 confidence: confidence(&tests, &phases, &explicit),
@@ -2741,20 +2771,10 @@ fn create_coverage_view_with_model(
     // phase's lines sort and deduplicate as numbers, in the order the
     // `SourceLine`s they stand for sort in.
     let hit_ranks = hit_ids.ranks();
-    let mut point_files = manifest
-        .points
-        .iter()
-        .map(|point| ids.id(&point.file))
-        .collect::<Vec<_>>();
-    point_files.sort_unstable();
-    point_files.dedup();
     let mut hit_locations = vec![None; hit_ids.names.len()];
-    for point in &manifest.points {
-        if let Some(number) = hit_ids.numbers.get(point.id.as_str()) {
-            let file = point_files
-                .binary_search_by(|file| file.as_str().cmp(&point.file))
-                .expect("every point file is listed") as u32;
-            hit_locations[*number] = Some((file, point.line));
+    for (hit, location) in point_hits.iter().zip(&point_locations) {
+        if let Some(number) = hit {
+            hit_locations[*number] = Some(*location);
         }
     }
     let lines_of = |hits: &[usize]| {
@@ -2765,22 +2785,19 @@ fn create_coverage_view_with_model(
         located.sort_unstable();
         located.dedup();
         located
-            .into_iter()
-            .map(|(file, line)| SourceLine {
-                file: point_files[file as usize].clone(),
-                line,
-            })
-            .collect::<Vec<_>>()
     };
     test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
+    // Each test's lines as numbers, for its file's lines.
+    let mut test_locations = Vec::with_capacity(test_order.len());
     let tests = test_order
         .into_iter()
         .map(|id| {
             let test = tests_by_id.remove(&id).expect("test order references test");
             let outcome = test_outcome(&test);
-            let hits = distinct(test.hits);
-            let lines = lines_of(&hits);
-            let hits = hit_ids.sorted_by(hits, &hit_ranks);
+            let hits = hit_ids.distinct_by(test.hits, &hit_ranks);
+            let located = lines_of(&hits);
+            let lines = located.iter().copied().map(source_line).collect();
+            test_locations.push(located);
             TestCoverageResult {
                 id: test.id,
                 name: test.name,
@@ -2792,7 +2809,7 @@ fn create_coverage_view_with_model(
                 provenance: test.provenance,
                 role: test.role,
                 attribution: test.attribution,
-                hits,
+                hits: hit_ids.names_of(&hits),
                 decisions: test
                     .decisions
                     .into_iter()
@@ -2812,10 +2829,10 @@ fn create_coverage_view_with_model(
             BTreeSet<String>,
             BTreeSet<String>,
             BTreeSet<String>,
-            BTreeSet<SourceLine>,
+            Vec<(u32, usize)>,
         ),
     >::new();
-    for test in &tests {
+    for (test, located) in tests.iter().zip(test_locations) {
         let aggregate = test_files
             .entry(
                 test.file
@@ -2826,16 +2843,20 @@ fn create_coverage_view_with_model(
         aggregate.0.insert(test.id.clone());
         aggregate.1.insert(test.provenance.runner.clone());
         aggregate.2.insert(test.provenance.kind.clone());
-        aggregate.3.extend(test.lines.iter().cloned());
+        aggregate.3.extend(located);
     }
     let test_files = test_files
         .into_iter()
-        .map(|(file, (tests, runners, kinds, lines))| TestFileResult {
-            file,
-            tests: sorted(&tests),
-            runners: sorted(&runners),
-            kinds: sorted(&kinds),
-            lines: lines.into_iter().collect(),
+        .map(|(file, (tests, runners, kinds, mut lines))| {
+            lines.sort_unstable();
+            lines.dedup();
+            TestFileResult {
+                file,
+                tests: sorted(&tests),
+                runners: sorted(&runners),
+                kinds: sorted(&kinds),
+                lines: lines.into_iter().map(source_line).collect(),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -2849,13 +2870,12 @@ fn create_coverage_view_with_model(
     let phases = phases
         .into_iter()
         .map(|phase| {
-            let hits = distinct(phase.hits);
-            let lines = lines_of(&hits);
-            let hits = hit_ids.sorted_by(hits, &hit_ranks);
+            let hits = hit_ids.distinct_by(phase.hits, &hit_ranks);
+            let lines = lines_of(&hits).into_iter().map(source_line).collect();
             PhaseResult {
                 phase: phase.phase,
                 test: phase.test,
-                hits,
+                hits: hit_ids.names_of(&hits),
                 decisions: phase
                     .decisions
                     .into_iter()
@@ -4026,10 +4046,13 @@ mod tests {
                 .insert(name.to_owned());
         }
         let numbered = numbered
-            .into_relation(&hits)
+            .into_relation()
             .by_hit
             .into_iter()
-            .map(|(obligation, reached)| {
+            .enumerate()
+            .filter(|(_, reached)| !reached.numbers.is_empty())
+            .map(|(hit, reached)| {
+                let obligation = hits.names[hit].to_string();
                 let names = reached
                     .names
                     .into_iter()

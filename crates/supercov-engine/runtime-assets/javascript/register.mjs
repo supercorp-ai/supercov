@@ -12,6 +12,16 @@ import path, { basename, dirname, isAbsolute, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
+// Supercov runs Node with --enable-source-maps so a stack through an
+// instrumented copy names the project's file. The flag also reads the maps
+// every package ships, which a plain run never does: a third of the CPU a
+// measured Vitest suite added. Where Node can, Supercov's flag maps the
+// project's files alone, unless the command asked for maps itself: a second
+// flag in NODE_OPTIONS, or one on its own command line.
+if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === "--enable-source-maps").length === 1 &&
+    !process.execArgv.includes("--enable-source-maps") &&
+    typeof Module.setSourceMapsSupport === "function")
+    Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
 installLaunchSupervisor();
 // Instrumented sources import the browser-safe capability seam; bind the
 // real supervisor implementation before any user module evaluates.
@@ -981,13 +991,23 @@ if (missingFile) {
         }
     };
 }
-register(new URL("./resolve-loader.mjs", import.meta.url), {
-    data: {
-        typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
-        supportFile,
-        missingFile,
-    },
-});
+const loaderData = {
+    typescriptRequireHook: typeof typescriptHandler === "function" && typescriptHandler.name !== "loadTS",
+    supportFile,
+    missingFile,
+};
+// Where Node can (22.15, 23.5), the hooks run in this thread. Off it, every
+// Node process started a thread of its own and compiled a module loader
+// there, and each import and require waited on a message to it: on Bulletproof
+// React's Vitest suite on one worker, a third of the time a measured run added.
+if (typeof Module.registerHooks === "function") {
+    const hooks = await import("./resolve-loader.mjs");
+    hooks.initialize(loaderData);
+    Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
+}
+else {
+    register(new URL("./resolve-loader.mjs", import.meta.url), { data: loaderData });
+}
 if (process.env.SUPERCOV_DEBUG === "1") {
     console.error("[supercov] preload", { entrypoint });
 }
@@ -1133,13 +1153,19 @@ if (generatedPlaywrightConfig &&
 }
 // A process the runner marked as not a test worker skips the wrapper, unless
 // it was started from Playwright's own files: a worker Playwright starts some
-// other way than its worker entry still has the wrapper, only later.
+// other way than its worker entry still has the wrapper, only later. The
+// runner itself has it too: it lists each test with the fixtures its spec's
+// `test` carries, and puts tests with the same worker fixtures in one worker.
+// A CommonJS spec it listed with Playwright's own `test` ran in the worker
+// with the wrapper's, beside a spec through a facade that has Playwright's
+// own in both, and the worker refused the pair: "Playwright detected
+// inconsistent test.use() options". An ES module spec already had the wrapper
+// in the runner, through the module hooks.
 const isPlaywrightProcess = /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint);
 const mayBePlaywrightWorker = process.env.SUPERCOV_PLAYWRIGHT_WORKER !== "0" || isPlaywrightProcess;
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
-    !isPlaywrightEntrypoint &&
-    mayBePlaywrightWorker &&
+    (isPlaywrightEntrypoint || mayBePlaywrightWorker) &&
     process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
     process.env.VITEST !== "true") {
     const target = playwrightTarget ?? "@playwright/test";
@@ -1147,6 +1173,16 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     const originalPlaywrightConfig = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG
         ?.replaceAll("\\", "/");
     const wrapper = await import(__rewriteRelativeImportExtension(new URL("./playwright.mjs", import.meta.url)));
+    // A spec transpiled from `import test from "@playwright/test"` reads the
+    // module's `default` when it says it is an ES module, and the module
+    // itself otherwise: the wrapper's namespace says nothing and is no
+    // function, and rallly's i18n spec failed with `(0 , _test.default) is not
+    // a function`. Its exports, marked as an ES module's, with `test` itself
+    // as the default. Not a function that calls `test` (Playwright names a
+    // test by where it was declared, read from the stack, and an extra frame
+    // moved it), nor the exports assigned onto the wrapper's `test` (its
+    // fixtures then differed between the runner and a worker).
+    const commonjsWrapper = { ...wrapper, __esModule: true, default: wrapper.test };
     const originalLoad = Module._load;
     Module._load = function supercovLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");
@@ -1164,7 +1200,7 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
                 ? parentFile.startsWith(`${normalizedRoot}/`)
                 : parentFile.includes("/tests/"));
         if (request === target && belongsToProject)
-            return wrapper;
+            return commonjsWrapper;
         return originalLoad.call(this, request, parent, isMain);
     };
 }

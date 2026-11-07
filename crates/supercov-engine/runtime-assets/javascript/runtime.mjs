@@ -37,7 +37,8 @@ var COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 var DEFAULT_SERVER_EVIDENCE_ROOT = "/tmp/supercov-server-evidence";
 function configuredServerEvidenceRoot() {
   var _a8;
-  return typeof process !== "undefined" && ((_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"]) ? process.env["SUPERCOV_SERVER_EVIDENCE_ROOT"] : DEFAULT_SERVER_EVIDENCE_ROOT;
+  const configured = typeof process !== "undefined" ? (_a8 = process.env) == null ? void 0 : _a8["SUPERCOV_SERVER_EVIDENCE_ROOT"] : void 0;
+  return configured ? configured : DEFAULT_SERVER_EVIDENCE_ROOT;
 }
 function nonEmpty(value) {
   return typeof value === "string" && value.length > 0;
@@ -116,6 +117,18 @@ function serverEvidenceDirectory(scope, root = configuredServerEvidenceRoot()) {
 }
 function serverEvidencePath(scope, root = configuredServerEvidenceRoot()) {
   return `${serverEvidenceDirectory(scope, root)}/${pathComponent(scope.attemptId)}.jsonl`;
+}
+// A scope's evidence directory and file, made once per scope and root: a
+// server works them out for every record it writes, thousands per test.
+var scopedEvidenceLocations = /* @__PURE__ */ new WeakMap();
+function scopedEvidenceLocation(scope) {
+  const root = configuredServerEvidenceRoot();
+  const known = scopedEvidenceLocations.get(scope);
+  if (known !== void 0 && known.root === root)
+    return known;
+  const location = { root, directory: serverEvidenceDirectory(scope, root), path: serverEvidencePath(scope, root) };
+  scopedEvidenceLocations.set(scope, location);
+  return location;
 }
 function backgroundEvidenceDirectory(runId, root = configuredServerEvidenceRoot()) {
   return `${serverRunEvidenceDirectory(runId, root)}/background`;
@@ -288,6 +301,12 @@ function activateProbeV2Context(context) {
   state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
 }
+// The context the async hook leaves to a callback's first probe: the
+// request's store, or else the one the environment carries.
+function resolveProbeV2Epoch() {
+  var _a8, _b;
+  return activateProbeV2Context((_b = (_a8 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a8 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
+}
 function withProbeV2Context(context, callback) {
   const previous = state.probeV2Clock.epoch;
   activateProbeV2Context(context);
@@ -308,10 +327,14 @@ function installProbeV2AsyncHook() {
       return;
     const epochs = [];
     createHook({
+      // NaN, which no epoch equals: the callback's first probe works out
+      // its context. Most callbacks a server or a test runner runs reach no
+      // instrumented code, and working it out here, for every one, read the
+      // environment twice and built a key each time: on a Next app's suite,
+      // more of the server's time than any of Supercov's other work.
       before() {
-        var _a9, _b;
         epochs.push(state.probeV2Clock.epoch);
-        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
+        state.probeV2Clock.epoch = NaN;
       },
       after() {
         var _a9;
@@ -819,7 +842,8 @@ function flushOnTermination(flush) {
     }
   } catch (e) {
   }
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"]) {
+  const signals = ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"];
+  for (const signal of signals) {
     try {
       process.on(signal, () => {
         drain();
@@ -830,6 +854,24 @@ function flushOnTermination(flush) {
       });
     } catch (e) {
     }
+  }
+  // A listener keeps nothing alive, and a signal a process sends itself is
+  // handled on a later turn of its event loop: `process.kill(process.pid,
+  // "SIGTERM")` as a script's last line exited 0, once nothing else held the
+  // loop open, where alone it ended by the signal. A signal to itself that
+  // only this listener would take is drained and left to act at once.
+  try {
+    const kill = process.kill;
+    const numbered = { 1: "SIGHUP", 2: "SIGINT", 15: "SIGTERM", 21: "SIGBREAK" };
+    process.kill = function supercovKill(pid, signal) {
+      const name = signal === void 0 ? "SIGTERM" : typeof signal === "number" ? numbered[signal] : signal;
+      if (Number(pid) === process.pid && signals.indexOf(name) >= 0 && process.listenerCount(name) <= 1) {
+        drain();
+        process.removeAllListeners(name);
+      }
+      return kill.apply(this, arguments);
+    };
+  } catch (e) {
   }
 }
 // Rust compiled to wasm and measured by the Rust frontend keeps what it ran
@@ -1085,8 +1127,9 @@ function appendServer(record) {
   if (!runId)
     return;
   try {
-    const directory = scope ? serverEvidenceDirectory(scope) : void 0;
-    const path = scope ? serverEvidencePath(scope) : void 0;
+    const location = scope ? scopedEvidenceLocation(scope) : void 0;
+    const directory = location == null ? void 0 : location.directory;
+    const path = location == null ? void 0 : location.path;
     // Work done while handling a request that named no test -- a webhook a
     // mock server sends -- says so, with the request's number.
     const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
@@ -1700,10 +1743,17 @@ function noteSupport(scope) {
     const moduleBuiltin = typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:module") : void 0;
     const cache = moduleBuiltin && moduleBuiltin._cache;
     const root = process.env.SUPERCOV_PROJECT_ROOT;
-    if (cache && root) {
+    // The in-thread module hooks count every load (resolve-loader.mjs): a
+    // cache nothing was loaded into since the last request holds nothing
+    // new. Listing a Next server's thousands of keys on every request was
+    // the most of its time any of Supercov's code took. Without the count
+    // (off-thread hooks), every request looks.
+    const loads = runtimeGlobal.__SUPERCOV_MODULE_LOADS__;
+    const unchanged = typeof loads === "number" && loads === supportNoted.loads;
+    supportNoted.loads = loads;
+    if (cache && root && !unchanged) {
       for (const name of Object.keys(cache)) {
-        // Every request comes here, and a server has thousands of modules:
-        // each is looked at once, whether it is noted or not.
+        // Each is looked at once, whether it is noted or not.
         if (supportNoted.modules.has(name))
           continue;
         supportNoted.modules.add(name);
@@ -1854,6 +1904,8 @@ function recordCoverageHit(id) {
     activateProbeV2Context(currentRequestContext());
     epoch = clock.epoch;
     clock.epoch = previousEpoch;
+  } else if (epoch !== epoch) {
+    epoch = resolveProbeV2Epoch();
   }
   if (!state.hitEpochs)
     state.hitEpochs = /* @__PURE__ */ new Map();
@@ -1941,6 +1993,8 @@ function recordCoverageHitV2(file, index) {
   const previousEpoch = file.clock.epoch;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
+  else if (previousEpoch !== previousEpoch)
+    resolveProbeV2Epoch();
   try {
     const epoch = file.clock.epoch;
     if (file.hitEpochs[index] === epoch)
@@ -1993,6 +2047,8 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   const previousEpoch = file.clock.epoch;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
+  else if (previousEpoch !== previousEpoch)
+    resolveProbeV2Epoch();
   try {
     const epoch = file.clock.epoch;
     const seen = file.decisionEpochs[decisionIndex];

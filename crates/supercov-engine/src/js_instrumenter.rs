@@ -8406,7 +8406,64 @@ fn compound_root<'e, 'a>(expression: &'e Expression<'a>) -> Option<&'e LogicalEx
 /// This deliberately recognizes only semantics that are provable from syntax;
 /// it never evaluates user code or assumes values for identifiers/calls.
 fn decision_outcome_is_variable(expression: &Expression<'_>) -> bool {
-    syntactic_boolean_outcome(expression).is_none()
+    syntactic_boolean_outcome(expression).is_none() && !decided_at_build(expression)
+}
+
+/// A test Next's bundler decides when it builds: `process.env.NEXT_RUNTIME`
+/// compared with a literal, or the negation of that. Next writes
+/// "nodejs" or "edge" in its place in each bundle and drops the branch that
+/// can no longer run, with the imports in it. A probe around the test hid it
+/// from that: an `instrumentation.ts` importing Node-only code under
+/// `if (process.env.NEXT_RUNTIME === "nodejs")` pulled that code into the
+/// Edge bundle, and the build failed. Such a test is left as it is: the
+/// statements of its branches are measured, the decision is not. A test
+/// joined by `&&` or `||` keeps its probes: each operand is measured on its
+/// own as well.
+fn decided_at_build(expression: &Expression<'_>) -> bool {
+    fn runtime_variable(expression: &Expression<'_>) -> bool {
+        let (object, name) = match expression {
+            Expression::StaticMemberExpression(member) => {
+                (&member.object, member.property.name.as_str())
+            }
+            Expression::ComputedMemberExpression(member) => match &member.expression {
+                Expression::StringLiteral(literal) => (&member.object, literal.value.as_str()),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        name == "NEXT_RUNTIME"
+            && matches!(object, Expression::StaticMemberExpression(env)
+                if env.property.name == "env"
+                    && matches!(&env.object, Expression::Identifier(process) if process.name == "process"))
+    }
+    fn literal(expression: &Expression<'_>) -> bool {
+        matches!(
+            expression,
+            Expression::StringLiteral(_)
+                | Expression::NumericLiteral(_)
+                | Expression::BooleanLiteral(_)
+                | Expression::NullLiteral(_)
+        ) || matches!(expression, Expression::Identifier(identifier) if identifier.name == "undefined")
+    }
+    match transparent_expression(expression) {
+        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
+            decided_at_build(&unary.argument)
+        }
+        Expression::BinaryExpression(binary)
+            if matches!(
+                binary.operator,
+                BinaryOperator::Equality
+                    | BinaryOperator::Inequality
+                    | BinaryOperator::StrictEquality
+                    | BinaryOperator::StrictInequality
+            ) =>
+        {
+            let left = transparent_expression(&binary.left);
+            let right = transparent_expression(&binary.right);
+            (runtime_variable(left) && literal(right)) || (literal(left) && runtime_variable(right))
+        }
+        other => runtime_variable(other),
+    }
 }
 
 fn syntactic_boolean_outcome(expression: &Expression<'_>) -> Option<bool> {
@@ -10695,6 +10752,37 @@ export const r = v && w && q;
     /// the module names its decisions by id and width, never by their text,
     /// so the text is in the code only where the code is. A decision too
     /// wide for the encoding is begun with its width, too.
+    /// Next decides `process.env.NEXT_RUNTIME` when it builds each bundle,
+    /// and drops the branch the bundle cannot run with its imports: the test
+    /// stays as written for it to read. A test joined with anything else is
+    /// a decision like any other.
+    #[test]
+    fn a_runtime_test_next_decides_at_build_is_left_as_written() {
+        let source = "export async function register() {\n  if (process.env.NEXT_RUNTIME === \"nodejs\") {\n    await import(\"./node-only\");\n  }\n  if (process.env[\"NEXT_RUNTIME\"] !== \"edge\") {\n    await import(\"./also-node\");\n  }\n  if (!(\"edge\" == process.env.NEXT_RUNTIME)) {\n    await import(\"./still-node\");\n  }\n  if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {\n    await import(\"./ready\");\n  }\n}\n";
+        let output = instrument_candidate(source, "src/instrumentation.ts").unwrap();
+        for test in [
+            "if (process.env.NEXT_RUNTIME === \"nodejs\") {",
+            "if (process.env[\"NEXT_RUNTIME\"] !== \"edge\") {",
+            "if (!(\"edge\" == process.env.NEXT_RUNTIME)) {",
+        ] {
+            assert!(output.code.contains(test), "{test}\n{}", output.code);
+        }
+        assert!(
+            !output
+                .code
+                .contains("if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {"),
+            "{}",
+            output.code
+        );
+        assert_eq!(output.decisions.len(), 1, "{:?}", output.decisions);
+        // The branches' statements are measured all the same.
+        assert!(
+            output.points.iter().any(|point| point.line == 3),
+            "{:?}",
+            output.points
+        );
+    }
+
     #[test]
     fn a_module_carries_no_decision_text_beyond_its_own_code() {
         let wide = (0..33)
