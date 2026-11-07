@@ -151,6 +151,9 @@ export default {
     ...base.webServer,
     command: 'NODE_ENV=test npx next build && npx next start --port 3002',
     timeout: 900_000,
+    // Stopped with a signal it can exit on, so a profiled server writes its
+    // profile: Playwright's default is SIGKILL.
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 10_000 },
   },
 };
 `,
