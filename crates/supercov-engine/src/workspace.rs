@@ -2250,8 +2250,45 @@ pub fn prune_cached_workspace_sources(
             }
         }
     }
+    clear_around(&workspace);
     removed.sort();
     Ok(removed)
+}
+
+/// Removes what lies around a package's copy -- the rest of its repository,
+/// linked or copied beside it on the way up -- which the next run makes
+/// again. Left in the project's `.supercov`, it was the repository's other
+/// packages to a test runner started in the project: Vitest's includes
+/// followed the links and ran a monorepo's other apps' tests too. Best
+/// effort, as making it is.
+fn clear_around(workspace: &Path) {
+    let Some(copy) = copy_directory_of(workspace) else {
+        return;
+    };
+    let Ok(below) = workspace.strip_prefix(&copy) else {
+        return;
+    };
+    let path_down = below
+        .ancestors()
+        .map(|ancestor| copy.join(ancestor))
+        .collect::<Vec<_>>();
+    let between = path_down.len().saturating_sub(2);
+    for level in path_down.iter().skip(1).take(between) {
+        let Ok(entries) = fs::read_dir(level) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path_down.contains(&path) {
+                continue;
+            }
+            let _ = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&path),
+                Ok(_) => fs::remove_file(&path).or_else(|_| fs::remove_dir(&path)),
+                Err(error) => Err(error),
+            };
+        }
+    }
 }
 
 /// The directory an Ant build reaches out to: the closest one holding the

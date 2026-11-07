@@ -492,6 +492,34 @@ fn a_patch_whose_git_cannot_run_is_refused() {
         .succeeds();
 }
 
+/// After a run, nothing of the rest of the repository stays in the
+/// project's `.supercov`. The copy is laid out within its repository, with
+/// the other packages linked around it; left there, a test runner started in
+/// the project followed the links and ran another package's tests too, as
+/// Vitest's includes did in a monorepo. The next run links them again.
+#[test]
+fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
+    let (repository, project) = Project::cart_below("around-copy", "web");
+    repository.write(
+        "admin/test/admin.test.js",
+        "import test from 'node:test';\ntest('admin', () => {});\n",
+    );
+    repository.commit("admin");
+    let name = repository.root.file_name().unwrap();
+    let around = project
+        .root
+        .join(".supercov/workspaces/workspace")
+        .join(name);
+    for _ in 0..2 {
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        assert!(around.join("web").is_dir(), "the package's copy is kept");
+        assert!(
+            std::fs::symlink_metadata(around.join("admin")).is_err(),
+            "another package stayed beside the copy"
+        );
+    }
+}
+
 #[test]
 fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     // Git names a file from the top (`web/src/cart.js`), the run from where
