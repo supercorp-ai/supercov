@@ -1729,10 +1729,17 @@ function noteSupport(scope) {
     const moduleBuiltin = typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:module") : void 0;
     const cache = moduleBuiltin && moduleBuiltin._cache;
     const root = process.env.SUPERCOV_PROJECT_ROOT;
-    if (cache && root) {
+    // The in-thread module hooks count every load (resolve-loader.mjs): a
+    // cache nothing was loaded into since the last request holds nothing
+    // new. Listing a Next server's thousands of keys on every request was
+    // the most of its time any of Supercov's code took. Without the count
+    // (off-thread hooks), every request looks.
+    const loads = runtimeGlobal.__SUPERCOV_MODULE_LOADS__;
+    const unchanged = typeof loads === "number" && loads === supportNoted.loads;
+    supportNoted.loads = loads;
+    if (cache && root && !unchanged) {
       for (const name of Object.keys(cache)) {
-        // Every request comes here, and a server has thousands of modules:
-        // each is looked at once, whether it is noted or not.
+        // Each is looked at once, whether it is noted or not.
         if (supportNoted.modules.has(name))
           continue;
         supportNoted.modules.add(name);

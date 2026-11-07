@@ -942,7 +942,7 @@ class CoveragePhaseController {
             phaseSiteCookie: COVERAGE_PHASE_SITE_COOKIE,
             coveredHosts,
         })
-            .catch(() => undefined))));
+            .catch(() => timingCount("activate.frameRefused")))));
     }
     async activateWorkers(phaseId) {
         await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map(async (worker) => {
@@ -1002,7 +1002,10 @@ class CoveragePhaseController {
         // round trip through Playwright, was most of what an action waited
         // for. A cookie the browser refuses fails the whole call, so then
         // each host is given its own and one refused leaves the others theirs.
-        await context.addCookies(byHost.flat()).catch(() => Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => undefined))));
+        await context.addCookies(byHost.flat()).catch(() => {
+            timingCount("activate.cookiesRefused");
+            return Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => timingCount("activate.hostCookiesRefused"))));
+        });
     }
     async activatePage(page, phaseId) {
         const cdp = this.cdpSessions.get(page);

@@ -235,6 +235,9 @@ export async function load(url, context, nextLoad) {
     return loaded(url, await nextLoad(url, context));
 }
 export function loadSync(url, context, nextLoad) {
+    // Every module this process loads, required or imported: a server's
+    // runtime rescans the module cache for new ones only when this moved.
+    globalThis.__SUPERCOV_MODULE_LOADS__ = (globalThis.__SUPERCOV_MODULE_LOADS__ ?? 0) + 1;
     if (context.conditions?.includes("require"))
         return nextLoad(url, context);
     return loaded(url, nextLoad(url, context));
