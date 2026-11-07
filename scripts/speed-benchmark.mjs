@@ -314,7 +314,17 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
       run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options, SUPERCOV_KEEP_WORKSPACE: '1' }, true);
-      const { totals, functions } = profileSelfTime(directory);
+      const { totals, functions, processes } = profileSelfTime(directory);
+      // Each process that kept a CPU busy for a second or more: which one
+      // the time went to, by whose code.
+      writeFileSync(
+        join(output, `profile-processes-${variant}-${suite.name}.txt`),
+        processes
+          .filter(({ busy }) => busy >= 1)
+          .sort((a, b) => b.busy - a.busy)
+          .map(({ file, busy, kinds, functions }) => [`== ${file} busy ${busy.toFixed(2)}s`, ...kinds, '--', ...functions].join('\n'))
+          .join('\n\n') + '\n',
+      );
       profiled[`${variant} ${suite.name}`] = totals;
       const heaviest = Object.entries(functions)
         .sort(([, a], [, b]) => b - a)
@@ -351,11 +361,14 @@ if (process.env.SPEED_DIAGNOSE === '1') {
 function profileSelfTime(directory) {
   const totals = {};
   const functions = {};
+  const processes = [];
   const kindOf = (url, functionName) => {
     if (!url) return functionName.startsWith('(') ? functionName : '(native)';
     if (url.includes('/.supercov/node_modules/') || url.includes('/supercov/runtime/')) return 'supercov runtime';
     if (url.startsWith('node:')) return /source_map|sourcemap|prepareStackTrace/i.test(url + functionName) ? 'node source maps' : 'node';
-    const module = /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(url);
+    // The last node_modules in the path: pnpm keeps each package under
+    // node_modules/.pnpm/<name>@<version>/node_modules/<name>.
+    const module = /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(url);
     if (module) return `pkg ${module[1]}`;
     return 'app';
   };
@@ -364,17 +377,31 @@ function profileSelfTime(directory) {
     const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
     const self = new Map();
     profile.samples.forEach((id, index) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[index] ?? 0)));
+    const own = {};
+    const ownFunctions = {};
     for (const [id, micros] of self) {
       const { url, functionName, lineNumber } = nodes.get(id).callFrame;
       const kind = kindOf(url, functionName);
       totals[kind] = (totals[kind] ?? 0) + micros / 1e6;
+      if (kind !== '(idle)') own[kind] = (own[kind] ?? 0) + micros / 1e6;
+      if (!functionName.startsWith('(')) {
+        const what = `${kind}: ${functionName || '(anonymous)'}`;
+        ownFunctions[what] = (ownFunctions[what] ?? 0) + micros / 1e6;
+      }
       if (!functionName.startsWith('(')) {
         const what = `${kind}: ${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
         functions[what] = (functions[what] ?? 0) + micros / 1e6;
       }
     }
+    const busy = Object.values(own).reduce((sum, seconds) => sum + seconds, 0);
+    const top = (table, count) =>
+      Object.entries(table)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, count)
+        .map(([what, seconds]) => `${seconds.toFixed(2)}s ${what}`);
+    processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 12) });
   }
-  return { totals, functions };
+  return { totals, functions, processes };
 }
 
 const median = (values) => {
