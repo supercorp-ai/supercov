@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.24.5
+
+**Fixed**
+
+- A Bun suite whose `bunfig.toml` preload imports `bun:test` recorded no tests: Bun loads configured preloads before `BUN_OPTIONS`, so the preload took Bun's own test API before Supercov's adapter could wrap it, and all coverage was counted as background. The adapter now goes first in the copy's preload list, the project's own preloads following in their order; the project's `bunfig.toml` is not changed ([#197](https://github.com/supercorp-ai/supercov/issues/197)).
+- In a monorepo, the rest of the repository that a package's copy was built inside stayed in the project's `.supercov` between runs, so a test runner started in the project, such as Vitest following its includes, could find and run the other packages' tests. It is removed when the run ends.
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
+
 ## 4.24.4
 
 **Fixed**
