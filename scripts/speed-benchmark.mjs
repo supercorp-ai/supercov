@@ -363,7 +363,38 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     {},
     true,
   ).stdout;
-  writeFileSync(join(output, 'bundles.txt'), bundles);
+  // And what the build was given: the project's sources against the copy's
+  // instrumented ones, and how much of the copy is inline source maps.
+  const sources = run(
+    project,
+    'python3',
+    ['-c', `
+import os, re, sys
+def walk(root):
+    total = maps = files = 0
+    for base, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ('node_modules', '.next', '.git', '.supercov')]
+        for name in names:
+            if not re.search(r'\\.(m?[jt]sx?|cjs)$', name):
+                continue
+            text = open(os.path.join(base, name), 'rb').read()
+            files += 1
+            total += len(text)
+            at = text.rfind(b'sourceMappingURL=data:')
+            if at >= 0:
+                maps += len(text) - at
+    return files, total, maps
+copy = next((os.path.join(b, d) for b, ds, _ in os.walk('.supercov/workspaces') for d in ds if d == 'web' and b.endswith('apps')), None)
+for label, root in (('project', '.'), ('copy', copy)):
+    if root:
+        files, total, maps = walk(root)
+        print(f'{label}: {files} files, {total/1e6:.1f} MB, inline maps {maps/1e6:.1f} MB')
+`],
+    'sources',
+    {},
+    true,
+  ).stdout;
+  writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}`);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   console.log(table);
 }
