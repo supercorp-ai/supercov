@@ -288,6 +288,12 @@ function activateProbeV2Context(context) {
   state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
 }
+// The context the async hook leaves to a callback's first probe: the
+// request's store, or else the one the environment carries.
+function resolveProbeV2Epoch() {
+  var _a8, _b;
+  return activateProbeV2Context((_b = (_a8 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a8 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
+}
 function withProbeV2Context(context, callback) {
   const previous = state.probeV2Clock.epoch;
   activateProbeV2Context(context);
@@ -308,10 +314,14 @@ function installProbeV2AsyncHook() {
       return;
     const epochs = [];
     createHook({
+      // NaN, which no epoch equals: the callback's first probe works out
+      // its context. Most callbacks a server or a test runner runs reach no
+      // instrumented code, and working it out here, for every one, read the
+      // environment twice and built a key each time: on a Next app's suite,
+      // more of the server's time than any of Supercov's other work.
       before() {
-        var _a9, _b;
         epochs.push(state.probeV2Clock.epoch);
-        activateProbeV2Context((_b = (_a9 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a9 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
+        state.probeV2Clock.epoch = NaN;
       },
       after() {
         var _a9;
@@ -1873,6 +1883,8 @@ function recordCoverageHit(id) {
     activateProbeV2Context(currentRequestContext());
     epoch = clock.epoch;
     clock.epoch = previousEpoch;
+  } else if (epoch !== epoch) {
+    epoch = resolveProbeV2Epoch();
   }
   if (!state.hitEpochs)
     state.hitEpochs = /* @__PURE__ */ new Map();
@@ -1960,6 +1972,8 @@ function recordCoverageHitV2(file, index) {
   const previousEpoch = file.clock.epoch;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
+  else if (previousEpoch !== previousEpoch)
+    resolveProbeV2Epoch();
   try {
     const epoch = file.clock.epoch;
     if (file.hitEpochs[index] === epoch)
@@ -2012,6 +2026,8 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   const previousEpoch = file.clock.epoch;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
+  else if (previousEpoch !== previousEpoch)
+    resolveProbeV2Epoch();
   try {
     const epoch = file.clock.epoch;
     const seen = file.decisionEpochs[decisionIndex];
