@@ -1,6 +1,8 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
+import fs, { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
+import { threadId } from "node:worker_threads";
+import { dirname, resolve, sep } from "node:path";
 import { Buffer } from "node:buffer";
 
 // In a container Supercov's `docker` launcher mounts the run's directory
@@ -145,4 +147,42 @@ export function appendEvidenceRecord(directory, prefix, payload) {
         : appendJsonLineSync;
     append(journal.path, line);
     journal.size += Buffer.byteLength(line);
+}
+
+// Playwright 1.59 writes each file it compiles into its cache in place and
+// reads it back unchecked: a process that read one while another wrote it
+// ran an empty module -- a config of no `default` failed at "Cannot add
+// property metadata, object is not extensible", a test file at "does not
+// provide an export named". The cache a run gives it starts empty and is
+// shared by every Playwright of the run, the containers a sealed suite execs
+// into among them, so every first compile raced; there each file is written
+// whole, or is not there yet and is compiled again. A file written beside the
+// cache's folders, not in one, is never taken for an old entry and removed.
+//
+// Playwright compiles in two threads: the config and CommonJS files in the
+// process's own, ES modules in the thread its loader hooks run in, which has
+// its own `fs` and does not run `--import`. Each calls this. The partial
+// file's name is unique to the write: a process ID repeats across containers
+// and both threads of one process count from zero.
+let cacheWritesWhole = false;
+export function writePlaywrightCacheWhole() {
+    const transformCache = process.env.PWTEST_CACHE_DIR;
+    if (!transformCache || cacheWritesWhole)
+        return;
+    cacheWritesWhole = true;
+    const cacheFolder = resolve(transformCache) + sep;
+    const writeFileSync = fs.writeFileSync;
+    fs.writeFileSync = function (file, ...rest) {
+        if (typeof file !== "string" || !resolve(file).startsWith(cacheFolder))
+            return writeFileSync.call(this, file, ...rest);
+        const partial = resolve(transformCache, `.writing-${process.pid}-${threadId}-${randomUUID()}`);
+        try {
+            writeFileSync.call(this, partial, ...rest);
+            fs.renameSync(partial, file);
+        }
+        finally {
+            fs.rmSync(partial, { force: true });
+        }
+    };
+    syncBuiltinESMExports();
 }

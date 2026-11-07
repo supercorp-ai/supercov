@@ -1,6 +1,10 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { writePlaywrightCacheWhole } from "./atomic.mjs";
+// This thread is where Playwright compiles ES modules and writes them into
+// its cache: written whole here too (atomic.mjs says why).
+writePlaywrightCacheWhole();
 const GENERATED_TARGET = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const TARGET = process.env.SUPERCOV_PLAYWRIGHT_MODULE ??
     (GENERATED_TARGET.startsWith("__") ? "@playwright/test" : GENERATED_TARGET);
