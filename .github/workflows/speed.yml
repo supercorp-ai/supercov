@@ -46,7 +46,7 @@ jobs:
 
   measure:
     needs: build
-    name: Measure ${{ matrix.app }}
+    name: Measure ${{ matrix.label }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
@@ -54,14 +54,23 @@ jobs:
       matrix:
         include:
           - app: bulletproof
+            label: bulletproof
             node: 22
             rounds: 3
             diagnose: 1
             binaries: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
-          # 170 Playwright tests on one worker: one round and the diagnostic
-          # pass. Against plain alone: a Supercov without f8f3d872 cannot build
-          # it (its instrumentation.ts guards Node-only imports with NEXT_RUNTIME).
+          # 170 Playwright tests on one worker, against plain alone: a Supercov
+          # without f8f3d872 cannot build it (its instrumentation.ts guards
+          # Node-only imports with NEXT_RUNTIME). Three rounds for the ratio
+          # on one runner, and the diagnostic pass on another beside it.
           - app: rallly
+            label: rallly
+            node: 24
+            rounds: 3
+            diagnose: 0
+            binaries: new=binaries/supercov-new/supercov
+          - app: rallly
+            label: rallly-diagnose
             node: 24
             rounds: 1
             diagnose: 1
@@ -108,7 +117,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: speed-${{ matrix.app }}
+          name: speed-${{ matrix.label }}
           path: |
             ${{ runner.temp }}/speed/samples.jsonl
             ${{ runner.temp }}/speed/summary.md

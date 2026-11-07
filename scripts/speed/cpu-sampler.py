@@ -54,7 +54,7 @@ def sample(first):
             used = (int(fields[11]) + int(fields[12])) / tick
             started = fields[19]
             with open(f'/proc/{pid}/cmdline') as handle:
-                cmd = ' '.join(handle.read().split('\0'))[:400]
+                cmd = ' '.join(handle.read().split('\0'))
         except Exception:
             continue
         key = (pid, started)
