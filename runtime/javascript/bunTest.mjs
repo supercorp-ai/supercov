@@ -5,6 +5,10 @@
 // existing API so both keep native test registration and execution semantics.
 import * as runtime from "./runtime.mjs";
 import { callerLocation, runnerExecutionScope, runnerTestId, writeRunnerEvidence } from "./runnerEvidence.mjs";
+import { adaptRunnerEntry } from "./runnerEntry.mjs";
+
+// Bun runs no Node preload: a runner it starts is adapted here.
+await adaptRunnerEntry(process.argv[1]?.replaceAll("\\", "/") ?? "");
 
 const adapted = new WeakSet();
 const nativeJest = Bun.jest;

@@ -68,6 +68,7 @@ const mappings = [
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
+    "runnerEntry.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
     "tap.mjs",

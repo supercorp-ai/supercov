@@ -77,6 +77,13 @@ Bun keeps its own formatted reporter titles. Async test bodies retain their
 identity across `await`, including concurrent execution. Lifecycle hooks have
 separate setup identities and do not credit their coverage to the test body.
 
+Bun can also run another test runner by its entry point, such as
+`bun node_modules/vitest/vitest.mjs run` or `bun node_modules/mocha/bin/mocha.js`.
+The Bun adapter sets that runner up as Node's preload would: Vitest gets
+Supercov's generated config, which merges the project's own (including one given
+by `--config`), and Mocha's runner is patched before it loads. Their tests are
+attributed as they are under Node.
+
 Callback completion supplies the recorded outcome. If Bun interrupts a callback
 before it completes, Supercov preserves its named coverage with an **unknown**
 outcome. Bun's final runner verdict can additionally reflect a timeout, hook

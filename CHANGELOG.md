@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Vitest or Mocha started by Bun from its entry point (`bun node_modules/vitest/vitest.mjs run`) passed and recorded no test: Bun loads no Node preload, so the runner was never set up, and all its coverage was counted as background while the run reported a complete measurement. The Bun adapter now sets these runners up as Node's preload does, so their tests are attributed under Bun as under Node ([#205](https://github.com/supercorp-ai/supercov/issues/205)).
+
 ## 4.24.6
 
 **Fixed**

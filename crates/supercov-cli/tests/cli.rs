@@ -4920,6 +4920,80 @@ fn bun_is_available() -> bool {
     available
 }
 
+/// A runner Bun starts by its entry point is adapted as Node's preload adapts
+/// it, though Bun loads no Node preload: Vitest takes the run's generated
+/// config, keeping the project's own for it to merge, and Mocha's Runner is
+/// patched before the CLI loads it. Bun-launched Vitest passed and recorded
+/// no test, every probe counted as background (#205). Stand-ins at each
+/// runner's entry point print what they were given.
+#[cfg(unix)]
+#[test]
+fn bun_launched_runners_are_adapted_as_node_ones_are() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = Project::empty("bun launched runners");
+    project.write("package.json", r#"{ "private": true, "type": "module" }"#);
+    project.write(
+        "src/pick.js",
+        "export function pick(flag) {\n  if (flag) return 'yes';\n  return 'no';\n}\n",
+    );
+    project.write("vitest.config.ts", "export default {};\n");
+    project.write(
+        "node_modules/vitest/vitest.mjs",
+        "console.log('VITEST ' + JSON.stringify({ argv: process.argv.slice(2), original: process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG }));\n",
+    );
+    project.write("node_modules/mocha/package.json", r#"{ "name": "mocha" }"#);
+    project.write(
+        "node_modules/mocha/lib/runner.js",
+        "class Runner { run() { return this; } }\nmodule.exports = Runner;\n",
+    );
+    project.write(
+        "node_modules/mocha/bin/mocha.js",
+        "const Runner = require('../lib/runner.js');\nconsole.log('MOCHA patched=' + Boolean(Runner.prototype.run.supercovMocha));\n",
+    );
+    project.write(".gitignore", "node_modules\n");
+    project.git(&["init", "-q"]);
+    project.commit("runners");
+    let vitest = project
+        .supercov(&[
+            "--",
+            "bun",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "vitest.config.ts",
+        ])
+        .succeeds();
+    let line = vitest
+        .lines()
+        .find_map(|line| line.strip_prefix("VITEST "))
+        .unwrap_or_else(|| panic!("{vitest}"));
+    let seen: serde_json::Value = serde_json::from_str(line).unwrap();
+    let argv = seen["argv"].as_array().unwrap();
+    assert_eq!(argv[0], "run", "{seen}");
+    assert_eq!(argv[1], "--config", "{seen}");
+    assert!(
+        argv[2]
+            .as_str()
+            .unwrap()
+            .ends_with(".supercov/vitest.config.mjs"),
+        "{seen}"
+    );
+    assert_eq!(argv.len(), 3, "{seen}");
+    assert!(
+        seen["original"]
+            .as_str()
+            .unwrap()
+            .ends_with("/vitest.config.ts"),
+        "{seen}"
+    );
+    let mocha = project
+        .supercov(&["--", "bun", "node_modules/mocha/bin/mocha.js"])
+        .succeeds();
+    assert!(mocha.contains("MOCHA patched=true"), "{mocha}");
+}
+
 /// A Bun test project: one source module, one `bun:test` file, and, where a
 /// browser suite is asked for, a Playwright config in the shape discovery
 /// finds. Bun ignores `NODE_OPTIONS`, so Supercov's preload never reaches it.
@@ -15303,7 +15377,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1746 => javascript_frontend.rs:1746",
+            "fs.read_to_string#javascript_frontend.rs:1747 => javascript_frontend.rs:1747",
         ],
     );
 }
@@ -17375,12 +17449,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:353",
-            "javascript_frontend.rs:353",
+            "fs.read#javascript_frontend.rs:354",
+            "javascript_frontend.rs:354",
         ),
         (
-            "fs.read#javascript_frontend.rs:365",
-            "javascript_frontend.rs:365",
+            "fs.read#javascript_frontend.rs:366",
+            "javascript_frontend.rs:366",
         ),
         ("fs.symlink_metadata#workspace.rs:1282", "workspace.rs:1282"),
     ] {
@@ -17410,12 +17484,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1876@2",
+            "fs.read_to_string#javascript_frontend.rs:1877@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1876"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1877"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 

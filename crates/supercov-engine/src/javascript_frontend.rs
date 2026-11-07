@@ -63,6 +63,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
+    "runnerEntry.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
     "tap.mjs",
@@ -2054,9 +2055,9 @@ mod tests {
             "fs.rename@34",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:467",
-            "javascript-source-path#javascript_frontend.rs:1758",
-            "javascript-source-path#javascript_frontend.rs:1874",
+            "javascript-source-path#javascript_frontend.rs:468",
+            "javascript-source-path#javascript_frontend.rs:1759",
+            "javascript-source-path#javascript_frontend.rs:1875",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2167,8 +2168,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:513",
-            "javascript-source-path#javascript_frontend.rs:467",
+            "fs.read_to_string#javascript_frontend.rs:514",
+            "javascript-source-path#javascript_frontend.rs:468",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
