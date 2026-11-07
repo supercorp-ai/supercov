@@ -4159,8 +4159,8 @@ mod tests {
         fs::remove_dir_all(top).ok();
         for fault in [
             "fs.read_dir#jvm_run.rs:1819",
-            "fs.read_dir#workspace.rs:2480",
-            "fs.symlink_metadata#workspace.rs:2365",
+            "fs.read_dir#workspace.rs:2472",
+            "fs.symlink_metadata#workspace.rs:2357",
         ] {
             let (top, _, workspace) = make(false, &beside);
             let failed = crate::fault::during(fault, || {

@@ -2085,6 +2085,103 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
+    /// The copy's `bunfig.toml` loads the Bun adapter before the preloads it
+    /// names -- at the top and under `[test]`, one path or a list, in any
+    /// directory -- and the project's follow in their order. The text as
+    /// written is kept as the authored copy, and the rewritten one comes
+    /// back from the cache. A config naming no preload, an empty list, a
+    /// preload that is no path, or text that is no TOML is left as it is.
+    #[test]
+    fn a_bun_config_in_the_copy_loads_the_adapter_before_its_own_preloads() {
+        let configs = [
+            (
+                "bunfig.toml",
+                "preload = \"./first.ts\"\n[test]\ntimeout = 5000\npreload = [\"./a.ts\", \"./b.ts\"]\n",
+            ),
+            ("pkg/bunfig.toml", "[test]\npreload = \"./only.ts\"\n"),
+            ("none/bunfig.toml", "[test]\ntimeout = 5000\n"),
+            ("empty/bunfig.toml", "[test]\npreload = []\n"),
+            ("number/bunfig.toml", "preload = 1\n"),
+            ("broken/bunfig.toml", "[test\npreload = \"./a.ts\"\n"),
+        ];
+        let fixture = || {
+            let (source_root, workspace, project) = frontend_fixture();
+            for (file, text) in configs {
+                let path = workspace.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, text).unwrap();
+            }
+            (source_root, workspace, project)
+        };
+        let (source_root, workspace, project) = fixture();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
+        fs::write(workspace.join("bunfig.toml"), configs[0].1).unwrap();
+        let cache = read_javascript_frontend_cache(&workspace, "cache").unwrap();
+        load_cached_javascript_frontend(&workspace, &cache).unwrap();
+        let adapter = workspace
+            .join(".supercov/node_modules/bunTest.mjs")
+            .to_string_lossy()
+            .into_owned();
+        let preloads = |file: &str, table: Option<&str>| {
+            let text = fs::read_to_string(workspace.join(file)).unwrap();
+            let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+            let item = table.map_or(document.as_item(), |table| &document[table]);
+            item["preload"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|path| path.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(preloads("bunfig.toml", None), [&adapter, "./first.ts"]);
+        assert_eq!(
+            preloads("bunfig.toml", Some("test")),
+            [&adapter, "./a.ts", "./b.ts"]
+        );
+        assert_eq!(
+            preloads("pkg/bunfig.toml", Some("test")),
+            [&adapter, "./only.ts"]
+        );
+        assert!(
+            fs::read_to_string(workspace.join("bunfig.toml"))
+                .unwrap()
+                .contains("timeout = 5000")
+        );
+        for (file, text) in &configs[..2] {
+            let authored = authored_path(&workspace, Path::new(file));
+            assert_eq!(fs::read_to_string(authored).unwrap(), *text, "{file}");
+        }
+        for (file, text) in &configs[2..] {
+            assert_eq!(fs::read_to_string(workspace.join(file)).unwrap(), *text);
+            assert!(
+                !authored_path(&workspace, Path::new(file)).exists(),
+                "{file}"
+            );
+        }
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+        // Each step of it failing stops the preparation: the configurations
+        // looked for, one read, its authored copy kept or the rewritten text
+        // published, and the list of rewritten files read for the cache.
+        for fault in [
+            "fs.read_dir#integrity.rs:508",
+            "fs.read_to_string#javascript_frontend.rs:517",
+            "javascript-source-path#javascript_frontend.rs:471",
+            "fs.rename@2",
+            "fs.read#javascript_frontend.rs:423",
+        ] {
+            let (source_root, workspace, project) = fixture();
+            let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
+            assert!(prepared.is_err(), "{fault}");
+            if fault == "fs.rename@2" {
+                let config = fs::read_to_string(workspace.join("bunfig.toml")).unwrap();
+                assert_eq!(config, configs[0].1);
+            }
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+        }
+    }
+
     #[test]
     fn a_source_that_cannot_be_published_keeps_its_authored_copy_and_stops_preparation() {
         let (source_root, workspace, project) = frontend_fixture();

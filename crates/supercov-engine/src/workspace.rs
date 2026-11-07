@@ -2262,30 +2262,22 @@ pub fn prune_cached_workspace_sources(
 /// followed the links and ran a monorepo's other apps' tests too. Best
 /// effort, as making it is.
 fn clear_around(workspace: &Path) {
-    let Some(copy) = copy_directory_of(workspace) else {
-        return;
-    };
-    let Ok(below) = workspace.strip_prefix(&copy) else {
-        return;
-    };
-    let path_down = below
+    let copy = copy_directory_of(workspace).expect("a workspace lies in its copy");
+    // The package's copy and each directory above it, short of the copy's.
+    let path_down = workspace
         .ancestors()
-        .map(|ancestor| copy.join(ancestor))
+        .take_while(|directory| *directory != copy)
         .collect::<Vec<_>>();
-    let between = path_down.len().saturating_sub(2);
-    for level in path_down.iter().skip(1).take(between) {
-        let Ok(entries) = fs::read_dir(level) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+    for level in path_down.iter().skip(1) {
+        for entry in fs::read_dir(level).into_iter().flatten().flatten() {
             let path = entry.path();
-            if path_down.contains(&path) {
+            if path_down.contains(&path.as_path()) {
                 continue;
             }
-            let _ = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(&path),
-                Ok(_) => fs::remove_file(&path).or_else(|_| fs::remove_dir(&path)),
-                Err(error) => Err(error),
+            let _ = if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))
             };
         }
     }
@@ -2683,18 +2675,18 @@ mod tests {
         assert!(!symlink(&copy.join("tree/scratch")));
         fs::remove_dir_all(top).unwrap();
         for fault in [
-            "fs.read_dir#workspace.rs:2480",
-            "fs.read_dir entry#workspace.rs:2480",
-            "fs.symlink_metadata#workspace.rs:2482",
-            "fs.canonicalize#workspace.rs:2485",
-            "fs.remove_file#workspace.rs:2489,fs.remove_dir#workspace.rs:2489",
-            "fs.write#workspace.rs:2401",
-            "fs.symlink_metadata#workspace.rs:2523",
-            "fs.read_link#workspace.rs:2525",
-            "fs.copy#workspace.rs:2530",
-            "fs.create_dir#workspace.rs:2533",
-            "fs.read_dir#workspace.rs:2534",
-            "fs.read_dir entry#workspace.rs:2534",
+            "fs.read_dir#workspace.rs:2472",
+            "fs.read_dir entry#workspace.rs:2472",
+            "fs.symlink_metadata#workspace.rs:2474",
+            "fs.canonicalize#workspace.rs:2477",
+            "fs.remove_file#workspace.rs:2481,fs.remove_dir#workspace.rs:2481",
+            "fs.write#workspace.rs:2393",
+            "fs.symlink_metadata#workspace.rs:2515",
+            "fs.read_link#workspace.rs:2517",
+            "fs.copy#workspace.rs:2522",
+            "fs.create_dir#workspace.rs:2525",
+            "fs.read_dir#workspace.rs:2526",
+            "fs.read_dir entry#workspace.rs:2526",
         ] {
             let (top, copy, workspace) = fresh("small-fault");
             let failed =
@@ -2703,8 +2695,8 @@ mod tests {
             fs::remove_dir_all(top).unwrap();
         }
         for fault in [
-            "fs.symlink_metadata#workspace.rs:2501",
-            "fs.read_dir#workspace.rs:2508",
+            "fs.symlink_metadata#workspace.rs:2493",
+            "fs.read_dir#workspace.rs:2500",
         ] {
             let (top, copy, workspace) = fresh("unsized");
             crate::fault::during(fault, || copy_small_links_around(&copy, &workspace, 1024))
@@ -2722,15 +2714,15 @@ mod tests {
         assert!(!symlink(&copy.join("tools/build")) && !file.exists());
         fs::remove_dir_all(top).unwrap();
         for fault in [
-            "fs.symlink_metadata#workspace.rs:2365",
-            "fs.canonicalize#workspace.rs:2369",
-            "fs.remove_file#workspace.rs:2370,fs.remove_dir#workspace.rs:2370",
-            "fs.create_dir#workspace.rs:2371",
-            "fs.write#workspace.rs:2401",
-            "fs.read_dir#workspace.rs:2375",
-            "fs.read_dir entry#workspace.rs:2375",
-            "fs.symlink=9,fs.copy#workspace.rs:2386",
-            "fs.remove_file#workspace.rs:2391",
+            "fs.symlink_metadata#workspace.rs:2357",
+            "fs.canonicalize#workspace.rs:2361",
+            "fs.remove_file#workspace.rs:2362,fs.remove_dir#workspace.rs:2362",
+            "fs.create_dir#workspace.rs:2363",
+            "fs.write#workspace.rs:2393",
+            "fs.read_dir#workspace.rs:2367",
+            "fs.read_dir entry#workspace.rs:2367",
+            "fs.symlink=9,fs.copy#workspace.rs:2378",
+            "fs.remove_file#workspace.rs:2383",
         ] {
             let (top, copy, _) = fresh("unfold-fault");
             let failed = crate::fault::during(fault, || {

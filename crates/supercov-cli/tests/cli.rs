@@ -504,6 +504,7 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
         "admin/test/admin.test.js",
         "import test from 'node:test';\ntest('admin', () => {});\n",
     );
+    repository.write("tsconfig.base.json", "{}\n");
     repository.commit("admin");
     let name = repository.root.file_name().unwrap();
     let around = project
@@ -516,6 +517,10 @@ fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
         assert!(
             std::fs::symlink_metadata(around.join("admin")).is_err(),
             "another package stayed beside the copy"
+        );
+        assert!(
+            std::fs::symlink_metadata(around.join("tsconfig.base.json")).is_err(),
+            "a file of the repository stayed beside the copy"
         );
     }
 }
