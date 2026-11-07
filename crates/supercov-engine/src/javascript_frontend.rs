@@ -2055,8 +2055,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:467",
-            "javascript-source-path#javascript_frontend.rs:1756",
-            "javascript-source-path#javascript_frontend.rs:1872",
+            "javascript-source-path#javascript_frontend.rs:1758",
+            "javascript-source-path#javascript_frontend.rs:1874",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));

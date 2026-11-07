@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Bun test could be recorded with no source file: Bun reported Supercov's wrapper around `test` as an `unknown` frame in front of the test's own, whether the test was registered directly or by `call`, `apply` or `bind`. Tests with the same title in different files then shared one identity, a file filter selected none, and `merge` collapsed them. Each keeps its file now ([#200](https://github.com/supercorp-ai/supercov/issues/200)).
+- A Vitest run of a package whose Vitest and Vite are installed only in that package, not at the repository root, failed loading Supercov's generated config because it looked for Vite from the copy's `.supercov`. It looks from the runner and the project's own config first, through Vitest's own dependencies under pnpm's strict layout, and an error Vite itself raises while loading is no longer hidden by trying another copy ([#199](https://github.com/supercorp-ai/supercov/issues/199)).
+
 ## 4.24.5
 
 **Fixed**
@@ -15,7 +22,6 @@
 
 **Fixed**
 
-- Bun tests now keep their source files through proxied registration APIs, including `call`, `apply` and `bind`. Tests with the same title in different files no longer share an identity or collapse in a merge.
 - `merge` refused a unit run and an end-to-end run of the same commit for different denominators when a file had a type-only import (`import { type T }`): whether that import counted as a line depended on the test command, so `node --import tsx` dropped it and Vitest kept it. The file's nearest tsconfig alone decides now (`verbatimModuleSyntax`, `preserveValueImports`, `importsNotUsedAsValues`, `emitDecoratorMetadata`), as tsc, esbuild, swc, Babel and ts-node do, so every command counts it alike.
 - A Playwright suite with many Vitest files beside it could have Vitest taken for its test fixture module, and every Playwright test then crashed with `Cannot redefine property: Symbol($$jest-matchers-object)`. Another runner's own API (`vitest`, `@jest/globals`, `bun:test`, `node:test`, `mocha` and the like) is never taken for the fixture.
 - A run whose test harness started the build from its own code (`execSync('npm run build')`) and whose build failed was told to add `npm run build` to the command. The run now names the build it saw start and its exit code, and gives no such hint.
