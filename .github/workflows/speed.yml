@@ -123,7 +123,7 @@ jobs:
             ${{ runner.temp }}/speed/summary.md
             ${{ runner.temp }}/speed/report-*.json
             ${{ runner.temp }}/speed/bundles.txt
-            ${{ runner.temp }}/speed/leave-out.md
+            ${{ runner.temp }}/speed/samples/
             ${{ runner.temp }}/speed/profile.md
             ${{ runner.temp }}/speed/profile-top-*.txt
             ${{ runner.temp }}/speed/profile-processes-*.txt

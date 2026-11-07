@@ -307,24 +307,6 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     reset(`diagnose-${name}-${suite.name}`);
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
   }
-  // TEMPORARY: the measured e2e suite with each part of an action's
-  // activation left out (SUPERCOV_SPEED_LEAVE_OUT), for what each costs. The
-  // evidence of these runs is wrong; only their times are read.
-  const e2e = suites.find((suite) => suite.name === 'e2e');
-  if (e2e) {
-    const leftOut = ['| Left out | E2e s | E2e mean test s | Failed |', '|---|---|---|---|'];
-    for (const part of ['cookies', 'frames', 'activation']) {
-      rmSync(join(project, '.supercov'), { recursive: true, force: true });
-      rmSync(join(project, '.next'), { recursive: true, force: true });
-      reset(`leave-out-${part}`);
-      const report = join(output, `report-leave-out-${part}.json`);
-      const { seconds } = run(project, path, ['--', ...e2e.command], `leave-out-${part}`, { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_SPEED_LEAVE_OUT: part }, true);
-      const times = existsSync(report) ? flowTimes(report) : {};
-      leftOut.push(`| ${part} | ${seconds.toFixed(2)} | ${(times.testSeconds ?? 0).toFixed(3)} | ${times.failed ?? '?'} |`);
-    }
-    writeFileSync(join(output, 'leave-out.md'), `${leftOut.join('\n')}\n`);
-    console.log(leftOut.join('\n'));
-  }
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
   // A pool that ends its workers with a signal leaves them no profile to
@@ -407,7 +389,28 @@ for label, root in (('project', '.'), ('copy', copy)):
     if root:
         files, total, maps = walk(root)
         print(f'{label}: {files} files, {total/1e6:.1f} MB, inline maps {maps/1e6:.1f} MB')
-`],
+# Three source files as the build was given them, beside their originals:
+# the largest component, and a page and a server module of middling size.
+import shutil
+if copy:
+    picked = []
+    for pattern in (r'components/.*\\.tsx$', r'app/.*page\\.tsx$', r'(server|lib)/.*\\.ts$'):
+        found = []
+        for base, dirs, names in os.walk('src'):
+            for name in names:
+                path = os.path.join(base, name)
+                if re.search(pattern, path):
+                    found.append((os.path.getsize(path), path))
+        found.sort()
+        if found:
+            picked.append(found[-1][1] if pattern.startswith('components') else found[len(found) // 2][1])
+    out = sys.argv[1]
+    os.makedirs(out, exist_ok=True)
+    for index, path in enumerate(picked):
+        shutil.copy(path, os.path.join(out, f'{index}-original-{os.path.basename(path)}'))
+        shutil.copy(os.path.join(copy, path), os.path.join(out, f'{index}-instrumented-{os.path.basename(path)}'))
+        print('sample', path)
+`, join(output, 'samples')],
     'sources',
     {},
     true,
