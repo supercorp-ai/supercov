@@ -15272,13 +15272,13 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.copy@1",
             "fs.read_dir@36 => workspace.rs:1156",
             "fs.read_dir@37 => workspace.rs:706",
-            "fs.read_dir@48 => workspace.rs:1356",
+            "fs.read_dir@51 => workspace.rs:1356",
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
             "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1678 => javascript_frontend.rs:1678",
+            "fs.read_to_string#javascript_frontend.rs:1747 => javascript_frontend.rs:1747",
         ],
     );
 }
@@ -16615,9 +16615,9 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
 #[test]
 fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
-        ("fs.read_dir@51", "workspaces"),
-        ("fs.read_dir@52", "/out"),
-        ("fs.read@65", "workspaces"),
+        ("fs.read_dir@54", "workspaces"),
+        ("fs.read_dir@55", "/out"),
+        ("fs.read@66", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
@@ -17385,12 +17385,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1807@2",
+            "fs.read_to_string#javascript_frontend.rs:1877@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1807"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1877"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
