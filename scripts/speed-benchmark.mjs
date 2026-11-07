@@ -307,6 +307,18 @@ if (process.env.SPEED_DIAGNOSE === '1') {
     reset(`diagnose-${name}-${suite.name}`);
     run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
   }
+  // Supercov's own work, natively profiled: the merge of the two runs just
+  // made, which publishes the merged run.
+  if (process.env.SPEED_SAMPLY) {
+    run(
+      project,
+      process.env.SPEED_SAMPLY,
+      ['record', '--save-only', '--unstable-presymbolicate', '-o', join(output, 'samply-merge.json.gz'), '--', path, 'merge'],
+      'samply-merge',
+      {},
+      true,
+    );
+  }
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
   // A pool that ends its workers with a signal leaves them no profile to
