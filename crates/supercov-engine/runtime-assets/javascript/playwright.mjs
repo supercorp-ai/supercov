@@ -713,9 +713,18 @@ class CoveragePhaseController {
         await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id, phase.id));
         return phase;
     }
-    beginAssertion(operation, source = callerSource()) {
+    beginAssertion(operation, source = callerSource(), reachesBrowser = true) {
         timingCount("beginAssertion");
         const phase = this.createPhase("assertion", operation, this.lastActionId, source);
+        // An assertion that is over before any message could reach the
+        // browser (`expect(value).toBe(1)`) gets no browser phase: telling the
+        // page and the app's cookies afterwards labelled what the page did
+        // next, the last action's work, as this assertion's, and queued two
+        // calls ahead of the test's next action.
+        if (!reachesBrowser) {
+            timingCount("assertion.offBrowser");
+            return phase;
+        }
         this.activePhaseId = phase.id;
         // Playwright queues browser protocol commands in order. Starting this
         // evaluation before an async locator assertion is sufficient to tag its
@@ -1463,7 +1472,45 @@ function installChildProcessScopePropagation() {
     syncBuiltinESMExports();
 }
 installChildProcessScopePropagation();
-function wrapMatchers(matchers, path = "expect") {
+// expect's own matchers that settle in the call, whatever they are given, on
+// a value that is no Playwright object: none of them can wait for the page.
+// Under `expect.poll`, `.resolves` or `.rejects` the same names wait.
+const SETTLED_MATCHERS = new Set([
+    "toBe",
+    "toBeCloseTo",
+    "toBeDefined",
+    "toBeFalsy",
+    "toBeGreaterThan",
+    "toBeGreaterThanOrEqual",
+    "toBeInstanceOf",
+    "toBeLessThan",
+    "toBeLessThanOrEqual",
+    "toBeNaN",
+    "toBeNull",
+    "toBeTruthy",
+    "toBeUndefined",
+    "toContain",
+    "toContainEqual",
+    "toEqual",
+    "toHaveLength",
+    "toHaveProperty",
+    "toMatch",
+    "toMatchObject",
+    "toStrictEqual",
+]);
+const PLAYWRIGHT_VALUE_TYPES = new Set(["APIResponse", "ElementHandle", "Frame", "FrameLocator", "JSHandle", "Locator", "Page"]);
+function isPlaywrightValue(value) {
+    if (!value || (typeof value !== "object" && typeof value !== "function"))
+        return false;
+    try {
+        return "_guid" in value || "_frame" in value || "_selector" in value ||
+            PLAYWRIGHT_VALUE_TYPES.has(value.constructor?.name);
+    }
+    catch {
+        return true;
+    }
+}
+function wrapMatchers(matchers, path = "expect", settles = false) {
     return new Proxy(matchers, {
         get(target, property) {
             // Matcher objects and built-ins can expose getters whose internal slots
@@ -1474,13 +1521,13 @@ function wrapMatchers(matchers, path = "expect") {
             if (value &&
                 typeof value === "object" &&
                 (name === "not" || name === "resolves" || name === "rejects"))
-                return wrapMatchers(value, `${path}.${name}`);
+                return wrapMatchers(value, `${path}.${name}`, settles && name === "not");
             if (typeof value !== "function")
                 return value;
             return (...args) => {
                 const controller = activeController;
                 const phase = bridgedAssertionDepth === 0
-                    ? controller?.beginAssertion(`${path}.${name}`)
+                    ? controller?.beginAssertion(`${path}.${name}`, undefined, !(settles && SETTLED_MATCHERS.has(name)))
                     : undefined;
                 try {
                     const result = Reflect.apply(value, target, args);
@@ -1508,21 +1555,21 @@ function wrapMatchers(matchers, path = "expect") {
         },
     });
 }
-function wrapExpectCallable(callable) {
+function wrapExpectCallable(callable, polls = false) {
     return new Proxy(callable, {
         apply(target, thisArg, argumentsList) {
             const result = Reflect.apply(target, thisArg, argumentsList);
             if (typeof result === "function")
-                return wrapExpectCallable(result);
+                return wrapExpectCallable(result, polls);
             if (result && typeof result === "object")
-                return wrapMatchers(result);
+                return wrapMatchers(result, "expect", !polls && !isPlaywrightValue(argumentsList[0]));
             return result;
         },
         get(target, property, receiver) {
             const value = Reflect.get(target, property, receiver);
             if (typeof value !== "function")
                 return value;
-            return wrapExpectCallable(value.bind(target));
+            return wrapExpectCallable(value.bind(target), polls || property === "poll");
         },
     });
 }
