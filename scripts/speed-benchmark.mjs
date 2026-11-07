@@ -245,6 +245,10 @@ function keepTraces(label) {
 
 function suiteRun(round, variant, suite, binary) {
   reset(`${round}-${variant}-${suite.name}`);
+  // Every run builds from nothing, as on a fresh CI checkout: Supercov's copy
+  // never has the project's build, and a plain run after the first found the
+  // one the run before it left and built warm.
+  rmSync(join(project, '.next'), { recursive: true, force: true });
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
   // Supercov's copy is kept, for the traces of the tests that failed in it.
   const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
