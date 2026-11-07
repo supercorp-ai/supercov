@@ -36,7 +36,10 @@ def kind(comm, cmd):
             return 'node playwright'
         if 'vitest' in cmd:
             return 'node vitest'
-        return 'node other'
+        # Which script, by the last two parts of its path.
+        args = [part for part in cmd.split(' ')[1:] if part and not part.startswith('-')]
+        script = '/'.join(args[0].split('/')[-2:]) if args else '?'
+        return f'node other {script}'
     if comm.startswith('supercov'):
         return 'supercov'
     return f'other {comm}'
@@ -70,10 +73,11 @@ while True:
     totals = {}
     for what, used in seen.values():
         totals[what] = round(totals.get(what, 0) + used, 2)
-    # Other processes by name, the five busiest; the rest as one.
-    others = sorted((what for what in totals if what.startswith('other ')), key=lambda what: -totals[what])
-    for what in others[5:]:
-        totals['other rest'] = round(totals.get('other rest', 0) + totals.pop(what), 2)
+    # Other processes by name, the five busiest of each; the rest as one.
+    for prefix in ('other ', 'node other '):
+        others = sorted((what for what in totals if what.startswith(prefix) and not what.endswith(' rest')), key=lambda what: -totals[what])
+        for what in others[5:]:
+            totals[prefix + 'rest'] = round(totals.get(prefix + 'rest', 0) + totals.pop(what), 2)
     with open(out + '.tmp', 'w') as handle:
         json.dump(totals, handle)
     os.replace(out + '.tmp', out)
