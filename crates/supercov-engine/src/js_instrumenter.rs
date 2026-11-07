@@ -836,6 +836,58 @@ fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Progra
     program.body = separated;
 }
 
+/// Every name a program reads.
+struct ReferencedNames(HashSet<String>);
+
+impl<'a> Visit<'a> for ReferencedNames {
+    fn visit_identifier_reference(&mut self, reference: &oxc_ast::ast::IdentifierReference<'a>) {
+        self.0.insert(reference.name.to_string());
+    }
+}
+
+/// Bind only the runtime helpers the instrumented program calls. Every file
+/// bound all twenty of them, each with its type where TypeScript reads it:
+/// some 4 KB a file before its first line, which every bundler, transpiler
+/// and test runner then parsed. The locals are the file's own unique names,
+/// so one no reference reads is never called.
+fn prune_unused_runtime_helpers(program: &mut Program<'_>, locals: &[String]) {
+    let mut referenced = ReferencedNames(HashSet::new());
+    referenced.visit_program(program);
+    let unused =
+        |name: &str| locals.iter().any(|local| local == name) && !referenced.0.contains(name);
+    for statement in program.body.iter_mut() {
+        match statement {
+            Statement::VariableDeclaration(declaration)
+                if declaration.declarations.iter().all(|declarator| {
+                    declarator
+                        .id
+                        .get_binding_identifier()
+                        .is_some_and(|binding| {
+                            locals.iter().any(|local| local == binding.name.as_str())
+                        })
+                }) =>
+            {
+                declaration.declarations.retain(|declarator| {
+                    declarator
+                        .id
+                        .get_binding_identifier()
+                        .is_none_or(|binding| !unused(binding.name.as_str()))
+                });
+                return;
+            }
+            Statement::ImportDeclaration(import)
+                if import.source.value == "virtual:supercov-runtime" =>
+            {
+                if let Some(specifiers) = import.specifiers.as_mut() {
+                    specifiers.retain(|specifier| !unused(specifier.local().name.as_str()));
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn mark_generated_statements<'a>(ast: AstBuilder<'a>, program: &mut Program<'a>) {
     let Some(span) = generated_statement_span(program.source_text) else {
         return;
@@ -4148,10 +4200,11 @@ fn instrument_candidate_with_binding(
     let coverage_hit = names.allocate("__supercovCoverageHit");
     let register_probe_v2 = names.allocate("__supercovRegisterProbeV2");
     let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
-    let coverage_hit_v2 = names.allocate("__supercovCoverageHitV2");
-    let probe_file_v2 = names.allocate("__supercovProbeFileV2");
-    let probe_clock_v2 = names.allocate("__supercovProbeClockV2");
-    let probe_hits_v2 = names.allocate("__supercovProbeHitsV2");
+    // Short: these four are in every statement probe of the file.
+    let coverage_hit_v2 = names.allocate("__supercovHit");
+    let probe_file_v2 = names.allocate("__supercovFile");
+    let probe_clock_v2 = names.allocate("__supercovClock");
+    let probe_hits_v2 = names.allocate("__supercovHits");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -4534,6 +4587,10 @@ fn instrument_candidate_with_binding(
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
+    let runtime_locals = runtime_imports
+        .iter()
+        .map(|(_, local)| (*local).clone())
+        .collect::<Vec<_>>();
     if runtime_binding == RuntimeBinding::DirectGlobal || parsed.program.source_type.is_script() {
         // Read off an untyped global, every helper is `any` to TypeScript,
         // whatever the runtime's declarations say, and so is each value that
@@ -4618,6 +4675,7 @@ fn instrument_candidate_with_binding(
         ast: AstBuilder::new(&allocator),
     }
     .visit_program(&mut parsed.program);
+    prune_unused_runtime_helpers(&mut parsed.program, &runtime_locals);
     let (code, map) =
         generate_candidate(&parsed.program, file, &safety.source_sensitive_functions)?;
     Ok(CandidateOutput {
