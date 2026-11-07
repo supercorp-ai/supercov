@@ -836,12 +836,15 @@ fn separate_top_level_declarations<'a>(ast: AstBuilder<'a>, program: &mut Progra
     program.body = separated;
 }
 
-/// Every name a program reads.
-struct ReferencedNames(HashSet<String>);
+/// Every one of Supercov's own names a program reads.
+struct ReferencedNames<'a>(HashSet<&'a str>);
 
-impl<'a> Visit<'a> for ReferencedNames {
+impl<'a> Visit<'a> for ReferencedNames<'a> {
     fn visit_identifier_reference(&mut self, reference: &oxc_ast::ast::IdentifierReference<'a>) {
-        self.0.insert(reference.name.to_string());
+        let name = reference.name.as_str();
+        if name.starts_with("__supercov") {
+            self.0.insert(name);
+        }
     }
 }
 
@@ -850,7 +853,7 @@ impl<'a> Visit<'a> for ReferencedNames {
 /// some 4 KB a file before its first line, which every bundler, transpiler
 /// and test runner then parsed. The locals are the file's own unique names,
 /// so one no reference reads is never called. `anchor` is kept.
-fn prune_unused_runtime_helpers(program: &mut Program<'_>, locals: &[String], anchor: &str) {
+fn prune_unused_runtime_helpers<'a>(program: &mut Program<'a>, locals: &[String], anchor: &str) {
     let mut referenced = ReferencedNames(HashSet::new());
     referenced.visit_program(program);
     let unused = |name: &str| {
