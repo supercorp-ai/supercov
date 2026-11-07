@@ -2042,7 +2042,7 @@ mod tests {
             "fs.read@2",
             "fs.read@3",
             "fs.read@5",
-            "fs.read@38",
+            "fs.read@39",
             // Read back to adapt: Playwright's runtime, the loader, a source.
             "fs.read_to_string@1",
             "fs.read_to_string@2",
@@ -2051,8 +2051,8 @@ mod tests {
             "fs.open_with@1",
             "fs.write_all@1",
             "fs.rename@1",
-            "fs.rename@33",
             "fs.rename@34",
+            "fs.rename@35",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:468",
