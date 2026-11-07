@@ -562,6 +562,7 @@ class CoveragePhaseController {
                 if (!controller || controller.runtimeSnapshots)
                     return;
                 try {
+                    timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
                     controller.leftSnapshots.push(JSON.parse(payload));
                 }
                 catch {
@@ -1015,9 +1016,19 @@ class CoveragePhaseController {
         });
         // Every host's cookies in one call: a call per host, each its own
         // round trip through Playwright, was most of what an action waited
-        // for. A cookie the browser refuses fails the whole call, so then
-        // each host is given its own and one refused leaves the others theirs.
-        await context.addCookies(byHost.flat()).catch(() => {
+        // for. A cookie is kept per host, for every port of it: hosts that
+        // differ only by port gave the same cookies twice, and each goes once.
+        // A cookie the browser refuses fails the whole call, so then each host
+        // is given its own and one refused leaves the others theirs.
+        const distinct = new Map();
+        for (const cookie of byHost.flat()) {
+            const target = cookie.url ? new URL(cookie.url) : undefined;
+            const where = target ? `${target.protocol}//${target.hostname}${target.pathname}` : `${cookie.domain}${cookie.path}`;
+            const key = JSON.stringify([cookie.name, cookie.value, where, cookie.sameSite, cookie.secure ?? false]);
+            if (!distinct.has(key))
+                distinct.set(key, cookie);
+        }
+        await context.addCookies([...distinct.values()]).catch(() => {
             timingCount("activate.cookiesRefused");
             return Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => timingCount("activate.hostCookiesRefused"))));
         });
@@ -1060,7 +1071,13 @@ function readSnapshot(target) {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
         return getSnapshot ? JSON.stringify(getSnapshot()) : undefined;
     })
-        .then((text) => (typeof text === "string" ? JSON.parse(text) : undefined));
+        .then((text) => {
+        if (typeof text !== "string")
+            return undefined;
+        // Phase timing counts the bytes each read carried, as its "ms".
+        timingCount("transfer.snapshotBytes", text.length);
+        return JSON.parse(text);
+    });
 }
 let activeController;
 let bridgedAssertionDepth = 0;
