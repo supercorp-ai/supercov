@@ -998,14 +998,23 @@ if (typeof Module.registerHooks === "function") {
     hooks.initialize(loaderData);
     Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
     // Playwright compiles ES modules in the hooks thread its own loader
-    // starts, which these hooks no longer reach: the cache patch is sent there
-    // by itself, in Playwright's runner and workers alone. Supercov names the
-    // cache for every run, and a module registered off the thread in any
-    // other process -- a Vitest worker -- started that thread for it and sent
-    // every import through it.
-    if (process.env.PWTEST_CACHE_DIR &&
-        (isPlaywrightEntrypoint || /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint)))
-        register(new URL("./playwrightCacheThread.mjs", import.meta.url));
+    // starts, which these hooks no longer reach: the cache patch goes to that
+    // thread by itself, ahead of the first module anyone registers off this
+    // one, which is what starts it. Supercov names the cache for every run,
+    // and registering it unasked started the thread in every Node process --
+    // a Vitest worker -- and sent each of its imports through it.
+    if (process.env.PWTEST_CACHE_DIR) {
+        const registerOffThread = Module.register;
+        let cacheThreadRegistered = false;
+        Module.register = function (...args) {
+            if (!cacheThreadRegistered) {
+                cacheThreadRegistered = true;
+                registerOffThread.call(this, new URL("./playwrightCacheThread.mjs", import.meta.url));
+            }
+            return registerOffThread.apply(this, args);
+        };
+        syncBuiltinESMExports();
+    }
 }
 else {
     register(new URL("./resolve-loader.mjs", import.meta.url), { data: loaderData });
