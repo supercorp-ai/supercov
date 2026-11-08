@@ -999,8 +999,12 @@ if (typeof Module.registerHooks === "function") {
     Module.registerHooks({ resolve: hooks.resolveSync, load: hooks.loadSync });
     // Playwright compiles ES modules in the hooks thread its own loader
     // starts, which these hooks no longer reach: the cache patch is sent there
-    // by itself, where a cache it must keep whole is named.
-    if (process.env.PWTEST_CACHE_DIR)
+    // by itself, in Playwright's runner and workers alone. Supercov names the
+    // cache for every run, and a module registered off the thread in any
+    // other process -- a Vitest worker -- started that thread for it and sent
+    // every import through it.
+    if (process.env.PWTEST_CACHE_DIR &&
+        (isPlaywrightEntrypoint || /\/node_modules\/(?:@playwright\/test|playwright)\//.test(entrypoint)))
         register(new URL("./playwrightCacheThread.mjs", import.meta.url));
 }
 else {
