@@ -261,7 +261,7 @@ function activateProbeV2Key(key, force = false) {
         file.decisionObservationCounts.fill(0);
         file.decisionCompleteEpochs.fill(0);
         for (const vectors of file.decisionEpochs) {
-          if (vectors instanceof Uint32Array)
+          if (vectors.size === void 0)
             vectors.fill(0);
           else
             vectors.clear();
@@ -2021,6 +2021,10 @@ function registerProbeV2(definition) {
     pointIds,
     clock: state.probeV2Clock,
     hitEpochs: new Uint32Array(pointIds.length),
+    // A narrow decision's vectors in an array, a wide one's in a Map, told
+    // apart by `size`, which only the Map has: `instanceof Uint32Array` read
+    // the global on every evaluation, and under Vitest's jsdom environment
+    // each read is a getter call, most of a canvas app's measured unit time.
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
     decisionVectorCounts: decisions.map((_, index) => {
       var _a9, _b2;
@@ -2109,7 +2113,7 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
   const clock = file.clock;
   if (clock.fast) {
     const seen = file.decisionEpochs[decisionIndex];
-    if (seen instanceof Uint32Array && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
+    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
       return value;
   }
   return recordMcdcEndV2(file, decisionIndex, encoded, value);
@@ -2134,7 +2138,7 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
     const seen = file.decisionEpochs[decisionIndex];
     if (!seen)
       return value;
-    if (seen instanceof Uint32Array) {
+    if (seen.size === void 0) {
       if (seen[vectorIndex] === epoch)
         return value;
       seen[vectorIndex] = epoch;
