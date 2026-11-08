@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -1721,42 +1721,6 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * thousands of them were most of a test's record. The engine decodes the
  * columns into exactly these events, in this order.
  */
-function columnarEvents(snapshot) {
-    const events = snapshot?.events;
-    if (!Array.isArray(events) || events.length === 0)
-        return snapshot;
-    const tables = { types: new Map(), phases: new Map(), environments: new Map() };
-    const index = (table, value) => {
-        let found = table.get(value);
-        if (found === undefined) {
-            found = table.size;
-            table.set(value, found);
-        }
-        return found;
-    };
-    const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
-    let previous = 0;
-    events.forEach((event, position) => {
-        columns.id.push(event.id);
-        columns.type.push(index(tables.types, event.type));
-        columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
-        columns.environment.push(index(tables.environments, event.environment));
-        columns.t.push(event.timestampMs - previous);
-        previous = event.timestampMs;
-        if (event.vector !== undefined)
-            columns.vector[position] = event.vector;
-    });
-    const { events: _events, ...rest } = snapshot;
-    return {
-        ...rest,
-        eventColumns: {
-            types: [...tables.types.keys()],
-            phases: [...tables.phases.keys()],
-            environments: [...tables.environments.keys()],
-            ...columns,
-        },
-    };
-}
 function appendEvidenceLine(serialized) {
     const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
         (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")

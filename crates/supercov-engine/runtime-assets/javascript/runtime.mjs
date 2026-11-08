@@ -1171,24 +1171,10 @@ function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
-    if (record.type === "decision") {
-      recordBrowserEvent(__spreadProps(__spreadValues({
-        type: "decision",
-        id: record.id,
-        vector: record.vector,
-        timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
-        environment: "server"
-      }));
-    } else {
-      recordBrowserEvent(__spreadProps(__spreadValues({
-        type: "hit",
-        id: record.id,
-        timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
-        environment: "server"
-      }));
-    }
+    if (record.type === "decision")
+      recordBrowserEvent(decisionEvent(record.id, record.vector, timestampMs, record.phaseId, "server"));
+    else
+      recordBrowserEvent(hitEvent(record.id, timestampMs, record.phaseId, "server"));
     return;
   }
   const fs = getFs();
@@ -1988,21 +1974,20 @@ function recordCoverageHit(id) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
-      type: "hit",
-      id,
-      timestampMs
-    }, phaseId ? { phaseId } : {}), {
-      environment: "browser"
-    })))
+    if (recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "browser")))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
-      type: "hit",
-      id,
-      timestampMs
-    }, phaseId ? { phaseId } : {}));
+    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
   }
+}
+// A first hit's event, built as one literal in the order the spread helpers
+// gave its keys: they walked every key of three objects for each first hit
+// of every statement in every test.
+function hitEvent(id, timestampMs, phaseId, environment) {
+  return phaseId ? { type: "hit", id, timestampMs, phaseId, environment } : { type: "hit", id, timestampMs, environment };
+}
+function decisionEvent(id, vector, timestampMs, phaseId, environment) {
+  return phaseId ? { type: "decision", id, vector, timestampMs, phaseId, environment } : { type: "decision", id, vector, timestampMs, environment };
 }
 // A file's ids, as the instrumenter writes them: one string of ids separated
 // by spaces, or a list where an id holds one.
@@ -2471,22 +2456,10 @@ function mcdcEnd(frame, value) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
-      type: "decision",
-      id: decision.id,
-      vector,
-      timestampMs
-    }, phaseId ? { phaseId } : {}), {
-      environment: "browser"
-    })))
+    if (recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "browser")))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
-      type: "decision",
-      id: decision.id,
-      vector,
-      timestampMs
-    }, phaseId ? { phaseId } : {}));
+    appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
   return value;
 }
