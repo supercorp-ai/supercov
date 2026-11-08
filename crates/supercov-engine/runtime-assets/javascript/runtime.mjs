@@ -2003,24 +2003,31 @@ function recordCoverageHit(id) {
     }, phaseId ? { phaseId } : {}));
   }
 }
+// A file's ids, as the instrumenter writes them: one string of ids separated
+// by spaces, or a list where an id holds one.
+function listedIds(ids) {
+  return typeof ids === "string" ? ids === "" ? [] : ids.split(" ") : ids;
+}
 function registerProbeV2(definition) {
   var _a8, _b;
+  const decisions = listedIds(definition.decisions);
+  const pointIds = listedIds(definition.pointIds);
   const file = {
     // Each decision's id and its number of conditions: the module carries
     // no source text, which the manifest holds.
-    decisions: definition.decisions,
+    decisions,
     decisionWidths: definition.decisionWidths,
-    pointIds: definition.pointIds,
+    pointIds,
     clock: state.probeV2Clock,
-    hitEpochs: new Uint32Array(definition.pointIds.length),
+    hitEpochs: new Uint32Array(pointIds.length),
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
-    decisionVectorCounts: definition.decisions.map((_, index) => {
+    decisionVectorCounts: decisions.map((_, index) => {
       var _a9, _b2;
       return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
     }),
-    decisionObservationEpochs: new Uint32Array(definition.decisions.length),
-    decisionObservationCounts: new Uint16Array(definition.decisions.length),
-    decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+    decisionObservationEpochs: new Uint32Array(decisions.length),
+    decisionObservationCounts: new Uint16Array(decisions.length),
+    decisionCompleteEpochs: new Uint32Array(decisions.length),
     pendingDefaults: new Uint32Array(definition.defaultCount || 0),
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.

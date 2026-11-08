@@ -4511,10 +4511,26 @@ fn instrument_candidate_with_binding(
     // a route's server-only `loader` and `action` keeps it. With the text it
     // carried their conditions (`process.env.QSTASH_RETRIES`) into browser
     // chunks.
+    // The ids as one string, space-separated, which the runtime splits: a
+    // list of hundreds of quoted ids, one a line, was the largest part of a
+    // component's registration for every bundler and runner to parse. Any id
+    // with a space in it, or none at all, keeps the list.
+    let ids = |ids: Vec<&String>| {
+        if ids.iter().any(|id| id.is_empty() || id.contains(' ')) {
+            serde_json::json!(ids)
+        } else {
+            serde_json::Value::String(
+                ids.iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+    };
     let registration = serde_json::json!({
-        "decisions": collector.decisions.iter().map(|decision| &decision.id).collect::<Vec<_>>(),
+        "decisions": ids(collector.decisions.iter().map(|decision| &decision.id).collect()),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "pointIds": point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect::<Vec<_>>(),
+        "pointIds": ids(point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect()),
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
