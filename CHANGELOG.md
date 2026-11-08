@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.25.0
+
+**Changed**
+
+- Measured runs of Next.js apps with Playwright and Vitest are faster. On a Next.js app's Vitest suite and Playwright flow, a measured run takes 1.04× the plain run, against 1.15× with 4.24.8. On a larger Next.js 16 app on Turbopack (1,100 Vitest tests and 170 Playwright tests on one worker), a measured run takes 1.15× the plain run; 4.24.8 could not build it (see Fixed). Measured in GitHub Actions on 4-CPU runners, three rounds each, every run building the app from nothing.
+- Supercov's own calls into Playwright no longer appear among a test's steps in its report.
+- An assertion that is over within its call, such as `expect(value).toBe(1)` on a value the test already holds (outside `expect.poll`, `.resolves` and `.rejects`), no longer becomes the page's current phase: what the page does after it stays with the action before it. An assertion whose arguments or matcher reach the page still gives the page its phase first.
+- On Node 22.15 and 23.5 or later, Supercov's module hooks run in the importing thread rather than a thread of their own, and on Node 22.14 or later its `--enable-source-maps` maps the project's files only, unless the command asks for source maps itself.
+
+**Fixed**
+
+- A Next.js app whose `instrumentation.ts` imports Node-only modules inside `if (process.env.NEXT_RUNTIME === "nodejs")` failed its measured Turbopack build with those modules in the Edge bundle. That comparison is now left for Next to decide.
+- `import test from "@playwright/test"` failed under Supercov with `(0 , _test.default) is not a function`.
+- Tailwind CSS v4 found no sources in Supercov's copy, because its automatic source detection reads `.gitignore` files above the project and `.supercov` holds one; the measured build lacked every utility class only the app's own components used.
+- A CommonJS spec and an ES module spec run by one Playwright worker failed with `Playwright detected inconsistent test.use() options`.
+
 ## 4.24.8
 
 **Fixed**
