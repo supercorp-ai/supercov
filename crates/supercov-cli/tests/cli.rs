@@ -16717,7 +16717,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
         ("fs.read_dir@55", "workspaces"),
         ("fs.read_dir@57", "/out"),
-        ("fs.read#workspace.rs:1649", "workspaces"),
+        ("fs.read#workspace.rs:1646", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),

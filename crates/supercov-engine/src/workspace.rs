@@ -5722,10 +5722,10 @@ mod tests {
     fn writeback_stops_at_a_file_it_cannot_read() {
         for (kind, fault) in [
             (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1380"),
-            (CommandOutputs::Go, "fs.metadata#workspace.rs:1645"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1649"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1751"),
-            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2199"),
+            (CommandOutputs::Go, "fs.metadata#workspace.rs:1642"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1646"),
+            (CommandOutputs::Go, "fs.read#workspace.rs:1748"),
+            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2196"),
         ] {
             let (root, workspace) = writeback_fixture("unreadable");
             let baseline = workspace_output_baseline(&workspace).unwrap();
@@ -5773,7 +5773,7 @@ mod tests {
             hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
         });
         fs::create_dir_all(root.join(".git")).unwrap();
-        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2051", || {
+        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2048", || {
             mirror_git_repository(&root, &workspace)
         });
         assert!(mirrored.is_err());
@@ -5816,7 +5816,7 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2222", || {
+        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2217", || {
             prune_cached_workspace_sources(&root, &lock)
         });
         assert!(
