@@ -65,12 +65,26 @@ async function attachedProfile(cwd, command, args, label, profile) {
   let text = '';
   child.stdout.on('data', (chunk) => { text += chunk; });
   child.stderr.on('data', (chunk) => { text += chunk; });
-  const sampler = spawn(process.env.SPEED_SAMPLY, ['record', '--save-only', '--unstable-presymbolicate', '-o', profile, '-p', String(child.pid)], { stdio: 'ignore' });
-  await new Promise((resolve) => child.on('close', resolve));
+  const exited = new Promise((resolve) => {
+    child.on('close', resolve);
+    child.on('error', (error) => { text += String(error); resolve(); });
+  });
+  // The profile is a diagnostic: a profiler that fails to start or stops
+  // early leaves the run as it is, without one.
+  let samplerOutput = '';
+  const sampler = spawn(process.env.SPEED_SAMPLY, ['record', '--save-only', '--unstable-presymbolicate', '-o', profile, '-p', String(child.pid)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  sampler.stdout?.on('data', (chunk) => { samplerOutput += chunk; });
+  sampler.stderr?.on('data', (chunk) => { samplerOutput += chunk; });
+  const stopped = new Promise((resolve) => {
+    sampler.on('close', resolve);
+    sampler.on('error', (error) => { samplerOutput += String(error); resolve(); });
+  });
+  await exited;
   writeFileSync(join(logs, `${label}.log`), text);
-  const stopped = new Promise((resolve) => sampler.on('close', resolve));
-  setTimeout(() => sampler.kill('SIGINT'), 5_000).unref();
+  const timer = setTimeout(() => sampler.kill('SIGINT'), 5_000);
   await stopped;
+  clearTimeout(timer);
+  writeFileSync(join(logs, `${label}-samply.log`), samplerOutput);
 }
 
 function checkout(directory, repository, commit) {
@@ -337,7 +351,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   // runs just made, which publishes the merged run.
   if (process.env.SPEED_SAMPLY) {
     const unit = suites.find((suite) => suite.name === 'unit');
-    if (unit) {
+    if (unit) try {
       reset('samply-unit');
       run(
         project,
@@ -347,8 +361,11 @@ if (process.env.SPEED_DIAGNOSE === '1') {
         {},
         true,
       );
+    } catch (error) {
+      console.log(`[speed] no native profile of the unit run: ${error.message}`);
     }
-    run(
+    try {
+      run(
       project,
       process.env.SPEED_SAMPLY,
       ['record', '--save-only', '--unstable-presymbolicate', '-o', join(output, 'samply-merge.json.gz'), '--', path, 'merge'],
@@ -356,6 +373,9 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       {},
       true,
     );
+    } catch (error) {
+      console.log(`[speed] no native profile of the merge: ${error.message}`);
+    }
   }
   // Then every Node process of one plain and one measured run of each suite,
   // CPU-profiled: where the time Supercov adds is spent, by whose code.
