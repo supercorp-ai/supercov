@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Playwright test file could fail at `does not provide an export named …`, and then the run reported `No tests found`, when it imported an ES module that another Playwright process was still writing into the shared compile cache. 4.24.3 wrote that cache whole only from the process's main thread; Playwright 1.59 compiles ES modules in its loader thread, which now writes whole too. Most often hit by the first tests of a Docker relay run, whose containers share one cold cache.
+
 ## 4.24.7
 
 **Fixed**

@@ -99,3 +99,31 @@ test("a module Playwright compiles in its loader thread is written into its cach
   assert.equal(readFileSync(resolve(cache, "cd/esm_7654321.js"), "utf8"), "export const x = 1;");
   assert.deepEqual(readdirSync(cache).sort(), ["cd"]);
 });
+
+// A write that fails reaches Playwright as its own would, and leaves no
+// partial file in the cache.
+test("a cache write that fails leaves no partial file behind", t => {
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "supercov-transform-cache-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = resolve(root, ".supercov/node_modules");
+  cpSync(resolve(import.meta.dirname, "../../runtime/javascript"), runtime, { recursive: true });
+  const cache = resolve(root, "cache");
+  const script = [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    // A folder where the compiled file goes: the rename onto it fails.
+    "const target = path.join(process.env.PWTEST_CACHE_DIR, 'ef', 'busy_1111111.js');",
+    "fs.mkdirSync(path.join(target, 'inside'), { recursive: true });",
+    "try { fs.writeFileSync(target, 'export {};', 'utf8'); console.log('wrote'); }",
+    "catch (error) { console.log(error.code); }",
+  ].join("\n");
+  const ran = spawnSync(process.execPath, [
+    `--import=${pathToFileURL(resolve(runtime, "register.mjs")).href}`,
+    "-e",
+    script,
+  ], { cwd: root, encoding: "utf8", timeout: 15000, env: { ...process.env, PWTEST_CACHE_DIR: cache } });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  assert.notEqual(ran.stdout.trim().split("\n").at(-1), "wrote");
+  assert.deepEqual(readdirSync(cache).sort(), ["ef"]);
+  assert.deepEqual(readdirSync(resolve(cache, "ef/busy_1111111.js")), ["inside"]);
+});
