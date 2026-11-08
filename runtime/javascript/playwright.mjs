@@ -548,16 +548,15 @@ class CoveragePhaseController {
         return internally(context, () => this.registerContextNow(context, adopted));
     }
     async registerContextNow(context, adopted) {
-        // What every new document of the context runs first, in this order, as
-        // one script: one call where four, each awaited, were most of what a
-        // test waited for before its page opened. Each part runs on its own,
-        // as separate scripts did, so one that throws leaves the others.
+        // The context's own scripts first: sent when it was made, so they
+        // are in place, or sent now for a context made some other way.
+        await prepareContext(context);
+        // Then what every new document of the context runs for this test, in
+        // this order, as one script: one call where several, each awaited,
+        // were most of what a test waited for before its page opened. Each
+        // part runs on its own, as separate scripts did, so one that throws
+        // leaves the others.
         const parts = [];
-        // A Rust crate compiled to wasm the run measures: pages remember
-        // their wasm instances, so each test's work can be taken from them.
-        if (process.env.SUPERCOV_WASM_REGIONS === "1")
-            parts.push("globalThis.__SUPERCOV_WASM_REGIONS__ = true;");
-        parts.push(browserRuntimePrelude);
         // A context that outlives its test (a worker-scoped browser fixture)
         // is registered again by every later test, so this script accumulates
         // on it and each new document runs every copy in registration order.
@@ -580,26 +579,8 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
             phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
         })});`);
-        const content = parts.map((part) => `try {\n${part}\n} catch (error) {}`).join("\n");
         await Promise.all([
-            context.addInitScript({ content }).catch(() => undefined),
-            // A document that leaves hands its evidence over through this
-            // binding: the next one reads what it stored only on the same
-            // origin. One binding per context, which outlives a test in a
-            // shared context: the test that has the page now takes what it
-            // hands over.
-            contextsWithLeavingBinding.has(context) ? undefined : (contextsWithLeavingBinding.add(context), context.exposeBinding(LEAVING_BINDING, (source, payload) => {
-                const controller = source?.page ? controllerOwning(source.page) : undefined;
-                if (!controller || controller.runtimeSnapshots)
-                    return;
-                try {
-                    timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
-                    controller.leftSnapshots.push(expandSnapshot(JSON.parse(payload)));
-                }
-                catch {
-                    // Not evidence.
-                }
-            }).catch(() => undefined)),
+            context.addInitScript({ content: separately(parts) }).catch(() => undefined),
             adopted ? undefined : this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId),
         ]);
         const register = (page) => {
@@ -1111,7 +1092,50 @@ function announceAttempt({ attemptId, scopeHeader, scopeValue, scopeCookie, scop
     }
 }
 const LEAVING_BINDING = "__supercovLeaving";
-const contextsWithLeavingBinding = new WeakSet();
+/** Scripts as one, each part run on its own as separate scripts were. */
+function separately(parts) {
+    return parts.map((part) => `try {\n${part}\n} catch (error) {}`).join("\n");
+}
+/** A document that leaves hands its evidence to the test that has its page. */
+function takeLeavingEvidence(source, payload) {
+    const controller = source?.page ? controllerOwning(source.page) : undefined;
+    if (!controller || controller.runtimeSnapshots)
+        return;
+    try {
+        timingCount("transfer.leavingBytes", typeof payload === "string" ? payload.length : 0);
+        controller.leftSnapshots.push(expandSnapshot(JSON.parse(payload)));
+    }
+    catch {
+        // Not evidence.
+    }
+}
+/**
+ * What a context's documents run whichever test has them -- the runtime, and
+ * the binding through which a leaving document hands its evidence over (the
+ * next one reads what it stored only on the same origin) -- sent once, when
+ * the context is made: Playwright opens the test's page meanwhile, and the
+ * test's setup waits only for its own script and cookies. A context that
+ * outlives its test keeps the one binding: the test that has the page now
+ * takes what it hands over.
+ */
+const preparedContexts = new WeakMap();
+function prepareContext(context) {
+    let prepared = preparedContexts.get(context);
+    if (!prepared) {
+        const parts = [];
+        // A Rust crate compiled to wasm the run measures: pages remember
+        // their wasm instances, so each test's work can be taken from them.
+        if (process.env.SUPERCOV_WASM_REGIONS === "1")
+            parts.push("globalThis.__SUPERCOV_WASM_REGIONS__ = true;");
+        parts.push(browserRuntimePrelude);
+        prepared = Promise.resolve(internally(context, () => Promise.all([
+            context.addInitScript({ content: separately(parts) }).catch(() => undefined),
+            context.exposeBinding(LEAVING_BINDING, takeLeavingEvidence).catch(() => undefined),
+        ]))).catch(() => undefined);
+        preparedContexts.set(context, prepared);
+    }
+    return prepared;
+}
 function readSnapshot(target) {
     return target
         .evaluate(() => {
@@ -1165,6 +1189,7 @@ function trackContext(context, configuredHeaders) {
     trackedContexts.add(context);
     context.once?.("close", () => trackedContexts.delete(context));
     patchContextPrototype(context);
+    void prepareContext(context);
 }
 function liveTrackedContexts() {
     const contexts = new Set(trackedContexts);
