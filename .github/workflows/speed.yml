@@ -120,7 +120,9 @@ jobs:
       - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
       - run: npx -y playwright@1.49.1 install-deps chromium
       # samply, for a native profile of Supercov's own work.
+      # Optional: a download that fails leaves the pass without it.
       - if: matrix.diagnose == 1
+        continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/samply"
           curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply"
