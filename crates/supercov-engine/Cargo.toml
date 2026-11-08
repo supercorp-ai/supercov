@@ -17,6 +17,7 @@ oracle-harnesses = []
 
 [dependencies]
 ignore = "0.4"
+memchr = "2.8"
 base64.workspace = true
 cargo-platform.workspace = true
 cargo-config2.workspace = true

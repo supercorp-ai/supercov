@@ -1576,11 +1576,8 @@ fn compiled_javascript(path: &Path) -> bool {
 fn instrumented_wasm(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension == "wasm")
-        && fs::read(path).is_ok_and(|bytes| {
-            bytes
-                .windows(b"__supercov_region_".len())
-                .any(|window| window == b"__supercov_region_")
-        })
+        && fs::read(path)
+            .is_ok_and(|bytes| memchr::memmem::find(&bytes, b"__supercov_region_").is_some())
 }
 
 fn is_build_output(root: &Path, directory: &Path) -> bool {
@@ -1749,7 +1746,7 @@ pub enum CommandOutputs {
 fn links_the_go_runtime(path: &Path) -> Result<bool, WorkspaceError> {
     const MARKER: &[u8] = b"_supercov_runtime";
     let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
-    Ok(bytes.contains(&0) && bytes.windows(MARKER.len()).any(|window| window == MARKER))
+    Ok(bytes.contains(&0) && memchr::memmem::find(&bytes, MARKER).is_some())
 }
 
 /// The directories a JVM build writes its reports to, inside its output.
@@ -2201,11 +2198,9 @@ fn built_from_instrumented_source(path: &Path, compiled: bool) -> Result<bool, W
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(io_error(path, error)),
     };
-    let holds = |marker: &[u8]| {
-        contents
-            .windows(marker.len())
-            .any(|window| window == marker)
-    };
+    // Every file a build left in the copy is read, thousands of a Next build:
+    // a window compared at every byte was most of the time after the tests.
+    let holds = |marker: &[u8]| memchr::memmem::find(&contents, marker).is_some();
     Ok(holds(RUNTIME) || (compiled && (holds(PROBE) || holds(GLOBAL))))
 }
 

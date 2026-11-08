@@ -2340,6 +2340,7 @@ dependencies = [
  "ignore",
  "junction",
  "libc",
+ "memchr",
  "memmap2",
  "nextest-metadata",
  "object",
