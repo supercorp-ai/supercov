@@ -62,7 +62,11 @@ function installRuntime(target) {
     mcdcEnd(_frame, value) {
       return value;
     },
-    registerProbeV2(definition) {
+    registerProbeV2(registered) {
+      // Ids come as one space-separated string, or a list where an id holds
+      // a space, as the runtime takes them.
+      const ids = (value) => (typeof value === "string" ? (value === "" ? [] : value.split(" ")) : value);
+      const definition = { ...registered, decisions: ids(registered.decisions), pointIds: ids(registered.pointIds) };
       return {
         ...definition,
         clock: { epoch: 1, fast: true },

@@ -134,7 +134,7 @@ function runtimePrelude(transformed) {
     mcdcCondition: "function(frame,index,value){return value;}",
     mcdcEnd: "function(frame,value){return value;}",
     coverageHit: "function(){}",
-    registerProbeV2: "function(definition){return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisionWidths.map(function(width){return new Uint32Array(2*3**Math.min(width,6));}),pendingDefaults:new Uint32Array(definition.defaultCount||0),none:{[Symbol.iterator]:function(){return {next:function(){return {done:true};}};}}});}",
+    registerProbeV2: "function(definition){var ids=function(v){return typeof v==='string'?(v===''?[]:v.split(' ')):v;};definition.pointIds=ids(definition.pointIds);definition.decisions=ids(definition.decisions);return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisionWidths.map(function(width){return new Uint32Array(2*3**Math.min(width,6));}),pendingDefaults:new Uint32Array(definition.defaultCount||0),none:{[Symbol.iterator]:function(){return {next:function(){return {done:true};}};}}});}",
     coverageHitV2: "function(){}",
     renderedValueV2: "function(file,index,value){return value;}",
     mcdcEndV2: "function(file,index,encoded,value){return value;}",
