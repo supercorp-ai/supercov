@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.24.8
 
 **Fixed**
 
