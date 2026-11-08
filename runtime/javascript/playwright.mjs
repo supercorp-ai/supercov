@@ -1017,8 +1017,8 @@ class CoveragePhaseController {
             if (!distinct.has(key))
                 distinct.set(key, cookie);
         }
-        await context.addCookies([...distinct.values()]).catch(() => {
-            timingCount("activate.cookiesRefused");
+        await context.addCookies([...distinct.values()]).catch((error) => {
+            timingCount(timingBuckets ? `activate.cookiesRefused: ${String(error?.message ?? error).split("\n")[0].slice(0, 120)}` : "activate.cookiesRefused");
             return Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => timingCount("activate.hostCookiesRefused"))));
         });
     }
