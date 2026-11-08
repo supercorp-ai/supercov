@@ -16715,8 +16715,8 @@ fn a_workspace_whose_git_repository_cannot_be_made_runs_without_one() {
 #[test]
 fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
     for (fault, said) in [
-        ("fs.read_dir@55", "workspaces"),
-        ("fs.read_dir@57", "/out"),
+        ("fs.read_dir@54", "workspaces"),
+        ("fs.read_dir@55", "/out"),
         ("fs.read#workspace.rs:1646", "workspaces"),
         ("fs.create_dir_all@17", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
@@ -17119,18 +17119,18 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@33", "runtime.d.mts"),
-        ("fs.rename@34", "playwright.mjs"),
-        ("fs.rename@36", "playwright.config.mjs"),
-        ("fs.rename@37", "vitest.config.mjs"),
-        ("fs.rename@40", "vitestCommands.mjs"),
+        ("fs.rename@34", "runtime.d.mts"),
+        ("fs.rename@35", "playwright.mjs"),
+        ("fs.rename@37", "playwright.config.mjs"),
+        ("fs.rename@38", "vitest.config.mjs"),
+        ("fs.rename@41", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@42", "test/cart.test.js"),
-        ("fs.rename@43", "authored-sources.json"),
-        ("fs.rename@44", "statement-exclusions.json"),
-        ("fs.rename@45", "manifest.json"),
-        ("fs.rename@46", "instrumentation-complete"),
-        ("fs.rename@47", "injected fault at fs"),
+        ("fs.rename@43", "test/cart.test.js"),
+        ("fs.rename@44", "authored-sources.json"),
+        ("fs.rename@45", "statement-exclusions.json"),
+        ("fs.rename@46", "manifest.json"),
+        ("fs.rename@47", "instrumentation-complete"),
+        ("fs.rename@48", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
