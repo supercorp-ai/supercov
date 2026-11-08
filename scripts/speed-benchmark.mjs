@@ -223,6 +223,14 @@ export default {
     const project = join(output, 'excalidraw');
     checkout(project, 'https://github.com/excalidraw/excalidraw.git', '701b901a0f1ba3d0b390d9cdf63d112e25abac4b');
     run(project, 'npx', ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'], 'install');
+    // Its service worker refuses to precache a file over 2.3 MB, and the
+    // plain main chunk is 1.9 MB: a build of instrumented code, any tool's,
+    // fails there. The limit is raised for every variant alike, so the build
+    // is timed to its end.
+    const config = join(project, 'excalidraw-app/vite.config.mts');
+    const text = readFileSync(config, 'utf8');
+    assert.ok(text.includes('maximumFileSizeToCacheInBytes: 2.3 * 1024 ** 2'), 'Excalidraw no longer limits its precache as expected');
+    writeFileSync(config, text.replace('maximumFileSizeToCacheInBytes: 2.3 * 1024 ** 2', 'maximumFileSizeToCacheInBytes: 64 * 1024 ** 2'));
     return {
       project,
       description: 'the Vite build once',
@@ -230,8 +238,7 @@ export default {
       suites: [
         { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
         // A build runs no test: Supercov publishes no run of its own for it.
-        // Its log says whether it built.
-        { name: 'build', command: ['npx', '-y', 'yarn@1.22.22', '--cwd', 'excalidraw-app', 'build:app:docker'], build: true, mayFail: true },
+        { name: 'build', command: ['npx', '-y', 'yarn@1.22.22', '--cwd', 'excalidraw-app', 'build:app:docker'], build: true },
       ],
       reset() {},
     };
