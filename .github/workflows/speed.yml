@@ -125,7 +125,10 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/samply"
-          curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply"
+          # The release binary, or built from crates.io when GitHub's release
+          # downloads fail.
+          curl -fsSL https://github.com/mstange/samply/releases/download/samply-v0.13.1/samply-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C "$RUNNER_TEMP/samply" \
+            || cargo install samply --version 0.13.1 --locked --root "$RUNNER_TEMP/samply"
           echo "SPEED_SAMPLY=$(find "$RUNNER_TEMP/samply" -name samply -type f | head -1)" >> "$GITHUB_ENV"
           sudo sysctl kernel.perf_event_paranoid=1
       - name: Measure
