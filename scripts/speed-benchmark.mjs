@@ -417,7 +417,7 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
       run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options, SUPERCOV_KEEP_WORKSPACE: '1' }, true);
-      const { totals, functions, processes } = profileSelfTime(directory);
+      const { totals, functions, processes, callers } = profileSelfTime(directory);
       // Each process that kept a CPU busy for a second or more: which one
       // the time went to, by whose code.
       writeFileSync(
@@ -434,6 +434,21 @@ if (process.env.SPEED_DIAGNOSE === '1') {
         .slice(0, 25)
         .map(([what, seconds]) => `${seconds.toFixed(3)}s  ${what}`);
       writeFileSync(join(output, `profile-top-${variant}-${suite.name}.txt`), `${heaviest.join('\n')}\n`);
+      // Who called each of the heaviest: the two frames above it, by time.
+      writeFileSync(
+        join(output, `profile-callers-${variant}-${suite.name}.txt`),
+        Object.entries(functions)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 15)
+          .map(([what]) => [
+            `== ${what}`,
+            ...Object.entries(callers[what] ?? {})
+              .sort(([, a], [, b]) => b - a)
+              .slice(0, 8)
+              .map(([chain, seconds]) => `${seconds.toFixed(3)}s  <- ${chain}`),
+          ].join('\n'))
+          .join('\n\n') + '\n',
+      );
     }
   }
   const kinds = [...new Set(Object.values(profiled).flatMap((totals) => Object.keys(totals)))].sort();
@@ -516,6 +531,7 @@ if copy:
 function profileSelfTime(directory) {
   const totals = {};
   const functions = {};
+  const callers = {};
   const processes = [];
   const kindOf = (url, functionName) => {
     if (!url) return functionName.startsWith('(') ? functionName : '(native)';
@@ -530,6 +546,15 @@ function profileSelfTime(directory) {
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.cpuprofile'))) {
     const profile = JSON.parse(readFileSync(join(directory, file), 'utf8'));
     const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
+    const parents = new Map();
+    for (const node of profile.nodes)
+      for (const child of node.children ?? []) parents.set(child, node.id);
+    const frame = (id) => {
+      const node = id === undefined ? undefined : nodes.get(id);
+      if (!node) return '(root)';
+      const { url, functionName, lineNumber } = node.callFrame;
+      return `${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
+    };
     const self = new Map();
     profile.samples.forEach((id, index) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[index] ?? 0)));
     const own = {};
@@ -546,6 +571,10 @@ function profileSelfTime(directory) {
       if (!functionName.startsWith('(')) {
         const what = `${kind}: ${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
         functions[what] = (functions[what] ?? 0) + micros / 1e6;
+        const parent = parents.get(id);
+        const chain = `${frame(parent)} <- ${frame(parents.get(parent))}`;
+        callers[what] ??= {};
+        callers[what][chain] = (callers[what][chain] ?? 0) + micros / 1e6;
       }
     }
     const busy = Object.values(own).reduce((sum, seconds) => sum + seconds, 0);
@@ -556,7 +585,7 @@ function profileSelfTime(directory) {
         .map(([what, seconds]) => `${seconds.toFixed(2)}s ${what}`);
     processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 30) });
   }
-  return { totals, functions, processes };
+  return { totals, functions, processes, callers };
 }
 
 const median = (values) => {
