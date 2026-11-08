@@ -449,11 +449,19 @@ class CoveragePhaseController {
      * already has one of this test's phases is left alone: a reset that
      * arrives late must not drop what this test ran.
      */
-    async takeCarriedEvidence() {
-        await Promise.all([...this.pendingRegistrations]);
-        return internally(this.anyOwner(), () => this.takeCarriedEvidenceNow());
+    /**
+     * `pages`, when given, are the pages the test starts with, read from the
+     * live contexts while those are being registered: what they carry is in
+     * their documents, which registering a context does not touch, so the
+     * test's setup need not wait for one before the other.
+     */
+    async takeCarriedEvidence(pages) {
+        if (pages === undefined)
+            await Promise.all([...this.pendingRegistrations]);
+        const targets = pages ?? this.allPages();
+        return internally(targets[0] ?? this.anyOwner(), () => this.takeCarriedEvidenceNow(targets));
     }
-    async takeCarriedEvidenceNow() {
+    async takeCarriedEvidenceNow(pages) {
         const prefix = `${this.scope.attemptId}:`;
         const take = (target) => bounded(target
             .evaluate((prefix) => {
@@ -471,7 +479,7 @@ class CoveragePhaseController {
         }, prefix)
             .then((text) => (typeof text === "string" ? expandSnapshot(JSON.parse(text)) : undefined))
             .catch(() => undefined), WORKER_ACTIVATION_WAIT_MS);
-        const taken = await Promise.all(this.allPages().flatMap((page) => [
+        const taken = await Promise.all(pages.flatMap((page) => [
             ...page.frames().map(take),
             ...page.workers().map(take),
         ]));
@@ -1806,8 +1814,20 @@ const instrumentedFixtures = {
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
-            await timed("fixture.adopt", () => controller.adoptTrackedContexts().catch(() => undefined));
-            const carried = await timed("fixture.carried", () => controller.takeCarriedEvidence().catch(() => undefined));
+            // The pages the test starts with, whose evidence is taken while
+            // their contexts are registered.
+            const startingPages = [...liveTrackedContexts()].flatMap((context) => {
+                try {
+                    return context.pages();
+                }
+                catch {
+                    return [];
+                }
+            });
+            const [, carried] = await Promise.all([
+                timed("fixture.adopt", () => controller.adoptTrackedContexts().catch(() => undefined)),
+                timed("fixture.carried", () => controller.takeCarriedEvidence(startingPages).catch(() => undefined)),
+            ]);
             if (carried) {
                 appendEvidenceLine(`${JSON.stringify({
                     testId: `__supercov_background__:playwright:${scope.attemptId}`,
