@@ -693,13 +693,7 @@ pub fn run_direct_javascript(
     let frontend = if let Some(cache) = &reusable_frontend {
         load_cached_javascript_frontend(&workspace, cache)
     } else {
-        prepare_javascript_frontend(
-            &workspace,
-            &project,
-            &collector_id,
-            &frontend_cache_key,
-            &request.command,
-        )
+        prepare_javascript_frontend(&workspace, &project, &collector_id, &frontend_cache_key)
     }
     .map_err(|error| error.to_string())?;
     crate::workspace::hide_rewritten_files(
@@ -1426,6 +1420,13 @@ pub fn run_direct_javascript(
     for warning in nothing_came_back(&in_containers, !servers.is_empty(), &entries) {
         let _ = writeln!(diagnostics, "{warning}");
     }
+    for warning in crashed(&entries) {
+        let _ = writeln!(diagnostics, "{warning}");
+    }
+    let (started_build, failed_builds) = started_builds(&entries, &workspace);
+    for failed in failed_builds {
+        let _ = writeln!(diagnostics, "{failed}");
+    }
     if let Some(support) = &support {
         entries.push(EvidenceArchiveEntry {
             path: crate::support_reach::ARCHIVE_PATH.into(),
@@ -1592,7 +1593,12 @@ pub fn run_direct_javascript(
         recovered_runs,
         metadata,
         server_runs,
-        unrun_build: project.unrun_build.clone(),
+        // A command that started a build was not short of one.
+        unrun_build: if started_build {
+            Vec::new()
+        } else {
+            project.unrun_build.clone()
+        },
     })
 }
 
@@ -1658,20 +1664,94 @@ fn nothing_came_back(
     warnings
 }
 
+/// What the launch observer noted of a child a crash signal ended.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashedChild {
+    signal: String,
+    command: serde_json::Value,
+    ran_ms: u64,
+}
+
+/// Processes a crash signal ended. Such a process says nothing itself: on
+/// 2026-11-06 a backend that died right after it listened read as one that
+/// never became ready, and a Playwright worker as one that "exited
+/// unexpectedly".
+fn crashed(entries: &[EvidenceArchiveEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.path.starts_with("execution."))
+        .flat_map(|entry| entry.contents.split(|byte| *byte == b'\n'))
+        .filter_map(|line| serde_json::from_slice::<CrashedChild>(line).ok())
+        .map(|child| {
+            format!(
+                "[supercov] warning: {} crashed with {} {:.1} s after it started: a crash in Node or native code. A server that dies so reads as one that never answered.",
+                child.command.as_str().unwrap_or("a process the run started"),
+                child.signal,
+                child.ran_ms as f64 / 1000.0
+            )
+        })
+        .collect()
+}
+
 /// Whether the command builds: a word of it, or of a `package.json` script
 /// it runs, directly or through other scripts, is a build (`build`,
 /// `build:web`, `turbo run build`, `tsc --build`).
 fn command_builds(command: &[String], workspace: &Path) -> bool {
-    let scripts = std::fs::read_to_string(workspace.join("package.json"))
+    builds(
+        &command.join(" "),
+        &package_scripts(workspace),
+        &mut std::collections::BTreeSet::new(),
+    )
+}
+
+/// The `scripts` of the project's `package.json`, or none.
+fn package_scripts(workspace: &Path) -> serde_json::Value {
+    std::fs::read_to_string(workspace.join("package.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|package| package.get("scripts").cloned())
-        .unwrap_or_default();
-    builds(
-        &command.join(" "),
-        &scripts,
-        &mut std::collections::BTreeSet::new(),
-    )
+        .unwrap_or_default()
+}
+
+/// What the launch observer noted of a child the command started.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchedChild {
+    event: String,
+    command: serde_json::Value,
+    #[serde(default)]
+    code: Option<i64>,
+}
+
+/// The builds the command started itself, which its words need not name:
+/// a test harness can run `npm run build` from its own code,
+/// and a run whose build failed was told to put `npm run build` in the
+/// command. Whether one started, and each that exited non-zero.
+fn started_builds(entries: &[EvidenceArchiveEntry], workspace: &Path) -> (bool, Vec<String>) {
+    let scripts = package_scripts(workspace);
+    let mut started = false;
+    let mut failed = Vec::new();
+    for child in entries
+        .iter()
+        .filter(|entry| entry.path.starts_with("execution."))
+        .flat_map(|entry| entry.contents.split(|byte| *byte == b'\n'))
+        .filter_map(|line| serde_json::from_slice::<LaunchedChild>(line).ok())
+    {
+        let Some(command) = child.command.as_str() else {
+            continue;
+        };
+        if !builds(command, &scripts, &mut std::collections::BTreeSet::new()) {
+            continue;
+        }
+        started = true;
+        if let (true, Some(code)) = (child.event == "child-exit", child.code) {
+            failed.push(format!(
+                "[supercov] the build the command started, `{command}`, exited {code}: its output above says why."
+            ));
+        }
+    }
+    (started, failed)
 }
 
 /// Whether `text` builds, through the scripts it names that `seen` has not.

@@ -68,6 +68,11 @@ export function runnerExecutionScope(identity) {
         attemptId: `${testKey}-${retry}-${processInstanceToken()}`,
     };
 }
+// A frame's location: a path, then `:line:column`. Bun 1.2 writes a module's
+// top-level frame with a line and no column; the column is tried first, as a
+// greedy path would otherwise take `file.ts:2:5` for the file `file.ts:2`.
+const FRAME_WITH_COLUMN = /(?:^at (?:async )?| \()((?:file:\/\/|\/|[A-Za-z]:[\\/]|\\\\).*):(\d+):(\d+)\)?$/;
+const FRAME_WITH_LINE = /(?:^at (?:async )?| \()((?:file:\/\/|\/|[A-Za-z]:[\\/]|\\\\).*):(\d+)\)?$/;
 export function callerLocation(boundary = callerLocation) {
     // Omit the registration wrapper by identity. A user file may have the same
     // basename as a runtime adapter. Parse the location suffix, not individual
@@ -78,13 +83,13 @@ export function callerLocation(boundary = callerLocation) {
         if (typeof error.stack !== "string")
             return {};
         const entry = error.stack.split("\n")[1]?.trim();
-        const match = entry && /(?:^at (?:async )?| \()((?:file:\/\/|\/|[A-Za-z]:[\\/]|\\\\).*):(\d+):(\d+)\)?$/.exec(entry);
+        const match = entry && (FRAME_WITH_COLUMN.exec(entry) ?? FRAME_WITH_LINE.exec(entry));
         if (!match)
             return {};
         return {
             file: match[1],
             line: Number(match[2]),
-            column: Number(match[3]),
+            ...(match[3] === undefined ? {} : { column: Number(match[3]) }),
         };
     }
     catch {

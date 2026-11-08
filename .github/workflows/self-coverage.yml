@@ -67,34 +67,12 @@ jobs:
       # kept before any slice starts: ten slices fetching them at once from
       # a slow mirror held some for half an hour, the cache being saved only
       # as a job ends.
-      - uses: actions/cache@v4
-        if: runner.os == 'Linux'
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/system-packages
         with:
-          path: ~/apt-archives
+          command: npx -y "playwright@$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV | tail -1)" install-deps
           key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json') }}
-      - name: Fetch the browsers' system packages
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p ~/apt-archives/partial
-          printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
-            | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
-          versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
-          # Bounded and tried again, as the compatibility runner legs do: an
-          # apt mirror slowed to a package every few seconds held this step
-          # until the job's limit on 2026-10-26.
-          for attempt in 1 2 3; do
-            timeout 8m npx -y "playwright@$(echo "$versions" | tail -1)" install-deps && break
-            echo "attempt $attempt did not finish; trying again"
-            # The timeout ends npx, not the apt-get it started under sudo:
-            # left running, that holds dpkg's lock, and the next attempt
-            # failed at once on 2026-10-26. End what holds the locks, then
-            # let dpkg finish what was stopped part way.
-            sudo fuser -k /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
-            sleep 2
-            sudo dpkg --configure -a || true
-            [ "$attempt" = 3 ] && exit 1
-          done
-          sudo chown -R "$USER" ~/apt-archives
+          prefix: apt-playwright-${{ runner.os }}-${{ runner.arch }}-
       - run: cargo build --profile measure -p supercov
       - uses: actions/upload-artifact@v4
         with:
@@ -159,31 +137,7 @@ jobs:
       # The Ant tests skip without it, and the Ant support then shows as
       # gaps the local measurement does not have. After the cache: a key
       # restored from before these jars still gets them.
-      - name: Install Apache Ant and the jars its tests use
-        shell: bash
-        run: |
-          version=1.10.15
-          # From the archive: the mirrors drop a release once the next is out.
-          # It is slow to answer, hence the patience.
-          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 60 -o "$RUNNER_TEMP/ant.zip" \
-            "https://archive.apache.org/dist/ant/binaries/apache-ant-$version-bin.zip"
-          unzip -q "$RUNNER_TEMP/ant.zip" -d "$RUNNER_TEMP"
-          echo "ANT_HOME=$RUNNER_TEMP/apache-ant-$version" >> "$GITHUB_ENV"
-          for jar in \
-            junit/junit/4.13.2/junit-4.13.2.jar \
-            org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar \
-            org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar \
-            org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar \
-            org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar \
-            org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar \
-            org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar \
-            org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar \
-            org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar \
-            org/testng/testng/6.14.3/testng-6.14.3.jar \
-            com/beust/jcommander/1.72/jcommander-1.72.jar; do
-            curl -fsSL --retry 3 --create-dirs -o "$HOME/.m2/repository/$jar" \
-              "https://repo1.maven.org/maven2/$jar"
-          done
+      - uses: ./.github/actions/apache-ant
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -232,27 +186,17 @@ jobs:
       # The system libraries the browsers need are 142 MB of packages a
       # slice fetched every run; one run's mirror gave them at 74 kB/s, 32
       # minutes. Kept, and apt installs from what is kept.
-      - uses: actions/cache@v4
-        if: runner.os == 'Linux'
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/system-packages
         with:
-          path: ~/apt-archives
+          command: npx -y "playwright@$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV | tail -1)" install-deps
           key: apt-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.locks.outputs.hash }}
-          restore-keys: apt-playwright-${{ runner.os }}-${{ runner.arch }}-
+          prefix: apt-playwright-${{ runner.os }}-${{ runner.arch }}-
       # Each fixture pins its own Playwright, and each version launches its
       # own browser builds: install them for every version a lockfile names.
       - name: Install every pinned Playwright's browsers
         run: |
           versions=$(git ls-files '*package-lock.json' | xargs jq -r '.packages["node_modules/playwright-core"].version // empty' | sort -uV)
-          if [ "${{ runner.os }}" = Linux ]; then
-            mkdir -p ~/apt-archives/partial
-            printf 'Dir::Cache::Archives "%s";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' "$HOME/apt-archives" \
-              | sudo tee /etc/apt/apt.conf.d/99kept-archives > /dev/null
-          fi
-          # The system's libraries by the newest, which knows this system.
-          npx -y "playwright@$(echo "$versions" | tail -1)" install-deps
-          if [ "${{ runner.os }}" = Linux ]; then
-            sudo chown -R "$USER" ~/apt-archives
-          fi
           for version in $versions; do
             # A version older than the runner's OS knows no browser build for
             # it -- the Next fixture keeps the reporter's 1.60 -- and fetches

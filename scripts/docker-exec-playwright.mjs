@@ -47,8 +47,21 @@ test('a low score fails', () => {
   expect(grade(10)).toBe('fail');
 });
 `,
+  // A short container of the same image first, as an install is: Node runs
+  // there and loads nothing measured, so nothing is missing from it.
   'run-in-container.sh': `set -e
+docker run --rm --user ${user} -e HOME=/tmp -v "$PWD":/workspace -w /workspace ${IMAGE} node -e "require('node:fs').readdirSync('.')"
 docker run -d --name ${name} --user ${user} -e HOME=/tmp -v "$PWD":/workspace -w /workspace ${IMAGE} sleep infinity >/dev/null
+status=0
+docker exec ${name} node_modules/.bin/playwright test || status=$?
+docker rm -f ${name} >/dev/null
+exit $status
+`,
+  // The same, with the container's own user, root, as sealed workers run:
+  // what it writes -- the evidence, Playwright's test-results -- the run, as
+  // the checkout's user, still reads and removes.
+  'run-as-root.sh': `set -e
+docker run -d --name ${name} -v "$PWD":/workspace -w /workspace ${IMAGE} sleep infinity >/dev/null
 status=0
 docker exec ${name} node_modules/.bin/playwright test || status=$?
 docker rm -f ${name} >/dev/null
@@ -101,6 +114,12 @@ try {
   const low = lines('a low score fails');
   assert.ok(high.includes('src/grade.js:3') && !high.includes('src/grade.js:5'), `${high}\n${measured.stderr}`);
   assert.ok(low.includes('src/grade.js:5') && !low.includes('src/grade.js:3'), `${low}\n${measured.stderr}`);
+  const rooted = run(root, binary, ['--', 'sh', 'run-as-root.sh']);
+  assert.equal(rooted.status, 0, `${rooted.stdout}${rooted.stderr}`);
+  const rootedId = JSON.parse(run(root, binary, ['runs', '--json']).stdout).data.runs[0].id;
+  assert.notEqual(rootedId, id, `no run was recorded\n${rooted.stderr}`);
+  const rootedLines = run(root, binary, ['runs', rootedId, 'test', 'a high score is an A']).stdout;
+  assert.match(rootedLines, /src\/grade\.js:3/u, `${rootedLines}\n${rooted.stderr}`);
   const sealed = run(root, binary, ['--', 'sh', 'run-read-only.sh']);
   assert.equal(sealed.status, 0, `${sealed.stdout}${sealed.stderr}`);
   assert.doesNotMatch(`${sealed.stdout}${sealed.stderr}`, /EROFS|read-only file system/u);

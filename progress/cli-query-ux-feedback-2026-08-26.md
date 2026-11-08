@@ -3,7 +3,7 @@
 Status: recorded for the next UX session. Do not implement as part of the
 current engine/language-frontend work.
 
-Observed against npm `supercov@0.0.16` and Essential SEO run
+Observed against npm `supercov@0.0.16` and a field-project run
 `run_e0473933f13ca35b`.
 
 ## Problems to solve

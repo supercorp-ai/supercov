@@ -1,9 +1,14 @@
-// Bun does not load the Node --import preload. BUN_OPTIONS loads this before
-// its test files and their configured preloads. Older Bun versions create a
+// Bun does not load the Node --import preload. The isolated configuration
+// loads this before configured preloads; BUN_OPTIONS covers other commands.
+// Older Bun versions create a
 // native API per file; newer versions share one. Adapt the factory and the
 // existing API so both keep native test registration and execution semantics.
 import * as runtime from "./runtime.mjs";
 import { callerLocation, runnerExecutionScope, runnerTestId, writeRunnerEvidence } from "./runnerEvidence.mjs";
+import { adaptRunnerEntry } from "./runnerEntry.mjs";
+
+// Bun runs no Node preload: a runner it starts is adapted here.
+await adaptRunnerEntry(process.argv[1]?.replaceAll("\\", "/") ?? "");
 
 const adapted = new WeakSet();
 const nativeJest = Bun.jest;
@@ -38,7 +43,9 @@ function adapt(api) {
             const index = callbackIndex(args);
             const callback = index < 0 ? undefined : args[index];
             const name = row.name ?? (typeof args[0] === "string" ? args[0] : callback?.name || "anonymous test");
-            const location = row.location ?? callerLocation(supercovBunRegistration);
+            // Bun gives a Proxy call an `unknown` frame when the target is the
+            // boundary. Pass the invoked Proxy itself to omit that frame.
+            const location = row.location ?? callerLocation(registration);
             if (kind === "suite") {
                 if (!callback) return Reflect.apply(original, this, args);
                 const next = [...args];
@@ -115,7 +122,7 @@ function adapt(api) {
             }
             return result;
         }
-        return new Proxy(supercovBunRegistration, {
+        const registration = new Proxy(supercovBunRegistration, {
             get(target, property) {
                 if (["call", "apply", "bind"].includes(property)) return Reflect.get(target, property);
 
@@ -165,6 +172,7 @@ function adapt(api) {
                 return member.bind(original);
             },
         });
+        return registration;
     }
 
     api.test = api.it = wrap(originals.test, "test");

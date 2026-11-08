@@ -32,6 +32,7 @@
 
 use crate::fault_fs as fs;
 use crate::fault_process::Launch;
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Write},
@@ -39,7 +40,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
@@ -55,6 +56,11 @@ pub const CONTAINER_VARIABLE: &str = "SUPERCOV_CONTAINER";
 /// evidence: one that never does -- a server stopped at its first probe, a
 /// directory it may not write -- is said to have sent nothing back.
 pub const MARK_VARIABLE: &str = "SUPERCOV_CONTAINER_MARK";
+
+/// How long Docker Desktop keeps a path it looked up pointing at what was
+/// there: about a second, measured; the copy goes in by a rename just before
+/// the relay starts.
+const SETTLE_MS: i64 = 1_500;
 
 /// Numbers each container's mark within a run.
 static MARKS: AtomicUsize = AtomicUsize::new(0);
@@ -189,6 +195,8 @@ struct Shared {
     upstream: PathBuf,
     socket: PathBuf,
     started_ms: i64,
+    /// Whether the daemon is Docker Desktop's, asked once.
+    desktop: OnceLock<bool>,
     /// Containers created through the relay, as recorded.
     created: Mutex<Vec<CreatedContainer>>,
     /// Compose services already built from the copy in this run.
@@ -231,6 +239,7 @@ impl DockerProxy {
             upstream: upstream.to_owned(),
             socket: socket.to_owned(),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::new(Vec::new()),
             built: Mutex::new(BTreeSet::new()),
             docker: PathBuf::from("docker"),
@@ -299,6 +308,10 @@ impl DockerProxy {
                     None,
                 );
             }
+        }
+        // The run's user is the copy's owner.
+        if let Ok(copy) = std::fs::metadata(&self.shared.settings.copy) {
+            open_what_containers_wrote(&self.upstream, &self.shared.settings, copy.uid());
         }
         self.stop.store(true, Ordering::Release);
         // Always there: only `finish`, which takes the relay, takes it.
@@ -607,7 +620,13 @@ fn relay_messages(
         let (method, path) = endpoint(&request);
         let creating = method == "POST" && path == "/containers/create";
         let exec = (method == "POST")
-            .then(|| exec_container(path))
+            .then(|| on_container(path, "exec"))
+            .flatten()
+            .map(str::to_owned);
+        // A client that waits on a container -- `docker run` in the
+        // foreground, `docker compose run` -- hears how it ended.
+        let waited = (method == "POST")
+            .then(|| on_container(path, "wait"))
             .flatten()
             .map(str::to_owned);
         let mut created_context = None;
@@ -682,15 +701,17 @@ fn relay_messages(
             {
                 shared.record(id, context);
             }
-            // Sent as it came: chunked re-framed as one chunk.
-            if response.chunked() {
-                write!(client_writer, "{:x}\r\n", body.len())?;
-                client_writer.write_all(&body)?;
-                client_writer.write_all(b"\r\n0\r\n\r\n")?;
-            } else {
-                client_writer.write_all(&body)?;
+            send_body(&response, &body, client_writer)?;
+            continue;
+        }
+        if let Some(container) = waited {
+            let body = read_body(&response, upstream_reader)?;
+            if let Ok(ended) = serde_json::from_slice::<Value>(&body)
+                && let Some(status) = ended.get("StatusCode").and_then(Value::as_i64)
+            {
+                shared.record_exit(&container, status);
             }
-            client_writer.flush()?;
+            send_body(&response, &body, client_writer)?;
             continue;
         }
         if !response.chunked() && response.content_length().is_none() {
@@ -700,6 +721,18 @@ fn relay_messages(
         }
         relay_body(&response, upstream_reader, client_writer)?;
     }
+}
+
+/// A body read whole, sent as it came: chunked re-framed as one chunk.
+fn send_body(response: &Head, body: &[u8], out: &mut impl Write) -> io::Result<()> {
+    if response.chunked() {
+        write!(out, "{:x}\r\n", body.len())?;
+        out.write_all(body)?;
+        out.write_all(b"\r\n0\r\n\r\n")?;
+    } else {
+        out.write_all(body)?;
+    }
+    out.flush()
 }
 
 /// Raw bytes both ways until either side closes: what was already read into
@@ -790,6 +823,9 @@ impl Shared {
         let service = label("com.docker.compose.service");
         self.rewrite_socket_mounts(&mut config);
         let mounted = mounted_copy(&create_binds(&config), &self.settings.copy);
+        if mounted.is_some() {
+            self.settle();
+        }
         let mut context = CreateContext {
             measured: false,
             image: image.clone(),
@@ -885,6 +921,28 @@ impl Shared {
         (config, context)
     }
 
+    /// Docker Desktop shares the host's files into its machine and, for about
+    /// a second after it last looked a path up, keeps it pointing at what was
+    /// there. The run's copy is put in place by a rename, so a container that
+    /// mounted it at once saw the previous run's copy -- emptied, or gone --
+    /// and its tests found nothing to run. Such a container is created once
+    /// that second has passed.
+    fn settle(&self) {
+        let waited = now_ms() - self.started_ms;
+        if waited >= SETTLE_MS || !self.desktop() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis((SETTLE_MS - waited) as u64));
+    }
+
+    fn desktop(&self) -> bool {
+        *self.desktop.get_or_init(|| {
+            daemon_request(&self.upstream, "GET", "/info", None)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|info| info["OperatingSystem"] == "Docker Desktop")
+        })
+    }
+
     /// An exec's configuration, with the test command's settings when the
     /// container it runs in has the copy mounted. Settings the exec names
     /// itself are replaced; `NODE_OPTIONS` joins the container's own.
@@ -924,6 +982,14 @@ impl Shared {
             environment.retain(|entry| entry.split_once('=').is_none_or(|(key, _)| key != name));
             environment.push(format!("{name}={value}"));
         }
+        // The runtime there writes for the run, a user of its own: one in a
+        // container the run did not create learns it is in one here.
+        environment.retain(|entry| {
+            entry
+                .split_once('=')
+                .is_none_or(|(key, _)| key != CONTAINER_VARIABLE)
+        });
+        environment.push(format!("{CONTAINER_VARIABLE}=1"));
         config["Env"] = json!(environment);
         let line = json!({
             "exec": container,
@@ -1043,6 +1109,21 @@ impl Shared {
         Some(built)
     }
 
+    /// How a container a client waited on ended.
+    fn record_exit(&self, id: &str, status: i64) {
+        let _created = self.created.lock().unwrap_or_else(PoisonError::into_inner);
+        self.append(&json!({"id": id, "exited": status}));
+    }
+
+    fn append(&self, line: &Value) {
+        if let Ok(mut file) = fs::open_with(
+            fs::OpenOptions::new().create(true).append(true),
+            &self.settings.state,
+        ) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     fn record(&self, id: &str, context: CreateContext) {
         // Keep the journal append under the same lock as the insertion.
         // JSON Display writes several fragments, which concurrent container
@@ -1062,12 +1143,7 @@ impl Shared {
             "note": context.note,
             "mark": context.mark,
         });
-        if let Ok(mut file) = fs::open_with(
-            fs::OpenOptions::new().create(true).append(true),
-            &self.settings.state,
-        ) {
-            let _ = writeln!(file, "{line}");
-        }
+        self.append(&line);
     }
 }
 
@@ -1142,10 +1218,104 @@ fn add_settings(
     }
 }
 
-/// The container a `POST /containers/{id}/exec` creates an exec in.
-fn exec_container(path: &str) -> Option<&str> {
+/// What the measured containers wrote into the copy and the run's own
+/// directory, opened to every user. A container runs as root, as sealed
+/// workers do, and what it makes there -- its evidence, a test runner's
+/// `test-results` -- the run, as another user, could neither read nor
+/// remove: 4.24.1 recorded no run, "Permission denied". A container of each
+/// image that ran opens them, `chmod`, not `chown`: under rootless Docker a
+/// container's root is the user already, and a chown would hand the files to
+/// another. The suite's own containers may be gone by now; these are new, and
+/// removed once done. An image with no `chmod` leaves things as they were.
+///
+/// Only when something there belongs to a user other than `owner`, the
+/// run's: Docker Desktop gives a container's files to the user already, and
+/// there a container that mounted the copy just before the next run replaced
+/// it showed that run the old, emptied copy.
+fn open_what_containers_wrote(upstream: &Path, settings: &ProxySettings, owner: u32) {
+    let Ok(text) = fs::read_to_string(&settings.state) else {
+        return;
+    };
+    let paths = [
+        Some(settings.copy.as_path()),
+        settings.state.parent().and_then(Path::parent),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !paths.iter().any(|path| another_owns_something(path, owner)) {
+        return;
+    }
+    let images = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["measured"] == true)
+        .filter_map(|line| line["image"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    let paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let command = ["-R", "a+rwX"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(paths.iter().cloned())
+        .collect::<Vec<_>>();
+    let binds = paths
+        .iter()
+        .map(|path| format!("{path}:{path}"))
+        .collect::<Vec<_>>();
+    for image in images {
+        let config = json!({
+            "Image": image,
+            "User": "0:0",
+            "Entrypoint": ["chmod"],
+            "Cmd": command,
+            "HostConfig": {"Binds": binds},
+        })
+        .to_string();
+        let Some(id) = daemon_request(
+            upstream,
+            "POST",
+            "/containers/create",
+            Some(config.as_bytes()),
+        )
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|created| created["Id"].as_str().map(str::to_owned)) else {
+            continue;
+        };
+        let _ = daemon_request(upstream, "POST", &format!("/containers/{id}/start"), None);
+        let _ = daemon_request(upstream, "POST", &format!("/containers/{id}/wait"), None);
+        let _ = daemon_request(
+            upstream,
+            "DELETE",
+            &format!("/containers/{id}?force=true"),
+            None,
+        );
+    }
+}
+
+/// Whether anything at or below `path`, links not followed, belongs to a user
+/// other than `owner`; it stops at the first that does.
+fn another_owns_something(path: &Path, owner: u32) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.uid() != owner
+        || (metadata.is_dir()
+            && std::fs::read_dir(path).is_ok_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| another_owns_something(&entry.path(), owner))
+            }))
+}
+
+/// The container a `POST /containers/{id}/<action>` acts on: an exec is
+/// created in it, or it is waited on.
+fn on_container<'p>(path: &'p str, action: &str) -> Option<&'p str> {
     path.strip_prefix("/containers/")?
-        .strip_suffix("/exec")
+        .strip_suffix(action)?
+        .strip_suffix('/')
         .filter(|container| !container.is_empty() && !container.contains('/'))
 }
 
@@ -1343,7 +1513,8 @@ pub struct Journal {
     /// Each container given the run's settings that nothing was `docker
     /// exec`ed in -- a server, whose coverage the run reads -- and whose
     /// runtime never marked that it could write, by its compose service or
-    /// image.
+    /// image. One that ran to its own end, as an install or a migration
+    /// does, and exited 0 had nothing to send.
     pub silent: Vec<String>,
 }
 
@@ -1351,12 +1522,21 @@ pub fn journal(state: &Path) -> Journal {
     let Ok(text) = fs::read_to_string(state) else {
         return Journal::default();
     };
-    let lines = text
+    let (lines, exits) = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .partition::<Vec<_>, _>(|line| line.get("exited").is_none());
+    let lines = lines
+        .into_iter()
         .filter(|line| line.get("measured").and_then(Value::as_bool).is_some())
         .collect::<Vec<_>>();
     let text = |line: &Value, name: &str| line.get(name).and_then(Value::as_str).map(str::to_owned);
+    // Each container a client waited on that exited 0: it ran to its end.
+    let finished = exits
+        .iter()
+        .filter(|line| line["exited"] == 0)
+        .filter_map(|line| text(line, "id"))
+        .collect::<BTreeSet<_>>();
     let sorted = |mut items: Vec<String>| {
         items.sort();
         items.dedup();
@@ -1384,6 +1564,7 @@ pub fn journal(state: &Path) -> Journal {
                 .filter(measured)
                 .filter(|line| text(line, "exec").is_none())
                 .filter(|line| text(line, "id").is_none_or(|id| !exec_targets.contains(&id)))
+                .filter(|line| text(line, "id").is_none_or(|id| !finished.contains(&id)))
                 .filter(|line| text(line, "mark").is_none_or(|mark| !Path::new(&mark).exists()))
                 .filter_map(|line| text(line, "service").or_else(|| text(line, "image")))
                 .collect(),
@@ -1469,7 +1650,18 @@ mod tests {
                             )
                             .unwrap();
                         };
-                        if path.starts_with("/images/") {
+                        if path == "/info" {
+                            // Docker Desktop's, where the test asks for it.
+                            if socket_directory.join("desktop").exists() {
+                                respond(
+                                    &mut writer,
+                                    "200 OK",
+                                    r#"{"OperatingSystem":"Docker Desktop"}"#,
+                                );
+                            } else {
+                                respond(&mut writer, "200 OK", "OK");
+                            }
+                        } else if path.starts_with("/images/") {
                             // Built during the run, pulled long ago, or
                             // built by an earlier run.
                             let (id, created) = if path.contains("pulled") {
@@ -1525,6 +1717,21 @@ mod tests {
                                     })
                                     .to_string(),
                                 );
+                            }
+                        } else if method == "POST" && path.ends_with("/wait") {
+                            // Ended, gone, or answered with no status.
+                            match path.as_str() {
+                                "/containers/gone/wait" => respond(
+                                    &mut writer,
+                                    "404 Not Found",
+                                    r#"{"message":"no such container"}"#,
+                                ),
+                                "/containers/odd/wait" => respond(&mut writer, "200 OK", "odd"),
+                                _ => respond(
+                                    &mut writer,
+                                    "200 OK",
+                                    r#"{"StatusCode":0,"Error":null}"#,
+                                ),
                             }
                         } else if method == "POST" && path.ends_with("/exec") {
                             sender
@@ -1768,6 +1975,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
@@ -1981,6 +2189,40 @@ mod tests {
         );
         drop(stream);
         proxy.finish();
+        // Everything there is the run's user's: nothing is opened.
+        let chmods = |created: &mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| created.recv_timeout(Duration::from_secs(2)).ok())
+                .filter(|sent| sent["Entrypoint"] == json!(["chmod"]))
+                .collect::<Vec<_>>()
+        };
+        assert!(chmods(&created).is_empty());
+        // Something another user's -- a container's root -- and a container of
+        // each image that ran, as root, opens the copy and the run's directory
+        // to every user.
+        let mine = std::fs::metadata(&directory).unwrap().uid();
+        open_what_containers_wrote(
+            &daemon,
+            &crate::docker_proxy::tests::settings(&directory),
+            mine + 1,
+        );
+        let opened = chmods(&created);
+        assert_eq!(
+            opened
+                .iter()
+                .map(|sent| sent["Image"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["playwright", "pulled-outer", "pulled-playwright"]
+        );
+        let copied = copy.display().to_string();
+        assert_eq!(opened[0]["User"], "0:0");
+        assert_eq!(
+            opened[0]["Cmd"],
+            json!(["-R", "a+rwX", copied, directory.display().to_string()])
+        );
+        assert_eq!(
+            opened[0]["HostConfig"]["Binds"][0],
+            json!(format!("{copied}:{copied}"))
+        );
         let journal = journal(&directory.join("state/containers.jsonl"));
         assert_eq!(
             journal.execs,
@@ -1994,7 +2236,8 @@ mod tests {
 
     /// A container the run's settings were given to serves, unless a
     /// command was `docker exec`ed in it: that one ran the tests. One whose
-    /// runtime marked that it could write sent something back.
+    /// runtime marked that it could write sent something back, and one that
+    /// ran to its end and exited 0 -- an install -- had nothing to.
     #[test]
     fn a_container_tests_were_run_in_is_not_a_server() {
         let directory = temporary("journal");
@@ -2007,6 +2250,10 @@ mod tests {
             [
                 json!({"id": "a1", "image": "app-api", "service": "api", "measured": true, "mark": directory.join("marks/0")}),
                 json!({"id": "d4", "image": "app-web", "service": "web", "measured": true, "mark": marked}),
+                json!({"id": "e5", "image": "app-web", "measured": true, "mark": directory.join("marks/2")}),
+                json!({"id": "e5", "exited": 0}),
+                json!({"id": "f6", "image": "app-worker", "measured": true, "mark": directory.join("marks/3")}),
+                json!({"id": "f6", "exited": 137}),
                 json!({"id": "b2", "image": "playwright", "measured": true}),
                 json!({"id": "c3", "image": "postgres:16", "measured": false, "note": "left alone"}),
                 json!({"exec": "tests", "id": "b2", "image": "playwright", "measured": true}),
@@ -2018,7 +2265,131 @@ mod tests {
         let journal = journal(&state);
         assert_eq!(journal.notes, ["left alone"]);
         assert_eq!(journal.execs, ["`docker exec` in tests"]);
-        assert_eq!(journal.silent, ["api"]);
+        assert_eq!(journal.silent, ["api", "app-worker"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// On Docker Desktop a container that mounts the copy is created once a
+    /// second and more has passed since the copy went in; elsewhere, and
+    /// after that, at once.
+    #[test]
+    fn on_docker_desktop_a_container_of_the_copy_waits_for_the_copy_to_show() {
+        for desktop in [true, false] {
+            let directory = temporary("settle");
+            let daemon = directory.join("d.sock");
+            if desktop {
+                fs::write(directory.join("desktop"), "").unwrap();
+            }
+            let _created = fake_daemon(&daemon);
+            let proxy =
+                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
+                    .unwrap();
+            let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let body = format!(
+                r#"{{"Image": "app", "HostConfig": {{"Binds": ["{}:/workspace"]}}}}"#,
+                directory.join("copy").display()
+            );
+            let mut create = || {
+                let begun = std::time::Instant::now();
+                let (head, _) = exchange(
+                    &mut stream,
+                    &mut reader,
+                    &format!(
+                        "POST /containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    ),
+                );
+                assert!(head.start.contains(" 201"), "{head:?}");
+                begun.elapsed()
+            };
+            let first = create();
+            let second = create();
+            assert_eq!(first >= Duration::from_millis(1_200), desktop, "{first:?}");
+            assert!(second < Duration::from_millis(1_200), "{second:?}");
+            drop(stream);
+            proxy.finish();
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// Nothing is opened when no measured container ran, and an image whose
+    /// container the daemon refuses is passed over for the next.
+    #[test]
+    fn what_another_owns_is_opened_only_by_a_container_the_daemon_makes() {
+        let directory = temporary("opened");
+        let daemon = directory.join("d.sock");
+        let created = fake_daemon(&daemon);
+        let settings = settings(&directory);
+        fs::create_dir_all(&settings.copy).unwrap();
+        fs::create_dir_all(settings.state.parent().unwrap()).unwrap();
+        let theirs = std::fs::metadata(&directory).unwrap().uid() + 1;
+        fs::write(&settings.state, "").unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        fs::write(
+            &settings.state,
+            [
+                json!({"id": "a1", "image": "refused-api", "measured": true}),
+                json!({"id": "b2", "image": "worker", "measured": true}),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        open_what_containers_wrote(&daemon, &settings, theirs);
+        let sent = std::iter::from_fn(|| created.recv_timeout(Duration::from_secs(2)).ok())
+            .map(|sent| sent["Image"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(sent, ["refused-api", "worker"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A container a client waited on and that exited 0 ran to its end -- an
+    /// install, a migration -- and had nothing to send back; a wait the
+    /// daemon answered with no status records nothing.
+    #[test]
+    fn a_container_that_ran_to_its_end_is_not_said_to_have_sent_nothing() {
+        let directory = temporary("waited");
+        let daemon = directory.join("d.sock");
+        let _created = fake_daemon(&daemon);
+        let proxy =
+            DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)).unwrap();
+        let mut stream = UnixStream::connect(directory.join("p.sock")).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut post = |path: &str, body: &str| {
+            exchange(
+                &mut stream,
+                &mut reader,
+                &format!(
+                    "POST {path} HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        let mounted = format!(
+            r#"{{"Image": "install", "HostConfig": {{"Binds": ["{}:/workspace"]}}}}"#,
+            directory.join("copy").display()
+        );
+        let (head, _) = post("/v1.47/containers/create", &mounted);
+        assert!(head.start.contains(" 201"), "{head:?}");
+        let (head, body) = post("/v1.47/containers/c0ffee/wait?condition=next-exit", "");
+        assert!(head.start.contains(" 200"), "{head:?}");
+        assert_eq!(body, br#"{"StatusCode":0,"Error":null}"#);
+        for container in ["gone", "odd"] {
+            post(&format!("/containers/{container}/wait"), "");
+        }
+        drop(stream);
+        proxy.finish();
+        let state = directory.join("state/containers.jsonl");
+        let journal = journal(&state);
+        assert!(journal.silent.is_empty(), "{journal:?}");
+        let exits = fs::read_to_string(&state)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("exited"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(exits, [r#"{"id":"c0ffee","exited":0}"#]);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2026,14 +2397,21 @@ mod tests {
     /// and a create's binds, of any shape a client sends.
     #[test]
     fn an_exec_names_its_container_and_a_create_its_host_binds() {
-        assert_eq!(exec_container("/containers/tests/exec"), Some("tests"));
+        assert_eq!(
+            on_container("/containers/tests/exec", "exec"),
+            Some("tests")
+        );
+        assert_eq!(
+            on_container("/containers/c0ffee/wait", "wait"),
+            Some("c0ffee")
+        );
         for path in [
             "/containers//exec",
             "/containers/a/b/exec",
             "/containers/create",
             "/images/x/exec",
         ] {
-            assert_eq!(exec_container(path), None, "{path}");
+            assert_eq!(on_container(path, "exec"), None, "{path}");
         }
         let binds = create_binds(&json!({"HostConfig": {
             "Binds": ["/host/app:/app:ro", "/host/data:/data", "cache:/cache", "/anonymous"],
@@ -2570,6 +2948,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
@@ -2594,6 +2973,7 @@ mod tests {
                 upstream: directory.join("d.sock"),
                 socket: directory.join("p.sock"),
                 started_ms: now_ms(),
+                desktop: OnceLock::new(),
                 created: Mutex::default(),
                 built: Mutex::default(),
             }
@@ -2706,7 +3086,7 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:147", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:153", || {
                 socket_path(&directory.join("state"))
             })
             .is_err()
@@ -2714,13 +3094,13 @@ mod tests {
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:158", || {
+            crate::fault::during("fs.create_dir#docker_proxy.rs:164", || {
                 socket_path(&directory.join("state").join("d".repeat(120)))
             })
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:219", || {
+            crate::fault::during("fs.create_dir_all#docker_proxy.rs:227", || {
                 DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
             })
             .is_err()
@@ -2966,6 +3346,7 @@ mod tests {
             upstream: directory.join("d.sock"),
             socket: directory.join("p.sock"),
             started_ms: now_ms(),
+            desktop: OnceLock::new(),
             created: Mutex::default(),
             built: Mutex::default(),
             docker: PathBuf::from("docker"),
@@ -2994,6 +3375,7 @@ mod tests {
             .as_bytes(),
             exec,
             b"POST /containers/create HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"POST /containers/one/wait HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
             b"GET /logs HTTP/1.1\r\n\r\n",
         ]
         .concat();
@@ -3004,6 +3386,7 @@ mod tests {
             b"HTTP/1.1 201 Created\r\nContent-Length: 12\r\n\r\n{\"Id\":\"two\"}",
             b"HTTP/1.1 201 Created\r\nContent-Length: 11\r\n\r\n{\"Id\":\"e1\"}",
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"StatusCode\":0}",
             b"HTTP/1.1 200 OK\r\n\r\nall of it",
         ]
         .concat();
@@ -3018,6 +3401,7 @@ mod tests {
                     answered.contains("c\r\n{\"Id\":\"one\"}\r\n0\r\n\r\n"),
                     "{answered}"
                 );
+                assert!(answered.contains("{\"StatusCode\":0}"), "{answered}");
                 break;
             }
             assert!(relayed.is_err(), "{nth}");

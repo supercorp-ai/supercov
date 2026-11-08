@@ -492,6 +492,59 @@ fn a_patch_whose_git_cannot_run_is_refused() {
         .succeeds();
 }
 
+/// After a run, nothing of the rest of the repository stays in the
+/// project's `.supercov`. The copy is laid out within its repository, with
+/// the other packages linked around it; left there, a test runner started in
+/// the project followed the links and ran another package's tests too, as
+/// Vitest's includes did in a monorepo. The next run links them again.
+#[test]
+fn a_package_run_leaves_no_way_to_its_repositorys_other_packages() {
+    let (repository, project) = Project::cart_below("around-copy", "web");
+    repository.write(
+        "admin/test/admin.test.js",
+        "import test from 'node:test';\ntest('admin', () => {});\n",
+    );
+    repository.write("tsconfig.base.json", "{}\n");
+    repository.commit("admin");
+    // A test that writes beside its package makes a directory there.
+    project.write(
+        "test/beside.test.js",
+        "import test from 'node:test';\nimport { mkdirSync } from 'node:fs';\ntest('beside', () => { mkdirSync('../made-by-a-test/inner', { recursive: true }); });\n",
+    );
+    project.commit("beside");
+    let name = repository.root.file_name().unwrap();
+    let around = project
+        .root
+        .join(".supercov/workspaces/workspace")
+        .join(name);
+    for _ in 0..2 {
+        project.supercov(&["--", "node", "--test"]).succeeds();
+        assert!(around.join("web").is_dir(), "the package's copy is kept");
+        for left in ["admin", "tsconfig.base.json", "made-by-a-test"] {
+            assert!(
+                std::fs::symlink_metadata(around.join(left)).is_err(),
+                "{left} stayed beside the copy"
+            );
+        }
+    }
+    // Clearing is best effort: a level or an entry that cannot be read
+    // leaves it, and the run goes on.
+    for fault in [
+        "fs.read_dir#workspace.rs:2269",
+        "fs.read_dir entry#workspace.rs:2269",
+        "fs.symlink_metadata#workspace.rs:2274",
+    ] {
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        assert_eq!(ran.code(), 0, "{fault}: {}", ran.stderr());
+        assert!(
+            fired_at(&ran.stderr(), &fault[fault.find('#').unwrap() + 1..]),
+            "{fault}: {}",
+            ran.stderr()
+        );
+    }
+}
+
 #[test]
 fn patch_reads_a_project_kept_below_the_top_of_its_repository() {
     // Git names a file from the top (`web/src/cart.js`), the run from where
@@ -602,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1098")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1092")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1098"),
+        seen.contains("test fault at fs (javascript_run.rs:1092"),
         "{seen}"
     );
 }
@@ -1241,6 +1294,73 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
         assert_ne!(refused.code(), 0, "{fault}: {output}");
         assert!(output.contains(said), "{fault}: {output}");
     }
+}
+
+/// Whether an import only types use is a line to run is the project's
+/// tsconfig's to say, not the command's: on 2026-11-06 a unit run and an
+/// end-to-end run (`node --import tsx …`) of one commit counted
+/// `import { type Funnel }` differently and could not be merged. Here one
+/// run's command is a `tsx` the old check took for the compiler.
+#[cfg(unix)]
+#[test]
+fn runs_of_two_commands_count_a_type_only_import_alike_and_merge() {
+    let project = Project::empty("type-import-merge");
+    project.write(
+        "package.json",
+        r#"{ "name": "rates", "private": true, "type": "module" }"#,
+    );
+    // Read as JSON with comments: a quote in a comment, an escape in a string.
+    project.write(
+        "tsconfig.json",
+        r#"{
+  // keeps "strict" on
+  "compilerOptions": { "strict": true, "rootDir": ".\\" }
+}
+"#,
+    );
+    project.write(
+        "src/rate.ts",
+        "export type Rate = { cents: number };\nexport const zero = 0;\n",
+    );
+    project.write(
+        "src/price.ts",
+        r#"import { type Rate } from "./rate.ts";
+
+export function price(rate: Rate, discount: boolean): number {
+  return discount ? rate.cents - 1 : rate.cents;
+}
+"#,
+    );
+    project.write(
+        "test/price.test.ts",
+        r#"import test from "node:test";
+import assert from "node:assert/strict";
+import { price } from "../src/price.ts";
+
+test("full price", () => assert.equal(price({ cents: 5 }, false), 5));
+test("discount", () => assert.equal(price({ cents: 5 }, true), 4));
+"#,
+    );
+    project.write_script("tsx", "#!/bin/sh\nexec node --test \"$@\"\n");
+    project.git(&["init", "-q"]);
+    project.commit("rates");
+    project
+        .supercov(&["--", "node", "--test", "--test-name-pattern=full"])
+        .succeeds();
+    let unit = project.latest();
+    project
+        .supercov(&["--", "./tsx", "--test-name-pattern=discount"])
+        .succeeds();
+    let e2e = project.latest();
+    let lines = |run: &str| {
+        project.supercov(&["runs", run, "--json"]).json()["data"]["coverage"]["lines"]["total"]
+            .clone()
+    };
+    // The import is no line to run under either command.
+    assert_eq!(lines(&unit), 3);
+    assert_eq!(lines(&e2e), 3);
+    let merged = project.supercov(&["merge", &unit, &e2e]).exits(0);
+    assert!(merged.contains("merged run"), "{merged}");
 }
 
 #[test]
@@ -4800,6 +4920,80 @@ fn bun_is_available() -> bool {
     available
 }
 
+/// A runner Bun starts by its entry point is adapted as Node's preload adapts
+/// it, though Bun loads no Node preload: Vitest takes the run's generated
+/// config, keeping the project's own for it to merge, and Mocha's Runner is
+/// patched before the CLI loads it. Bun-launched Vitest passed and recorded
+/// no test, every probe counted as background (#205). Stand-ins at each
+/// runner's entry point print what they were given.
+#[cfg(unix)]
+#[test]
+fn bun_launched_runners_are_adapted_as_node_ones_are() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = Project::empty("bun launched runners");
+    project.write("package.json", r#"{ "private": true, "type": "module" }"#);
+    project.write(
+        "src/pick.js",
+        "export function pick(flag) {\n  if (flag) return 'yes';\n  return 'no';\n}\n",
+    );
+    project.write("vitest.config.ts", "export default {};\n");
+    project.write(
+        "node_modules/vitest/vitest.mjs",
+        "console.log('VITEST ' + JSON.stringify({ argv: process.argv.slice(2), original: process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG }));\n",
+    );
+    project.write("node_modules/mocha/package.json", r#"{ "name": "mocha" }"#);
+    project.write(
+        "node_modules/mocha/lib/runner.js",
+        "class Runner { run() { return this; } }\nmodule.exports = Runner;\n",
+    );
+    project.write(
+        "node_modules/mocha/bin/mocha.js",
+        "const Runner = require('../lib/runner.js');\nconsole.log('MOCHA patched=' + Boolean(Runner.prototype.run.supercovMocha));\n",
+    );
+    project.write(".gitignore", "node_modules\n");
+    project.git(&["init", "-q"]);
+    project.commit("runners");
+    let vitest = project
+        .supercov(&[
+            "--",
+            "bun",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "--config",
+            "vitest.config.ts",
+        ])
+        .succeeds();
+    let line = vitest
+        .lines()
+        .find_map(|line| line.strip_prefix("VITEST "))
+        .unwrap_or_else(|| panic!("{vitest}"));
+    let seen: serde_json::Value = serde_json::from_str(line).unwrap();
+    let argv = seen["argv"].as_array().unwrap();
+    assert_eq!(argv[0], "run", "{seen}");
+    assert_eq!(argv[1], "--config", "{seen}");
+    assert!(
+        argv[2]
+            .as_str()
+            .unwrap()
+            .ends_with(".supercov/vitest.config.mjs"),
+        "{seen}"
+    );
+    assert_eq!(argv.len(), 3, "{seen}");
+    assert!(
+        seen["original"]
+            .as_str()
+            .unwrap()
+            .ends_with("/vitest.config.ts"),
+        "{seen}"
+    );
+    let mocha = project
+        .supercov(&["--", "bun", "node_modules/mocha/bin/mocha.js"])
+        .succeeds();
+    assert!(mocha.contains("MOCHA patched=true"), "{mocha}");
+}
+
 /// A Bun test project: one source module, one `bun:test` file, and, where a
 /// browser suite is asked for, a Playwright config in the shape discovery
 /// finds. Bun ignores `NODE_OPTIONS`, so Supercov's preload never reaches it.
@@ -5237,6 +5431,79 @@ describe('bounds', () => {
     );
     assert!(!line.contains("bounds > below ["), "{line}");
     assert!(!line.contains("bounds > nan ["), "{line}");
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_configured_preloads_importing_test_keep_exact_test_and_hook_scopes() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun configured preload attribution", false);
+    let config = "# Keep the project's settings and preload order.\n[test]\ntimeout = 5000\npreload = [\"./first.ts\", \"./second.ts\"]\n";
+    project.write("bunfig.toml", config);
+    project.write(
+        "src/setup-only.ts",
+        "export function setupOnly() {\n  return 7;\n}\n",
+    );
+    project.write("first.ts", "import { test, beforeEach } from 'bun:test';\nglobalThis.preloadOrder = ['first'];\nbeforeEach(async () => { const { setupOnly } = await import('./src/setup-only'); setupOnly(); });\n");
+    project.write("second.ts", "import { mock } from 'bun:test';\nimport * as native from 'bun:test';\nglobalThis.preloadOrder.push('second');\nmock.module('vitest', () => ({ ...native }));\n");
+    project.write("src/clamp.test.ts", "import { test, expect } from 'bun:test';\nimport { clamp } from './clamp';\ntest('ready slot', async () => { await Promise.resolve(); expect(globalThis.preloadOrder).toEqual(['first', 'second']); expect(clamp(11, 0, 10)).toBe(10); });\n");
+    project.write("src/compat.test.ts", "import { test, expect } from 'vitest';\nimport { clamp } from './clamp';\ntest('compatible slot', () => { expect(clamp(5, 0, 10)).toBe(5); });\n");
+    project.commit("configured preloads import the test module");
+    for _ in 0..2 {
+        project.supercov(&["--", "bun", "test"]).succeeds();
+        let summary = project.supercov(&["runs", "latest"]).succeeds();
+        contains_all(
+            &summary,
+            &["Exact for 2 test(s)", "Total       2", "Passed      2"],
+        );
+        let line = project
+            .supercov(&["runs", "latest", "line", "src/clamp.ts:3"])
+            .succeeds();
+        contains_all(&line, &["ready slot", "compatible slot"]);
+        let setup = project
+            .supercov(&["runs", "latest", "line", "src/setup-only.ts:2"])
+            .succeeds();
+        contains_all(&setup, &["COVERED"]);
+        assert!(
+            !setup.contains("ready slot"),
+            "hook work was credited to a test body: {setup}"
+        );
+        assert!(
+            !setup.contains("compatible slot"),
+            "hook work was credited to a test body: {setup}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.root.join("bunfig.toml")).unwrap(),
+            config
+        );
+        assert!(project.git(&["status", "--porcelain"]).trim().is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bun_string_preload_keeps_named_tests_and_original_configuration() {
+    if !bun_is_available() {
+        return;
+    }
+    let project = bun_project("bun-string-preload", false);
+    let config = "[test]\npreload = './preload.ts'\n";
+    project.write("bunfig.toml", config);
+    project.write("preload.ts", "import { test } from 'bun:test';\nif (typeof test !== 'function') throw new Error('test API missing');\n");
+    project.commit("string preload imports the test module");
+    project.supercov(&["--", "bun", "test"]).succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Exact for 1 test(s)", "Total       1", "Passed      1"],
+    );
+    let named = project
+        .supercov(&["runs", "latest", "test", "clamps below"])
+        .succeeds();
+    contains_all(&named, &["clamps below", "bun:test"]);
+    assert_eq!(project.read("bunfig.toml"), config);
 }
 
 #[cfg(unix)]
@@ -5904,6 +6171,29 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         "{said}"
     );
     assert!(!said.contains("starts without build output"), "{said}");
+
+    // A build the command starts from its own code, as a test harness
+    // may, failed: the build is named, not taken for one the
+    // command never ran.
+    project.write(
+        "package.json",
+        r#"{ "name": "built", "scripts": { "build": "node build.js && exit 2", "test": "node harness.mjs" } }"#,
+    );
+    project.write(
+        "harness.mjs",
+        "import { execSync } from 'node:child_process';\nexecSync('npm run build', { stdio: 'inherit' });\n",
+    );
+    let harness = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(harness.code(), 0, "{}", harness.stdout());
+    let said = format!("{}{}", harness.stdout(), harness.stderr());
+    assert!(
+        said.contains("the build the command started, `npm run build`, exited 2"),
+        "{said}"
+    );
+    assert!(!said.contains("starts without build output"), "{said}");
+    // The failed build's record reads back as one, not as a malformed line.
+    let report = project.supercov(&["runs", "latest"]).exits(0);
+    assert!(!report.contains("malformed"), "{report}");
 }
 
 #[cfg(unix)]
@@ -8893,6 +9183,57 @@ fn a_playwright_suite_reads_back_by_its_tags() {
             "{tag}: {summary}"
         );
     }
+}
+
+/// Unit tests beside the specs import `test` and `expect` from their own
+/// runner more often than the specs import them from their fixture module.
+/// On 2026-11-06 a suite's Vitest files outscored its fixture
+/// module, Supercov wrapped Vitest as the Playwright fixture, and every
+/// Playwright test crashed loading Vitest's `expect`. Another runner's API
+/// is never the fixture.
+#[cfg(unix)]
+#[test]
+fn a_playwright_fixture_is_not_taken_from_the_unit_tests_beside_it() {
+    let project = Project::empty("playwright-beside-vitest");
+    project.write(
+        "package.json",
+        r#"{ "name": "playwright-beside-vitest", "private": true, "type": "module" }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/ship.js",
+        "export const ship = (sum) => (sum > 100 ? 0 : 5);\n",
+    );
+    project.write(
+        "playwright.config.js",
+        "export default { testDir: \"tests/e2e\", reporter: \"line\" };\n",
+    );
+    project.write(
+        "tests/e2e/fixtures.js",
+        "import { test as base, expect } from \"@playwright/test\";\nexport const test = base.extend({ order: async ({}, use) => use(10) });\nexport { expect };\n",
+    );
+    project.write(
+        "tests/e2e/ship.spec.js",
+        "import { test, expect } from \"./fixtures.js\";\nimport { ship } from \"../../src/ship.js\";\ntest(\"small orders pay\", ({ order }) => expect(ship(order)).toBe(5));\n",
+    );
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        project.write(
+            &format!("tests/unit/{name}.test.js"),
+            "import { test, expect } from \"vitest\";\nimport { ship } from \"../../src/ship.js\";\ntest(\"free\", () => expect(ship(200)).toBe(0));\n",
+        );
+    }
+    project.git(&["init", "-q"]);
+    project.commit("playwright beside vitest");
+    let output = project
+        .supercov(&["--", "npx", "playwright", "test"])
+        .succeeds();
+    assert!(output.contains("1 passed"), "{output}");
 }
 
 #[test]
@@ -13401,13 +13742,13 @@ fn a_docker_relay_that_cannot_start_leaves_the_daemon_as_it_was() {
             ("RELAYED", "0"),
             (
                 "SUPERCOV_TEST_FAULT",
-                "fs.create_dir_all#docker_proxy.rs:211",
+                "fs.create_dir_all#docker_proxy.rs:219",
             ),
         ],
     );
     let said = unrelayed.stderr();
     assert_eq!(unrelayed.code(), 0, "{}{said}", unrelayed.stdout());
-    assert!(fired_at(&said, "docker_proxy.rs:211"), "{said}");
+    assert!(fired_at(&said, "docker_proxy.rs:219"), "{said}");
     assert!(
         said.contains(
             "containers the tests start are not measured: the Docker relay could not start"
@@ -15029,15 +15370,15 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "fs.rename@1",
             "fs.rename@2",
             "fs.copy@1",
-            "fs.read_dir@40",
-            "fs.read_dir@41",
-            "fs.read_dir@52",
+            "fs.read_dir@36 => workspace.rs:1157",
+            "fs.read_dir@37 => workspace.rs:706",
+            "fs.read_dir@51 => workspace.rs:1358",
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
             "fs.canonicalize#main.rs:2475 => main.rs:2475",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:1944 => javascript_frontend.rs:1944",
+            "fs.read_to_string#javascript_frontend.rs:2024 => javascript_frontend.rs:2024",
         ],
     );
 }
@@ -16411,43 +16752,43 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
         // A listing's first entry unreadable: the copy's tree, the
         // project's dependencies, their tools, a scope, the outputs.
         (
-            "fs.read_dir entry#7",
+            "fs.read_dir entry#6",
             "injected fault at fs",
             "workspace.rs:706",
         ),
         (
-            "fs.read_dir entry#10",
+            "fs.read_dir entry#9",
             "injected fault at fs",
             "workspace.rs:1053",
+        ),
+        (
+            "fs.read_dir entry#10",
+            "injected fault at fs",
+            "workspace.rs:990",
         ),
         (
             "fs.read_dir entry#11",
             "injected fault at fs",
-            "workspace.rs:990",
-        ),
-        (
-            "fs.read_dir entry#12",
-            "injected fault at fs",
             "workspace.rs:937",
         ),
         (
-            "fs.read_dir entry#16",
+            "fs.read_dir entry#15",
             "injected fault at fs",
             "workspace.rs:1358",
         ),
-        ("fs.read_dir@57", "injected fault at fs", "workspace.rs:706"),
+        ("fs.read_dir@53", "injected fault at fs", "workspace.rs:706"),
         (
-            "fs.read_dir@66",
+            "fs.read_dir@62",
             "/node_modules: injected",
             "workspace.rs:1053",
         ),
         (
-            "fs.read_dir@67",
+            "fs.read_dir@63",
             "node_modules/.bin: injected",
             "workspace.rs:990",
         ),
         (
-            "fs.read_dir@68",
+            "fs.read_dir@64",
             "node_modules/@scope: injected",
             "workspace.rs:937",
         ),
@@ -16470,17 +16811,17 @@ fn a_run_whose_dependencies_cannot_be_linked_into_the_copy_says_so() {
     ];
     let unlinkable = [
         (
-            "fs.read_dir entry#9",
+            "fs.read_dir entry#8",
             "injected fault at fs",
             "workspace.rs:769",
         ),
         (
-            "fs.read_dir@62",
+            "fs.read_dir@58",
             "packages/web/node_modules: injected",
             "workspace.rs:769",
         ),
         (
-            "fs.read_dir@63",
+            "fs.read_dir@59",
             "packages/web/node_modules/.bin: injected",
             "workspace.rs:990",
         ),
@@ -16602,17 +16943,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1338",
         "fs.create_dir_all#javascript_run.rs:674",
-        "fs.write#javascript_run.rs:975",
+        "fs.write#javascript_run.rs:969",
         "fs.canonicalize#process_supervision.rs:1719",
-        "fs.create_dir_all#javascript_run.rs:1046",
-        "fs.create_dir_all#javascript_run.rs:1217",
+        "fs.create_dir_all#javascript_run.rs:1040",
+        "fs.create_dir_all#javascript_run.rs:1211",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1480",
-        "fs.create_dir_all#javascript_run.rs:1482",
+        "fs.create_dir_all#javascript_run.rs:1481",
+        "fs.create_dir_all#javascript_run.rs:1483",
         "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1582",
-        "fs.create_dir_all#javascript_run.rs:1584",
+        "fs.create_dir_all#javascript_run.rs:1583",
+        "fs.create_dir_all#javascript_run.rs:1585",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17075,11 +17416,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2488", "jvm_run.rs:2488"),
-        ("fs.create_dir_all#jvm_run.rs:2504", "jvm_run.rs:2504"),
-        ("fs.create_dir_all#jvm_run.rs:2514", "jvm_run.rs:2514"),
-        ("fs.write#jvm_run.rs:2488", "jvm_run.rs:2488"),
-        ("fs.write#jvm_run.rs:2504", "jvm_run.rs:2504"),
+        ("fs.create_dir_all#jvm_run.rs:2489", "jvm_run.rs:2489"),
+        ("fs.create_dir_all#jvm_run.rs:2505", "jvm_run.rs:2505"),
+        ("fs.create_dir_all#jvm_run.rs:2515", "jvm_run.rs:2515"),
+        ("fs.write#jvm_run.rs:2489", "jvm_run.rs:2489"),
+        ("fs.write#jvm_run.rs:2505", "jvm_run.rs:2505"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17109,12 +17450,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:354",
-            "javascript_frontend.rs:354",
+            "fs.read#javascript_frontend.rs:356",
+            "javascript_frontend.rs:356",
         ),
         (
-            "fs.read#javascript_frontend.rs:366",
-            "javascript_frontend.rs:366",
+            "fs.read#javascript_frontend.rs:368",
+            "javascript_frontend.rs:368",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17144,12 +17485,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1731@2",
+            "fs.read_to_string#javascript_frontend.rs:1814@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1731"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1814"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -18445,7 +18786,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1961", "jvm_run.rs:1961"),
+                ("fs.canonicalize#jvm_run.rs:1962", "jvm_run.rs:1962"),
                 ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
@@ -19688,8 +20029,8 @@ fn a_java_server_whose_roots_cannot_be_read_in_the_copy_is_left_unmeasured() {
 #[test]
 fn a_directory_discovery_cannot_list_holds_no_configuration() {
     for fault in [
-        "fs.read_dir#project_discovery.rs:330",
-        "fs.read_dir entry#project_discovery.rs:330",
+        "fs.read_dir#project_discovery.rs:349",
+        "fs.read_dir entry#project_discovery.rs:349",
     ] {
         let project = Project::cart("discovery-unlisted");
         let ran =
@@ -19697,7 +20038,7 @@ fn a_directory_discovery_cannot_list_holds_no_configuration() {
         let said = ran.stderr();
         assert_eq!(ran.code(), 0, "{fault}: {said}");
         assert!(
-            fired_at(&said, "project_discovery.rs:330"),
+            fired_at(&said, "project_discovery.rs:349"),
             "{fault}: {said}"
         );
     }
@@ -19914,4 +20255,47 @@ fn an_ant_build_is_read_before_it_runs() {
         "{}",
         elsewhere.stderr()
     );
+}
+
+/// A process the suite starts that a crash signal ends says nothing of it:
+/// on 2026-11-06 a backend that died so right after it listened read as one
+/// that never became ready. The run names it, and a child its test stops
+/// with SIGTERM is not named.
+#[cfg(unix)]
+#[test]
+fn a_child_a_crash_signal_ends_is_named() {
+    let project = Project::cart("crashed-child");
+    project.write(
+        "test/server.test.js",
+        r#"import { test } from "node:test";
+import { spawn, spawnSync } from "node:child_process";
+
+test("the helper server crashes, the test does not", () => {
+  spawnSync(process.execPath, ["-e", "process.kill(process.pid, 'SIGSEGV')"]);
+});
+
+test("a server the test stops is not a crash", async () => {
+  const server = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  server.kill("SIGTERM");
+  await new Promise((done) => server.once("exit", done));
+});
+"#,
+    );
+    project.commit("a crashing helper");
+    let measured = project.supercov(&["--", "node", "--test"]);
+    let output = measured.exits(0);
+    let named: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains("crashed with"))
+        .collect();
+    assert_eq!(named.len(), 1, "{output}");
+    contains_all(
+        named[0],
+        &[
+            "[supercov] warning:",
+            "crashed with SIGSEGV",
+            "s after it started",
+        ],
+    );
+    assert!(!output.contains("SIGTERM"), "{output}");
 }

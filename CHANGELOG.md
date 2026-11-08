@@ -1,5 +1,69 @@
 # Changelog
 
+## 4.24.8
+
+**Fixed**
+
+- A Playwright test file could fail at `does not provide an export named …`, and then the run reported `No tests found`, when it imported an ES module that another Playwright process was still writing into the shared compile cache. 4.24.3 wrote that cache whole only from the process's main thread; Playwright 1.59 compiles ES modules in its loader thread, which now writes whole too. Most often hit by the first tests of a Docker relay run, whose containers share one cold cache.
+
+## 4.24.7
+
+**Fixed**
+
+- Vitest or Mocha started by Bun from its entry point (`bun node_modules/vitest/vitest.mjs run`) passed and recorded no test: Bun loads no Node preload, so the runner was never set up, and all its coverage was counted as background while the run reported a complete measurement. The Bun adapter now sets these runners up as Node's preload does, so their tests are attributed under Bun as under Node ([#205](https://github.com/supercorp-ai/supercov/issues/205)).
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
+
+## 4.24.6
+
+**Fixed**
+
+- A Bun test could be recorded with no source file: Bun reported Supercov's wrapper around `test` as an `unknown` frame in front of the test's own, whether the test was registered directly or by `call`, `apply` or `bind`. Tests with the same title in different files then shared one identity, a file filter selected none, and `merge` collapsed them. Each keeps its file now ([#200](https://github.com/supercorp-ai/supercov/issues/200)).
+- A Vitest run of a package whose Vitest and Vite are installed only in that package, not at the repository root, failed loading Supercov's generated config because it looked for Vite from the copy's `.supercov`. It looks from the runner and the project's own config first, through Vitest's own dependencies under pnpm's strict layout, and an error Vite itself raises while loading is no longer hidden by trying another copy ([#199](https://github.com/supercorp-ai/supercov/issues/199)).
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
+
+## 4.24.5
+
+**Fixed**
+
+- A Bun suite whose `bunfig.toml` preload imports `bun:test` recorded no tests: Bun loads configured preloads before `BUN_OPTIONS`, so the preload took Bun's own test API before Supercov's adapter could wrap it, and all coverage was counted as background. The adapter now goes first in the copy's preload list, the project's own preloads following in their order; the project's `bunfig.toml` is not changed ([#197](https://github.com/supercorp-ai/supercov/issues/197)).
+- After a JavaScript run of a package inside a monorepo, links to the rest of the repository stayed in the package's `.supercov`, so a plain test run in the package (`npx vitest run`) also collected the other packages' tests through them. They are removed when the run ends, and the next run makes them again.
+
+**Contributors**
+
+- [@artile](https://github.com/artile)
+
+## 4.24.4
+
+**Fixed**
+
+- `merge` refused a unit run and an end-to-end run of the same commit for different denominators when a file had a type-only import (`import { type T }`): whether that import counted as a line depended on the test command, so `node --import tsx` dropped it and Vitest kept it. The file's nearest tsconfig alone decides now (`verbatimModuleSyntax`, `preserveValueImports`, `importsNotUsedAsValues`, `emitDecoratorMetadata`), as tsc, esbuild, swc, Babel and ts-node do, so every command counts it alike.
+- A Playwright suite with many Vitest files beside it could have Vitest taken for its test fixture module, and every Playwright test then crashed with `Cannot redefine property: Symbol($$jest-matchers-object)`. Another runner's own API (`vitest`, `@jest/globals`, `bun:test`, `node:test`, `mocha` and the like) is never taken for the fixture.
+- A run whose test harness started the build from its own code (`execSync('npm run build')`) and whose build failed was told to add `npm run build` to the command. The run now names the build it saw start and its exit code, and gives no such hint.
+
+## 4.24.3
+
+**Added**
+
+- A process the run measured that a crash signal ended -- SIGSEGV, SIGBUS, SIGABRT and the like -- is now named when the run ends, with the signal and how long it ran. Such a process says nothing itself: a backend that crashed right after it printed its URL read as one that never became ready, and a Playwright worker as one that "exited unexpectedly". Exits by SIGTERM or SIGKILL, which teardowns send, are not named.
+
+**Fixed**
+
+- A container that ran to its end with exit code 0 -- a short install step started with `docker run` or `docker compose run` from the same image as the servers -- is no longer named as one that sent no coverage back.
+- Playwright 1.59 could crash while loading its config under coverage (`Cannot add property metadata, object is not extensible`): it read a compiled file from its transform cache while another process was still writing it. Files go into that cache whole now.
+- On Docker Desktop a container created right after the run started could see the previous run's copy of the project, empty or with old files, so `docker exec` found no Playwright. Such a container now waits until the new copy shows, at most 1.5 s after the run starts; nothing waits elsewhere.
+
+## 4.24.2
+
+**Fixed**
+
+- Tests run as root in a container -- a sealed worker running Playwright by `docker exec` -- wrote their evidence readable by root alone, so the run, as the checkout's user, stopped at each file with "Permission denied (os error 13)" and recorded no run. Evidence a container writes is now readable by every user, and when the run ends, whatever a container left that another user owns in the copy and the run's directory -- Playwright's `test-results`, `.last-run.json` -- is opened to the run's user, so it is read and removed.
+
 ## 4.24.1
 
 **Fixed**

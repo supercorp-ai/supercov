@@ -1,0 +1,80 @@
+name: Apache Ant
+description: >
+  Apache Ant, as ANT_HOME, and the jars its tests name on their command lines
+  in the local Maven repository: fetched once and kept in the Actions cache.
+  archive.apache.org stopped answering on 2026-11-05 and failed a release's
+  compatibility run.
+inputs:
+  version:
+    description: The Ant release.
+    default: "1.10.15"
+runs:
+  using: composite
+  steps:
+    - id: kept
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/supercov-ant
+        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}
+    - shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        kept="$HOME/.cache/supercov-ant"
+        mkdir -p "$kept"
+        fetch() {
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 -o "$kept/$1.part" "$2" \
+            && mv "$kept/$1.part" "$kept/$1"
+        }
+        # The release asked for, from Apache's CDN, then from its archive,
+        # which keeps every release but answers slowly or not at all (it timed
+        # out on 2026-11-05); and failing both, the CDN's current 1.10 release,
+        # which has every task the tests use. The CDN keeps only the newest:
+        # 1.10.15 was gone from it by the time 1.10.18 was out.
+        # A glob, not `ls`: with nothing kept yet `ls` fails, and the step
+        # runs under pipefail.
+        zip=""
+        for found in "$kept"/apache-ant-*-bin.zip; do
+          [ -e "$found" ] && zip="$found"
+          break
+        done
+        if [ -z "$zip" ]; then
+          name="apache-ant-$VERSION-bin.zip"
+          fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name" \
+            || fetch "$name" "https://archive.apache.org/dist/ant/binaries/$name" \
+            || { name=$(curl -fsSL --retry 5 --connect-timeout 30 https://dlcdn.apache.org/ant/binaries/ \
+                   | grep -oE 'apache-ant-1\.10\.[0-9]+-bin\.zip' | sort -uV | tail -1) \
+                 && fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name"; } \
+            || { echo "::error::Apache Ant could not be fetched"; exit 1; }
+          zip="$kept/$name"
+        fi
+        unzip -q -o "$zip" -d "$RUNNER_TEMP"
+        home=$(basename "$zip" -bin.zip)
+        echo "ANT_HOME=$RUNNER_TEMP/$home" >> "$GITHUB_ENV"
+        # JUnit 4 for <junit>, the platform for <junitlauncher>, and TestNG
+        # 6.14.3, the last line whose jar carries its own Ant task: where the
+        # tests look, without Maven, which not every runner has.
+        for jar in \
+          junit/junit/4.13.2/junit-4.13.2.jar \
+          org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar \
+          org/junit/jupiter/junit-jupiter-api/5.10.2/junit-jupiter-api-5.10.2.jar \
+          org/junit/jupiter/junit-jupiter-engine/5.10.2/junit-jupiter-engine-5.10.2.jar \
+          org/junit/platform/junit-platform-commons/1.10.2/junit-platform-commons-1.10.2.jar \
+          org/junit/platform/junit-platform-engine/1.10.2/junit-platform-engine-1.10.2.jar \
+          org/junit/platform/junit-platform-launcher/1.10.2/junit-platform-launcher-1.10.2.jar \
+          org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar \
+          org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar \
+          org/testng/testng/6.14.3/testng-6.14.3.jar \
+          com/beust/jcommander/1.72/jcommander-1.72.jar; do
+          if [ ! -s "$kept/$jar" ]; then
+            curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --create-dirs -o "$kept/$jar" \
+              "https://repo1.maven.org/maven2/$jar"
+          fi
+          mkdir -p "$(dirname "$HOME/.m2/repository/$jar")"
+          cp "$kept/$jar" "$HOME/.m2/repository/$jar"
+        done
+    - if: steps.kept.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/supercov-ant
+        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}

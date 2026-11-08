@@ -317,7 +317,7 @@ miss blocks flipping any default.
   WebKit reruns, so engine selection is covered under failure supervision as
   well as normal completion.
 - Phase 3 is promoted. The independent syntax matrix is green for 43 cases on
-  Node 22, Node 24, Chromium, Firefox, and WebKit. Essential SEO Rust dogfood
+  Node 22, Node 24, Chromium, Firefox, and WebKit. Field-project Rust dogfood
   run `2026-08-25T00-25-52-427Z` passed all 30 offline tests; a preceding VM
   snapshot tar race failed before test execution and the retry isolated that
   failure to Supermachine's bake path. The six production fixture shapes,
@@ -781,9 +781,9 @@ miss blocks flipping any default.
   The repaired archived run is valid and queryable at 52.98% lines, 40.77%
   branches, and 28.30% MC/DC; structural completeness is false only because
   the current tests do not execute every declared obligation.
-- Essential SEO also runs end to end through the private Rust shell with no
+- The field project also runs end to end through the private Rust shell with no
   Supermachine/provider special case. Run
-  `rust-essential-seo-dogfood-2026-08-25c` built the isolated Remix/Vite app,
+  `rust-field-dogfood-2026-08-25c` built the isolated Remix/Vite app,
   launched the existing opaque offline command, passed all 30 Playwright E2E
   tests, packed 90 evidence entries, and served the stored run through the
   Rust mmap query path. Its report is valid and measurement-complete across
@@ -842,7 +842,7 @@ miss blocks flipping any default.
   test, minimization and diff variant reproduces the frozen text, pagination
   command and warning/error behavior. Black-box tests cover both the complete
   webpack run and the mixed-outcome Playwright run with blocking source-scope
-  limitations; a live Essential SEO comparison additionally exercised large
+  limitations; a live field-project comparison additionally exercised large
   uncovered-obligation pages, decision sorting, exact test detail and subset
   minimization without a difference. The only normalized text remains the
   intentional old-engine fingerprint reason. Both human and JSON query slices
@@ -2276,7 +2276,7 @@ miss blocks flipping any default.
 
 ## Checkpoint — 2026-08-27 public JavaScript field hardening
 
-- Essential SEO agent dogfood produced a consolidated B1–B9/D1–D7 field
+- Field-project agent dogfood produced a consolidated B1–B9/D1–D7 field
   report. `progress/javascript-field-hardening-2026-08-27.md` now binds every
   in-scope finding to an implementation and executable proof; separately
   labelled Shopify harness and application bugs remain outside Supercov.
@@ -2296,7 +2296,7 @@ miss blocks flipping any default.
   tests are green locally, followed by the runtime, public runner/build,
   opaque-launcher, four-browser syntax and macOS crash/isolation matrices.
   Test262 preserved all 65,051 baseline-passing scenarios across 41,593 files
-  with zero semantic differences. Combined Essential SEO dogfood passed 436
+  with zero semantic differences. Combined field-project dogfood passed 436
   unit and 80 E2E tests with complete measurement. The release transformer
   measured 25.66ms median for 500 files. Hosted CI was not used.
 - B9 is closed as well: strict merge rejection now names the exact incompatible

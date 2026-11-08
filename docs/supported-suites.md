@@ -65,7 +65,8 @@ one run and preserves runner identity wherever the runner exposes it.
 ### Bun
 
 Run `supercov -- bun test` or the package script that launches it. Supercov
-loads a native Bun adapter through `BUN_OPTIONS`, preserving existing Bun
+loads a native Bun adapter before configured preloads in the isolated copy,
+and through `BUN_OPTIONS` for commands without them, preserving existing Bun
 options, configured preloads, and the project's files. Named ESM imports,
 namespace imports, and CommonJS `require('bun:test')` are supported. Bun ignores
 Node's preload settings, so the Node adapter alone cannot attribute its tests.
@@ -75,6 +76,13 @@ the registration's title template and original row index in Supercov's queries;
 Bun keeps its own formatted reporter titles. Async test bodies retain their
 identity across `await`, including concurrent execution. Lifecycle hooks have
 separate setup identities and do not credit their coverage to the test body.
+
+Bun can also run another test runner by its entry point, such as
+`bun node_modules/vitest/vitest.mjs run` or `bun node_modules/mocha/bin/mocha.js`.
+The Bun adapter sets that runner up as Node's preload would: Vitest gets
+Supercov's generated config, which merges the project's own (including one given
+by `--config`), and Mocha's runner is patched before it loads. Their tests are
+attributed as they are under Node.
 
 Callback completion supplies the recorded outcome. If Bun interrupts a callback
 before it completes, Supercov preserves its named coverage with an **unknown**

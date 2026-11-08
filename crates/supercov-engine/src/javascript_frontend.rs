@@ -59,10 +59,12 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "nodeAssertStrict.mjs",
     "nodeTest.mjs",
     "playwright.mjs",
+    "playwrightCacheThread.mjs",
     "playwrightReporter.mjs",
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
+    "runnerEntry.mjs",
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
@@ -376,7 +378,11 @@ pub fn load_cached_javascript_frontend(
     })
 }
 
-fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
+fn frontend_artifact_paths(
+    workspace: &Path,
+    project: &CoverageProject,
+    authored: &BTreeSet<String>,
+) -> Vec<String> {
     let mut artifacts = vec![
         ".supercov/node_modules/package.json".to_owned(),
         ".supercov/node_modules/runtime.d.mts".to_owned(),
@@ -416,10 +422,9 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
             artifacts.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
-    let rewritten = project
-        .source_files
+    artifacts.extend(authored.iter().cloned());
+    let rewritten = authored
         .iter()
-        .chain(project.source_scope.entries.iter().map(|entry| &entry.file))
         .map(|file| format!("{AUTHORED_DIRECTORY}/{file}"))
         .collect::<Vec<_>>();
     artifacts.extend(rewritten);
@@ -468,17 +473,93 @@ fn write_authored(
     atomic_write(&path, source.as_bytes())
 }
 
+/// `file`'s authored copy, written the first time it is kept.
+fn keep_authored(
+    workspace: &Path,
+    authored: &mut BTreeSet<String>,
+    file: &str,
+    source: &str,
+) -> Result<(), JavascriptFrontendError> {
+    if authored.insert(file.to_owned()) {
+        write_authored(workspace, file, source)?;
+    }
+    Ok(())
+}
+
+fn prepend_bun_adapter(preload: Option<&mut toml_edit::Item>, adapter: &str) -> bool {
+    let Some(preload) = preload else {
+        return false;
+    };
+    if let Some(paths) = preload.as_array_mut() {
+        if paths.is_empty() {
+            return false;
+        }
+        paths.insert(0, adapter);
+        return true;
+    }
+    if let Some(path) = preload.as_str() {
+        let mut paths = toml_edit::Array::new();
+        paths.push(adapter);
+        paths.push(path);
+        *preload = toml_edit::value(paths);
+        return true;
+    }
+    false
+}
+
+/// Bun loads configured preloads before BUN_OPTIONS. Its first import of
+/// bun:test captures the native exports, so the adapter must precede it.
+/// Change only the isolated copy, keeping the authored config for tools.
+fn configure_bun_preloads(
+    workspace: &Path,
+    authored: &mut BTreeSet<String>,
+) -> Result<(), JavascriptFrontendError> {
+    let files = crate::integrity::walked_configuration_files(workspace)
+        .map_err(|error| io_error(workspace, io::Error::other(error)))?;
+    let adapter = workspace.join(".supercov/node_modules/bunTest.mjs");
+    let adapter = adapter.to_string_lossy();
+    for path in files
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "bunfig.toml"))
+    {
+        let source = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
+        // Leave malformed configs to the runner: a Node-only command may
+        // share a project with Bun without ever reading its config.
+        let Ok(mut document) = source.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let changed = prepend_bun_adapter(document.get_mut("preload"), &adapter);
+        let changed = prepend_bun_adapter(
+            document
+                .get_mut("test")
+                .and_then(|test| test.get_mut("preload")),
+            &adapter,
+        ) || changed;
+        if !changed {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(workspace)
+            .expect("configuration walked inside workspace");
+        let file = relative.to_string_lossy().replace('\\', "/");
+        keep_authored(workspace, authored, &file, &source)?;
+        atomic_write(&path, document.to_string().as_bytes())?;
+    }
+    Ok(())
+}
+
 fn write_javascript_frontend_cache(
     workspace: &Path,
     project: &CoverageProject,
     key: &str,
     assertion_calls: usize,
+    authored: &BTreeSet<String>,
 ) -> Result<(), JavascriptFrontendError> {
     let cache_directory = workspace.join(FRONTEND_CACHE_DIRECTORY);
     create_directory_all(&cache_directory)?;
     // Never empty: the frontend's own files are always among them. Each read,
     // digested and stored on its own, across the cores.
-    let paths = frontend_artifact_paths(workspace, project);
+    let paths = frontend_artifact_paths(workspace, project, authored);
     let artifacts = crate::threads::parallel_map(&paths, |path| {
         let contents = fs::read(workspace.join(path))
             .map_err(|source| io_error(&workspace.join(path), source))?;
@@ -1344,24 +1425,27 @@ fn write_vitest_config(
     let source = format!(
         "import {{ createRequire }} from 'node:module';\n\
          import {{ pathToFileURL }} from 'node:url';\n\
-         // pnpm's strict layout does not hoist vite to the project root: it\n\
-         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
-         // resolved from this generated file fails. Vitest depends on vite, so\n\
-         // fall back to resolving it through vitest's own tree rather than\n\
-         // requiring the project to hoist anything.\n\
+         // Resolve from the actual runner and original configuration, whose\n\
+         // package may be nested and have no dependencies hoisted to the root.\n\
+         // Resolving through Vitest's real entry also supports strict pnpm.\n\
+         const discoveredConfig = {original};\n\
          const supercovRequire = createRequire(import.meta.url);\n\
          const supercovLoadVite = async () => {{\n\
-           try {{\n\
-             return await import('vite');\n\
-           }} catch (error) {{\n\
+           const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
+           const anchors = [process.argv[1], originalPath].filter(Boolean);\n\
+           const resolvers = [...anchors.map(file => createRequire(resolve(file))), supercovRequire];\n\
+           for (const from of resolvers) {{\n\
              let entry;\n\
              try {{\n\
-               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
+               entry = createRequire(from.resolve('vitest')).resolve('vite');\n\
              }} catch {{\n\
-               throw error;\n\
+               try {{ entry = from.resolve('vite'); }} catch {{ continue; }}\n\
              }}\n\
+             // Initialization errors belong to this dependency; do not hide\n\
+             // them by falling back to another installed version.\n\
              return await import(pathToFileURL(entry).href);\n\
            }}\n\
+           return await import('vite');\n\
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
@@ -1369,7 +1453,6 @@ fn write_vitest_config(
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
-         const discoveredConfig = {original};\n\
          // Browser Mode runs the test file in the browser, so the node setup --\n\
          // which reaches node:fs to write evidence -- cannot load there. Vite\n\
          // externalises it and the suite fails before collecting a test.\n\
@@ -1776,7 +1859,6 @@ enum InstrumentedSource {
 struct SourceInstrumentation<'a> {
     workspace: &'a Path,
     project: &'a CoverageProject,
-    command: &'a [String],
     standalone_runtime: &'a str,
     browser_suite: bool,
     images: bool,
@@ -1792,7 +1874,6 @@ fn instrument_source(
     let SourceInstrumentation {
         workspace,
         project,
-        command,
         standalone_runtime,
         browser_suite,
         images,
@@ -1802,7 +1883,7 @@ fn instrument_source(
     let path = workspace.join(relative);
     let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
     let capability_wrapper = runtime_specifier(relative, "capability.mjs");
-    let elide = crate::typescript_imports::elides_type_imports(workspace, file, command);
+    let elide = crate::typescript_imports::elides_type_imports(workspace, file);
     let instrumented = timed(&SETUP.instrument_ns, || {
         crate::fault::or("instrument-source", injected_instrumentation_error, || {
             instrument_with_import_policy(&source, file, &capability_wrapper, elide)
@@ -1911,7 +1992,6 @@ pub fn prepare_javascript_frontend(
     project: &CoverageProject,
     collector_id: &str,
     cache_key: &str,
-    command: &[String],
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     // Runtime code files live under a node_modules segment: Node attributes
@@ -1965,6 +2045,7 @@ pub fn prepare_javascript_frontend(
         )?;
     }
     let mut authored = BTreeSet::new();
+    configure_bun_preloads(workspace, &mut authored)?;
     let sources_started = Instant::now();
     // Every source on its own, spread over the cores: a project's sources were
     // instrumented one after another, most of a second of every run. Merged in
@@ -1972,7 +2053,6 @@ pub fn prepare_javascript_frontend(
     let options = SourceInstrumentation {
         workspace,
         project,
-        command,
         standalone_runtime: &standalone_runtime,
         browser_suite,
         images,
@@ -2081,7 +2161,7 @@ pub fn prepare_javascript_frontend(
         b"coverage-completeness-v2\n",
     )?;
     timed(&SETUP.cache_ns, || {
-        write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls)
+        write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls, &authored)
     })?;
     Ok(PreparedJavascriptFrontend {
         manifest,
@@ -2127,7 +2207,7 @@ mod tests {
         workspace: &Path,
         project: &CoverageProject,
     ) -> Result<(), JavascriptFrontendError> {
-        prepare_javascript_frontend(workspace, project, "collector", "cache", &[])?;
+        prepare_javascript_frontend(workspace, project, "collector", "cache")?;
         let cache = read_javascript_frontend_cache(workspace, "cache")
             .ok_or(JavascriptFrontendError::UnsafeSourcePath("no cache".into()))?;
         load_cached_javascript_frontend(workspace, &cache).map(drop)
@@ -2155,7 +2235,7 @@ mod tests {
             "fs.read@2",
             "fs.read@3",
             "fs.read@5",
-            "fs.read@38",
+            "fs.read@40",
             // Read back to adapt: Playwright's runtime, the loader, a source.
             "fs.read_to_string@1",
             "fs.read_to_string@2",
@@ -2164,13 +2244,13 @@ mod tests {
             "fs.open_with@1",
             "fs.write_all@1",
             "fs.rename@1",
-            "fs.rename@33",
-            "fs.rename@34",
+            "fs.rename@35",
+            "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:463",
-            "javascript-source-path#javascript_frontend.rs:1801",
-            "javascript-source-path#javascript_frontend.rs:1729",
+            "javascript-source-path#javascript_frontend.rs:468",
+            "javascript-source-path#javascript_frontend.rs:1882",
+            "javascript-source-path#javascript_frontend.rs:1812",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2183,7 +2263,7 @@ mod tests {
         for site in ["instrument-source", "instrument-test"] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(site, || {
-                prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+                prepare_javascript_frontend(&workspace, &project, "collector", "cache")
             });
             assert!(
                 matches!(prepared, Err(JavascriptFrontendError::Instrument { .. })),
@@ -2198,6 +2278,108 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
+    /// The copy's `bunfig.toml` loads the Bun adapter before the preloads it
+    /// names -- at the top and under `[test]`, one path or a list, in any
+    /// directory -- and the project's follow in their order. The text as
+    /// written is kept as the authored copy, and the rewritten one comes
+    /// back from the cache. A config naming no preload, an empty list, a
+    /// preload that is no path, or text that is no TOML is left as it is.
+    #[test]
+    fn a_bun_config_in_the_copy_loads_the_adapter_before_its_own_preloads() {
+        let configs = [
+            (
+                "bunfig.toml",
+                "preload = \"./first.ts\"\n[test]\ntimeout = 5000\npreload = [\"./a.ts\", \"./b.ts\"]\n",
+            ),
+            ("pkg/bunfig.toml", "[test]\npreload = \"./only.ts\"\n"),
+            ("top/bunfig.toml", "preload = [\"./top.ts\"]\n"),
+            ("none/bunfig.toml", "[test]\ntimeout = 5000\n"),
+            ("empty/bunfig.toml", "[test]\npreload = []\n"),
+            ("number/bunfig.toml", "preload = 1\n"),
+            ("broken/bunfig.toml", "[test\npreload = \"./a.ts\"\n"),
+        ];
+        let fixture = || {
+            let (source_root, workspace, project) = frontend_fixture();
+            for (file, text) in configs {
+                let path = workspace.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, text).unwrap();
+            }
+            (source_root, workspace, project)
+        };
+        let (source_root, workspace, project) = fixture();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
+        fs::write(workspace.join("bunfig.toml"), configs[0].1).unwrap();
+        let cache = read_javascript_frontend_cache(&workspace, "cache").unwrap();
+        load_cached_javascript_frontend(&workspace, &cache).unwrap();
+        let adapter = workspace
+            .join(".supercov/node_modules/bunTest.mjs")
+            .to_string_lossy()
+            .into_owned();
+        let preloads = |file: &str, table: Option<&str>| {
+            let text = fs::read_to_string(workspace.join(file)).unwrap();
+            let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+            let item = table.map_or(document.as_item(), |table| &document[table]);
+            item["preload"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|path| path.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(preloads("bunfig.toml", None), [&adapter, "./first.ts"]);
+        assert_eq!(
+            preloads("bunfig.toml", Some("test")),
+            [&adapter, "./a.ts", "./b.ts"]
+        );
+        assert_eq!(
+            preloads("pkg/bunfig.toml", Some("test")),
+            [&adapter, "./only.ts"]
+        );
+        assert_eq!(preloads("top/bunfig.toml", None), [&adapter, "./top.ts"]);
+        assert!(
+            fs::read_to_string(workspace.join("bunfig.toml"))
+                .unwrap()
+                .contains("timeout = 5000")
+        );
+        let (rewritten, untouched) = configs.split_at(3);
+        for (file, text) in rewritten {
+            let authored = authored_path(&workspace, Path::new(file));
+            assert_eq!(fs::read_to_string(authored).unwrap(), *text, "{file}");
+        }
+        for (file, text) in untouched {
+            assert_eq!(fs::read_to_string(workspace.join(file)).unwrap(), *text);
+            assert!(
+                !authored_path(&workspace, Path::new(file)).exists(),
+                "{file}"
+            );
+        }
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+        // Each step of it failing stops the preparation: the configurations
+        // looked for, one read, its authored copy kept or the rewritten text
+        // published.
+        for fault in [
+            "fs.read_dir#integrity.rs:508",
+            "fs.read_to_string#javascript_frontend.rs:525",
+            "javascript-source-path#javascript_frontend.rs:468",
+            // Package and types, two Playwright adapters, two configurations
+            // and the bunfig's authored copy precede its rewrite's.
+            &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
+        ] {
+            let (source_root, workspace, project) = fixture();
+            let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
+            assert!(prepared.is_err(), "{fault}");
+            if fault.starts_with("fs.rename") {
+                let config = fs::read_to_string(workspace.join("bunfig.toml")).unwrap();
+                assert_eq!(config, configs[0].1);
+                assert!(authored_path(&workspace, Path::new("bunfig.toml")).exists());
+            }
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+        }
+    }
+
     #[test]
     fn a_source_that_cannot_be_published_keeps_its_authored_copy_and_stops_preparation() {
         let (source_root, workspace, project) = frontend_fixture();
@@ -2207,7 +2389,7 @@ mod tests {
         // and the authored copy precede the source's own atomic publication.
         let fault = format!("fs.rename@{}", RUNTIME_FILES.len() + 8);
         let prepared = crate::fault::during(&fault, || {
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[])
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache")
         });
         assert!(
             matches!(&prepared, Err(JavascriptFrontendError::Io { path: failed, .. }) if failed == &path),
@@ -2224,7 +2406,7 @@ mod tests {
                 .exists()
         );
         assert_eq!(fs::read_dir(workspace.join("src")).unwrap().count(), 1);
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         assert!(
             workspace
                 .join(".supercov/instrumentation-complete")
@@ -2679,7 +2861,7 @@ mod tests {
                 project.playwright_config.is_some(),
                 "the fixture's Playwright config was not discovered for {command:?}"
             );
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
             let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
             assert!(
                 transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2706,7 +2888,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2727,7 +2909,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         for file in &project.source_files {
             let transformed = fs::read_to_string(workspace.join(file)).unwrap();
             if !transformed.contains("globalThis.__SUPERCOV_DIRECT_RUNTIME__") {
@@ -2771,7 +2953,7 @@ mod tests {
         )
         .unwrap();
         assert!(project.playwright_config.is_some());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2796,7 +2978,7 @@ mod tests {
             &environment,
         );
         assert!(project.playwright_config.is_some());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START),
@@ -2819,7 +3001,7 @@ mod tests {
                 source,
                 &BTreeMap::new(),
             );
-            prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+            prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
             let transformed = fs::read_to_string(workspace.join("src").join(name)).unwrap();
             assert!(
                 transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2848,7 +3030,7 @@ mod tests {
             &BTreeMap::new(),
         );
         fs::write(workspace.join("Dockerfile"), "FROM scratch\n").unwrap();
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(
             transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2868,7 +3050,7 @@ mod tests {
             source,
             &BTreeMap::new(),
         );
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
         assert!(
             transformed.contains("(() => { if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) {"),
@@ -2900,7 +3082,7 @@ mod tests {
         )
         .unwrap();
         assert!(project.playwright_config.is_none());
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         let transformed = fs::read_to_string(workspace.join("src/example.ts")).unwrap();
         assert!(transformed.contains(crate::js_instrumenter::RUNTIME_LOADER_START));
     }
@@ -2956,7 +3138,7 @@ mod tests {
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
         let prepared =
-            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test", &[])
+            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test")
                 .unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),
@@ -3020,8 +3202,7 @@ mod tests {
             ..project.clone()
         };
         let empty =
-            prepare_javascript_frontend(&workspace, &bare, "collector-bare", "cache-bare", &[])
-                .unwrap();
+            prepare_javascript_frontend(&workspace, &bare, "collector-bare", "cache-bare").unwrap();
         assert!(empty.manifest.points.is_empty());
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
@@ -3111,7 +3292,7 @@ mod tests {
         // still the text as written.
         let (source_root, workspace, project) = frontend_fixture();
         let written = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
-        prepare_javascript_frontend(&workspace, &project, "collector", "cache", &[]).unwrap();
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
         assert!(
             project
                 .source_scope

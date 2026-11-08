@@ -453,6 +453,65 @@ test("an execution-trace writer that meets a clone of itself rotates its log", {
   }
 });
 
+test("a child a crash signal ends or that fails is noted, and one a teardown stops is not", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-execution-crash-"));
+  try {
+    const supervisor = pathToFileURL(resolve("runtime/javascript/launchSupervisor.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { spawn, spawnSync, execFileSync } from "node:child_process";
+         const { installLaunchSupervisor } = await import(${JSON.stringify(supervisor)});
+         installLaunchSupervisor();
+         const crash = (signal) => ["-e", "process.kill(process.pid, '" + signal + "')"];
+         spawnSync(process.execPath, crash("SIGSEGV"));
+         // Through no shell: dash runs a command as its child and exits 134.
+         try { execFileSync(process.execPath, crash("SIGABRT")); } catch {}
+         spawnSync(process.execPath, crash("SIGTERM"));
+         const ended = (launched) => new Promise((done) => launched.once("exit", done));
+         await ended(spawn(process.execPath, crash("SIGBUS")));
+         const stopped = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
+         stopped.kill("SIGKILL");
+         await ended(stopped);
+         spawnSync(process.execPath, ["-e", "process.exit(3)"]);
+         try { execFileSync(process.execPath, ["-e", "process.exit(4)"]); } catch {}
+         await ended(spawn(process.execPath, ["-e", "process.exit(5)"]));
+         await ended(spawn(process.execPath, ["-e", "0"]));
+         process.stdout.write(String(process.pid));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_EXECUTION_LOG: resolve(root, "execution.jsonl") },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const parentPid = child.stdout.trim();
+    const exits = readdirSync(root)
+      .filter((name) => name.startsWith(`execution.host.${parentPid}-`))
+      .flatMap((log) => readFileSync(resolve(root, log), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
+      .filter((event) => event.event === "child-exit");
+    assert.deepEqual(
+      exits.map((event) => event.signal ?? event.code),
+      ["SIGSEGV", "SIGABRT", "SIGBUS", 3, 4, 5],
+    );
+    for (const exit of exits) {
+      assert.equal(typeof exit.child, "number");
+      assert.ok(exit.ranMs >= 0);
+      assert.equal("signal" in exit && "code" in exit, false);
+    }
+    // The command with its arguments.
+    assert.equal(exits[0].command, `${process.execPath} -e process.kill(process.pid, 'SIGSEGV')`);
+    assert.equal(exits[3].command, `${process.execPath} -e process.exit(3)`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a background writer that meets a clone of itself moves to a fresh shard", {
   skip: process.platform === "win32",
 }, () => {
