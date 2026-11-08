@@ -73,6 +73,14 @@ jobs:
             rounds: 3
             diagnose: 0
             binaries: new=binaries/supercov-new/supercov
+          # The same on a second runner: runners differ, and the ratio with
+          # them, by more than a change of a few seconds moves it.
+          - app: rallly
+            label: rallly-second
+            node: 24
+            rounds: 3
+            diagnose: 0
+            binaries: new=binaries/supercov-new/supercov
           - app: rallly
             label: rallly-diagnose
             node: 24
@@ -108,6 +116,8 @@ jobs:
           pattern: supercov-*
           path: binaries
       - run: chmod +x binaries/*/supercov
+      # Which machine this was: the ratio moves with it.
+      - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
       - run: npx -y playwright@1.49.1 install-deps chromium
       # samply, for a native profile of Supercov's own work.
       - if: matrix.diagnose == 1

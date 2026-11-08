@@ -536,7 +536,9 @@ const cpuTable = Object.keys(cpu).length === 0 ? '' : [
   `|---|${Object.keys(cpu).map(() => '---').join('|')}|`,
   ...cpuKinds.map((kind) => `| ${kind} | ${Object.values(cpu).map((totals) => (totals[kind] ?? 0).toFixed(1)).join(' | ')} |`),
 ].join('\n');
-const table = `${application}: medians of ${rounds} rounds, ${description}.\n\n${rows.join('\n')}\n${cpuTable}\n`;
+const machineFile = join(process.env.RUNNER_TEMP ?? output, 'machine.txt');
+const machine = existsSync(machineFile) ? readFileSync(machineFile, 'utf8').trim().replace(/\s+/g, ' ') : 'unknown machine';
+const table = `${application}: medians of ${rounds} rounds, ${description}; ${machine}.\n\n${rows.join('\n')}\n${cpuTable}\n`;
 writeFileSync(join(output, 'summary.md'), table);
 if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
 console.log(table);
