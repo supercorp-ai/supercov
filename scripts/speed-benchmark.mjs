@@ -54,6 +54,25 @@ function run(cwd, command, args, label, extra = {}, mayFail = false) {
   return { seconds, stdout: result.stdout };
 }
 
+// A command run as `run` runs it, with samply attached to its own process
+// (not its children) until it exits.
+async function attachedProfile(cwd, command, args, label, profile) {
+  const child = spawn(command, args, {
+    cwd,
+    env: { ...process.env, CI: 'true', SUPERCOV_PHASE_TIMING: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let text = '';
+  child.stdout.on('data', (chunk) => { text += chunk; });
+  child.stderr.on('data', (chunk) => { text += chunk; });
+  const sampler = spawn(process.env.SPEED_SAMPLY, ['record', '--save-only', '--unstable-presymbolicate', '-o', profile, '-p', String(child.pid)], { stdio: 'ignore' });
+  await new Promise((resolve) => child.on('close', resolve));
+  writeFileSync(join(logs, `${label}.log`), text);
+  const stopped = new Promise((resolve) => sampler.on('close', resolve));
+  setTimeout(() => sampler.kill('SIGINT'), 5_000).unref();
+  await stopped;
+}
+
 function checkout(directory, repository, commit) {
   if (existsSync(directory)) return;
   mkdirSync(directory);
@@ -305,7 +324,13 @@ if (process.env.SPEED_DIAGNOSE === '1') {
   rmSync(join(project, '.supercov'), { recursive: true, force: true });
   for (const suite of suites) {
     reset(`diagnose-${name}-${suite.name}`);
-    run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+    if (suite.name === 'e2e' && process.env.SPEED_SAMPLY) {
+      // The e2e run's Supercov process alone, natively profiled: its setup,
+      // evidence and publication, without the browser and Node beside it.
+      await attachedProfile(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, join(output, 'samply-e2e.json.gz'));
+    } else {
+      run(project, path, ['--', ...suite.command], `diagnose-${name}-${suite.name}`, { SUPERCOV_PHASE_TIMING: '1' }, true);
+    }
   }
   // Supercov's own work, natively profiled: a whole measured unit run (its
   // setup, evidence and publication beside Vitest), and the merge of the two
