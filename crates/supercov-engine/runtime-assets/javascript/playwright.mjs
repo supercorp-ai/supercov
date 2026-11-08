@@ -240,6 +240,9 @@ class CoveragePhaseController {
     // dispose so a worker-scoped context does not keep registering pages with
     // controllers of tests that already finished.
     contextListeners = new Map();
+    // Contexts that closed during the test: a phase sent to one failed, and
+    // its cookies were then tried again host by host.
+    closedContexts = new WeakSet();
     // Snapshots read from pages the suite closed before teardown. A `page`
     // fixture override tears down before the collector's own fixture, and a
     // closed page cannot be evaluated, so the evidence is taken on the way out.
@@ -598,9 +601,11 @@ class CoveragePhaseController {
         const registerServiceWorker = (worker) => {
             void this.registerWorker(worker);
         };
+        const closed = () => this.closedContexts.add(context);
         context.on("page", register);
         context.on("serviceworker", registerServiceWorker);
-        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker]]);
+        context.on("close", closed);
+        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]]);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         for (const page of context.pages())
@@ -894,7 +899,7 @@ class CoveragePhaseController {
     async activateInBrowserNow(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
-                .filter((context) => !this.adoptedContexts.has(context))
+                .filter((context) => !this.adoptedContexts.has(context) && !this.closedContexts.has(context))
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
@@ -913,7 +918,7 @@ class CoveragePhaseController {
         const covered = (page) => this.adoptedContexts.has(page.context())
             ? []
             : this.appHosts.map((url) => new URL(url).hostname);
-        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].filter((page) => !page.isClosed?.()).flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
