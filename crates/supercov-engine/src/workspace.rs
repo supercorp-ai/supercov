@@ -2546,7 +2546,7 @@ fn relink_around(_root: &Path, workspace: &Path) {
 /// Supercov's store tells Git to ignore all of it (`*`), and a tool that
 /// finds a project's sources the way Git lists them walks up from the copy
 /// and meets that file: Tailwind's automatic source detection found no file
-/// at all, and rallly's measured build had none of the utility classes only
+/// at all, and a Next.js app's measured build had none of the utility classes only
 /// its own components use. Beside the copy, above the copied project, the
 /// copy's directory lets everything back in, for a scan that starts inside.
 /// Git never reads it: the directories above it are ignored already. Best

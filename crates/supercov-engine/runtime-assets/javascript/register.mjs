@@ -991,8 +991,8 @@ const loaderData = {
 };
 // Where Node can (22.15, 23.5), the hooks run in this thread. Off it, every
 // Node process started a thread of its own and compiled a module loader
-// there, and each import and require waited on a message to it: on Bulletproof
-// React's Vitest suite on one worker, a third of the time a measured run added.
+// there, and each import and require waited on a message to it: on a Next.js
+// app's Vitest suite on one worker, a third of the time a measured run added.
 if (typeof Module.registerHooks === "function") {
     const hooks = await import("./resolve-loader.mjs");
     hooks.initialize(loaderData);
@@ -1096,7 +1096,7 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     // A spec transpiled from `import test from "@playwright/test"` reads the
     // module's `default` when it says it is an ES module, and the module
     // itself otherwise: the wrapper's namespace says nothing and is no
-    // function, and rallly's i18n spec failed with `(0 , _test.default) is not
+    // function, and a Next.js app's spec failed with `(0 , _test.default) is not
     // a function`. Its exports, marked as an ES module's, with `test` itself
     // as the default. Not a function that calls `test` (Playwright names a
     // test by where it was declared, read from the stack, and an extra frame
