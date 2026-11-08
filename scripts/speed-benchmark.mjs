@@ -1,6 +1,7 @@
-// How much longer a real Next.js application's tests take under Supercov
-// than without it: the application SPEED_APP names (see `applications`),
-// its Vitest suite and its Playwright suite against a production build. Each
+// How much longer a real application's tests and builds take under Supercov
+// than without it: the application SPEED_APP names (see `applications`) and
+// its suites, such as a Vitest suite and a Playwright suite against a
+// production build, or the production build alone. Each
 // round runs the plain suites, then every binary named in
 // SUPERCOV_BINARIES (`name=path,...`) in an order that turns each round, so
 // no binary always runs on a warmer machine. A Supercov run starts with no
@@ -216,10 +217,29 @@ export default {
       },
     };
   },
+  // Excalidraw, a large Vite app: its Vitest suite, and its Vite production
+  // build alone, the build a measured end-to-end run serves its app from.
+  excalidraw() {
+    const project = join(output, 'excalidraw');
+    checkout(project, 'https://github.com/excalidraw/excalidraw.git', '701b901a0f1ba3d0b390d9cdf63d112e25abac4b');
+    run(project, 'npx', ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'], 'install');
+    return {
+      project,
+      description: 'the Vite build once',
+      outputs: ['excalidraw-app/build'],
+      suites: [
+        { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
+        // A build runs no test: Supercov publishes no run of its own for it.
+        // Its log says whether it built.
+        { name: 'build', command: ['npx', '-y', 'yarn@1.22.22', '--cwd', 'excalidraw-app', 'build:app:docker'], build: true, mayFail: true },
+      ],
+      reset() {},
+    };
+  },
 };
 const application = process.env.SPEED_APP ?? 'bulletproof';
 assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
-const { project, description, suites, reset } = applications[application]();
+const { project, description, suites, reset, outputs = ['.next'] } = applications[application]();
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so
@@ -281,7 +301,7 @@ function suiteRun(round, variant, suite, binary) {
   // Every run builds from nothing, as on a fresh CI checkout: Supercov's copy
   // never has the project's build, and a plain run after the first found the
   // one the run before it left and built warm.
-  rmSync(join(project, '.next'), { recursive: true, force: true });
+  for (const built of outputs) rmSync(join(project, built), { recursive: true, force: true });
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
   // Supercov's copy is kept, for the traces of the tests that failed in it.
   const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
@@ -305,7 +325,7 @@ function suiteRun(round, variant, suite, binary) {
   const extra = existsSync(report) ? flowTimes(report) : {};
   sample(round, variant, suite.name, seconds, extra);
   keepTraces(`${round}-${variant}-${suite.name}`);
-  if (!binary) return;
+  if (!binary || suite.build) return;
   const latest = JSON.parse(
     run(project, binary, ['runs', 'latest', '--json'], `${round}-${variant}-${suite.name}-latest`)
       .stdout,
@@ -552,21 +572,22 @@ const of = (variant, suite, field = 'seconds') =>
       .filter((value) => value !== undefined),
   );
 const rows = [];
-const plainTotal = of('plain', 'unit') + of('plain', 'e2e');
+const plainTotal = suites.reduce((sum, suite) => sum + of('plain', suite.name), 0);
 const failures = (variant) =>
   samples
     .filter((entry) => entry.variant === variant)
     .reduce((sum, entry) => sum + (entry.failed ?? 0), 0);
-rows.push('| Variant | Unit s | E2e s | E2e mean test s | E2e failed | Merge s | Total s | Total × plain | E2e test × plain |');
-rows.push('|---|---|---|---|---|---|---|---|---|');
-rows.push(
-  `| plain | ${of('plain', 'unit').toFixed(2)} | ${of('plain', 'e2e').toFixed(2)} | ${of('plain', 'e2e', 'testSeconds').toFixed(2)} | ${failures('plain')} | | ${plainTotal.toFixed(2)} | 1.000 | 1.000 |`,
-);
-for (const { name } of binaries) {
-  const total = of(name, 'unit') + of(name, 'e2e') + of(name, 'merge');
-  rows.push(
-    `| ${name} | ${of(name, 'unit').toFixed(2)} | ${of(name, 'e2e').toFixed(2)} | ${of(name, 'e2e', 'testSeconds').toFixed(2)} | ${failures(name)} | ${of(name, 'merge').toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} | ${(of(name, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |`,
-  );
+const flowSuite = suites.find((suite) => suite.name === 'e2e');
+const label = (name) => `${name[0].toUpperCase()}${name.slice(1)}`;
+rows.push(`| Variant | ${suites.map((suite) => `${label(suite.name)} s | ${label(suite.name)} × plain`).join(' | ')} |${flowSuite ? ' E2e mean test s | E2e failed |' : ''} Merge s | Total s | Total × plain |${flowSuite ? ' E2e test × plain |' : ''}`);
+rows.push(`|---|${suites.map(() => '---|---').join('|')}|${flowSuite ? '---|---|' : ''}---|---|---|${flowSuite ? '---|' : ''}`);
+for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
+  const merge = variant === 'plain' ? 0 : of(variant, 'merge');
+  const total = suites.reduce((sum, suite) => sum + of(variant, suite.name), 0) + merge;
+  const cells = suites.map((suite) => `${of(variant, suite.name).toFixed(2)} | ${(of(variant, suite.name) / of('plain', suite.name)).toFixed(3)}`);
+  const flow = flowSuite ? ` ${of(variant, 'e2e', 'testSeconds').toFixed(2)} | ${failures(variant)} |` : '';
+  const flowRatio = flowSuite ? ` ${(of(variant, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |` : '';
+  rows.push(`| ${variant} | ${cells.join(' | ')} |${flow} ${variant === 'plain' ? '' : merge.toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} |${flowRatio}`);
 }
 // CPU seconds by kind of process, for the first round's runs.
 const cpu = Object.fromEntries(

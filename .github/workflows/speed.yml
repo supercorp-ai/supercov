@@ -1,7 +1,7 @@
 name: Speed
 
-# How much longer real Next.js applications' tests take under Supercov than
-# without it, for the pull request's base and its head on one machine, taking
+# How much longer real applications' tests and builds take under Supercov
+# than without it, for the pull request's base and its head on one machine, taking
 # turns (scripts/speed-benchmark.mjs). Add the `speed` label to a pull request;
 # each push to a labelled pull request measures again.
 
@@ -81,6 +81,13 @@ jobs:
             rounds: 3
             diagnose: 0
             binaries: new=binaries/supercov-new/supercov
+          # A large Vite app: its Vitest suite and its production build.
+          - app: excalidraw
+            label: excalidraw
+            node: 22
+            rounds: 3
+            diagnose: 1
+            binaries: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
           - app: rallly
             label: rallly-diagnose
             node: 24
