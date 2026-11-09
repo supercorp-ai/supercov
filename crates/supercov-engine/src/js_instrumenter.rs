@@ -180,13 +180,16 @@ impl ProbeTable {
 /// module and by an id no other place has: a place another call names can
 /// be hit without its neighbour, and one whose id repeats is recorded under
 /// the first place with that id.
-fn merge_adjacent_probes(
-    program: &mut Program<'_>,
+///
+/// The merge is made on the last walk over the program,
+/// `AssertedTargetTransformer`'s, rather than on a walk of its own; this
+/// sets it up.
+fn adjacent_probe_merger(
     hit: &str,
     file: &str,
     named: &PlacesNamed,
     repeated: &[usize],
-) -> Vec<[usize; 2]> {
+) -> AdjacentProbeMerger {
     let mut mergeable = named
         .counts
         .iter()
@@ -197,20 +200,17 @@ fn merge_adjacent_probes(
             *entry = false;
         }
     }
-    let mut merger = AdjacentProbeMerger {
-        hit,
-        file,
+    AdjacentProbeMerger {
+        hit: hit.to_owned(),
+        file: file.to_owned(),
         mergeable,
         follows: Vec::new(),
-    };
-    merger.visit_program(program);
-    merger.follows.sort_unstable();
-    merger.follows
+    }
 }
 
 /// By place, how many calls name each statement point, as `(file, place)`.
-/// Counted on the request-phase walk, the last before the merge, rather than
-/// on a walk of its own.
+/// Counted on the request-phase walk, after which nothing adds a probe,
+/// rather than on a walk of its own.
 struct PlacesNamed {
     file: String,
     counts: Vec<u32>,
@@ -281,22 +281,22 @@ fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Op
     place_argument(call, file)
 }
 
-struct AdjacentProbeMerger<'n> {
-    hit: &'n str,
-    file: &'n str,
+struct AdjacentProbeMerger {
+    hit: String,
+    file: String,
     /// By place: a statement point named once, by an id no other place has.
     mergeable: Vec<bool>,
     follows: Vec<[usize; 2]>,
 }
 
-impl<'a> VisitMut<'a> for AdjacentProbeMerger<'_> {
-    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
-        walk_mut::walk_statements(self, statements);
+impl AdjacentProbeMerger {
+    /// Merges one list whose own lists are merged already.
+    fn merge<'a>(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
         let mergeable = |place: usize| self.mergeable.get(place) == Some(&true);
         let mut leader = None;
         let mut keep = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
-            let place = statement_probe_place(statement, self.hit, self.file);
+            let place = statement_probe_place(statement, &self.hit, &self.file);
             match (leader, place) {
                 (Some(first), Some(place)) if mergeable(first) && mergeable(place) => {
                     if keep.is_empty() {
@@ -317,6 +317,52 @@ impl<'a> VisitMut<'a> for AdjacentProbeMerger<'_> {
             keep[index - 1]
         });
     }
+}
+
+/// Writes the table's key into the module's registration,
+/// `const <file> = registerProbeV2({ key: "", ... })` at the top level.
+fn set_registration_key<'a>(
+    ast: AstBuilder<'a>,
+    program: &mut Program<'a>,
+    probe_file: &str,
+    key: &str,
+) -> Result<(), CandidateError> {
+    let registration = program.body.iter_mut().find_map(|statement| {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            return None;
+        };
+        let declarator = declaration.declarations.first_mut()?;
+        if declarator.id.get_binding_identifier()?.name != probe_file {
+            return None;
+        }
+        let Some(Expression::CallExpression(call)) = declarator.init.as_mut() else {
+            return None;
+        };
+        let Some(Argument::ObjectExpression(object)) = call.arguments.first_mut() else {
+            return None;
+        };
+        object.properties.iter_mut().find_map(|property| {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                return None;
+            };
+            let property = &mut **property;
+            match (&property.key, &mut property.value) {
+                (PropertyKey::StaticIdentifier(name), Expression::StringLiteral(value))
+                    if name.name == "key" =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            }
+        })
+    });
+    let Some(value) = registration else {
+        return Err(CandidateError::Internal(
+            "the probe registration was not found to write its key into".to_string(),
+        ));
+    };
+    value.value = ast.str(key);
+    Ok(())
 }
 
 /// Each place whose id an earlier place has, beside that first place, flat.
@@ -3818,6 +3864,8 @@ struct AssertedTargetTransformer<'a> {
     /// Every one of Supercov's own names the program reads, gathered on this
     /// last walk over it for `prune_unused_runtime_helpers`.
     referenced: Vec<&'a str>,
+    /// Adjacent statement probes are merged on this walk too.
+    merger: Option<AdjacentProbeMerger>,
 }
 
 impl<'a> AssertedTargetTransformer<'a> {
@@ -3850,6 +3898,13 @@ impl<'a> AssertedTargetTransformer<'a> {
 }
 
 impl<'a> VisitMut<'a> for AssertedTargetTransformer<'a> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        walk_mut::walk_statements(self, statements);
+        if let Some(merger) = self.merger.as_mut() {
+            merger.merge(statements);
+        }
+    }
+
     fn visit_identifier_reference(
         &mut self,
         reference: &mut oxc_ast::ast::IdentifierReference<'a>,
@@ -4169,6 +4224,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
         referenced: Vec::new(),
+        merger: None,
     }
     .visit_program(&mut parsed.program);
     let (generated, map) =
@@ -4759,26 +4815,23 @@ fn instrument_candidate_with_binding(
         .chain(extra.ids.iter().cloned())
         .collect::<Vec<_>>();
     let point_aliases = repeated_places(&point_ids);
-    let follows = merge_adjacent_probes(
-        &mut parsed.program,
+    let merger = adjacent_probe_merger(
         &coverage_hit_v2,
         &probe_file_v2,
         &request_transformer.named,
         &point_aliases,
     );
-    let probe_table = ProbeTable::new(
-        file,
-        point_ids,
-        collector
-            .decisions
-            .iter()
-            .map(|decision| decision.id.clone())
-            .collect(),
-        follows,
-    );
+    let decision_ids = collector
+        .decisions
+        .iter()
+        .map(|decision| decision.id.clone())
+        .collect::<Vec<_>>();
+    // The key digests which probes the merge drops, which the last walk
+    // decides: the registration is written with an empty key, filled in
+    // after that walk by `set_registration_key`.
     let mut registration = serde_json::json!({
-        "key": &probe_table.key,
-        "points": probe_table.points.len(),
+        "key": "",
+        "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
@@ -4790,7 +4843,7 @@ fn instrument_candidate_with_binding(
     // runtime records them as that one point, as it did by id.
     for (field, aliases) in [
         ("pointAliases", point_aliases),
-        ("decisionAliases", repeated_places(&probe_table.decisions)),
+        ("decisionAliases", repeated_places(&decision_ids)),
     ] {
         if !aliases.is_empty() {
             registration[field] = serde_json::json!(aliases);
@@ -4960,8 +5013,17 @@ fn instrument_candidate_with_binding(
     let mut asserted_targets = AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
         referenced: Vec::new(),
+        merger: Some(merger),
     };
     asserted_targets.visit_program(&mut parsed.program);
+    let mut follows = asserted_targets
+        .merger
+        .take()
+        .map(|merger| merger.follows)
+        .unwrap_or_default();
+    follows.sort_unstable();
+    let probe_table = ProbeTable::new(file, point_ids, decision_ids, follows);
+    set_registration_key(ast, &mut parsed.program, &probe_file_v2, &probe_table.key)?;
     // The first helper stays whatever the file calls: the loaders the
     // JavaScript frontend adds find the declarations by it.
     prune_unused_runtime_helpers(
