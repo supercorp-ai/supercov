@@ -39,6 +39,34 @@ A mutant's id is stable across runs: the file, its span, the mutator and the
 replacement. A later strong pass can reuse a result while the file's hash and
 the tests that reach it are unchanged.
 
+### Ids and descriptors
+
+An id is `file:startLine:startCol-endLine:endCol:Mutator:descriptor`, with
+1-based lines and 1-based columns in UTF-16 code units, as StrykerJS's
+`mutation.json` reports them. The descriptor names the mutant within its span
+and mutator without printing code, so StrykerJS's mutants can be joined by id
+from their replacement code:
+
+| Mutator | Descriptor |
+| --- | --- |
+| ArithmeticOperator, EqualityOperator, LogicalOperator, AssignmentOperator, UpdateOperator | the new operator (`<=`, `&&`, `-=`, `--`) |
+| UnaryOperator | the new operator (`+`, `-`), or `removed` for `~x` to `x` |
+| BooleanLiteral | the new literal (`true`, `false`), or `removed` for `!x` to `x` |
+| ConditionalExpression | `true` or `false` (a test, or a `for(;;)` given a false test), or `empty` for a switch case emptied |
+| StringLiteral | `empty`, or `Stryker was here!` for an empty string or template |
+| MethodExpression | the new method name (`startsWith`), or `removed` for `x.trim()` to `x` |
+| OptionalChaining | the link that loses its `?`: `.name`, `[]` for a computed member, `()` for a call |
+| ArrowFunction | `undefined` |
+| BlockStatement, ObjectLiteral | `{}` |
+| ArrayDeclaration | the replacement: `[]`, `["Stryker was here"]`, `Array()`, `Array([])`, `new Array()`, `new Array([])` |
+| CallExpression | `empty` (the statement removed) |
+
+Regex mutants (weapon-regex's) are not enumerated yet and have no descriptor.
+The grammar is implemented twice: in `scripts/stryker-parity.mjs`, which
+prints StrykerJS's own mutants with their descriptors and writes the goldens,
+and in the engine's `descriptor_from_stryker`. The engine's enumeration is
+tested against those goldens: same mutants, order, spans and descriptors.
+
 ## Status
 
 Each mutant has one `status`, the furthest step known, and the per-step facts
