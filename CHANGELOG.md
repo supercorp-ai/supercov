@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- In a suite that starts several Playwright processes side by side over one run, such as a sealed suite whose containers each run `playwright test file:line`, one test of a file could now and then fail with `No tests found`. Playwright removes every cached file of a source before it writes one, including the entry another process had just written and was about to read the source map of. That test was then placed by its compiled lines, and its `file:line` filter missed it. Entries in the run's cache are no longer removed.
+
 ## 4.25.0
 
 **Changed**

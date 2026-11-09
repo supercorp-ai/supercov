@@ -2,7 +2,7 @@ import fs, { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSy
 import { randomUUID } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { threadId } from "node:worker_threads";
-import { dirname, resolve, sep } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import { Buffer } from "node:buffer";
 
 // In a container Supercov's `docker` launcher mounts the run's directory
@@ -159,6 +159,16 @@ export function appendEvidenceRecord(directory, prefix, payload) {
 // whole, or is not there yet and is compiled again. A file written beside the
 // cache's folders, not in one, is never taken for an old entry and removed.
 //
+// Nor is an entry removed. Before it writes one, Playwright removes every
+// cached file of that source, the entry another process has just written
+// for the same content among them, and a process that had read that entry's
+// code reads its source map only when a test is declared: in between, the
+// map was gone, the test was placed by the compiled file's lines, and a
+// `file:line` filter found no tests -- one test of a file, now and then, in
+// a sealed suite whose containers start Playwright side by side. An entry is
+// named by its source's content, so an old one is never read for new
+// content; the cache is the run's own and goes with it.
+//
 // Playwright compiles in two threads: the config and CommonJS files in the
 // process's own, ES modules in the thread its loader hooks run in, which has
 // its own `fs` and does not run `--import`. Each calls this. The partial
@@ -171,9 +181,16 @@ export function writePlaywrightCacheWhole() {
         return;
     cacheWritesWhole = true;
     const cacheFolder = resolve(transformCache) + sep;
+    const inCache = (file) => typeof file === "string" && resolve(file).startsWith(cacheFolder);
     const writeFileSync = fs.writeFileSync;
+    const rmSync = fs.rmSync;
+    fs.rmSync = function (file, ...rest) {
+        if (inCache(file) && !basename(file).startsWith(".writing-"))
+            return;
+        return rmSync.call(this, file, ...rest);
+    };
     fs.writeFileSync = function (file, ...rest) {
-        if (typeof file !== "string" || !resolve(file).startsWith(cacheFolder))
+        if (!inCache(file))
             return writeFileSync.call(this, file, ...rest);
         const partial = resolve(transformCache, `.writing-${process.pid}-${threadId}-${randomUUID()}`);
         try {
@@ -181,7 +198,7 @@ export function writePlaywrightCacheWhole() {
             fs.renameSync(partial, file);
         }
         finally {
-            fs.rmSync(partial, { force: true });
+            rmSync(partial, { force: true });
         }
     };
     syncBuiltinESMExports();
