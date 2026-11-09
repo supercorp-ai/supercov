@@ -1543,6 +1543,7 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events: Vec::new(),
         logicals: Vec::new(),
+        comparisons: Vec::new(),
         phase_id: Some(phase.into()),
     })
 }

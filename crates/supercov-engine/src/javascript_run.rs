@@ -2274,7 +2274,7 @@ mod tests {
                     hits: vec!["h".into()],
                     events: vec![],
                     logicals: vec![],
-                    phase_id: None,
+                    ..Default::default()
                 }]
             } else {
                 vec![]

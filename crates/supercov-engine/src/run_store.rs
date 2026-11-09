@@ -332,7 +332,7 @@ fn create_analyzable_run(
             ],
             events: vec![],
             logicals: vec![],
-            phase_id: None,
+            ..Default::default()
         }],
         browser: vec![],
         server: vec![],
@@ -356,7 +356,7 @@ fn create_analyzable_run(
             hits: vec![],
             events: vec![],
             logicals: vec![],
-            phase_id: None,
+            ..Default::default()
         }];
         vec![unclaimed, parallel]
     } else {

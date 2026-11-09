@@ -4197,7 +4197,7 @@ mod tests {
                     hits: vec!["point".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),

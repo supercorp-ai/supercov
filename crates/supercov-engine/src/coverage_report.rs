@@ -155,6 +155,10 @@ pub struct RuntimeSnapshot {
     pub events: Vec<RuntimeEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logicals: Vec<LogicalSnapshot>,
+    /// What each comparison and mutation probe saw: the values that decide
+    /// whether a mutant there is infected (`docs/design/mutants.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comparisons: Vec<ComparisonSnapshot>,
     /// Every hit and decision vector of this snapshot is an explicit event of
     /// this phase. A frontend that observes a whole phase at once -- Python
     /// reads a phase's slot -- names the phase here instead of writing an
@@ -181,10 +185,7 @@ struct RuntimeSnapshotWire {
     event_columns: Option<EventColumns>,
     #[serde(default)]
     logicals: Vec<LogicalSnapshot>,
-    // Read so a snapshot carrying it is accepted; the raw evidence keeps it
-    // for the infection research, and nothing here counts it.
     #[serde(default)]
-    #[allow(dead_code)]
     comparisons: Vec<ComparisonSnapshot>,
     #[serde(default)]
     phase_id: Option<String>,
@@ -280,6 +281,7 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
             hits: wire.hits,
             events,
             logicals: wire.logicals,
+            comparisons: wire.comparisons,
             phase_id: wire.phase_id,
         })
     }
@@ -3884,6 +3886,20 @@ mod tests {
     /// this one) reads as exactly the events it was made of, in their order:
     /// a phase or none, two environments, decisions with their vectors, and a
     /// timestamp earlier than the one before it.
+    /// A snapshot's probe outcomes are kept, with columnar events or without,
+    /// and a snapshot without any writes none.
+    #[test]
+    fn comparison_outcomes_survive_reading_and_writing() {
+        let read: RuntimeSnapshot = serde_json::from_str(r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1]},"comparisons":[{"id":"src/a.ts:3:9","outcomes":["lt","eq"]},{"id":"src/a.ts:4:1-4:6#arith","outcomes":["differs"]}]}"#).unwrap();
+        assert_eq!(read.comparisons.len(), 2);
+        assert_eq!(read.comparisons[0].outcomes, ["lt", "eq"]);
+        let written = serde_json::to_string(&read).unwrap();
+        let again: RuntimeSnapshot = serde_json::from_str(&written).unwrap();
+        assert_eq!(again.comparisons, read.comparisons);
+        let plain = serde_json::to_string(&RuntimeSnapshot::default()).unwrap();
+        assert!(!plain.contains("comparisons"), "{plain}");
+    }
+
     #[test]
     fn columnar_events_read_as_the_events_they_were_made_of() {
         let written: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"events":[{"type":"hit","id":"a","timestampMs":1793741378313,"phaseId":"p:1","environment":"browser"},{"type":"hit","id":"b","timestampMs":1793741378310,"environment":"browser"},{"type":"decision","id":"d","vector":{"values":[true,null,false],"outcome":true},"timestampMs":1793741378400,"phaseId":"p:2","environment":"browser"},{"type":"hit","id":"c","timestampMs":1793741378400,"phaseId":"p:1","environment":"server"},{"type":"decision","id":"d","vector":{"values":[false,null,false],"outcome":false},"timestampMs":1793741378401,"phaseId":null,"environment":"browser"}]}"#).unwrap();
@@ -4126,7 +4142,7 @@ mod tests {
                 hits: hits.iter().map(|hit| (*hit).into()).collect(),
                 events: vec![],
                 logicals: vec![],
-                phase_id: None,
+                ..Default::default()
             }],
             browser: vec![],
             server: vec![],
@@ -4844,6 +4860,7 @@ mod tests {
             hits: vec!["hit".into()],
             events: vec![],
             logicals: vec![],
+            comparisons: Vec::new(),
             phase_id: Some("b".into()),
         });
         attempt.runtime.push(RuntimeSnapshot {
@@ -4851,6 +4868,7 @@ mod tests {
             hits: vec!["hit".into()],
             events: vec![],
             logicals: vec![],
+            comparisons: Vec::new(),
             phase_id: Some("ghost".into()),
         });
         let view = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();

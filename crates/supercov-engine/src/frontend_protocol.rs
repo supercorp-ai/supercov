@@ -486,7 +486,7 @@ mod tests {
                         environment: "fixture".into(),
                     }],
                     logicals: vec![],
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: vec![],
                 server: vec![],

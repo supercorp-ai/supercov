@@ -1478,7 +1478,7 @@ pub(crate) fn snapshot_regions(
             hits: hits.into_iter().collect(),
             events,
             logicals: Vec::new(),
-            phase_id: None,
+            ..Default::default()
         },
         phases,
     })
