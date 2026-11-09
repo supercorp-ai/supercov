@@ -388,6 +388,7 @@ impl<'a> PythonObligationCollector<'a> {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             plan: PythonFilePlan::default(),
             point_ids: BTreeSet::new(),

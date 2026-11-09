@@ -84,6 +84,19 @@ pub struct CoverageManifest {
     /// assertion stood.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assertion_sites: Vec<PointMeta>,
+    /// Each instrumented module's ids in the order its probes number them,
+    /// by the key the module carries instead: what evidence names
+    /// `~p<key>.<place>` and `~d<key>.<place>` is read back through it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probe_tables: BTreeMap<String, ProbeTableIds>,
+}
+
+/// A module's point and decision ids, in the order its probes number them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProbeTableIds {
+    pub points: Vec<String>,
+    pub decisions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3689,6 +3702,7 @@ fn archive_request_from<D>(
             frontend.language, coverage_model.language
         )));
     }
+    resolve_probe_places(&mut raw_results, &manifest.probe_tables);
     separate_repeated_executions(&mut raw_results);
     release_leaked_phases(&mut raw_results);
     // After server work was credited to its tests by time, so a picked test
@@ -3723,6 +3737,120 @@ fn archive_request_from<D>(
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     Ok((frontend, normalized, transport, digest))
+}
+
+/// Evidence that names a probe by its module's table and place -- a module
+/// ships the table's key, not its ids -- named by the id at that place, so
+/// nothing after this reads a place. A name of no table this run has is
+/// left as it is: an id the manifest does not know, as a module from an
+/// earlier run would have given.
+fn resolve_probe_places(
+    raw_results: &mut [RawTestResult],
+    tables: &BTreeMap<String, ProbeTableIds>,
+) {
+    if tables.is_empty() {
+        return;
+    }
+    let places = ProbePlaces(
+        tables
+            .iter()
+            .map(|(key, table)| (key.as_str(), table))
+            .collect(),
+    );
+    for raw in raw_results.iter_mut() {
+        for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
+            for id in &mut snapshot.hits {
+                places.point(id);
+            }
+            for decision in &mut snapshot.decisions {
+                places.decision(&mut decision.id);
+            }
+            for event in &mut snapshot.events {
+                match event.event_type.as_str() {
+                    "hit" => places.point(&mut event.id),
+                    "decision" => places.decision(&mut event.id),
+                    _ => {}
+                }
+            }
+            places.logicals(&mut snapshot.logicals);
+        }
+        for record in &mut raw.server {
+            let Some(id) = record.id.as_mut() else {
+                continue;
+            };
+            match record.record_type.as_str() {
+                "hit" => places.point(id),
+                "decision" => places.decision(id),
+                _ => {}
+            }
+        }
+    }
+}
+
+struct ProbePlaces<'a>(std::collections::HashMap<&'a str, &'a ProbeTableIds>);
+
+impl ProbePlaces<'_> {
+    /// The id `~<kind><key>.<place>` names, when it is one.
+    fn id(&self, name: &str, kind: char) -> Option<&String> {
+        let rest = name.strip_prefix('~')?.strip_prefix(kind)?;
+        let (key, place) = rest.split_once('.')?;
+        let place = place.parse::<usize>().ok()?;
+        let table = self.0.get(key)?;
+        if kind == 'p' {
+            table.points.get(place)
+        } else {
+            table.decisions.get(place)
+        }
+    }
+
+    fn point(&self, id: &mut String) {
+        if let Some(resolved) = self.id(id, 'p') {
+            id.clone_from(resolved);
+        }
+    }
+
+    fn decision(&self, id: &mut String) {
+        if let Some(resolved) = self.id(id, 'd') {
+            id.clone_from(resolved);
+        }
+    }
+
+    /// A module's selection outcomes are named by the point that was hit,
+    /// and are the outcomes of its branch: the point's id up to its last
+    /// `:`, as the runtime cut a branch from an id. A point of no branch had
+    /// none recorded. Outcomes of one branch are one entry, each once, in
+    /// the order first seen.
+    fn logicals(&self, logicals: &mut Vec<LogicalSnapshot>) {
+        if !logicals
+            .iter()
+            .any(|logical| self.id(&logical.id, 'p').is_some())
+        {
+            return;
+        }
+        let mut merged: Vec<LogicalSnapshot> = Vec::with_capacity(logicals.len());
+        for mut logical in logicals.drain(..) {
+            if let Some(resolved) = self.id(&logical.id, 'p') {
+                let Some((branch, _)) = resolved
+                    .rsplit_once(':')
+                    .filter(|(branch, _)| !branch.is_empty())
+                else {
+                    continue;
+                };
+                logical.id = branch.to_owned();
+            }
+            match merged.iter_mut().find(|existing| existing.id == logical.id) {
+                Some(existing) => {
+                    for vector in logical.vectors {
+                        if !existing.vectors.contains(&vector) {
+                            existing.vectors.push(vector);
+                        }
+                    }
+                }
+                None => merged.push(logical),
+            }
+        }
+        *logicals = merged;
+    }
 }
 
 /// Give a test that ran again under the same identity phases of its own.
@@ -4117,6 +4245,130 @@ mod tests {
         }
     }
 
+    /// Evidence names a probe by its module's table and place; the report
+    /// reads the id there, in every kind of record, and leaves a name of no
+    /// table, or of a place beyond it, as an id it does not know.
+    #[test]
+    fn probe_places_are_read_back_through_their_tables() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec![
+                    "s1".into(),
+                    "or:short".into(),
+                    "or:short".into(),
+                    "or:right".into(),
+                    "plain".into(),
+                ],
+                decisions: vec!["d1".into()],
+            },
+        )]);
+        let mut result = raw(
+            "a",
+            0,
+            "passed",
+            &["~pk.0", "~pk.1", "kept", "~pz.0", "~pk.9", "~dk.0"],
+        );
+        let vector = McdcVector {
+            values: vec![Some(true)],
+            outcome: true,
+        };
+        let snapshot = &mut result.runtime[0];
+        snapshot.decisions = vec![DecisionSnapshot {
+            id: "~dk.0".into(),
+            vectors: vec![vector.clone()],
+        }];
+        let event = |event_type: &str, id: &str| RuntimeEvent {
+            event_type: event_type.into(),
+            id: id.into(),
+            vector: (event_type == "decision").then(|| vector.clone()),
+            timestamp_ms: 1,
+            phase_id: None,
+            environment: "browser".into(),
+        };
+        snapshot.events = vec![
+            event("hit", "~pk.3"),
+            event("decision", "~dk.0"),
+            event("hit", "~dk.0"),
+        ];
+        let outcome = |right: bool, truthy: bool| LogicalVector { right, truthy };
+        snapshot.logicals = vec![
+            LogicalSnapshot {
+                id: "~pk.1".into(),
+                vectors: vec![outcome(false, true)],
+            },
+            LogicalSnapshot {
+                id: "~pk.3".into(),
+                vectors: vec![outcome(true, false), outcome(false, true)],
+            },
+            LogicalSnapshot {
+                id: "~pk.4".into(),
+                vectors: vec![outcome(true, true)],
+            },
+            LogicalSnapshot {
+                id: "other".into(),
+                vectors: vec![outcome(true, true)],
+            },
+        ];
+        result.browser = result.runtime.clone();
+        let record = |record_type: &str, id: &str| ServerRecord {
+            record_type: record_type.into(),
+            vector: None,
+            id: Some(id.into()),
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+        };
+        result.server = vec![
+            record("hit", "~pk.0"),
+            record("decision", "~dk.0"),
+            record("served", "~pk.0"),
+        ];
+        let mut results = vec![result];
+        resolve_probe_places(&mut results, &tables);
+        let result = &results[0];
+        for snapshot in result.runtime.iter().chain(&result.browser) {
+            // A decision's name in a point's place is no point.
+            assert_eq!(
+                snapshot.hits,
+                ["s1", "or:short", "kept", "~pz.0", "~pk.9", "~dk.0"]
+            );
+            assert_eq!(snapshot.decisions[0].id, "d1");
+            assert_eq!(
+                snapshot
+                    .events
+                    .iter()
+                    .map(|event| event.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["or:right", "d1", "~dk.0"]
+            );
+            // The two points of one branch are its one entry; a point of no
+            // branch had none recorded.
+            assert_eq!(
+                snapshot.logicals,
+                [
+                    LogicalSnapshot {
+                        id: "or".into(),
+                        vectors: vec![outcome(false, true), outcome(true, false)]
+                    },
+                    LogicalSnapshot {
+                        id: "other".into(),
+                        vectors: vec![outcome(true, true)]
+                    },
+                ]
+            );
+        }
+        assert_eq!(
+            result
+                .server
+                .iter()
+                .map(|record| record.id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["s1", "d1", "~pk.0"]
+        );
+    }
+
     /// A filtered view keeps the tests it picks and the setup that ran in
     /// their files; setup in another file, and work outside every test, is
     /// no picked test's.
@@ -4342,6 +4594,7 @@ mod tests {
             unmeasured: Vec::new(),
             scope: Some(scope),
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         for scope in [
             serde_json::json!({"entries": [
@@ -4422,6 +4675,7 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let with_declined = CoverageManifest {
             decisions: vec![],
@@ -4431,6 +4685,7 @@ mod tests {
             unmeasured: vec!["declined".into()],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
 
         let baseline =
@@ -4494,6 +4749,7 @@ mod tests {
             unmeasured: vec!["declined".into()],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let view = create_coverage_view(
             &manifest,
@@ -4527,6 +4783,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let view =
             create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
@@ -4556,6 +4813,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let vector = McdcVector {
             values: vec![Some(true), Some(true)],
@@ -4628,6 +4886,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let view =
             create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
@@ -4656,6 +4915,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let mut attempt = raw("test", 0, "passed", &[]);
         attempt.runtime[0].decisions.push(DecisionSnapshot {
@@ -4691,6 +4951,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
 
         // A vector of fewer conditions than its decision has is no reading
@@ -4719,6 +4980,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let phase = CoveragePhase {
             id: "assertion".into(),
@@ -4773,6 +5035,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let both = McdcVector {
             values: vec![Some(true), Some(true)],
@@ -4915,6 +5178,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let failed = raw("flaky", 0, "failed", &["failed"]);
         let mut passed = raw("flaky", 1, "passed", &["passed"]);
@@ -4960,6 +5224,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let request = |raw_results: Vec<RawTestResult>| CoverageReportRequest {
             run_id: "run".into(),
@@ -5043,6 +5308,7 @@ mod tests {
                 limitations: vec![],
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             raw_results: vec![companion, expected],
             generated_at: "time".into(),
@@ -5072,6 +5338,7 @@ mod tests {
                 limitations: vec![],
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             raw_results: vec![unstarted],
             generated_at: "time".into(),
@@ -5157,6 +5424,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -5254,6 +5522,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let manifest = EvidenceArchiveEntry {
             path: "manifest.json".into(),
@@ -5313,6 +5582,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         // Declare exactly the observed runners: the journal's node:test and the
         // synthesized background runner, shaped as the JavaScript run declares it.
@@ -5444,6 +5714,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let mut result = raw("test", 0, "passed", &[]);
         result.scope = Some(ExecutionScope {
@@ -5509,6 +5780,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let path = archive(vec![
             EvidenceArchiveEntry {
@@ -5872,6 +6144,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         }
     }
 

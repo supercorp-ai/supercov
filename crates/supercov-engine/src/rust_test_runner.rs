@@ -4419,6 +4419,7 @@ mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let entry = |thread: u64, observation: O| RustProbeEntry {
             thread,

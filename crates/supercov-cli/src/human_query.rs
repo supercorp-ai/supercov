@@ -2892,6 +2892,7 @@ mod tests {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
                 span: None,

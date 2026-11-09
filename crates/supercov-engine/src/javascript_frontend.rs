@@ -230,6 +230,10 @@ pub struct JavascriptManifest {
     pub branches: Vec<CandidateBranch>,
     pub limitations: Vec<CandidateLimitation>,
     pub scope: SourceScope,
+    /// What each instrumented module's probes number, by the key the module
+    /// carries in place of its ids.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probe_tables: BTreeMap<String, crate::coverage_report::ProbeTableIds>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2015,6 +2019,7 @@ pub fn prepare_javascript_frontend(
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
     let mut limitations = BTreeMap::new();
+    let mut probe_tables = BTreeMap::new();
     for limitation in &project.source_limitations {
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
@@ -2083,6 +2088,15 @@ pub fn prepare_javascript_frontend(
         for value in output.coverage_limitations {
             limitations.insert(value.id.clone(), value);
         }
+        if let Some(table) = output.probe_table {
+            probe_tables.insert(
+                table.key,
+                crate::coverage_report::ProbeTableIds {
+                    points: table.points,
+                    decisions: table.decisions,
+                },
+            );
+        }
     }
     account(&SETUP.sources_ns, sources_started);
     write_vitest_commands(&generated)?;
@@ -2110,6 +2124,7 @@ pub fn prepare_javascript_frontend(
         branches: branches.into_values().collect(),
         limitations: limitations.into_values().collect(),
         scope: project.source_scope.clone(),
+        probe_tables,
     };
     manifest.decisions.sort_by_key(|value| {
         (

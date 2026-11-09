@@ -542,6 +542,7 @@ mod tests {
             limitations: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let probes = BTreeMap::new();
         let inputs = crate::source_manifest::Inputs {

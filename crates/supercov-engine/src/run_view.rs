@@ -947,6 +947,7 @@ mod tests {
             limitations: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let raw = RawTestResult {
             span: None,

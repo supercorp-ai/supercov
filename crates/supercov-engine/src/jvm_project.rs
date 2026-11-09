@@ -410,6 +410,7 @@ pub fn prepare_jvm_project(
         unmeasured: Vec::new(),
         scope: None,
         assertion_sites: Vec::new(),
+        probe_tables: Default::default(),
     };
     let mut probes = std::collections::BTreeMap::new();
     let mut widths = Vec::new();

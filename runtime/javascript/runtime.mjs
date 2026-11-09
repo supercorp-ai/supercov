@@ -2004,35 +2004,59 @@ function hitEvent(id, timestampMs, phaseId, environment) {
 function decisionEvent(id, vector, timestampMs, phaseId, environment) {
   return phaseId ? { type: "decision", id, vector, timestampMs, phaseId, environment } : { type: "decision", id, vector, timestampMs, environment };
 }
-// A file's ids, as the instrumenter writes them: one string of ids separated
-// by spaces, or a list where an id holds one.
-function listedIds(ids) {
-  return typeof ids === "string" ? ids === "" ? [] : ids.split(" ") : ids;
+// A module carries the key of its table of ids, which the manifest holds, and
+// how many points and decisions it numbers: evidence names a probe by the key
+// and its place, `~p<key>.<place>` or `~d<key>.<place>`, and the report reads
+// the id there. A place whose id an earlier place has is named as that one,
+// as it was one id: a selection's two short outcomes are one point.
+function probeAliases(flat) {
+  const aliases = /* @__PURE__ */ new Map();
+  for (let index = 0; flat && index + 1 < flat.length; index += 2)
+    aliases.set(flat[index], flat[index + 1]);
+  return aliases;
+}
+function probePlaceName(names, aliases, count, kind, key, place) {
+  if (!(place >= 0 && place < count))
+    return void 0;
+  let name = names[place];
+  if (name === void 0) {
+    const first = aliases.get(place);
+    name = names[place] = first === void 0 ? `~${kind}${key}.${place}` : probePlaceName(names, aliases, count, kind, key, first);
+  }
+  return name;
+}
+function probePointName(file, place) {
+  return probePlaceName(file.pointNames, file.pointAliases, file.pointCount, "p", file.key, place);
+}
+function probeDecisionName(file, place) {
+  return probePlaceName(file.decisionNames, file.decisionAliases, file.decisionWidths.length, "d", file.key, place);
 }
 function registerProbeV2(definition) {
   var _a8, _b;
-  const decisions = listedIds(definition.decisions);
-  const pointIds = listedIds(definition.pointIds);
+  const pointCount = definition.points;
+  const decisionCount = definition.decisionWidths.length;
   const file = {
-    // Each decision's id and its number of conditions: the module carries
-    // no source text, which the manifest holds.
-    decisions,
+    key: definition.key,
+    pointCount,
+    pointNames: [],
+    pointAliases: probeAliases(definition.pointAliases),
+    decisionNames: [],
+    decisionAliases: probeAliases(definition.decisionAliases),
     decisionWidths: definition.decisionWidths,
-    pointIds,
     clock: state.probeV2Clock,
-    hitEpochs: new Uint32Array(pointIds.length),
+    hitEpochs: new Uint32Array(pointCount),
     // A narrow decision's vectors in an array, a wide one's in a Map, told
     // apart by `size`, which only the Map has: `instanceof Uint32Array` read
     // the global on every evaluation, and under Vitest's jsdom environment
     // each read is a getter call, most of a canvas app's measured unit time.
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
-    decisionVectorCounts: decisions.map((_, index) => {
+    decisionVectorCounts: definition.decisionWidths.map((_, index) => {
       var _a9, _b2;
       return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
     }),
-    decisionObservationEpochs: new Uint32Array(decisions.length),
-    decisionObservationCounts: new Uint16Array(decisions.length),
-    decisionCompleteEpochs: new Uint32Array(decisions.length),
+    decisionObservationEpochs: new Uint32Array(decisionCount),
+    decisionObservationCounts: new Uint16Array(decisionCount),
+    decisionCompleteEpochs: new Uint32Array(decisionCount),
     pendingDefaults: new Uint32Array(definition.defaultCount || 0),
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.
@@ -2070,7 +2094,7 @@ function coverageHitV2(file, index) {
   recordCoverageHitV2(file, index);
 }
 function recordCoverageHitV2(file, index) {
-  const id = file.pointIds[index];
+  const id = probePointName(file, index);
   if (!id)
     return;
   const fallbackEpoch = !file.clock.fast;
@@ -2087,7 +2111,7 @@ function recordCoverageHitV2(file, index) {
     coverageHit(id);
     const selections = file.selectionPoints;
     if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
-      recordSelectionOutcome(id, index - selections[0] & 3);
+      recordLogicalOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
       file.clock.epoch = previousEpoch;
@@ -2120,7 +2144,7 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
 }
 function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   var _a8, _b;
-  const id = file.decisions[decisionIndex];
+  const id = probeDecisionName(file, decisionIndex);
   if (!id || !Number.isSafeInteger(encoded) || encoded < 0)
     return value;
   const outcome = Boolean(value);
@@ -2212,8 +2236,12 @@ function recordSelectionOutcome(id, outcome) {
     branchId = separator > 0 ? id.slice(0, separator) : null;
     selectionBranchIds.set(id, branchId);
   }
-  if (branchId === null)
-    return;
+  if (branchId !== null)
+    recordLogicalOutcome(branchId, outcome);
+}
+// The outcomes of a selection by its branch id, or by the name of its point
+// that was hit, whose branch the report reads from the point's id.
+function recordLogicalOutcome(branchId, outcome) {
   let vectors = state.logicals.get(branchId);
   if (!vectors) {
     vectors = /* @__PURE__ */ new Map();

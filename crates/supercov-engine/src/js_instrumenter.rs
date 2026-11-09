@@ -102,10 +102,65 @@ pub struct CandidateOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_statements: Vec<CandidatePoint>,
     pub branches: Vec<CandidateBranch>,
+    /// The ids the module's probes are numbered by, which the module itself
+    /// does not carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_table: Option<ProbeTable>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
     pub limitations: Vec<String>,
+}
+
+/// A module's points and decisions in the order its probes number them.
+/// Evidence names a probe `~p<key>.<place>` or `~d<key>.<place>`, and the
+/// report reads the id at that place: the module ships the key alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProbeTable {
+    pub key: String,
+    pub points: Vec<String>,
+    pub decisions: Vec<String>,
+}
+
+impl ProbeTable {
+    /// The key is a digest of the file and both lists, so a module built
+    /// again from the same source -- a bundler's cache -- names the same
+    /// table, and two different tables never share a key.
+    pub fn new(file: &str, points: Vec<String>, decisions: Vec<String>) -> Self {
+        let mut digest = Sha256::new();
+        for part in [file]
+            .into_iter()
+            .chain(points.iter().map(String::as_str))
+            .chain(["\0"])
+            .chain(decisions.iter().map(String::as_str))
+        {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
+        let key = digest.finalize()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Self {
+            key,
+            points,
+            decisions,
+        }
+    }
+}
+
+/// Each place whose id an earlier place has, beside that first place, flat.
+fn repeated_places(ids: &[String]) -> Vec<usize> {
+    let mut first = HashMap::<&str, usize>::with_capacity(ids.len());
+    let mut repeated = Vec::new();
+    for (place, id) in ids.iter().enumerate() {
+        let earlier = *first.entry(id.as_str()).or_insert(place);
+        if earlier != place {
+            repeated.extend([place, earlier]);
+        }
+    }
+    repeated
 }
 
 fn restore_comment_text(
@@ -3954,6 +4009,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         points: point_analysis.points,
         excluded_statements,
         branches,
+        probe_table: None,
         runtime: None,
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
@@ -4506,36 +4562,50 @@ fn instrument_candidate_with_binding(
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
 
-    // Ids and widths only: the text of each decision is in the manifest, and
-    // this literal sits at the top of the module, where a bundler that drops
-    // a route's server-only `loader` and `action` keeps it. With the text it
-    // carried their conditions (`process.env.QSTASH_RETRIES`) into browser
-    // chunks.
-    // The ids as one string, space-separated, which the runtime splits: a
-    // list of hundreds of quoted ids, one a line, was the largest part of a
-    // component's registration for every bundler and runner to parse. Any id
-    // with a space in it, or none at all, keeps the list.
-    let ids = |ids: Vec<&String>| {
-        if ids.iter().any(|id| id.is_empty() || id.contains(' ')) {
-            serde_json::json!(ids)
-        } else {
-            serde_json::Value::String(
-                ids.iter()
-                    .map(|id| id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            )
-        }
-    };
-    let registration = serde_json::json!({
-        "decisions": ids(collector.decisions.iter().map(|decision| &decision.id).collect()),
+    // Neither ids nor text: a module carries its table's key and the size of
+    // each list, and the manifest holds the table. The runtime names a point
+    // by the key and its place, which the report reads back through the
+    // table. The ids were most of what instrumentation added to a bundle
+    // after minification, a third on a Vite app, as strings no minifier can
+    // shorten. The text of a decision never travelled: a registration sits
+    // at the top of the module, where a bundler that drops a route's
+    // server-only `loader` and `action` keeps it, and it carried their
+    // conditions (`process.env.QSTASH_RETRIES`) into browser chunks.
+    let probe_table = ProbeTable::new(
+        file,
+        point_analysis
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .chain(default_point_ids.iter().cloned())
+            .chain(extra.ids.iter().cloned())
+            .collect(),
+        collector
+            .decisions
+            .iter()
+            .map(|decision| decision.id.clone())
+            .collect(),
+    );
+    let mut registration = serde_json::json!({
+        "key": &probe_table.key,
+        "points": probe_table.points.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "pointIds": ids(point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect()),
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
         "selectionTrees": &logical_transformer.trees,
     });
+    // Places that repeat an earlier place's id -- a selection's two short
+    // outcomes are one point -- as pairs of the place and the first: the
+    // runtime records them as that one point, as it did by id.
+    for (field, aliases) in [
+        ("pointAliases", repeated_places(&probe_table.points)),
+        ("decisionAliases", repeated_places(&probe_table.decisions)),
+    ] {
+        if !aliases.is_empty() {
+            registration[field] = serde_json::json!(aliases);
+        }
+    }
     let registration_call = ast.expression_call(
         Span::default(),
         ast.expression_identifier(Span::default(), ast.ident(&register_probe_v2)),
@@ -4722,6 +4792,7 @@ fn instrument_candidate_with_binding(
         points: point_analysis.points,
         excluded_statements,
         branches,
+        probe_table: Some(probe_table),
         runtime: Some(CandidateRuntime {
             coverage_hit,
             mcdc_begin,
@@ -10894,6 +10965,36 @@ export const r = v && w && q;
             );
         }
         assert!(output.code.contains("decisionWidths"), "{}", output.code);
+    }
+
+    #[test]
+    fn a_module_names_its_table_by_key_and_carries_no_id() {
+        let source = "export function pick(a, b, options = {}) {\n  if (a && b) return a || b;\n  return options.name ?? 'none';\n}\n";
+        let output = instrument_candidate(source, "src/pick.js").unwrap();
+        let table = output.probe_table.as_ref().unwrap();
+        assert!(!table.points.is_empty() && !table.decisions.is_empty());
+        assert!(
+            output.code.contains(&format!("\"{}\"", table.key)),
+            "{}",
+            output.code
+        );
+        for id in table.points.iter().chain(&table.decisions) {
+            assert!(!output.code.contains(id.as_str()), "{id}\n{}", output.code);
+        }
+        // A selection's two short outcomes are one id at two places, and the
+        // module says the second is the first.
+        let repeated = repeated_places(&table.points);
+        assert!(!repeated.is_empty());
+        for pair in repeated.chunks(2) {
+            assert_eq!(table.points[pair[0]], table.points[pair[1]]);
+            assert!(pair[1] < pair[0]);
+        }
+        assert!(output.code.contains("pointAliases"), "{}", output.code);
+        // The same source names the same table; another file, another.
+        let again = instrument_candidate(source, "src/pick.js").unwrap();
+        assert_eq!(again.probe_table.as_ref(), Some(table));
+        let other = instrument_candidate(source, "src/other.js").unwrap();
+        assert_ne!(other.probe_table.unwrap().key, table.key);
     }
 
     #[test]

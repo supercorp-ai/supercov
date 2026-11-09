@@ -1247,6 +1247,7 @@ pub fn build_go_obligations_for(
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         },
         probes: collector.probes,
         edits,

@@ -281,6 +281,7 @@ fn create_analyzable_run(
         limitations: vec![],
         scope: None,
         assertion_sites: Vec::new(),
+        probe_tables: Default::default(),
     };
     let result = RawTestResult {
         span: None,
