@@ -182,14 +182,9 @@ fn merge_adjacent_probes(
     program: &mut Program<'_>,
     hit: &str,
     file: &str,
-    statement_points: &[String],
+    named: &PlacesNamed,
     repeated: &[usize],
 ) -> Vec<[usize; 2]> {
-    let mut named = PlacesNamed {
-        file,
-        counts: vec![0; statement_points.len()],
-    };
-    named.visit_program(program);
     let mut mergeable = named
         .counts
         .iter()
@@ -212,18 +207,27 @@ fn merge_adjacent_probes(
 }
 
 /// By place, how many calls name each statement point, as `(file, place)`.
-struct PlacesNamed<'n> {
-    file: &'n str,
+/// Counted on the request-phase walk, the last before the merge, rather than
+/// on a walk of its own.
+struct PlacesNamed {
+    file: String,
     counts: Vec<u32>,
 }
 
-impl<'a> Visit<'a> for PlacesNamed<'_> {
-    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+impl PlacesNamed {
+    fn count(&mut self, call: &CallExpression<'_>) {
         if let Some(count) =
-            place_argument(call, self.file).and_then(|place| self.counts.get_mut(place))
+            place_argument(call, &self.file).and_then(|place| self.counts.get_mut(place))
         {
             *count += 1;
         }
+    }
+}
+
+// For the parts the request-phase walk leaves alone.
+impl<'a> Visit<'a> for PlacesNamed {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        self.count(call);
         walk::walk_call_expression(self, call);
     }
 }
@@ -4427,7 +4431,9 @@ fn instrument_candidate_with_binding(
     } else {
         (String::new(), VariableDeclarationKind::Const)
     };
-    let mut names = CandidateNames::within(source, &namespace);
+    // Each walk allocates its names afresh, from one scan of the source.
+    let name_base = CandidateNames::within(source, &namespace);
+    let mut names = name_base.fresh();
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
@@ -4656,7 +4662,7 @@ fn instrument_candidate_with_binding(
         typescript,
         try_targets,
         loop_targets,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -4694,7 +4700,7 @@ fn instrument_candidate_with_binding(
         coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         scope_declarations: Vec::new(),
         frameless: 0,
         trees: Vec::new(),
@@ -4709,7 +4715,7 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit: coverage_hit.clone(),
         targets: switch_analysis.targets,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
@@ -4718,7 +4724,7 @@ fn instrument_candidate_with_binding(
         file,
         with_request_phase: with_request_phase.clone(),
         used: false,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
     };
     route_transformer.transform_program(&mut parsed.program);
     let mut request_transformer = RequestPhaseTransformer {
@@ -4726,6 +4732,10 @@ fn instrument_candidate_with_binding(
         with_request_phase: with_request_phase.clone(),
         used: route_transformer.used,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        named: PlacesNamed {
+            file: probe_file_v2.clone(),
+            counts: vec![0; point_analysis.points.len()],
+        },
     };
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
@@ -4746,12 +4756,13 @@ fn instrument_candidate_with_binding(
         .chain(default_point_ids.iter().cloned())
         .chain(extra.ids.iter().cloned())
         .collect::<Vec<_>>();
+    let point_aliases = repeated_places(&point_ids);
     let follows = merge_adjacent_probes(
         &mut parsed.program,
         &coverage_hit_v2,
         &probe_file_v2,
-        &point_ids[..point_analysis.points.len()],
-        &repeated_places(&point_ids),
+        &request_transformer.named,
+        &point_aliases,
     );
     let probe_table = ProbeTable::new(
         file,
@@ -4776,7 +4787,7 @@ fn instrument_candidate_with_binding(
     // outcomes are one point -- as pairs of the place and the first: the
     // runtime records them as that one point, as it did by id.
     for (field, aliases) in [
-        ("pointAliases", repeated_places(&probe_table.points)),
+        ("pointAliases", point_aliases),
         ("decisionAliases", repeated_places(&probe_table.decisions)),
     ] {
         if !aliases.is_empty() {
@@ -7622,6 +7633,10 @@ struct RequestPhaseTransformer<'a> {
     with_request_phase: String,
     used: bool,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// Every probe is in place by this walk, so it also counts the calls that
+    /// name each statement point, for `merge_adjacent_probes`, including in
+    /// what it does not rewrite.
+    named: PlacesNamed,
 }
 
 impl<'a> RequestPhaseTransformer<'a> {
@@ -7685,6 +7700,7 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
             .source_sensitive_functions
             .contains(&span_key(function.span))
         {
+            self.named.visit_function(function, flags);
             return;
         }
         walk_mut::walk_function(self, function, flags);
@@ -7695,6 +7711,7 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
             .source_sensitive_functions
             .contains(&span_key(function.span))
         {
+            self.named.visit_arrow_function_expression(function);
             return;
         }
         walk_mut::walk_arrow_function_expression(self, function);
@@ -7702,9 +7719,12 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
 
     // A with body is left uninstrumented: its object environment can
     // intercept probe identifiers (see `enter_with_statement`).
-    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        self.named.visit_with_statement(statement);
+    }
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
+        self.named.count(call);
         walk_mut::walk_call_expression(self, call);
         let property = match &call.callee {
             Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
@@ -7762,6 +7782,18 @@ impl<'s> CandidateNames<'s> {
             allocated: HashSet::new(),
             suffix: 0,
             namespace: namespace.to_owned(),
+        }
+    }
+
+    /// The same source and namespace with no name allocated yet: what
+    /// `within` gives, without reading the source again.
+    fn fresh(&self) -> Self {
+        Self {
+            source: self.source,
+            underscored: self.underscored.clone(),
+            allocated: HashSet::new(),
+            suffix: 0,
+            namespace: self.namespace.clone(),
         }
     }
 
