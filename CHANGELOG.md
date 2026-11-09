@@ -7,10 +7,19 @@
 - Measured runs of large JavaScript apps are faster and ship less. On a Vite canvas app's Vitest suite under jsdom, a measured run takes 1.49× the plain run, against 1.74× with 4.25.0, and `merge` of its runs takes 4.7 s instead of 12.4 s. Its instrumented production bundle is 8.4 MB, against 9.7 MB. Measured in GitHub Actions on 4-CPU runners, three rounds each.
 - An instrumented module carries its probe table's key instead of every probe's id, and a probe that always runs right after another is recorded with it rather than separately. The report reads both back, so coverage, per-test hits and phases are unchanged.
 - Instrumented code no longer reads the `Uint32Array` global on each decision it records; under Vitest's jsdom environment every such read was a getter call.
+- When this checkout holds build output (`dist/`, `.next/` and the like) that the copy the command runs in starts without, and the command does not run the project's `build` script, Supercov says so before the suite runs, not only after a failed run.
+- `merge` leaving runs out because `the dependencies have changed` says why that happens across CI jobs: every job must install the same lockfile. The merge docs show how for a repository without a committed lockfile.
 
 **Fixed**
 
+- `supercov -- bun test` failed with `Unknown command: bun` when Bun ran the script (`[run] bun = true` in `bunfig.toml`, `bun --bun run`, `bun run supercov`): Bun drops a leading `--` before Supercov sees it. Yarn 1's `yarn supercov -- ...` and PowerShell's way into a package manager's `.ps1` shim drop one too, and Yarn 1 also took `--exact-attribution` for its own, so the run went ahead without it. A first word that is no Supercov command but a program on `PATH`, or a path to one, is now measured as the test command, and Yarn 1's words are restored from what Yarn recorded ([#209](https://github.com/supercorp-ai/supercov/issues/209)).
+- In a suite that starts several Playwright processes side by side over one run, such as a sealed suite whose containers each run `playwright test file:line`, one test of a file could now and then fail with `No tests found`. Playwright removes every cached file of a source before it writes one, including the entry another process had just written and was about to read the source map of. That test was then placed by its compiled lines, and its `file:line` filter missed it. Entries in the run's cache are no longer removed.
+- The gem's `supercov`, started with no arguments from a directory whose path holds a space or a parenthesis, failed: its wrapper handed the path to a shell.
 - A Playwright test that closed a browser context sent the next phase to it anyway; the call failed and its cookies were tried again host by host. Closed contexts and pages are skipped.
+
+**Contributors**
+
+- [@Fidasek009](https://github.com/Fidasek009)
 
 ## 4.25.0
 
