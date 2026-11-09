@@ -106,6 +106,10 @@ pub struct CandidateOutput {
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
     pub limitations: Vec<String>,
+    /// StrykerJS's mutants of the file, each linked to the points, decisions,
+    /// branches and probes that decide it; only while `mutants_enabled`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutants: Vec<crate::js_mutant_links::CandidateMutant>,
 }
 
 fn restore_comment_text(
@@ -3677,8 +3681,9 @@ fn runtime_helper_type<'a>(
 
 #[cfg(test)]
 thread_local! {
-    static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static INFECTION_PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static INFECTION_PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static MUTANTS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The comparison probe runs only with `SUPERCOV_COMPARISONS=1` (or, in this
@@ -3686,8 +3691,22 @@ thread_local! {
 /// instrumented code is byte for byte what it was.
 /// The probe switches, for the frontend cache key: instrumentation cached
 /// with the probes off must not be reused once they are on, or the reverse.
-pub(crate) fn probe_options() -> (bool, bool) {
-    (comparisons_enabled(), infection_probes_enabled())
+pub(crate) fn probe_options() -> (bool, bool, bool) {
+    (
+        comparisons_enabled(),
+        infection_probes_enabled(),
+        mutants_enabled(),
+    )
+}
+
+/// Whether instrumentation enumerates StrykerJS's mutants and links each to
+/// its evidence: whenever a probe that decides some of them is on.
+pub(crate) fn mutants_enabled() -> bool {
+    #[cfg(test)]
+    if MUTANTS_FOR_TEST.with(|flag| flag.get()) {
+        return true;
+    }
+    comparisons_enabled() || infection_probes_enabled()
 }
 
 fn comparisons_enabled() -> bool {
@@ -3853,6 +3872,9 @@ struct ComparisonTransformer<'a, 'b> {
     file: &'b str,
     source: &'b str,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// Each comparison wrapped, with its site: the mutants' `compare` links.
+    /// Two comparisons can share a site (`a < b < c`), which the span tells.
+    placed: Vec<(Span, String)>,
 }
 
 impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
@@ -3903,6 +3925,7 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
         let (line, column) = line_and_utf16_column(self.source, binary.span.start as usize);
         let site = format!("{}:{}:{}", self.file, line, column);
         let span = binary.span;
+        self.placed.push((span, site.clone()));
         // An equality's own value is what is recorded: the comparison stays
         // whole, as the call's argument, and is evaluated once, there.
         let (left, right) = if code == 4 {
@@ -4094,6 +4117,14 @@ impl<'a> Visit<'a> for Effects {
     fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'a>) {}
 }
 
+/// Whether evaluating `expression` runs code or changes state (see
+/// [`Effects`]): removing it is then an infection whenever it runs.
+pub(crate) fn expression_has_effects(expression: &Expression<'_>) -> bool {
+    let mut effects = Effects::default();
+    effects.visit_expression(expression);
+    effects.found
+}
+
 /// A concise arrow body whose value the probe records: one with no effects
 /// (a body with effects is infected by their removal whenever the arrow runs)
 /// that may be `undefined` (any other body always differs from the mutant's
@@ -4272,16 +4303,22 @@ struct InfectionProbeTransformer<'a, 'b> {
     file: &'b str,
     source: &'b str,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// The site of each probe placed, an arrow read by its method's among
+    /// them: the mutants' `probe` links.
+    placed: Vec<String>,
+}
+
+/// An infection probe's site: the file, the probed expression's span and
+/// the probe's kind (`arith`, `assign`, `method`, `arrow`, `regex`).
+pub(crate) fn infection_probe_site(file: &str, source: &str, span: Span, kind: &str) -> String {
+    let (line, column) = line_and_utf16_column(source, span.start as usize);
+    let (end_line, end_column) = line_and_utf16_column(source, span.end as usize);
+    format!("{file}:{line}:{column}-{end_line}:{end_column}#{kind}")
 }
 
 impl<'a> InfectionProbeTransformer<'a, '_> {
     fn site(&self, span: Span, kind: &str) -> String {
-        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
-        let (end_line, end_column) = line_and_utf16_column(self.source, span.end as usize);
-        format!(
-            "{}:{}:{}-{}:{}#{}",
-            self.file, line, column, end_line, end_column, kind
-        )
+        infection_probe_site(self.file, self.source, span, kind)
     }
 
     fn string(&self, text: &str) -> Argument<'a> {
@@ -4361,6 +4398,7 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
             }
             _ => return,
         };
+        self.placed.push(site.clone());
         let body = value.take_in(self.ast.allocator);
         *value = self.call(
             Span::default(),
@@ -4394,6 +4432,7 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 }
                 let span = binary.span;
                 let site = self.site(span, "arith");
+                self.placed.push(site.clone());
                 let left = binary.left.take_in(self.ast.allocator);
                 let right = binary.right.take_in(self.ast.allocator);
                 *expression = self.call(
@@ -4428,6 +4467,7 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 }
                 let name = target.name;
                 let site = self.site(assignment.span, "assign");
+                self.placed.push(site.clone());
                 let right = assignment.right.take_in(self.ast.allocator);
                 assignment.right = self.call(
                     Span::default(),
@@ -4446,6 +4486,7 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 }
                 let span = regex.span;
                 let site = self.site(span, "regex");
+                self.placed.push(site.clone());
                 let literal = expression.take_in(self.ast.allocator);
                 *expression = self.call(
                     span,
@@ -4466,6 +4507,8 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 let Expression::StaticMemberExpression(member) = &mut call.callee else {
                     return;
                 };
+                self.placed.push(site.clone());
+                self.placed.extend(arrow_site.clone());
                 let receiver = member.object.take_in(self.ast.allocator);
                 let mut arguments = vec![
                     self.string(&site),
@@ -4775,6 +4818,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
             "coverage points, value branches, and extended branch obligations are not included"
                 .to_string(),
         ],
+        mutants: Vec::new(),
     })
 }
 
@@ -4939,6 +4983,18 @@ fn instrument_candidate_with_binding(
     equality_values.visit_program(&parsed.program);
     let mut infection_sites = InfectionSites::default();
     infection_sites.visit_program(&parsed.program);
+    // StrykerJS's mutants, enumerated on the program as written, with the
+    // facts about it their links need; linked once the probes are placed.
+    let mutant_facts = mutants_enabled().then(|| {
+        (
+            crate::js_mutants::enumerate(&parsed.program, source),
+            crate::js_mutant_links::MutantFacts::collect(
+                &parsed.program,
+                source,
+                &collector.decisions,
+            ),
+        )
+    });
     let optional_analysis = collect_optional_member_branches(
         &allocator,
         &mut parsed.program,
@@ -5334,6 +5390,7 @@ fn instrument_candidate_with_binding(
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        placed: Vec::new(),
     };
     if comparisons_enabled {
         comparison_transformer.visit_program(&mut parsed.program);
@@ -5349,10 +5406,26 @@ fn instrument_candidate_with_binding(
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        placed: Vec::new(),
     };
     if infection_probes_enabled {
         infection_transformer.visit_program(&mut parsed.program);
     }
+    let mutants = mutant_facts.map_or_else(Vec::new, |(ledger, facts)| {
+        crate::js_mutant_links::link(
+            file,
+            source,
+            ledger,
+            &facts,
+            &crate::js_mutant_links::Evidence {
+                points: &point_analysis.points,
+                decisions: &collector.decisions,
+                branches: &branches,
+                comparisons: &comparison_transformer.placed,
+                probes: &infection_transformer.placed,
+            },
+        )
+    });
     let mut route_transformer = RouteRequestPhaseTransformer {
         ast,
         file,
@@ -5631,6 +5704,7 @@ fn instrument_candidate_with_binding(
             limitations
         },
         limitations,
+        mutants,
     })
 }
 
@@ -14203,9 +14277,13 @@ export function shapes(n: number): unknown {
         let both = probe_options();
         COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
         INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(false));
-        assert_eq!(off, (false, false));
-        assert_eq!(comparisons, (true, false));
-        assert_eq!(both, (true, true));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(true));
+        let mutants = probe_options();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(false));
+        assert_eq!(off, (false, false, false));
+        assert_eq!(comparisons, (true, false, true));
+        assert_eq!(both, (true, true, true));
+        assert_eq!(mutants, (false, false, true));
     }
 
     #[test]

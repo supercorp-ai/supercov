@@ -15638,9 +15638,9 @@ fn a_rust_run_that_cannot_put_its_wrangler_in_place_says_so() {
 #[test]
 fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
     for (fault, said) in [
-        ("fs.create_dir_all@16", "injected fault at fs"),
-        ("fs.write@6", "rust-worker-0"),
         ("fs.create_dir_all@17", "injected fault at fs"),
+        ("fs.write@6", "rust-worker-0"),
+        ("fs.create_dir_all@18", "injected fault at fs"),
         ("fs.write@7", "injected fault at fs"),
         ("fs.write@8", "injected fault at fs"),
         ("fs.read_to_string@21", "wrangler.toml"),
@@ -16718,7 +16718,7 @@ fn a_run_that_cannot_bring_back_what_its_tests_wrote_says_so() {
         ("fs.read_dir@54", "workspaces"),
         ("fs.read_dir@55", "/out"),
         ("fs.read#workspace.rs:1646", "workspaces"),
-        ("fs.create_dir_all@17", "/out: injected fault at fs"),
+        ("fs.create_dir_all@18", "/out: injected fault at fs"),
         ("fs.write@5", "out/note.txt"),
         ("fs.copy@6", "out/data.bin"),
     ] {
@@ -17128,9 +17128,10 @@ fn a_javascript_run_that_cannot_write_its_copy_says_so() {
         ("fs.rename@44", "test/cart.test.js"),
         ("fs.rename@45", "authored-sources.json"),
         ("fs.rename@46", "statement-exclusions.json"),
-        ("fs.rename@47", "manifest.json"),
-        ("fs.rename@48", "instrumentation-complete"),
-        ("fs.rename@49", "injected fault at fs"),
+        ("fs.rename@47", "mutants.json"),
+        ("fs.rename@48", "manifest.json"),
+        ("fs.rename@49", "instrumentation-complete"),
+        ("fs.rename@50", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");

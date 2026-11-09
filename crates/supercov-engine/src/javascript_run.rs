@@ -1399,9 +1399,9 @@ pub fn run_direct_javascript(
             file: frontend.manifest_path,
             path: "manifest.json".into(),
         },
-        EvidenceArchiveSource::File {
-            file: workspace.join(".supercov/statement-exclusions.json"),
-            path: "statement-exclusions.json".into(),
+        EvidenceArchiveSource::Directory {
+            directory: workspace.join(".supercov/frontend-evidence"),
+            prefix: None,
         },
         EvidenceArchiveSource::Directory {
             directory: evidence_directory,
