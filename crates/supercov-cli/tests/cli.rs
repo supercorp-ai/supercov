@@ -15448,7 +15448,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2475 => main.rs:2475",
+            "fs.canonicalize#main.rs:2496 => main.rs:2496",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2024 => javascript_frontend.rs:2024",
         ],
