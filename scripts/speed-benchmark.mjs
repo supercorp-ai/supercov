@@ -527,7 +527,45 @@ if copy:
     {},
     true,
   ).stdout;
-  writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}`);
+  // What the shipped JavaScript is made of: plain's against the measured
+  // copy's, and in the measured one the bytes of probe ids, which minifiers
+  // leave as written, and of the loader each module begins with.
+  const shipped = run(
+    project,
+    'python3',
+    ['-c', `
+import os, re
+ids = re.compile(rb'"[0-9a-f]{16}[^" ]*(?: [0-9a-f]{16}[^" ]*)*"')
+loader = re.compile(rb'new Function\\("stack".{0,1200}?\\}\\s*catch\\s*(?:\\(\\w*\\))?\\s*\\{\\s*\\}', re.S)
+direct = re.compile(rb'globalThis\\.__SUPERCOV_DIRECT_RUNTIME__\\.\\w+')
+totals = {}
+for base, dirs, names in os.walk('.'):
+    dirs[:] = [d for d in dirs if d not in ('node_modules', '.git')]
+    if not (base.endswith(os.path.join('.next', 'static', 'chunks')) or base.endswith(os.path.join('build', 'assets'))):
+        continue
+    label = 'measured' if '.supercov' in base else 'plain'
+    row = totals.setdefault(label, {'files': 0, 'bytes': 0, 'ids': 0, 'idCount': 0, 'loaders': 0, 'loaderBytes': 0, 'direct': 0})
+    for name in names:
+        if not name.endswith('.js'):
+            continue
+        text = open(os.path.join(base, name), 'rb').read()
+        row['files'] += 1
+        row['bytes'] += len(text)
+        for match in ids.finditer(text):
+            row['ids'] += len(match.group(0))
+            row['idCount'] += match.group(0).count(b' ') + 1
+        for match in loader.finditer(text):
+            row['loaders'] += 1
+            row['loaderBytes'] += len(match.group(0))
+        row['direct'] += sum(len(match.group(0)) for match in direct.finditer(text))
+for label, row in sorted(totals.items()):
+    print(label, ' '.join(f'{key}={value}' for key, value in row.items()))
+`],
+    'shipped',
+    {},
+    true,
+  ).stdout;
+  writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}\n${shipped}`);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   console.log(table);
 }
