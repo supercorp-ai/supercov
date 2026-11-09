@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { argumentsAsTyped } from "./arguments.js";
 import { resolveNativeBinary } from "./native.js";
 
 let rustBinary;
@@ -14,7 +15,7 @@ try {
 }
 const child = spawn(
   rustBinary,
-  [...(separatorMayBeDropped() ? ["__separator-may-be-dropped"] : []), ...process.argv.slice(2)],
+  argumentsAsTyped(process.argv.slice(2), process.env),
   {
     stdio: "inherit",
     env: {
@@ -23,19 +24,6 @@ const child = spawn(
     },
   },
 );
-
-// Bun's runtime drops a leading `--` from the arguments it gives a script
-// (oven-sh/bun#13984), and Yarn 1 drops the one in `yarn supercov -- ...`:
-// `supercov -- bun test` reached the binary as `supercov bun test`. Neither
-// can be seen from here, so the binary is told it may have happened, and
-// takes a first word that is no command of its own but a program for the
-// test command.
-function separatorMayBeDropped() {
-  return (
-    typeof process.versions.bun === "string" ||
-    /^yarn\/1\./.test(process.env.npm_config_user_agent ?? "")
-  );
-}
 
 function resolvePackageRoot() {
   return dirname(dirname(fileURLToPath(import.meta.url)));

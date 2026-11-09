@@ -181,7 +181,9 @@ function quote(shell, argument) {
 }
 
 function line(shell, words) {
-  return words.map((word) => quote(shell, word)).join(" ");
+  const text = words.map((word) => quote(shell, word)).join(" ");
+  // PowerShell reads a quoted first word as a string, not a command.
+  return shell === "pwsh" && /^['"]/.test(text) ? `& ${text}` : text;
 }
 
 function shellRun(shell, commandLine, cwd, env) {
@@ -212,28 +214,41 @@ function observe(launcher, shell, cwd, commandLine, expected, extraEnv = {}) {
   const lines = existsSync(record) ? readFileSync(record, "utf8").trim().split("\n") : [];
   const seen = lines.length > 0 ? JSON.parse(lines.at(-1)) : null;
   const received = seen?.args ?? null;
-  // The launcher's word that a leading `--` may have been dropped: the
-  // binary then reads an unknown first word that names a program as the test
-  // command, which the end-to-end cases prove with the real binary.
-  const hinted = received?.[0] === "__separator-may-be-dropped";
-  const meant = hinted ? received.slice(1) : received;
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-  const exact = received !== null && same(meant, expected);
-  const recovered = !exact && hinted && expected[0] === "--" && same(meant, expected.slice(1));
+  const exact = received !== null && same(received, expected);
+  // Only the separator lost -- the leading `--`, or the one right after
+  // `--exact-attribution` -- is what the binary recovers: it reads a first
+  // word that names a program as the test command. The end-to-end cases
+  // prove that with the real binary; here the probe shows what arrived.
+  const separator = expected[0] === "--" ? 0 : expected[0] === "--exact-attribution" && expected[1] === "--" ? 1 : -1;
+  const recovered =
+    !exact && received !== null && separator !== -1 && same(received, expected.toSpliced(separator, 1));
+  const known = !exact && !recovered ? knownLoss(launcher, shell, expected) : undefined;
   results.push({
     launcher,
     shell,
     commandLine,
     expected,
     received,
-    hinted,
     recovered,
-    ok: exact || recovered,
+    known,
+    ok: exact || recovered || (known ? null : false),
     npmConfigArgv: seen?.npm_config_argv ?? null,
     userAgent: seen?.user_agent ?? null,
     status: result.status,
-    output: exact || recovered ? undefined : `${result.stderr}\n${result.stdout}`.trim().slice(-800),
+    output: exact || recovered || known ? undefined : `${result.stderr}\n${result.stdout}`.trim().slice(-800),
   });
+}
+
+// What no launcher of Supercov's can get back, named rather than passed:
+// PowerShell drops the first `--` on its way into Yarn 1's `.ps1` shim, and
+// Yarn 1 then drops the next one itself, along with what `npm_config_argv`
+// would have kept. A test command's own `--` is gone before anything of
+// Supercov's runs.
+function knownLoss(launcher, shell, expected) {
+  if (launcher === "yarn1" && shell === "pwsh" && expected.filter((word) => word === "--").length > 1)
+    return "PowerShell and Yarn 1 each drop a `--`; the test command's own is lost before Supercov runs";
+  return undefined;
 }
 
 function skip(launcher, reason) {
@@ -247,7 +262,10 @@ function project(name, manifest, files = {}) {
     join(directory, "package.json"),
     `${JSON.stringify({ name: `launch-${name}`, private: true, version: "1.0.0", ...manifest }, null, 2)}\n`,
   );
-  for (const [file, content] of Object.entries(files)) writeFileSync(join(directory, file), content);
+  for (const [file, content] of Object.entries(files)) {
+    mkdirSync(join(directory, file, ".."), { recursive: true });
+    writeFileSync(join(directory, file), content);
+  }
   return directory;
 }
 
@@ -328,6 +346,10 @@ for (const manager of managers) {
       bun: [["bunx", "supercov"], ["bunx", "--bun", "supercov"], ["bun", "x", "supercov"], ["bun", "run", "supercov"], ["bun", "--bun", "run", "supercov"]],
       "bun-run-bun": [["bun", "run", "supercov"], ["bunx", "supercov"]],
     }[manager.name];
+    // The shims npm writes, as a shell on Windows finds them: `.cmd` from
+    // cmd, `.ps1` from PowerShell.
+    if (manager.name === "npm" && windows)
+      direct.push([join(".", "node_modules", ".bin", shell === "pwsh" ? "supercov.ps1" : "supercov.cmd")]);
     for (const prefix of direct) {
       if (prefix[0].startsWith("node_modules") && shell === "cmd") prefix[0] = prefix[0].replaceAll("/", "\\");
       for (const each of [...plain, ...quoted]) {
@@ -388,6 +410,36 @@ else
       }
   }
 
+// `go run` in front of the Go launcher, which hands the binary os.Args[1:]
+// unchanged: a stand-in records what `go run` gives it.
+if (available("go", ["version"])) {
+  const directory = join(root, "goprobe");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "go.mod"), "module goprobe\n\ngo 1.22\n");
+  writeFileSync(
+    join(directory, "main.go"),
+    `package main
+
+import (
+\t"encoding/json"
+\t"os"
+)
+
+func main() {
+\tline, _ := json.Marshal(map[string]any{"args": os.Args[1:]})
+\tfile, _ := os.OpenFile(os.Getenv("SUPERCOV_ARGUMENTS_PROBE"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+\tfile.Write(append(line, '\\n'))
+\tfile.Close()
+}
+`,
+  );
+  for (const shell of shells)
+    for (const each of [...plain, ...quoted]) {
+      if (shell === "cmd" && ["percent", "caret", "inner quote"].includes(each.name)) continue;
+      observe("go run", shell, directory, line(shell, ["go", "run", ".", ...each.args]), each.args);
+    }
+} else skip("go run", "go is not installed");
+
 // End to end: the real binary measuring a real suite, started as the issue
 // started it and as the other launchers that lose a `--` start it. Each
 // must record one run with its passing test; a misspelt command must still
@@ -414,7 +466,8 @@ function endToEnd(launcher, shell, directory, commandLine, expectation) {
   let ok;
   let detail = "";
   if (expectation.refused) {
-    ok = result.status === 2 && output.includes(expectation.refused) && runCount(directory) === before;
+    // The binary exits 2; a package manager may report its own code.
+    ok = result.status !== 0 && output.includes(expectation.refused) && runCount(directory) === before;
   } else {
     const summary = run(binary, ["runs", "latest"], { cwd: directory });
     ok =
@@ -468,12 +521,13 @@ else {
   // Node's own runner, through the package managers that keep the `--` and
   // the one that drops it.
   const nodeTest = {
-    "math.js": "export function add(a, b) {\n  return a + b;\n}\n",
-    "math.test.js": 'import { test } from "node:test";\nimport assert from "node:assert";\nimport { add } from "./math.js";\n\ntest("adds", () => {\n  assert.equal(add(1, 1), 2);\n});\n',
+    "src/math.js": "export function add(a, b) {\n  return a + b;\n}\n",
+    "test/math.test.js": 'import { test } from "node:test";\nimport assert from "node:assert";\nimport { add } from "../src/math.js";\n\ntest("adds", () => {\n  assert.equal(add(1, 1), 2);\n});\n',
     ".gitignore": "node_modules\n.supercov\n",
   };
   for (const manager of [
     { name: "npm", manifest: {}, install: ["npm", ["install", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund", tarball]], direct: ["npx", "supercov"] },
+    { name: "pnpm", manifest: { packageManager: "pnpm@10.12.1" }, install: ["pnpm", ["add", "--ignore-scripts", "--no-optional", tarball]], direct: ["pnpm", "exec", "supercov"] },
     { name: "yarn1", manifest: { packageManager: "yarn@1.22.22" }, install: ["yarn", ["add", "--ignore-scripts", "--ignore-optional", `file:${tarball}`]], direct: ["yarn", "supercov"] },
   ]) {
     if (!available(manager.install[0])) {
@@ -491,6 +545,8 @@ else {
       endToEnd(manager.name, each, directory, line(each, [...manager.direct, "--", "node", "--test"]), one);
       endToEnd(manager.name, each, directory, line(each, [...manager.direct, "--exact-attribution", "--", "node", "--test"]), one);
       endToEnd(manager.name, each, directory, line(each, [manager.install[0], "run", "coverage"]), one);
+      // Written without the `--`, a program is still the test command.
+      endToEnd(manager.name, each, directory, line(each, [...manager.direct, "node", "--test"]), one);
       endToEnd(manager.name, each, directory, line(each, [...manager.direct, "frobnicate"]), { refused: "Unknown command: frobnicate" });
     }
   }
@@ -498,6 +554,8 @@ else {
 
 const failed = results.filter((each) => each.ok === false);
 const passed = results.filter((each) => each.ok === true);
+for (const each of results.filter((result) => result.known))
+  console.log(`KNOWN ${each.launcher} [${each.shell}] ${each.commandLine}: ${each.known}\n  received ${JSON.stringify(each.received)}`);
 for (const each of results) {
   if (each.skipped) console.log(`SKIP ${each.launcher}: ${each.skipped}`);
   else if (!each.ok)
@@ -505,7 +563,7 @@ for (const each of results) {
       `FAIL ${each.launcher} [${each.shell}] ${each.commandLine}\n  expected ${JSON.stringify(each.expected)}\n  received ${JSON.stringify(each.received)} (exit ${each.status})${each.output ? `\n  ${each.output.split("\n").slice(-3).join("\n  ")}` : ""}`,
     );
 }
-console.log(`[launch-arguments] ${passed.length} passed (${results.filter((each) => each.recovered).length} by the launcher's word that a \`--\` may be gone), ${failed.length} failed, ${results.filter((each) => each.skipped).length} skipped on ${process.platform}`);
+console.log(`[launch-arguments] ${passed.length} passed (${results.filter((each) => each.recovered).length} recovered by the binary from a lost \`--\`), ${results.filter((each) => each.known).length} known losses, ${failed.length} failed, ${results.filter((each) => each.skipped).length} skipped on ${process.platform}`);
 if (reportPath) writeFileSync(reportPath, `${JSON.stringify(results, null, 2)}\n`);
 rmSync(root, { recursive: true, force: true });
 if (failed.length > 0) process.exitCode = 1;

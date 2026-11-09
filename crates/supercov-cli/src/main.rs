@@ -243,22 +243,8 @@ fn hydrate_line_source_from_working_tree(
     );
 }
 
-/// Put first by the npm launcher when it runs under something known to drop
-/// a leading `--` on its way to a package's executable: Bun's runtime
-/// (oven-sh/bun#13984), and Yarn 1's `yarn supercov -- ...`. `supercov --
-/// bun test` then arrived as `supercov bun test`. With it, a first word that
-/// is no command of Supercov's but a program this host can start is taken
-/// for the test command, as the `--` before it said.
-const SEPARATOR_MAY_BE_DROPPED: &str = "__separator-may-be-dropped";
-
 fn main() -> ExitCode {
-    let mut os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let separator_may_be_dropped = os_arguments
-        .first()
-        .is_some_and(|argument| argument == SEPARATOR_MAY_BE_DROPPED);
-    if separator_may_be_dropped {
-        os_arguments.remove(0);
-    }
+    let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     // nextest's target runner for the owned frontend: test arguments pass
     // through untouched, so dispatch before anything reads them as UTF-8.
     if os_arguments.first().is_some_and(|argument| {
@@ -376,14 +362,13 @@ fn main() -> ExitCode {
                     exact_attribution: true,
                 },
             ),
-            Some(command) if separator_may_be_dropped && starts_a_program(&command) => {
-                public_coverage_run(
-                    std::iter::once(command).chain(arguments).collect(),
-                    RunOptions {
-                        exact_attribution: true,
-                    },
-                )
-            }
+            // As below: the `--` after the option was lost on the way here.
+            Some(command) if starts_a_program(&command) => public_coverage_run(
+                std::iter::once(command).chain(arguments).collect(),
+                RunOptions {
+                    exact_attribution: true,
+                },
+            ),
             _ => {
                 eprintln!(
                     "[supercov] --exact-attribution goes before the command: supercov --exact-attribution -- <test command>"
@@ -416,22 +401,22 @@ fn main() -> ExitCode {
         Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some("import") => import_command(arguments.collect()),
-        Some(command) if separator_may_be_dropped && starts_a_program(command) => {
-            public_coverage_run(
-                std::iter::once(command.to_owned())
-                    .chain(arguments)
-                    .collect(),
-                RunOptions::default(),
-            )
-        }
+        // The `--` before a test command does not always arrive: Bun drops a
+        // leading one on its way to a package's executable
+        // (oven-sh/bun#13984), Yarn 1 drops the one in `yarn supercov --
+        // ...`, and PowerShell drops the first on its way into a package
+        // manager's `.ps1` shim. `supercov -- bun test` arrived as
+        // `supercov bun test` (#209). A first word that is no command of
+        // Supercov's but a program this host can start is the test command
+        // the `--` would have introduced; anything else is a mistake.
+        Some(command) if starts_a_program(command) => public_coverage_run(
+            std::iter::once(command.to_owned())
+                .chain(arguments)
+                .collect(),
+            RunOptions::default(),
+        ),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
-            if starts_a_program(command) {
-                eprintln!(
-                    "[supercov] To measure it, put `--` before the test command: supercov -- {command}{}",
-                    if arguments.len() > 0 { " ..." } else { "" }
-                );
-            }
             ExitCode::from(2)
         }
     }

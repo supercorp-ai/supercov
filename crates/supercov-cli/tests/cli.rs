@@ -1430,76 +1430,76 @@ fn clean_removes_runs_and_keeps_what_it_is_told_to() {
     assert!(empty.contains("No local coverage runs"), "{empty}");
 }
 
-/// Bun's runtime and Yarn 1 drop the `--` in front of a test command before
-/// npm's launcher sees it, and `supercov -- bun test` reached the binary as
-/// `supercov bun test` (#209). The launcher then puts
-/// `__separator-may-be-dropped` first, and a first word that is no command of
-/// Supercov's but a program is measured as the command; anything else is the
-/// mistake it always was, and without the launcher's word nothing changes
-/// but a hint.
+/// The `--` in front of a test command does not always reach the binary:
+/// Bun drops a leading one (#209), Yarn 1 the one in `yarn supercov --`, and
+/// PowerShell the first on its way into a package manager's `.ps1` shim, so
+/// `supercov -- bun test` arrived as `supercov bun test`. A first word that is
+/// no command of Supercov's but a program is measured as the test command,
+/// also right after `--exact-attribution`; Supercov's own commands keep their
+/// meaning, and a word that starts nothing is still a mistake that records
+/// nothing.
 #[test]
-fn a_test_command_whose_separator_a_launcher_dropped_is_measured() {
-    const DROPPED: &str = "__separator-may-be-dropped";
-    let project = Project::cart("separator dropped");
+fn a_test_command_whose_separator_was_lost_is_measured() {
+    let project = Project::cart("separator lost");
     let runs = || {
-        project.supercov(&["runs", "--json"]).json()["data"]["runs"]
-            .as_array()
-            .map_or(0, Vec::len)
+        let listed = project.supercov(&["runs", "--json"]);
+        if listed.code() != 0 {
+            return 0;
+        }
+        listed.json()["data"]["runs"].as_array().map_or(0, Vec::len)
     };
-    let none = project.supercov(&["runs", "latest"]).exits(2);
-    assert!(none.contains("No local coverage runs"), "{none}");
+    assert_eq!(runs(), 0);
 
-    // Started directly, a command without `--` is still refused, with how to
-    // write it.
-    let hinted = project.supercov(&["node", "--test"]).exits(2);
-    contains_all(
-        &hinted,
-        &[
-            "Unknown command: node",
-            "put `--` before the test command: supercov -- node ...",
-        ],
-    );
-    let typo = project.supercov(&["frobnicate"]).exits(2);
-    assert!(!typo.contains("put `--` before"), "{typo}");
-
-    // From a launcher that may have lost the `--`, the program is measured,
-    // with and without the option in front of it.
-    project.supercov(&[DROPPED, "node", "--test"]).succeeds();
+    project.supercov(&["node", "--test"]).succeeds();
     assert_eq!(runs(), 1);
     let summary = project.supercov(&["runs", "latest"]).succeeds();
-    contains_all(&summary, &["Passed", "Lines"]);
+    contains_all(&summary, &["Passed      3", "Lines"]);
     project
-        .supercov(&[DROPPED, "--exact-attribution", "node", "--test"])
+        .supercov(&["--exact-attribution", "node", "--test"])
         .succeeds();
     assert_eq!(runs(), 2);
-    // The separator, when it did arrive, is read as always.
+    let exact = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(exact.contains("Exact for 3 test(s)"), "{exact}");
+    // The separator, when it does arrive, is read as always.
+    project.supercov(&["--", "node", "--test"]).succeeds();
     project
-        .supercov(&[DROPPED, "--", "node", "--test"])
-        .succeeds();
-    project
-        .supercov(&[DROPPED, "--exact-attribution", "--", "node", "--test"])
+        .supercov(&["--exact-attribution", "--", "node", "--test"])
         .succeeds();
     assert_eq!(runs(), 4);
 
-    // Supercov's own commands keep their meaning, a word that starts nothing
-    // is still a mistake, and nothing at all is the help.
-    let listed = project.supercov(&[DROPPED, "runs"]).succeeds();
+    // A path to a program is one too.
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    let node = String::from_utf8(node.stdout).unwrap().trim().to_owned();
+    project.supercov(&[&node, "--test"]).succeeds();
+    assert_eq!(runs(), 5);
+
+    // Supercov's own commands win; a word that is no program, or is not a
+    // file that can be run, is refused and measures nothing.
+    let listed = project.supercov(&["runs"]).succeeds();
     assert!(listed.contains("run_"), "{listed}");
-    let mistaken = project.supercov(&[DROPPED, "frobnicate"]).exits(2);
-    assert!(
-        mistaken.contains("Unknown command: frobnicate"),
-        "{mistaken}"
-    );
+    for args in [
+        vec!["frobnicate"],
+        vec!["frobnicate", "--test"],
+        vec!["package.json"],
+        vec!["src"],
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(
+            refused.contains(&format!("Unknown command: {}", args[0])),
+            "{args:?}: {refused}"
+        );
+    }
     let flagged = project
-        .supercov(&[DROPPED, "--exact-attribution", "frobnicate"])
+        .supercov(&["--exact-attribution", "frobnicate"])
         .exits(2);
     assert!(
         flagged.contains("--exact-attribution goes before"),
         "{flagged}"
     );
-    assert_eq!(runs(), 4);
-    let help = project.supercov(&[DROPPED]).succeeds();
-    assert!(help.contains("supercov -- <test command>"), "{help}");
+    assert_eq!(runs(), 5);
 }
 
 #[test]

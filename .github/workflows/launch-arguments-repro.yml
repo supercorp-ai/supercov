@@ -24,6 +24,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: corepack enable
       - run: cargo build -p supercov
+      - run: cargo test -p supercov-engine --lib process_supervision::tests
+      - run: cargo test -p supercov --test cli separator_was_lost
       - run: node scripts/launch-arguments-integration.mjs --binary target/debug/supercov${{ runner.os == 'Windows' && '.exe' || '' }} --report launch-arguments-${{ matrix.os }}.json
         continue-on-error: true
       - uses: actions/upload-artifact@v4

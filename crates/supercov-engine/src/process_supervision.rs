@@ -678,18 +678,31 @@ pub fn is_program(program: &str, cwd: &Path) -> bool {
                 .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
                 .map(|(_, value)| value)
         };
-        find_program_with(
-            OsStr::new(program),
-            cwd,
-            variable("PATH"),
-            variable("PATHEXT"),
-        )
-        .is_some()
+        let pathext = variable("PATHEXT");
+        find_program_with(OsStr::new(program), cwd, variable("PATH"), pathext.clone())
+            .is_some_and(|found| has_pathext_extension(Path::new(&found), pathext))
     }
     #[cfg(not(windows))]
     {
         is_program_with(program, cwd, std::env::var_os("PATH"))
     }
+}
+
+/// Whether `found` ends in an extension Windows starts a program by: the
+/// resolver also returns a named file such as `package.json`, which a shell
+/// would open, not run.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn has_pathext_extension(found: &Path, pathext: Option<OsString>) -> bool {
+    let pathext = pathext
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    found.extension().is_some_and(|extension| {
+        pathext.to_string_lossy().split(';').any(|listed| {
+            listed
+                .trim_start_matches('.')
+                .eq_ignore_ascii_case(&extension.to_string_lossy())
+        })
+    })
 }
 
 #[cfg(not(windows))]
@@ -2430,6 +2443,31 @@ mod tests {
         assert!(is_program_with("local", &root, Some(with_empty)));
         assert!(!is_program_with("tool", &root, None));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_pathext_extension_makes_a_windows_program() {
+        let listed = Some(OsString::from(".EXE;.cmd"));
+        assert!(has_pathext_extension(
+            Path::new(r"C:\bin\node.exe"),
+            listed.clone()
+        ));
+        assert!(has_pathext_extension(
+            Path::new(r"C:\bin\npm.CMD"),
+            listed.clone()
+        ));
+        assert!(!has_pathext_extension(
+            Path::new(r"C:\work\package.json"),
+            listed.clone()
+        ));
+        assert!(!has_pathext_extension(Path::new(r"C:\bin\tool"), listed));
+        // No PATHEXT, or an empty one, is the Windows default list.
+        assert!(has_pathext_extension(Path::new("run.bat"), None));
+        assert!(has_pathext_extension(
+            Path::new("run.com"),
+            Some(OsString::new())
+        ));
+        assert!(!has_pathext_extension(Path::new("run.ps1"), None));
     }
 
     #[test]
