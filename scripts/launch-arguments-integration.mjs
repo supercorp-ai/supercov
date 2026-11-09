@@ -131,11 +131,30 @@ fn main() {
 const probe = buildProbe();
 const record = join(root, "arguments.jsonl");
 
+// The npm package as it is packed, without its native packages: the
+// launcher starts the probe or the binary given here, and a release commit's
+// own version of them is not published yet. Yarn 1 resolves optional
+// packages even when told to skip them, and its install failed for one that
+// did not exist. The files npm would pack are copied, the manifest less
+// those, and the copy packed.
 function packed() {
+  const listed = must(
+    "npm",
+    ["pack", "--dry-run", "--ignore-scripts", "--json"],
+    { cwd: repository, shell: windows },
+  );
+  const staging = join(root, "package");
+  for (const { path } of JSON.parse(listed.stdout)[0].files) {
+    mkdirSync(join(staging, path, ".."), { recursive: true });
+    copyFileSync(join(repository, path), join(staging, path));
+  }
+  const manifest = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
+  delete manifest.optionalDependencies;
+  writeFileSync(join(staging, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const result = must(
     "npm",
     ["pack", "--ignore-scripts", "--json", "--pack-destination", root],
-    { cwd: repository, shell: windows },
+    { cwd: staging, shell: windows },
   );
   return join(root, JSON.parse(result.stdout)[0].filename);
 }
