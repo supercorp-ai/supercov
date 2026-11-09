@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 // What Playwright 1.59 does when it caches a file it compiled: one write in
@@ -126,4 +126,166 @@ test("a cache write that fails leaves no partial file behind", t => {
   assert.notEqual(ran.stdout.trim().split("\n").at(-1), "wrote");
   assert.deepEqual(readdirSync(cache).sort(), ["ef"]);
   assert.deepEqual(readdirSync(resolve(cache, "ef/busy_1111111.js")), ["inside"]);
+});
+
+// Before writing an entry, Playwright removes every cached file of that
+// source -- the entry another process has just written for the same content
+// among them -- and a process that read that entry's code reads its source
+// map only when a test is declared. A sealed suite's containers start
+// Playwright side by side over the run's one cache, and one test of a file
+// now and then failed its `file:line` filter with "No tests found": its
+// location came from the compiled lines. Supercov keeps every entry; the
+// cache is the run's own.
+//
+// Two cold `playwright test file:line` processes over one cache, held in the
+// order that loses the map: B misses and stops in its clear until A has
+// written the entry; A stops after writing until B has cleared; B stops
+// before writing its map until A has read the map. Plain Playwright loses
+// it; under Supercov's preload both find their test.
+test("a test is placed by its source map while another Playwright rewrites the entry", t => {
+  const repository = resolve(import.meta.dirname, "../..");
+  const cli = resolve(repository, "node_modules/playwright/cli.js");
+  if (!existsSync(cli)) {
+    t.skip("Playwright is not installed");
+    return;
+  }
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "supercov-transform-cache-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const runtime = resolve(root, ".supercov/node_modules");
+  cpSync(resolve(repository, "runtime/javascript"), runtime, { recursive: true });
+  const project = resolve(root, "project");
+  mkdirSync(project);
+  symlinkSync(resolve(repository, "node_modules"), resolve(project, "node_modules"), "junction");
+  writeFileSync(resolve(project, "package.json"), '{ "private": true }\n');
+  // Types the compiled file drops, so its lines differ from the source's.
+  writeFileSync(resolve(project, "race.spec.ts"), [
+    'import { test, expect } from "@playwright/test";',
+    "type Pair = {",
+    "  left: number;",
+    "  right: number;",
+    "};",
+    "const sum = (pair: Pair): number => pair.left + pair.right;",
+    'test("first", () => expect(sum({ left: 1, right: 1 })).toBe(2));',
+    'test("second", () => expect(sum({ left: 2, right: 2 })).toBe(4));',
+    "",
+  ].join("\n"));
+  // Holds one process at the points named above; each wait gives up after
+  // twenty seconds rather than hang the suite, and the flags say how far
+  // the order got.
+  writeFileSync(resolve(root, "order.cjs"), `
+const fs = require("node:fs");
+const path = require("node:path");
+const flags = process.env.RACE_FLAGS;
+const role = process.env.RACE_ROLE;
+const cache = path.resolve(process.env.PWTEST_CACHE_DIR) + path.sep;
+const flag = (name) => fs.writeFileSync(path.join(flags, name), "");
+const wait = (name) => {
+  const until = Date.now() + 20000;
+  while (!fs.existsSync(path.join(flags, name)) && Date.now() < until)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+};
+const inCache = (file) => typeof file === "string" && path.resolve(file).startsWith(cache);
+const { readdirSync, writeFileSync, renameSync, readFileSync } = fs;
+// A cache file arrives by a write in place, or, under Supercov, by a rename
+// of the whole file onto its name.
+const arriving = (target, before, after) => {
+  fs.writeFileSync = function (file, ...rest) {
+    if (inCache(file)) before(String(file));
+    const result = writeFileSync.call(this, file, ...rest);
+    if (inCache(file)) after(String(file));
+    return result;
+  };
+  fs.renameSync = function (from, to, ...rest) {
+    if (inCache(to)) before(String(to));
+    const result = renameSync.call(this, from, to, ...rest);
+    if (inCache(to)) after(String(to));
+    return result;
+  };
+};
+if (role === "B") {
+  let cleared = false;
+  fs.readdirSync = function (file, ...rest) {
+    if (!cleared && inCache(file + path.sep)) {
+      cleared = true;
+      flag("b-missed");
+      wait("a-wrote");
+    }
+    return readdirSync.call(this, file, ...rest);
+  };
+  arriving(".map", (file) => {
+    if (file.endsWith(".map")) {
+      flag("b-cleared");
+      wait("a-read");
+    }
+  }, () => {});
+}
+if (role === "A") {
+  arriving(".js", () => {}, (file) => {
+    if (file.endsWith(".js")) {
+      flag("a-wrote");
+      wait("b-cleared");
+    }
+  });
+  fs.readFileSync = function (file, ...rest) {
+    try {
+      return readFileSync.call(this, file, ...rest);
+    } finally {
+      if (inCache(file) && String(file).endsWith(".map")) flag("a-read");
+    }
+  };
+}
+`);
+  const race = (label, preload) => {
+    const cache = resolve(root, `cache-${label}`);
+    const flags = resolve(root, `flags-${label}`);
+    mkdirSync(flags);
+    const options = (role) => ({
+      cwd: project,
+      encoding: "utf8",
+      timeout: 120000,
+      env: {
+        ...process.env,
+        PWTEST_CACHE_DIR: cache,
+        RACE_FLAGS: flags,
+        RACE_ROLE: role,
+        NODE_OPTIONS: [
+          ...(preload ? [`--import=${pathToFileURL(resolve(runtime, "register.mjs")).href}`] : []),
+          `--require=${resolve(root, "order.cjs")}`,
+        ].join(" "),
+      },
+    });
+    const spawned = (role, line) =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, [cli, "test", `race.spec.ts:${line}`, "--reporter=line", "--workers=1"], {
+          ...options(role),
+          stdio: "pipe",
+        });
+        let output = "";
+        child.stdout.on("data", (chunk) => { output += chunk; });
+        child.stderr.on("data", (chunk) => { output += chunk; });
+        child.on("exit", (status) => done({ status, output }));
+      });
+    return (async () => {
+      const b = spawned("B", 8);
+      // A starts once B has missed and stopped, so both compile from cold.
+      const until = Date.now() + 60000;
+      while (!existsSync(resolve(flags, "b-missed")) && Date.now() < until)
+        await new Promise((done) => setTimeout(done, 20));
+      const a = spawned("A", 7);
+      const [first, second] = await Promise.all([a, b]);
+      return { a: first, b: second, reached: readdirSync(flags).sort() };
+    })();
+  };
+  return (async () => {
+    const plain = await race("plain");
+    assert.deepEqual(plain.reached, ["a-read", "a-wrote", "b-cleared", "b-missed"], JSON.stringify(plain));
+    assert.notEqual(plain.a.status, 0, plain.a.output);
+    assert.match(plain.a.output, /No tests found/u);
+    const kept = await race("supercov", true);
+    assert.deepEqual(kept.reached, ["a-read", "a-wrote", "b-cleared", "b-missed"], JSON.stringify(kept));
+    assert.equal(kept.a.status, 0, kept.a.output);
+    assert.match(kept.a.output, /1 passed/u);
+    assert.equal(kept.b.status, 0, kept.b.output);
+    assert.match(kept.b.output, /1 passed/u);
+  })();
 });
