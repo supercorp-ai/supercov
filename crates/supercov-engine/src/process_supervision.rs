@@ -663,6 +663,69 @@ fn resolve_program_with(
     path: Option<OsString>,
     pathext: Option<OsString>,
 ) -> OsString {
+    find_program_with(program, cwd, path, pathext).unwrap_or_else(|| program.to_owned())
+}
+
+/// Whether `program` names something a test command could start from `cwd`:
+/// a file in a PATH directory, or at a path with a separator, that this
+/// host can execute -- on Windows by its PATHEXT extension, as cmd.exe finds
+/// it; elsewhere by an execute permission.
+pub fn is_program(program: &str, cwd: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let variable = |name: &str| {
+            std::env::vars_os()
+                .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        };
+        find_program_with(
+            OsStr::new(program),
+            cwd,
+            variable("PATH"),
+            variable("PATHEXT"),
+        )
+        .is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        is_program_with(program, cwd, std::env::var_os("PATH"))
+    }
+}
+
+#[cfg(not(windows))]
+fn is_program_with(program: &str, cwd: &Path, path: Option<OsString>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |candidate: &Path| {
+        std::fs::metadata(candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    if program.is_empty() {
+        return false;
+    }
+    if program.contains('/') {
+        return executable(&cwd.join(program));
+    }
+    path.map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .iter()
+        // An empty PATH entry is the working directory, as the shell reads it.
+        .map(|directory| {
+            if directory.as_os_str().is_empty() {
+                cwd.join(program)
+            } else {
+                directory.join(program)
+            }
+        })
+        .any(|candidate| executable(&candidate))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn find_program_with(
+    program: &OsStr,
+    cwd: &Path,
+    path: Option<OsString>,
+    pathext: Option<OsString>,
+) -> Option<OsString> {
     const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
     let pathext = pathext
         .filter(|value| !value.is_empty())
@@ -686,14 +749,14 @@ fn resolve_program_with(
             let mut candidate = base.clone().into_os_string();
             candidate.push(extension);
             if is_file(Path::new(&candidate)) {
-                return candidate;
+                return Some(candidate);
             }
         }
         if base.extension().is_some() && is_file(&base) {
-            return base.into_os_string();
+            return Some(base.into_os_string());
         }
     }
-    program.to_owned()
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2324,6 +2387,49 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         root
+    }
+
+    /// What a launcher that may have lost a test command's `--` asks before
+    /// it takes an unknown first word for that command: only something the
+    /// host could start is one.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_program_is_an_executable_file_on_path_or_at_a_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_directory("is-program");
+        std::fs::create_dir(root.join("bin")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        for (name, mode) in [
+            ("bin/tool", 0o755),
+            ("bin/data", 0o644),
+            ("sub/run.sh", 0o700),
+            ("local", 0o755),
+        ] {
+            std::fs::write(root.join(name), "").unwrap();
+            std::fs::set_permissions(root.join(name), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        }
+        let path =
+            || Some(std::env::join_paths([root.join("elsewhere"), root.join("bin")]).unwrap());
+        let is = |program: &str| is_program_with(program, &root, path());
+        assert!(is("tool"));
+        // Not executable, absent, a directory, or empty: none can be started.
+        assert!(!is("data"));
+        assert!(!is("missing"));
+        assert!(!is("bin"));
+        assert!(!is(""));
+        // A separator is relative to the working directory, not PATH.
+        assert!(is("sub/run.sh"));
+        assert!(is("./sub/run.sh"));
+        assert!(!is("bin/data"));
+        assert!(is(&root.join("bin/tool").to_string_lossy()));
+        // A bare name is never looked for in the working directory, unless
+        // PATH has an empty entry, which stands for it.
+        assert!(!is("local"));
+        let with_empty = std::env::join_paths([PathBuf::new(), root.join("bin")]).unwrap();
+        assert!(is_program_with("local", &root, Some(with_empty)));
+        assert!(!is_program_with("tool", &root, None));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

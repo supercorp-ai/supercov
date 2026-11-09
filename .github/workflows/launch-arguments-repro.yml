@@ -23,7 +23,8 @@ jobs:
       - uses: denoland/setup-deno@v2
       - uses: astral-sh/setup-uv@v6
       - run: corepack enable
-      - run: node scripts/launch-arguments-integration.mjs --report launch-arguments-${{ matrix.os }}.json
+      - run: cargo build -p supercov
+      - run: node scripts/launch-arguments-integration.mjs --binary target/debug/supercov${{ runner.os == 'Windows' && '.exe' || '' }} --report launch-arguments-${{ matrix.os }}.json
         continue-on-error: true
       - uses: actions/upload-artifact@v4
         with:

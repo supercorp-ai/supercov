@@ -243,8 +243,22 @@ fn hydrate_line_source_from_working_tree(
     );
 }
 
+/// Put first by the npm launcher when it runs under something known to drop
+/// a leading `--` on its way to a package's executable: Bun's runtime
+/// (oven-sh/bun#13984), and Yarn 1's `yarn supercov -- ...`. `supercov --
+/// bun test` then arrived as `supercov bun test`. With it, a first word that
+/// is no command of Supercov's but a program this host can start is taken
+/// for the test command, as the `--` before it said.
+const SEPARATOR_MAY_BE_DROPPED: &str = "__separator-may-be-dropped";
+
 fn main() -> ExitCode {
-    let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let mut os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let separator_may_be_dropped = os_arguments
+        .first()
+        .is_some_and(|argument| argument == SEPARATOR_MAY_BE_DROPPED);
+    if separator_may_be_dropped {
+        os_arguments.remove(0);
+    }
     // nextest's target runner for the owned frontend: test arguments pass
     // through untouched, so dispatch before anything reads them as UTF-8.
     if os_arguments.first().is_some_and(|argument| {
@@ -355,13 +369,21 @@ fn main() -> ExitCode {
         // suite differently. Written once here rather than as a flag per
         // language, because what someone wants is the same thing in all of
         // them.
-        Some("--exact-attribution") => match arguments.next().as_deref() {
-            Some("--") => public_coverage_run(
+        Some("--exact-attribution") => match arguments.next() {
+            Some(separator) if separator == "--" => public_coverage_run(
                 arguments.collect(),
                 RunOptions {
                     exact_attribution: true,
                 },
             ),
+            Some(command) if separator_may_be_dropped && starts_a_program(&command) => {
+                public_coverage_run(
+                    std::iter::once(command).chain(arguments).collect(),
+                    RunOptions {
+                        exact_attribution: true,
+                    },
+                )
+            }
             _ => {
                 eprintln!(
                     "[supercov] --exact-attribution goes before the command: supercov --exact-attribution -- <test command>"
@@ -394,8 +416,22 @@ fn main() -> ExitCode {
         Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some("import") => import_command(arguments.collect()),
+        Some(command) if separator_may_be_dropped && starts_a_program(command) => {
+            public_coverage_run(
+                std::iter::once(command.to_owned())
+                    .chain(arguments)
+                    .collect(),
+                RunOptions::default(),
+            )
+        }
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            if starts_a_program(command) {
+                eprintln!(
+                    "[supercov] To measure it, put `--` before the test command: supercov -- {command}{}",
+                    if arguments.len() > 0 { " ..." } else { "" }
+                );
+            }
             ExitCode::from(2)
         }
     }
@@ -3913,6 +3949,13 @@ fn benchmark_js_transform() -> ExitCode {
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+/// Whether `command` is something a test command could start: a program on
+/// PATH or at a path from here.
+fn starts_a_program(command: &str) -> bool {
+    std::env::current_dir()
+        .is_ok_and(|cwd| supercov_engine::process_supervision::is_program(command, &cwd))
 }
 
 /// Writes and flushes: an error the buffer would only meet at exit is lost.

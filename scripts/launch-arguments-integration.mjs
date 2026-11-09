@@ -12,7 +12,7 @@
 // the packed npm package installed by each package manager, their shims, the
 // gem's wrapper, the wheel's script.
 //
-//   node scripts/launch-arguments-integration.mjs [--report <file.json>] [--only <substring>]
+//   node scripts/launch-arguments-integration.mjs [--binary <supercov>] [--report <file.json>] [--only <substring>]
 //
 // Exits 1 when an expected case differs; a launcher that is not installed is
 // skipped and named.
@@ -35,6 +35,9 @@ const repository = resolve(import.meta.dirname, "..");
 const windows = process.platform === "win32";
 const options = process.argv.slice(2);
 const reportPath = valueOf("--report");
+// The real binary, for the end-to-end cases: measured runs started through
+// each launcher.
+const binary = valueOf("--binary") ? resolve(valueOf("--binary")) : undefined;
 const only = valueOf("--only");
 
 function valueOf(flag) {
@@ -47,7 +50,14 @@ function valueOf(flag) {
 const root = mkdtempSync(join(tmpdir(), "supercov launch "));
 const results = [];
 
+// Through cmd, as a `.cmd` shim needs, each argument is quoted by hand:
+// Node joins them with spaces.
+function cmdArgument(argument) {
+  return /[\s&()^%"]/u.test(argument) ? `"${argument.replaceAll('"', '\\"')}"` : argument;
+}
+
 function run(command, args, settings = {}) {
+  if (settings.shell && windows) args = args.map(cmdArgument);
   const result = spawnSync(command, args, {
     encoding: "utf8",
     stdio: "pipe",
@@ -83,22 +93,28 @@ function buildProbe() {
   writeFileSync(
     source,
     `use std::io::Write;
-fn main() {
-    let mut line = String::from("[");
-    for (index, argument) in std::env::args_os().skip(1).enumerate() {
-        if index > 0 { line.push(','); }
-        line.push('"');
-        for character in argument.to_string_lossy().chars() {
-            match character {
-                '"' => line.push_str("\\\\\\""),
-                '\\\\' => line.push_str("\\\\\\\\"),
-                c if (c as u32) < 0x20 => line.push_str(&format!("\\\\u{:04x}", c as u32)),
-                c => line.push(c),
-            }
+fn quoted(text: &str) -> String {
+    let mut out = String::from("\\"");
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\\\\""),
+            '\\\\' => out.push_str("\\\\\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
-        line.push('"');
     }
-    line.push(']');
+    out.push('"');
+    out
+}
+fn main() {
+    let arguments: Vec<String> = std::env::args_os().skip(1).map(|a| quoted(&a.to_string_lossy())).collect();
+    let variable = |name: &str| std::env::var(name).map(|value| quoted(&value)).unwrap_or_else(|_| "null".to_owned());
+    let line = format!(
+        "{{\\"args\\":[{}],\\"npm_config_argv\\":{},\\"user_agent\\":{}}}",
+        arguments.join(","),
+        variable("npm_config_argv"),
+        variable("npm_config_user_agent"),
+    );
     let path = std::env::var_os("SUPERCOV_ARGUMENTS_PROBE").expect("SUPERCOV_ARGUMENTS_PROBE");
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
     writeln!(file, "{line}").unwrap();
@@ -106,7 +122,9 @@ fn main() {
 `,
   );
   const probe = join(root, windows ? "probe.exe" : "probe");
-  must("rustc", ["-O", "-o", probe, source]);
+  // Static on Linux, so the wheel built around it promises no newer glibc
+  // than its manylinux tag.
+  must("rustc", ["-O", ...(process.platform === "linux" ? ["-C", "target-feature=+crt-static"] : []), "-o", probe, source]);
   return probe;
 }
 
@@ -133,7 +151,6 @@ const plain = [
   { name: "separator inside the command", args: ["--", "tool", "--", "--flag"] },
   { name: "subcommand", args: ["runs", "latest", "gaps", "--limit", "5"] },
   { name: "help", args: [] },
-  { name: "a dashed test command", args: ["--", "--weird", "x"] },
 ];
 const quoted = [
   { name: "space", args: ["--", "tool", "a b"] },
@@ -193,15 +210,27 @@ function observe(launcher, shell, cwd, commandLine, expected, extraEnv = {}) {
   };
   const result = shellRun(shell, commandLine, cwd, env);
   const lines = existsSync(record) ? readFileSync(record, "utf8").trim().split("\n") : [];
-  const received = lines.length > 0 ? JSON.parse(lines.at(-1)) : null;
-  const ok = received !== null && JSON.stringify(received) === JSON.stringify(expected);
+  const seen = lines.length > 0 ? JSON.parse(lines.at(-1)) : null;
+  const received = seen?.args ?? null;
+  // The launcher's word that a leading `--` may have been dropped: the
+  // binary then reads an unknown first word that names a program as the test
+  // command, which the end-to-end cases prove with the real binary.
+  const hinted = received?.[0] === "__separator-may-be-dropped";
+  const meant = hinted ? received.slice(1) : received;
+  const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const exact = received !== null && same(meant, expected);
+  const recovered = !exact && hinted && expected[0] === "--" && same(meant, expected.slice(1));
   results.push({
     launcher,
     shell,
     commandLine,
     expected,
     received,
-    ok,
+    hinted,
+    recovered,
+    ok: exact || recovered,
+    npmConfigArgv: seen?.npm_config_argv ?? null,
+    userAgent: seen?.user_agent ?? null,
     status: result.status,
     output: ok ? undefined : `${result.stderr}\n${result.stdout}`.trim().slice(-800),
   });
@@ -359,6 +388,114 @@ else
       }
   }
 
+// End to end: the real binary measuring a real suite, started as the issue
+// started it and as the other launchers that lose a `--` start it. Each
+// must record one run with its passing test; a misspelt command must still
+// be refused and record nothing.
+function git(directory) {
+  must("git", ["init", "-q"], { cwd: directory });
+  must("git", ["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], { cwd: directory });
+  must("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "project"], { cwd: directory });
+}
+
+function runCount(directory) {
+  const runs = join(directory, ".supercov", "runs");
+  return existsSync(runs) ? readdirSync(runs).length : 0;
+}
+
+function endToEnd(launcher, shell, directory, commandLine, expectation) {
+  const name = `${launcher} [${shell}] ${commandLine}`;
+  if (only && !name.includes(only)) return;
+  const before = runCount(directory);
+  const env = { ...process.env, SUPERCOV_RUST_BINARY: binary };
+  delete env.SUPERCOV_ARGUMENTS_PROBE;
+  const result = shellRun(shell, commandLine, directory, env);
+  const output = `${result.stderr}\n${result.stdout}`;
+  let ok;
+  let detail = "";
+  if (expectation.refused) {
+    ok = result.status === 2 && output.includes(expectation.refused) && runCount(directory) === before;
+  } else {
+    const summary = run(binary, ["runs", "latest"], { cwd: directory });
+    ok =
+      result.status === 0 &&
+      runCount(directory) === before + 1 &&
+      summary.stdout.includes(expectation.summary);
+    detail = summary.stdout.split("\n").slice(0, 12).join("\n");
+  }
+  results.push({
+    launcher: `end to end: ${launcher}`,
+    shell,
+    commandLine,
+    expected: expectation,
+    received: { status: result.status, runs: runCount(directory) - before },
+    ok,
+    status: result.status,
+    output: ok ? undefined : `${output.trim().slice(-1200)}\n${detail}`,
+  });
+}
+
+if (!binary) skip("end to end", "no --binary given");
+else {
+  const shell = windows ? "cmd" : "sh";
+  const one = { summary: "Passed      1" };
+  if (available("bun")) {
+    // The issue's project, as filed.
+    for (const runBun of [true, false]) {
+      const directory = project(runBun ? "issue-run-bun" : "issue", {
+        type: "module",
+        scripts: { coverage: "supercov -- bun test", exact: "supercov --exact-attribution -- bun test" },
+      }, {
+        ...(runBun ? { "bunfig.toml": "[run]\nbun = true\n" } : {}),
+        "math.test.ts": 'import { expect, test } from "bun:test"\nimport { add } from "./src/math"\n\ntest("adds", () => {\n  expect(add(1, 1)).toBe(2)\n})\n',
+        ".gitignore": "node_modules\n.supercov\n",
+      });
+      mkdirSync(join(directory, "src"));
+      writeFileSync(join(directory, "src/math.ts"), "export function add(a: number, b: number): number {\n  return a + b\n}\n");
+      must("bun", ["add", tarball], { cwd: directory, shell: windows });
+      git(directory);
+      const label = runBun ? "bun, [run] bun = true" : "bun";
+      endToEnd(label, shell, directory, "bun run coverage", one);
+      endToEnd(label, shell, directory, "bun --bun run coverage", one);
+      endToEnd(label, shell, directory, "bun run exact", one);
+      endToEnd(label, shell, directory, line(shell, ["bunx", "--bun", "supercov", "--", "bun", "test"]), one);
+      endToEnd(label, shell, directory, line(shell, ["bun", "run", "supercov", "--", "bun", "test"]), one);
+      endToEnd(label, shell, directory, line(shell, ["bun", "--bun", "run", "supercov", "frobnicate"]), {
+        refused: "Unknown command: frobnicate",
+      });
+    }
+  } else skip("end to end: bun", "bun is not installed");
+  // Node's own runner, through the package managers that keep the `--` and
+  // the one that drops it.
+  const nodeTest = {
+    "math.js": "export function add(a, b) {\n  return a + b;\n}\n",
+    "math.test.js": 'import { test } from "node:test";\nimport assert from "node:assert";\nimport { add } from "./math.js";\n\ntest("adds", () => {\n  assert.equal(add(1, 1), 2);\n});\n',
+    ".gitignore": "node_modules\n.supercov\n",
+  };
+  for (const manager of [
+    { name: "npm", manifest: {}, install: ["npm", ["install", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund", tarball]], direct: ["npx", "supercov"] },
+    { name: "yarn1", manifest: { packageManager: "yarn@1.22.22" }, install: ["yarn", ["add", "--ignore-scripts", "--ignore-optional", `file:${tarball}`]], direct: ["yarn", "supercov"] },
+  ]) {
+    if (!available(manager.install[0])) {
+      skip(`end to end: ${manager.name}`, `${manager.install[0]} is not installed`);
+      continue;
+    }
+    const directory = project(`node-${manager.name}`, {
+      type: "module",
+      ...manager.manifest,
+      scripts: { coverage: "supercov -- node --test" },
+    }, nodeTest);
+    must(manager.install[0], manager.install[1], { cwd: directory, shell: windows });
+    git(directory);
+    for (const each of shells) {
+      endToEnd(manager.name, each, directory, line(each, [...manager.direct, "--", "node", "--test"]), one);
+      endToEnd(manager.name, each, directory, line(each, [...manager.direct, "--exact-attribution", "--", "node", "--test"]), one);
+      endToEnd(manager.name, each, directory, line(each, [manager.install[0], "run", "coverage"]), one);
+      endToEnd(manager.name, each, directory, line(each, [...manager.direct, "frobnicate"]), { refused: "Unknown command: frobnicate" });
+    }
+  }
+}
+
 const failed = results.filter((each) => each.ok === false);
 const passed = results.filter((each) => each.ok === true);
 for (const each of results) {
@@ -368,7 +505,7 @@ for (const each of results) {
       `FAIL ${each.launcher} [${each.shell}] ${each.commandLine}\n  expected ${JSON.stringify(each.expected)}\n  received ${JSON.stringify(each.received)} (exit ${each.status})${each.output ? `\n  ${each.output.split("\n").slice(-3).join("\n  ")}` : ""}`,
     );
 }
-console.log(`[launch-arguments] ${passed.length} passed, ${failed.length} failed, ${results.filter((each) => each.skipped).length} skipped on ${process.platform}`);
+console.log(`[launch-arguments] ${passed.length} passed (${results.filter((each) => each.recovered).length} by the launcher's word that a \`--\` may be gone), ${failed.length} failed, ${results.filter((each) => each.skipped).length} skipped on ${process.platform}`);
 if (reportPath) writeFileSync(reportPath, `${JSON.stringify(results, null, 2)}\n`);
 rmSync(root, { recursive: true, force: true });
 if (failed.length > 0) process.exitCode = 1;

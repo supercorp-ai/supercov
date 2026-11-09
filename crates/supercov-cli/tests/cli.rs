@@ -1430,6 +1430,78 @@ fn clean_removes_runs_and_keeps_what_it_is_told_to() {
     assert!(empty.contains("No local coverage runs"), "{empty}");
 }
 
+/// Bun's runtime and Yarn 1 drop the `--` in front of a test command before
+/// npm's launcher sees it, and `supercov -- bun test` reached the binary as
+/// `supercov bun test` (#209). The launcher then puts
+/// `__separator-may-be-dropped` first, and a first word that is no command of
+/// Supercov's but a program is measured as the command; anything else is the
+/// mistake it always was, and without the launcher's word nothing changes
+/// but a hint.
+#[test]
+fn a_test_command_whose_separator_a_launcher_dropped_is_measured() {
+    const DROPPED: &str = "__separator-may-be-dropped";
+    let project = Project::cart("separator dropped");
+    let runs = || {
+        project.supercov(&["runs", "--json"]).json()["data"]["runs"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    let none = project.supercov(&["runs", "latest"]).exits(2);
+    assert!(none.contains("No local coverage runs"), "{none}");
+
+    // Started directly, a command without `--` is still refused, with how to
+    // write it.
+    let hinted = project.supercov(&["node", "--test"]).exits(2);
+    contains_all(
+        &hinted,
+        &[
+            "Unknown command: node",
+            "put `--` before the test command: supercov -- node ...",
+        ],
+    );
+    let typo = project.supercov(&["frobnicate"]).exits(2);
+    assert!(!typo.contains("put `--` before"), "{typo}");
+
+    // From a launcher that may have lost the `--`, the program is measured,
+    // with and without the option in front of it.
+    project.supercov(&[DROPPED, "node", "--test"]).succeeds();
+    assert_eq!(runs(), 1);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Passed", "Lines"]);
+    project
+        .supercov(&[DROPPED, "--exact-attribution", "node", "--test"])
+        .succeeds();
+    assert_eq!(runs(), 2);
+    // The separator, when it did arrive, is read as always.
+    project
+        .supercov(&[DROPPED, "--", "node", "--test"])
+        .succeeds();
+    project
+        .supercov(&[DROPPED, "--exact-attribution", "--", "node", "--test"])
+        .succeeds();
+    assert_eq!(runs(), 4);
+
+    // Supercov's own commands keep their meaning, a word that starts nothing
+    // is still a mistake, and nothing at all is the help.
+    let listed = project.supercov(&[DROPPED, "runs"]).succeeds();
+    assert!(listed.contains("run_"), "{listed}");
+    let mistaken = project.supercov(&[DROPPED, "frobnicate"]).exits(2);
+    assert!(
+        mistaken.contains("Unknown command: frobnicate"),
+        "{mistaken}"
+    );
+    let flagged = project
+        .supercov(&[DROPPED, "--exact-attribution", "frobnicate"])
+        .exits(2);
+    assert!(
+        flagged.contains("--exact-attribution goes before"),
+        "{flagged}"
+    );
+    assert_eq!(runs(), 4);
+    let help = project.supercov(&[DROPPED]).succeeds();
+    assert!(help.contains("supercov -- <test command>"), "{help}");
+}
+
 #[test]
 fn mistakes_are_named_and_end_with_two() {
     let project = Project::cart("mistakes");
