@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 const budget = JSON.parse(
   readFileSync(resolve("benchmarks/rust-transform-budget.json"), "utf8"),
 );
 const executable = `supercov${process.platform === "win32" ? ".exe" : ""}`;
-const candidate = resolve(
+let candidate = resolve(
   process.env.SUPERCOV_RUST_BINARY ?? `target/release/${executable}`,
 );
 const cases = Array.from({ length: budget.corpusFiles }, (_, index) => ({
@@ -84,6 +84,44 @@ if (extrapolatedMonorepoMs > budget.monorepoExtrapolatedMsMax)
 // check failed here for that reason alone: the binary already published read
 // the same 52 ms. So a miss is put to the question that was asked by hand
 // then: is this build slower than the last release, on this machine, now?
+// The last release built from its tag as this binary was built. Compared
+// with the published binary -- fat LTO in one unit -- a build made faster to
+// build (thin LTO in sixteen units, as release-gates makes it) read 1.05x
+// with no change of code at all, and a change costing 2% failed the 1.1x
+// limit. Given the build command and where it leaves the binary, under the
+// target directory it shares with this build, the comparison is like with
+// like.
+function builtFromTag(version) {
+  const command = process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILD;
+  const built = process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILT;
+  const target = resolve("target");
+  const binary = resolve(target, "benchmark-reference", `${version}-built`, executable);
+  if (existsSync(binary)) return binary;
+  // The reference builds into the shared target directory and would
+  // replace this binary there.
+  const kept = resolve(target, "benchmark-candidate", executable);
+  mkdirSync(resolve(kept, ".."), { recursive: true });
+  copyFileSync(candidate, kept);
+  candidate = kept;
+  const source = resolve(target, "benchmark-reference", `${version}-source`);
+  rmSync(source, { recursive: true, force: true });
+  const step = (program, args, options = {}) => {
+    const ran = spawnSync(program, args, { stdio: "inherit", ...options });
+    if (ran.status !== 0) throw new Error(`${program} ${args.join(" ")} failed while building ${version}`);
+  };
+  step("git", ["fetch", "--quiet", "--depth", "1", "origin", "tag", `v${version}`]);
+  step("git", ["worktree", "add", "--quiet", "--detach", source, `v${version}`]);
+  try {
+    console.error(`[rust-transform] building ${version} from its tag as this binary was built: ${command}`);
+    step(command, [], { cwd: source, shell: true, env: { ...process.env, CARGO_TARGET_DIR: target } });
+    mkdirSync(resolve(binary, ".."), { recursive: true });
+    copyFileSync(resolve(target, built), binary);
+  } finally {
+    spawnSync("git", ["worktree", "remove", "--force", source]);
+  }
+  return binary;
+}
+
 function released() {
   if (process.env.SUPERCOV_BENCHMARK_REFERENCE)
     return {
@@ -103,6 +141,8 @@ function released() {
   });
   const version = viewed.stdout?.trim();
   if (viewed.status !== 0 || !/^\d+\.\d+\.\d+$/.test(version)) return null;
+  if (process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILD && process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILT)
+    return { version: `${version} built the same way`, binary: builtFromTag(version) };
   const directory = resolve("target/benchmark-reference", version);
   const binary = resolve(directory, "package/bin", executable);
   if (!existsSync(binary)) {
