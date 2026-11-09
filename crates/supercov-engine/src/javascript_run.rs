@@ -600,18 +600,18 @@ pub fn run_direct_javascript(
         "javascript",
         crate::integrity::javascript_assertion_paths(&root, &project).map_err(|e| e.to_string())?,
     )?;
-    // The root too, which a moved project must not reuse. And the files that
-    // are instrumented: the fingerprint digests every first-party file
-    // whatever its classification, so SUPERCOV_SOURCE_ROOTS set on a project
-    // that had already run was silently ignored until the workspace was
-    // deleted.
+    // The root, which a moved project must not reuse; the files instrumented
+    // (SUPERCOV_SOURCE_ROOTS set on a project that had already run was ignored
+    // until the workspace was deleted); and the probes, whose switch changed
+    // nothing once an instrumented copy was cached.
+    let probes = crate::js_instrumenter::probe_options();
     let frontend_cache_key = format!(
         "{}:{}:{}:{}:{}",
         integrity.fingerprint.combined,
         integrity.fingerprint.execution,
         crate::source_manifest::digest(&request.command),
         crate::source_manifest::digest(&project.root.to_string_lossy()),
-        crate::source_manifest::digest(&(&project.source_files, &source_roots))
+        crate::source_manifest::digest(&(&project.source_files, &source_roots, probes))
     );
     let prior_workspace = cached_workspace_path(&root, cleanup.lock());
     let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);

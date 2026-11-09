@@ -3684,6 +3684,12 @@ thread_local! {
 /// The comparison probe runs only with `SUPERCOV_COMPARISONS=1` (or, in this
 /// crate's tests, on the thread that asked for it), so every other run's
 /// instrumented code is byte for byte what it was.
+/// The probe switches, for the frontend cache key: instrumentation cached
+/// with the probes off must not be reused once they are on, or the reverse.
+pub(crate) fn probe_options() -> (bool, bool) {
+    (comparisons_enabled(), infection_probes_enabled())
+}
+
 fn comparisons_enabled() -> bool {
     #[cfg(test)]
     if COMPARISONS_FOR_TEST.with(|flag| flag.get()) {
@@ -14186,6 +14192,20 @@ export function shapes(n: number): unknown {
             }
         }
         assert!(checked > 100_000, "{checked}");
+    }
+
+    #[test]
+    fn the_cache_key_follows_each_probe_switch() {
+        let off = probe_options();
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
+        let comparisons = probe_options();
+        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(true));
+        let both = probe_options();
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
+        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(false));
+        assert_eq!(off, (false, false));
+        assert_eq!(comparisons, (true, false));
+        assert_eq!(both, (true, true));
     }
 
     #[test]
