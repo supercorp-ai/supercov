@@ -187,13 +187,19 @@ fn merge_adjacent_probes(
 ) -> Vec<[usize; 2]> {
     let mut named = PlacesNamed {
         file,
-        counts: HashMap::new(),
+        counts: vec![0; statement_points.len()],
     };
     named.visit_program(program);
-    let shared = repeated.iter().copied().collect::<HashSet<_>>();
-    let mergeable = (0..statement_points.len())
-        .filter(|place| named.counts.get(place) == Some(&1) && !shared.contains(place))
-        .collect();
+    let mut mergeable = named
+        .counts
+        .iter()
+        .map(|count| *count == 1)
+        .collect::<Vec<_>>();
+    for place in repeated {
+        if let Some(entry) = mergeable.get_mut(*place) {
+            *entry = false;
+        }
+    }
     let mut merger = AdjacentProbeMerger {
         hit,
         file,
@@ -205,16 +211,18 @@ fn merge_adjacent_probes(
     merger.follows
 }
 
-/// How many calls name each place, as `(file, place, ...)`.
+/// By place, how many calls name each statement point, as `(file, place)`.
 struct PlacesNamed<'n> {
     file: &'n str,
-    counts: HashMap<usize, usize>,
+    counts: Vec<u32>,
 }
 
 impl<'a> Visit<'a> for PlacesNamed<'_> {
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        if let Some(place) = place_argument(call, self.file) {
-            *self.counts.entry(place).or_default() += 1;
+        if let Some(count) =
+            place_argument(call, self.file).and_then(|place| self.counts.get_mut(place))
+        {
+            *count += 1;
         }
         walk::walk_call_expression(self, call);
     }
@@ -270,46 +278,49 @@ fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Op
 struct AdjacentProbeMerger<'n> {
     hit: &'n str,
     file: &'n str,
-    mergeable: HashSet<usize>,
+    /// By place: a statement point named once, by an id no other place has.
+    mergeable: Vec<bool>,
     follows: Vec<[usize; 2]>,
 }
 
 impl<'a> VisitMut<'a> for AdjacentProbeMerger<'_> {
     fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
         walk_mut::walk_statements(self, statements);
+        let mergeable = |place: usize| self.mergeable.get(place) == Some(&true);
         let mut leader = None;
-        let mut keep = Vec::with_capacity(statements.len());
-        for statement in statements.iter() {
+        let mut keep = Vec::new();
+        for (index, statement) in statements.iter().enumerate() {
             let place = statement_probe_place(statement, self.hit, self.file);
-            let dropped = match (leader, place) {
-                (Some(first), Some(place))
-                    if self.mergeable.contains(&first) && self.mergeable.contains(&place) =>
-                {
+            match (leader, place) {
+                (Some(first), Some(place)) if mergeable(first) && mergeable(place) => {
+                    if keep.is_empty() {
+                        keep = vec![true; statements.len()];
+                    }
+                    keep[index] = false;
                     self.follows.push([place, first]);
-                    true
                 }
-                _ => false,
-            };
-            if !dropped {
-                leader = place;
+                _ => leader = place,
             }
-            keep.push(!dropped);
         }
-        if keep.iter().all(|kept| *kept) {
+        if keep.is_empty() {
             return;
         }
         let mut index = 0;
         statements.retain(|_| {
-            let kept = keep[index];
             index += 1;
-            kept
+            keep[index - 1]
         });
     }
 }
 
 /// Each place whose id an earlier place has, beside that first place, flat.
 fn repeated_places(ids: &[String]) -> Vec<usize> {
-    let mut first = HashMap::<&str, usize>::with_capacity(ids.len());
+    // Called on every module's ids: a hasher made for short keys, not
+    // SipHash, which was most of what this cost.
+    let mut first = rustc_hash::FxHashMap::<&str, usize>::with_capacity_and_hasher(
+        ids.len(),
+        Default::default(),
+    );
     let mut repeated = Vec::new();
     for (place, id) in ids.iter().enumerate() {
         let earlier = *first.entry(id.as_str()).or_insert(place);
