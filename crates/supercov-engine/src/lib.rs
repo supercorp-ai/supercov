@@ -48,6 +48,7 @@ pub mod interned;
 pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;
+mod js_mutants;
 pub mod jvm_instrumenter;
 pub mod jvm_project;
 pub mod jvm_run;
