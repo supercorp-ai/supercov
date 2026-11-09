@@ -170,7 +170,9 @@ function createState() {
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
-    eventKeys: /* @__PURE__ */ new Set(),
+    // The events already recorded, by phase: a hit by its id, anything else
+    // by its type and what tells it apart (eventSeen).
+    eventKeys: /* @__PURE__ */ new Map(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
     persistedServerRecords: /* @__PURE__ */ new Set(),
@@ -207,7 +209,7 @@ function createState() {
       state2.hits.add(id);
     for (const event of (_d = stored.events) != null ? _d : []) {
       state2.events.push(event);
-      state2.eventKeys.add(eventKey(event));
+      eventSeen(state2.eventKeys, event);
     }
   } catch (e) {
   }
@@ -1928,16 +1930,25 @@ function withRequestPhase(handler, event) {
     return requestContext !== void 0 || context.scope || context.phaseId ? serverPhaseStorage.run(context, () => withProbeV2Context(context, invoke)) : invoke();
   };
 }
-function eventKey(event) {
-  var _a8;
-  const suffix = event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id;
-  return `${(_a8 = event.phaseId) != null ? _a8 : "unscoped"}:${event.type}:${suffix}`;
+// Whether `event` was already recorded, recording it if not. Kept per phase,
+// so a first hit looks up its id alone: one key joining the phase, the type
+// and the id was built and hashed for every first hit of every test.
+function eventSeen(seen, event) {
+  const phase = event.phaseId != null ? event.phaseId : "unscoped";
+  let keys = seen.get(phase);
+  if (keys === void 0) {
+    keys = /* @__PURE__ */ new Set();
+    seen.set(phase, keys);
+  }
+  const key = event.type === "hit" ? event.id : `${event.type}\0${event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id}`;
+  if (keys.has(key))
+    return true;
+  keys.add(key);
+  return false;
 }
 function recordBrowserEvent(event) {
-  const key = eventKey(event);
-  if (state.eventKeys.has(key))
+  if (eventSeen(state.eventKeys, event))
     return false;
-  state.eventKeys.add(key);
   state.events.push(event);
   workerEvidenceChanged();
   return true;
