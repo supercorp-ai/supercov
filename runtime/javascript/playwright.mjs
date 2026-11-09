@@ -570,6 +570,11 @@ class CoveragePhaseController {
         return internally(context, () => this.registerContextNow(context, adopted));
     }
     async registerContextNow(context, adopted) {
+        if (timingBuckets) {
+            const copies = (contextScriptCopies.get(context) ?? 0) + 1;
+            contextScriptCopies.set(context, copies);
+            timingCount(copies > 1 ? "registerContext.again" : "registerContext.first", copies);
+        }
         // The context's own scripts first: sent when it was made, so they
         // are in place, or sent now for a context made some other way.
         await prepareContext(context);
@@ -1140,6 +1145,9 @@ function announceAttempt({ attemptId, scopeHeader, scopeValue, scopeCookie, scop
         // Browser instrumentation must not change application behavior.
     }
 }
+// While timing: how many tests' scripts each context has run (a context
+// that outlives its test is registered by every later test).
+const contextScriptCopies = new WeakMap();
 const LEAVING_BINDING = "__supercovLeaving";
 /** Scripts as one, each part run on its own as separate scripts were. */
 function separately(parts) {
