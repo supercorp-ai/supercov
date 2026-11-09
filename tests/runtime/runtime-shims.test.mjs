@@ -1241,7 +1241,7 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   // The probe has to carry the value through unchanged: it sits inside JSX,
   // where the expression's result is what gets rendered.
   assert.equal(renderedValueV2(file, 0, "Copied!"), "Copied!");
-  const covered = new Set(coverageSnapshot().hits);
+  const covered = new Set(resolvedSnapshot(coverageSnapshot()).hits);
   assert.ok(covered.has("attribute"), "the evaluated attribute is recorded");
   // A rendered expression that never evaluates is not recorded, which is the
   // whole point: the enclosing JSX statement alone used to imply both.
