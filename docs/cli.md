@@ -847,6 +847,13 @@ own:
 - run: npx supercov merge
 ```
 
+Every machine must install the same dependencies. With a lockfile committed,
+install it as it is in each job (`npm ci`, `pnpm install --frozen-lockfile`,
+`yarn install --immutable`, `bun install --frozen-lockfile`). A repository
+without one resolves its dependencies anew in each job, and `merge` leaves
+every run out as `the dependencies have changed`: resolve the lockfile once in
+a first job, pass it to the others as an artifact, and `npm ci` it there.
+
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record

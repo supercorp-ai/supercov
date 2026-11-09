@@ -959,7 +959,14 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                 return false;
             }
             if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
-                outdated.push((*run, "the dependencies have changed".to_owned(), true));
+                // Jobs that each resolve their dependencies -- no lockfile
+                // committed -- record different ones, and their runs never
+                // merge; what to do about it is said here.
+                outdated.push((
+                    *run,
+                    "the dependencies have changed (runs merge only when every job installs the same lockfile: commit one, or resolve it once and install it with `npm ci` in each job)".to_owned(),
+                    true,
+                ));
                 return false;
             }
             // Only test-side files differ: each is judged by what the

@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1092")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1104")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1092"),
+        seen.contains("test fault at fs (javascript_run.rs:1104"),
         "{seen}"
     );
 }
@@ -6190,6 +6190,33 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         said.contains("starts without build output") && said.contains("npm run build && npm test"),
         "{said}"
     );
+    // Nothing built here: the copy lacks nothing this checkout has, and
+    // nothing is said before the suite runs.
+    assert!(!said.contains("starts without `dist/`"), "{said}");
+
+    // Built here, as a CI job builds before it measures: the copy starts
+    // without `dist/`, and that is said before the suite runs, ahead of what
+    // its failure says at the end.
+    let built_here = std::process::Command::new("node")
+        .arg("build.js")
+        .current_dir(&project.root)
+        .status()
+        .unwrap();
+    assert!(built_here.success());
+    let early = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(early.code(), 0, "{}", early.stdout());
+    let said = early.stderr();
+    let note = said
+        .find("the copy the command runs in starts without `dist/`, which this checkout has, and the command does not run `npm run build`")
+        .unwrap_or_else(|| panic!("{said}"));
+    let end = said
+        .find("starts without build output")
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(note < end, "{said}");
+    assert!(
+        said.contains("supercov -- sh -c \"npm run build && npm test\""),
+        "{said}"
+    );
 
     // A command that fails after its tests passed: no test failed, and the
     // build the copy starts without is named as what may be missing.
@@ -6216,10 +6243,11 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
 
     // With the build in the command, it compiles the instrumented copy, and
     // what the tests run is measured.
-    let built = project
-        .supercov(&["--", "sh", "-c", "npm run build && npm test"])
-        .succeeds();
-    assert!(!built.contains("starts without build output"), "{built}");
+    let built = project.supercov(&["--", "sh", "-c", "npm run build && npm test"]);
+    let said = format!("{}{}", built.stdout(), built.stderr());
+    built.succeeds();
+    assert!(!said.contains("starts without build output"), "{said}");
+    assert!(!said.contains("starts without `dist/`"), "{said}");
     let line = project
         .supercov(&["runs", "latest", "line", "src/fee.js:2"])
         .succeeds();
@@ -8358,7 +8386,9 @@ fn merge_says_what_moved_under_each_run_it_leaves_out() {
             1,
         ),
     );
-    left_out("the dependencies have changed");
+    left_out(
+        "the dependencies have changed (runs merge only when every job installs the same lockfile",
+    );
     project.write("package.json", &manifest);
 
     // A configuration file added may change how the tests run; told it does
@@ -15448,7 +15478,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2496 => main.rs:2496",
+            "fs.canonicalize#main.rs:2503 => main.rs:2503",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
         ],
@@ -17014,18 +17044,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1338",
-        "fs.create_dir_all#javascript_run.rs:674",
-        "fs.write#javascript_run.rs:969",
+        "fs.create_dir_all#javascript_run.rs:686",
+        "fs.write#javascript_run.rs:981",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1040",
-        "fs.create_dir_all#javascript_run.rs:1211",
+        "fs.create_dir_all#javascript_run.rs:1052",
+        "fs.create_dir_all#javascript_run.rs:1223",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1481",
-        "fs.create_dir_all#javascript_run.rs:1483",
+        "fs.create_dir_all#javascript_run.rs:1493",
+        "fs.create_dir_all#javascript_run.rs:1495",
         "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1583",
-        "fs.create_dir_all#javascript_run.rs:1585",
+        "fs.create_dir_all#javascript_run.rs:1595",
+        "fs.create_dir_all#javascript_run.rs:1597",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
