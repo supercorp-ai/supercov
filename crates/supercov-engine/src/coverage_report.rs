@@ -129,6 +129,17 @@ pub struct LogicalSnapshot {
     pub vectors: Vec<LogicalVector>,
 }
 
+/// One relational comparison site's operand relations (`lt`, `eq`, `gt`,
+/// `unordered`, `other`), keyed `file:line:column`. Infection research only:
+/// carried through the evidence for weak-mutation verdicts, never counted
+/// in coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComparisonSnapshot {
+    pub id: String,
+    pub outcomes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(
     rename_all = "camelCase",
@@ -170,6 +181,11 @@ struct RuntimeSnapshotWire {
     event_columns: Option<EventColumns>,
     #[serde(default)]
     logicals: Vec<LogicalSnapshot>,
+    // Read so a snapshot carrying it is accepted; the raw evidence keeps it
+    // for the infection research, and nothing here counts it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    comparisons: Vec<ComparisonSnapshot>,
     #[serde(default)]
     phase_id: Option<String>,
 }

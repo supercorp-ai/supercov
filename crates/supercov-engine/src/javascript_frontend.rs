@@ -1015,7 +1015,7 @@ fn runtime_declarations() -> String {
     // Next.js runs the project's eslint over the build graph, and
     // @typescript-eslint/no-explicit-any turned every `any` below into a
     // hard "Failed to compile" for a real monorepo.
-    let mut text = String::from("/* eslint-disable */\n");
+    let mut text = String::from(RUNTIME_DECLARATIONS_HEAD);
     for (name, before) in VALUES {
         let leading = (0..*before)
             .map(|index| format!("a{index}: any, "))
@@ -2172,6 +2172,10 @@ pub fn prepare_javascript_frontend(
         assertion_calls,
     })
 }
+
+/// The first lines of the runtime's declarations: the lint exemption, then the
+/// one helper whose type is not a value pass-through (infection research).
+const RUNTIME_DECLARATIONS_HEAD: &str = "/* eslint-disable */\nexport declare function compareV2(site: string, left: any, right: any, op: number): boolean;\n";
 
 #[cfg(test)]
 mod tests {

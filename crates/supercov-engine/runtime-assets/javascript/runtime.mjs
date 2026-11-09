@@ -170,6 +170,10 @@ function createState() {
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
+    // Per relational comparison site ("file:line:column"): the operand
+    // relations seen -- lt, eq, gt, unordered (NaN), or other (objects that
+    // are not Dates) -- for the infection research, beside the coverage.
+    comparisons: /* @__PURE__ */ new Map(),
     eventKeys: /* @__PURE__ */ new Set(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
@@ -362,19 +366,29 @@ function logicalSnapshot() {
     vectors: [...vectors.values()]
   }));
 }
+function comparisonSnapshot() {
+  return [...state.comparisons.entries()].map(([id, outcomes]) => ({
+    id,
+    outcomes: [...outcomes]
+  }));
+}
 function coverageSnapshot() {
-  return {
+  const snapshot = {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
     events: state.events,
     logicals: logicalSnapshot()
   };
+  if (state.comparisons.size)
+    snapshot.comparisons = comparisonSnapshot();
+  return snapshot;
 }
 function resetCoverage(testId2) {
   state.decisions.clear();
   state.hits.clear();
   state.events.length = 0;
   state.logicals.clear();
+  state.comparisons.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
@@ -546,6 +560,8 @@ function evidenceSize() {
     size += decision.vectors.size;
   for (const vectors of state.logicals.values())
     size += vectors.size;
+  for (const outcomes of state.comparisons.values())
+    size += outcomes.size;
   return size;
 }
 // The evidence's size when this document gave it to the Playwright collector
@@ -2226,6 +2242,45 @@ function recordSelectionOutcome(id, outcome) {
 // that returns the value through. Like optionalSelect, it records after the
 // value evaluates: an expression that throws is reported unevaluated rather
 // than covered.
+// `a < b` (op 0), `a <= b` (1), `a > b` (2), `a >= b` (3). The operands were
+// evaluated once, by the program, before this call; the relation is read
+// from them only when both are primitives of one kind or both Dates, which
+// no user code can observe, and the comparison itself runs once as written.
+function compareRelation(left, right) {
+  const lt = typeof left, rt = typeof right;
+  if (lt === "number" && rt === "number" || lt === "string" && rt === "string" || lt === "bigint" && rt === "bigint") {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left === right ? "eq" : "unordered";
+  }
+  if (left instanceof Date && right instanceof Date) {
+    const a = Date.prototype.getTime.call(left), b = Date.prototype.getTime.call(right);
+    return a < b ? "lt" : a > b ? "gt" : a === b ? "eq" : "unordered";
+  }
+  if ((lt === "number" || lt === "bigint") && (rt === "number" || rt === "bigint")) {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left == right ? "eq" : "unordered";
+  }
+  return "other";
+}
+function compareV2(site, left, right, op) {
+  const result = op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
+  try {
+    const relation = compareRelation(left, right);
+    let outcomes = state.comparisons.get(site);
+    if (outcomes === void 0) {
+      outcomes = /* @__PURE__ */ new Set();
+      state.comparisons.set(site, outcomes);
+    }
+    if (!outcomes.has(relation)) {
+      outcomes.add(relation);
+      workerEvidenceChanged();
+    }
+  } catch {
+  }
+  return result;
+}
 function renderedValueV2(file, index, value) {
   coverageHitV2(file, index);
   return value;
@@ -2530,6 +2585,7 @@ const directRuntimeApi = {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -2599,6 +2655,7 @@ export {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

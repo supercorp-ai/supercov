@@ -3675,6 +3675,101 @@ fn runtime_helper_type<'a>(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The comparison probe runs only with `SUPERCOV_COMPARISONS=1` (or, in this
+/// crate's tests, on the thread that asked for it), so every other run's
+/// instrumented code is byte for byte what it was.
+fn comparisons_enabled() -> bool {
+    #[cfg(test)]
+    if COMPARISONS_FOR_TEST.with(|flag| flag.get()) {
+        return true;
+    }
+    std::env::var_os("SUPERCOV_COMPARISONS").is_some_and(|value| value == "1")
+}
+
+/// `a < b` as `compareV2("file:line:column", a, b, 0)`: the runtime evaluates
+/// the operands' relation once, from the values the program computed, and
+/// returns the comparison's own result. Relational operators narrow no types,
+/// so a call in their place changes nothing TypeScript infers.
+struct ComparisonTransformer<'a, 'b> {
+    ast: AstBuilder<'a>,
+    compare_v2: String,
+    file: &'b str,
+    source: &'b str,
+    source_sensitive_functions: HashSet<SpanKey>,
+}
+
+impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        let Expression::BinaryExpression(binary) = expression else {
+            return;
+        };
+        let code = match binary.operator {
+            BinaryOperator::LessThan => 0,
+            BinaryOperator::LessEqualThan => 1,
+            BinaryOperator::GreaterThan => 2,
+            BinaryOperator::GreaterEqualThan => 3,
+            _ => return,
+        };
+        // Generated comparisons (loop counters a pass added) have no source.
+        if binary.span.is_unspanned() {
+            return;
+        }
+        let (line, column) = line_and_utf16_column(self.source, binary.span.start as usize);
+        let site = format!("{}:{}:{}", self.file, line, column);
+        let span = binary.span;
+        let left = binary.left.take_in(self.ast.allocator);
+        let right = binary.right.take_in(self.ast.allocator);
+        *expression = self.ast.expression_call(
+            span,
+            self.ast
+                .expression_identifier(Span::default(), self.ast.ident(&self.compare_v2)),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(&site),
+                    None,
+                )),
+                Argument::from(left),
+                Argument::from(right),
+                Argument::from(self.ast.expression_numeric_literal(
+                    Span::default(),
+                    code as f64,
+                    None,
+                    NumberBase::Decimal,
+                )),
+            ]),
+            false,
+        );
+    }
+}
+
 struct AssignmentNameSafetyTransformer<'a> {
     ast: AstBuilder<'a>,
     parenthesized_assignment_value: String,
@@ -4232,6 +4327,14 @@ fn instrument_candidate_with_binding(
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
     let default_entered_v2 = names.allocate("__supercovDefaultEnteredV2");
+    // Infection research, off unless asked for: see ComparisonTransformer. Its
+    // helper's name is allocated only then, so every other name is unchanged.
+    let comparisons_enabled = comparisons_enabled();
+    let compare_v2 = if comparisons_enabled {
+        names.allocate("__supercovCompareV2")
+    } else {
+        String::new()
+    };
     let typescript = parsed.program.source_type.is_typescript();
     let ast = AstBuilder::new(&allocator);
     let mut assignment_name_safety = AssignmentNameSafetyTransformer {
@@ -4489,6 +4592,20 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
+    // Infection research (feat/infection): each relational comparison of the
+    // source records whether its operands were less, equal, greater or
+    // unordered, beside (never in) the coverage figures. Last of the
+    // expression passes, so every other pass has matched its spans first.
+    let mut comparison_transformer = ComparisonTransformer {
+        ast,
+        compare_v2: compare_v2.clone(),
+        file,
+        source,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+    };
+    if comparisons_enabled {
+        comparison_transformer.visit_program(&mut parsed.program);
+    }
     let mut route_transformer = RouteRequestPhaseTransformer {
         ast,
         file,
@@ -4610,6 +4727,9 @@ fn instrument_candidate_with_binding(
         ("defaultSelectedV2", &default_selected_v2),
         ("defaultEnteredV2", &default_entered_v2),
     ];
+    if comparisons_enabled {
+        runtime_imports.push(("compareV2", &compare_v2));
+    }
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
@@ -13318,6 +13438,43 @@ export function shapes(n: number): unknown {
             }
         }
         assert!(checked > 100_000, "{checked}");
+    }
+
+    #[test]
+    fn relational_comparisons_record_their_operands_relation_behind_the_flag() {
+        let source = "export function f(a: number, b: number, d: Date) {\n  const late = a <= b;\n  if (a > 0 && b >= a) return late;\n  return d < new Date();\n}\n";
+        let plain = instrument_candidate(source, "src/compare.ts").unwrap();
+        assert!(
+            !plain.code.contains("CompareV2"),
+            "off by default:\n{}",
+            plain.code
+        );
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
+        let probed = instrument_candidate(source, "src/compare.ts");
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
+        let probed = probed.unwrap();
+        for expected in [
+            "\"src/compare.ts:2:16\", a, b, 1)",
+            "\"src/compare.ts:3:7\", a, 0, 2)",
+            "\"src/compare.ts:3:16\", b, a, 3)",
+            "\"src/compare.ts:4:10\", d, new Date(), 0)",
+        ] {
+            assert!(
+                probed.code.contains(expected),
+                "missing {expected}:\n{}",
+                probed.code
+            );
+        }
+        // The manifest still names each condition by its source text.
+        let output = probed;
+        assert!(
+            output
+                .decisions
+                .iter()
+                .any(|d| d.conditions.iter().any(|c| c == "a > 0")),
+            "{:?}",
+            output.decisions
+        );
     }
 
     #[test]
