@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.26.0
+
+**Changed**
+
+- Measured runs of large JavaScript apps are faster and ship less. On a Vite canvas app's Vitest suite under jsdom, a measured run takes 1.49× the plain run, against 1.74× with 4.25.0, and `merge` of its runs takes 4.7 s instead of 12.4 s. Its instrumented production bundle is 8.4 MB, against 9.7 MB. Measured in GitHub Actions on 4-CPU runners, three rounds each.
+- An instrumented module carries its probe table's key instead of every probe's id, and a probe that always runs right after another is recorded with it rather than separately. The report reads both back, so coverage, per-test hits and phases are unchanged.
+- Instrumented code no longer reads the `Uint32Array` global on each decision it records; under Vitest's jsdom environment every such read was a getter call.
+
+**Fixed**
+
+- A Playwright test that closed a browser context sent the next phase to it anyway; the call failed and its cookies were tried again host by host. Closed contexts and pages are skipped.
+
 ## 4.25.0
 
 **Changed**
