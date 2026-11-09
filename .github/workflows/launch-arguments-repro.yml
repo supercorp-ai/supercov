@@ -1,0 +1,31 @@
+# Temporary: reproduce how each launcher hands Supercov its arguments.
+name: Launch arguments repro
+on:
+  push:
+    branches: [fix/launch-arguments]
+jobs:
+  matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: oven-sh/setup-bun@v2
+      - uses: denoland/setup-deno@v2
+      - uses: astral-sh/setup-uv@v6
+      - run: corepack enable
+      - run: node scripts/launch-arguments-integration.mjs --report launch-arguments-${{ matrix.os }}.json
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launch-arguments-${{ matrix.os }}
+          path: launch-arguments-${{ matrix.os }}.json
