@@ -145,6 +145,7 @@ assert(
 // `oracle-harnesses` feature.
 const productSources = [
   resolve(repository, "bin/supercov.js"),
+  resolve(repository, "bin/arguments.js"),
   ...runtimeFiles.map((name) => resolve(runtime, name)),
   ...sourceFiles(resolve(repository, "crates/supercov-cli/src"), ".rs"),
   ...sourceFiles(

@@ -13,4 +13,8 @@ unless binary
   exit 126
 end
 
-exec(binary, *ARGV)
+# The program as a [path, argv0] pair: Ruby never hands that to a shell. A
+# lone string -- the path, when no arguments follow -- went through /bin/sh
+# when it held a space or a parenthesis, and `supercov` alone failed in a gem
+# directory with one.
+exec([binary, binary], *ARGV)

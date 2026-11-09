@@ -681,12 +681,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1538",
+            "fs.open_with#process_supervision.rs:1614",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1538");
+    terminal.wait_for("test fault at fs (process_supervision.rs:1614");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -1428,6 +1428,78 @@ fn clean_removes_runs_and_keeps_what_it_is_told_to() {
     project.supercov(&["runs", "clean"]).exits(0);
     let empty = project.supercov(&["runs", "latest"]).exits(2);
     assert!(empty.contains("No local coverage runs"), "{empty}");
+}
+
+/// The `--` in front of a test command does not always reach the binary:
+/// Bun drops a leading one (#209), Yarn 1 the one in `yarn supercov --`, and
+/// PowerShell the first on its way into a package manager's `.ps1` shim, so
+/// `supercov -- bun test` arrived as `supercov bun test`. A first word that is
+/// no command of Supercov's but a program is measured as the test command,
+/// also right after `--exact-attribution`; Supercov's own commands keep their
+/// meaning, and a word that starts nothing is still a mistake that records
+/// nothing.
+#[test]
+fn a_test_command_whose_separator_was_lost_is_measured() {
+    let project = Project::cart("separator lost");
+    let runs = || {
+        let listed = project.supercov(&["runs", "--json"]);
+        if listed.code() != 0 {
+            return 0;
+        }
+        listed.json()["data"]["runs"].as_array().map_or(0, Vec::len)
+    };
+    assert_eq!(runs(), 0);
+
+    project.supercov(&["node", "--test"]).succeeds();
+    assert_eq!(runs(), 1);
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Passed      3", "Lines"]);
+    project
+        .supercov(&["--exact-attribution", "node", "--test"])
+        .succeeds();
+    assert_eq!(runs(), 2);
+    let exact = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(exact.contains("Exact for 3 test(s)"), "{exact}");
+    // The separator, when it does arrive, is read as always.
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    project
+        .supercov(&["--exact-attribution", "--", "node", "--test"])
+        .succeeds();
+    assert_eq!(runs(), 4);
+
+    // A path to a program is one too.
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    let node = String::from_utf8(node.stdout).unwrap().trim().to_owned();
+    project.supercov(&[&node, "--test"]).succeeds();
+    assert_eq!(runs(), 5);
+
+    // Supercov's own commands win; a word that is no program, or is not a
+    // file that can be run, is refused and measures nothing.
+    let listed = project.supercov(&["runs"]).succeeds();
+    assert!(listed.contains("run_"), "{listed}");
+    for args in [
+        vec!["frobnicate"],
+        vec!["frobnicate", "--test"],
+        vec!["package.json"],
+        vec!["src"],
+    ] {
+        let refused = project.supercov(&args).exits(2);
+        assert!(
+            refused.contains(&format!("Unknown command: {}", args[0])),
+            "{args:?}: {refused}"
+        );
+    }
+    let flagged = project
+        .supercov(&["--exact-attribution", "frobnicate"])
+        .exits(2);
+    assert!(
+        flagged.contains("--exact-attribution goes before"),
+        "{flagged}"
+    );
+    assert_eq!(runs(), 5);
 }
 
 #[test]
@@ -12558,7 +12630,7 @@ fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
     );
     assert!(
         project
-            .supercov(&["--exact-attribution", "node"])
+            .supercov(&["--exact-attribution", "frobnicate"])
             .exits(2)
             .contains("--exact-attribution goes before the command")
     );
@@ -14777,7 +14849,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1450", watchdog),
+        ("fs.read_dir#process_supervision.rs:1526", watchdog),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -15376,7 +15448,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2475 => main.rs:2475",
+            "fs.canonicalize#main.rs:2496 => main.rs:2496",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
         ],
@@ -16944,7 +17016,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#lifecycle.rs:1338",
         "fs.create_dir_all#javascript_run.rs:674",
         "fs.write#javascript_run.rs:969",
-        "fs.canonicalize#process_supervision.rs:1719",
+        "fs.canonicalize#process_supervision.rs:1795",
         "fs.create_dir_all#javascript_run.rs:1040",
         "fs.create_dir_all#javascript_run.rs:1211",
         "fs.read_dir#evidence_archive.rs:262",
