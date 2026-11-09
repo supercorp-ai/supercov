@@ -11,6 +11,9 @@ import { writeFileSync } from 'node:fs';
 const [port, output] = process.argv.slice(2);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const functions = new Map();
+// V8's own work by name (compiling, parsing, instantiating), from its trace
+// events: "(program)" in the samples does not say which.
+const v8Events = new Map();
 const profiles = new Map();
 let sampledUs = 0;
 let idleUs = 0;
@@ -23,6 +26,7 @@ function save() {
       chunks,
       busyMs: Math.round(sampledUs / 1000),
       idleMs: Math.round(idleUs / 1000),
+      v8: [...v8Events].sort(([, a], [, b]) => b.us - a.us).slice(0, 60).map(([name, { us, count }]) => [name, Math.round(us / 1000), count]),
       functions: [...functions].sort(([, a], [, b]) => b - a).slice(0, 500).map(([what, us]) => [what, Math.round(us / 1000)]),
     }),
   );
@@ -38,6 +42,13 @@ function place(callFrame) {
 function aggregate(trace) {
   const events = Array.isArray(trace) ? trace : trace.traceEvents ?? [];
   for (const event of events) {
+    if (event.ph === 'X' && typeof event.dur === 'number' && /(^|,)v8(,|$)/.test(event.cat ?? '')) {
+      const entry = v8Events.get(event.name) ?? { us: 0, count: 0 };
+      entry.us += event.dur;
+      entry.count += 1;
+      v8Events.set(event.name, entry);
+      continue;
+    }
     if (event.name !== 'ProfileChunk') continue;
     const key = `${event.pid}:${event.id}`;
     let nodes = profiles.get(key);
@@ -101,7 +112,7 @@ async function record(url) {
   while (!closed) {
     await send('Tracing.start', {
       transferMode: 'ReturnAsStream',
-      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler'] },
+      traceConfig: { includedCategories: ['disabled-by-default-v8.cpu_profiler', 'v8'] },
     });
     await Promise.race([sleep(15_000), ended]);
     if (closed) return;

@@ -593,10 +593,12 @@ for label, row in sorted(totals.items()):
 // functions that ran longest, by script and line.
 function browserProfileText(file) {
   if (!existsSync(file)) return 'no profile\n';
-  const { chunks, busyMs, idleMs, functions } = JSON.parse(readFileSync(file, 'utf8'));
+  const { chunks, busyMs, idleMs, functions, v8 = [] } = JSON.parse(readFileSync(file, 'utf8'));
   return [
     `chunks ${chunks}, busy ${(busyMs / 1000).toFixed(2)}s, idle ${(idleMs / 1000).toFixed(2)}s`,
     ...functions.slice(0, 80).map(([what, ms]) => `${(ms / 1000).toFixed(3)}s  ${what}`),
+    '-- V8 trace events (nested ones overlap their parents)',
+    ...v8.map(([name, ms, count]) => `${(ms / 1000).toFixed(3)}s  ${count}x  ${name}`),
   ].join('\n') + '\n';
 }
 
