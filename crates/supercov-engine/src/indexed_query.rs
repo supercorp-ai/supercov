@@ -75,6 +75,9 @@ pub struct IndexedQueryRequest {
     /// `--test-file`: only tests in one of these files or directories.
     #[serde(default)]
     pub test_files: Vec<String>,
+    /// `mutants`: `--status`, `--mutator` and `--stryker`.
+    #[serde(default)]
+    pub mutants: crate::mutants_query::MutantsOptions,
 }
 
 fn default_limit() -> usize {
@@ -87,13 +90,16 @@ fn default_metric() -> MinimizeMetric {
 
 impl IndexedQueryRequest {
     /// The tests `--tag`, `--title` and `--test-file` pick, when any is given.
+    /// `mutants` reads verdicts worked out from the tests an index keeps, so
+    /// a kind or a runner picks its tests too.
     pub fn test_filter(&self) -> Option<crate::coverage_report::TestFilter> {
+        let by_tests = self.command == "mutants";
         let filter = crate::coverage_report::TestFilter {
             tags: self.tags.clone(),
             titles: self.titles.clone(),
             files: self.test_files.clone(),
-            kind: None,
-            runner: None,
+            kind: self.kind.clone().filter(|_| by_tests),
+            runner: self.runner.clone().filter(|_| by_tests),
         };
         (!filter.is_empty()).then_some(filter)
     }
@@ -507,6 +513,7 @@ pub enum IndexedQueryData {
     Minimize(Box<CoverageMinimizeData>),
     Diff(Box<CoverageDiffData>),
     TestsWithoutEvidence(Box<crate::coverage_query::TestsWithoutEvidenceData>),
+    Mutants(Box<crate::mutants_query::CoverageMutantsData>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -571,6 +578,7 @@ pub fn query_indexed(
         | "file-detail"
         | "minimize"
         | "diff"
+        | "mutants"
         | "tests-without-evidence" => None,
         _ => {
             return Err(IndexedQueryError::UnsupportedCommand(
@@ -630,8 +638,28 @@ pub fn query_indexed(
         });
     }
 
+    if request.command == "mutants" {
+        let (data, page) = crate::mutants_query::coverage_mutants_query(
+            index,
+            crate::mutants_query::CoverageMutantsQueryOptions {
+                run: &request.run_id,
+                file: request.file.as_deref(),
+                line: request.line,
+                options: &request.mutants,
+                offset: request.offset,
+                limit: request.limit,
+            },
+        )
+        .map_err(|error| with_scope_reason(index, view, error))?;
+        return Ok(IndexedQueryOutput {
+            command: "coverage.mutants",
+            data: IndexedQueryData::Mutants(Box::new(data)),
+            pagination: Some(page),
+        });
+    }
+
     if request.command == "summary" {
-        let data = coverage_summary_query(
+        let mut data = coverage_summary_query(
             index,
             CoverageSummaryQueryOptions {
                 run: &request.run_id,
@@ -644,6 +672,11 @@ pub fn query_indexed(
                 stale_reasons: request.stale_reasons.clone().unwrap_or_default(),
             },
         )?;
+        // Mutants' verdicts are of every attempt of the tests the index
+        // keeps: a view of some outcomes, kinds or runners has none of them.
+        if view == CoverageViewId::All && request.kind.is_none() && request.runner.is_none() {
+            data.mutants = crate::mutants_query::run_summary(index)?;
+        }
         return Ok(IndexedQueryOutput {
             command: "coverage.summary",
             data: IndexedQueryData::Summary(Box::new(data)),

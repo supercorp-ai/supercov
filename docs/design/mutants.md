@@ -112,17 +112,36 @@ npx supercov runs latest mutants --stryker reports/mutation/mutation.json   # jo
 ```
 
 The run summary gets one line, `Mutants  2,955 · weak score 85.0% · 211 not
-infected · 240 not reached · 206 unknown`. `gaps` points to `mutants --status
-not-infected` when a file has some. Narrowing options (`--tag`, `--test-file`,
-`--title`, `--kind`) narrow mutants as they narrow every query: a mutant only
-other tests infect is not infected there.
+infected · 240 not reached · 206 unknown`, and its JSON `data.mutants` (the
+`summary` below with `mutantSet`). A later step has `gaps` point to `mutants
+--status not-infected` when a file has some. Narrowing options (`--tag`,
+`--test-file`, `--title`, `--kind`, `--runner`) narrow mutants as they narrow
+every query: a mutant only other tests infect is not infected there. The
+verdicts are worked out when a run's index is built, from every test it keeps,
+so a kind or a runner picks its tests the way a tag does (a filtered index).
+`--filter passed` and `--filter failed` are refused: the verdicts are of every
+attempt, and an outcome view of them is not built.
+
+Without a file, people see a table of files ordered by how many mutants no
+test infects or reaches, a page of files at a time; `--json`, a file, `--status`
+and `--mutator` page through mutants. The scores and counts are of the mutants
+asked about: the run, a file or a line, and one mutator with `--mutator`;
+`--status` picks from them without changing the scores.
 
 `--stryker` reads one or more StrykerJS `mutation.json` reports and joins them
 by id. Each mutant then shows StrykerJS's status beside Supercov's (`stryker:
-Killed`), and the summary counts disagreements. A not-infected mutant StrykerJS
-killed is a soundness violation, and the command exits non-zero. This is how
-releases are validated, and how a team that already runs StrykerJS gets
-Supercov's reasons for its survivors.
+Killed`), and the summary counts disagreements. A not-infected or not-reached
+mutant StrykerJS killed (or timed out) is a soundness violation, and the
+command exits 1. This is how releases are validated, and how a team that
+already runs StrykerJS gets Supercov's reasons for its survivors.
+
+A StrykerJS mutant's id is built from its file (relative to the project root,
+or to `--stryker-root`), its location, and the descriptor
+`descriptor_from_stryker` reads from its replacement and the original code the
+report's `source` holds. Several reports merge by status: Killed or Timeout
+over Survived over NoCoverage; Ignored, CompileError, RuntimeError and Pending
+are no result and are dropped. The join is of the mutants asked about (a file,
+a line, a mutator).
 
 Reserved for strong mutation, not built now:
 
@@ -166,13 +185,44 @@ because the weak pass already knows:
       "original": "a < b",
       "replacement": "a <= b",
       "status": "not-infected",
-      "weak": { "reach": "reached", "infection": "not-infected", "reason": "a never equal to b" },
+      "weak": { "reach": "reached", "infection": "not-infected", "code": "operands-never-equal", "reason": "a never equal to b" },
       "strong": null,
       "stryker": null
     }
-  ]
+  ],
+  "stryker": null
 }
 ```
+
+Beside this shape the reply has `run`; `file` and `line` when one was asked;
+and `note` when there are no mutants, saying why and how to get them (the run
+did not list them: measure it again with the probes on). `weak.code` is a
+stable code for the reason, and `weak.proxy` is `true` for an infection that is
+only that the code around it ran (a block or a call removed). `reach` is
+`unknown` where no statement or function point contains the mutant;
+`infection` is null for a mutant not reached. `original` and `replacement` are
+on one line, cut at 120 characters; `replacement` is the code with the mutant
+in place where it is simply written from the original and the descriptor
+(operators, literals, method names, optional links), and the descriptor
+otherwise.
+
+With `--stryker`, the top-level `stryker` is the join:
+
+```json
+"stryker": {
+  "reports": ["reports/mutation/mutation.json"],
+  "matched": 2700,
+  "onlySupercov": { "total": 3, "byMutator": { "UnaryOperator": 3 } },
+  "onlyStryker": { "total": 12, "byMutator": { "Regex": 12 } },
+  "soundnessViolations": { "total": 0, "mutants": [] },
+  "survivorsExplained": { "survivors": 420, "explained": 300 }
+}
+```
+
+`soundnessViolations.mutants` lists up to 50, each with `id`, `status`,
+`stryker` and `reason`. `survivorsExplained` counts StrykerJS's matched
+survivors (Survived, NoCoverage) and those this run says no test infects or
+reaches.
 
 `strong` stays `null` until a strong pass fills it with `{ status, tests,
 durationMs }`. `stryker` holds the joined StrykerJS status when `--stryker`
@@ -187,5 +237,9 @@ arrive.
   the page or process instead.
 - Code that ran in a server process records hits but no values until those
   processes report outcomes too, so its outcome-based verdicts stay `unknown`.
+  Runners whose test process records the way a server does, with records
+  rather than snapshots (node:test, AVA, tap), are in the same place today:
+  Vitest, Jest, Mocha and Playwright's pages keep values; node:test's verdicts
+  that need a value are `unknown`.
 - Equivalent mutants are not detected. They show up as `not-infected` with
   their reason, which is often what makes them recognisable.

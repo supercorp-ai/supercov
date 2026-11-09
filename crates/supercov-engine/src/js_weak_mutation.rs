@@ -19,13 +19,13 @@
 //! evidence by text;
 //! here every rule reads a link made from exact spans.
 
-// Read by the mutants query, which comes next.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
-use crate::js_mutant_links::{BranchRole, CandidateMutant};
+use crate::coverage_analysis::McdcVector;
+use crate::coverage_index::{IndexedMutant, MutantStatus, MutationResults};
+use crate::coverage_report::RawTestResult;
+use crate::js_mutant_links::{BranchRole, CandidateMutant, MutantsFile};
 
 /// How far the run's tests got toward killing a mutant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,10 +850,334 @@ fn arrow_function(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, R
     }
 }
 
+/// What the tests of `raw_results` observed between them: every hit,
+/// decision vector, logical outcome and probe outcome of every snapshot, and
+/// of every record a server process wrote. A process outside the test
+/// process (a server a browser test drives) writes records, not snapshots,
+/// and records carry no outcomes: its hits are also `server_hits`.
+pub(crate) fn observations(raw_results: &[RawTestResult]) -> Observations {
+    let mut observations = Observations::default();
+    let mut vectors = HashMap::<String, HashSet<Vector>>::new();
+    let mut vector = |id: &str, vector: &McdcVector| {
+        vectors
+            .entry(id.to_owned())
+            .or_default()
+            .insert((vector.values.clone(), vector.outcome));
+    };
+    for raw in raw_results {
+        for snapshot in raw.runtime.iter().chain(&raw.browser) {
+            observations.hits.extend(snapshot.hits.iter().cloned());
+            for decision in &snapshot.decisions {
+                decision
+                    .vectors
+                    .iter()
+                    .for_each(|each| vector(&decision.id, each));
+            }
+            for event in &snapshot.events {
+                match (event.event_type.as_str(), &event.vector) {
+                    ("hit", _) => {
+                        observations.hits.insert(event.id.clone());
+                    }
+                    ("decision", Some(each)) => vector(&event.id, each),
+                    _ => {}
+                }
+            }
+            for logical in &snapshot.logicals {
+                observations
+                    .logicals
+                    .entry(logical.id.clone())
+                    .or_default()
+                    .extend(logical.vectors.iter().map(|each| (each.right, each.truthy)));
+            }
+            for comparison in &snapshot.comparisons {
+                observations
+                    .comparisons
+                    .entry(comparison.id.clone())
+                    .or_default()
+                    .extend(comparison.outcomes.iter().cloned());
+            }
+        }
+        for record in &raw.server {
+            match (record.record_type.as_str(), &record.id, &record.vector) {
+                ("hit", Some(id), _) => {
+                    observations.hits.insert(id.clone());
+                    observations.server_hits.insert(id.clone());
+                }
+                ("decision", Some(id), Some(each)) => vector(id, each),
+                _ => {}
+            }
+        }
+    }
+    observations.decisions = vectors
+        .into_iter()
+        .map(|(id, set)| (id, set.into_iter().collect()))
+        .collect();
+    observations
+}
+
+/// Each mutant the run listed, with its verdict from what the tests of
+/// `raw_results` observed; `None` when the run listed none (the probes were
+/// off, or the run predates the list).
+pub(crate) fn results(
+    raw_results: &[RawTestResult],
+    listed: Option<MutantsFile>,
+) -> Option<MutationResults> {
+    let listed = listed?;
+    let mutant_set = listed.mutant_set?;
+    let observations = observations(raw_results);
+    let mut mutants = Vec::new();
+    for (file, candidates) in listed.files {
+        let mut verdicts = candidates
+            .iter()
+            .map(|mutant| {
+                let (status, reason) = verdict(mutant, &observations);
+                IndexedMutant {
+                    file: file.clone(),
+                    start: mutant.start,
+                    end: mutant.end,
+                    mutator: mutant.mutator.clone(),
+                    descriptor: mutant.replacement.clone(),
+                    original: one_line(&mutant.original),
+                    replacement: one_line(&replaced(mutant)),
+                    status: match status {
+                        Status::NotReached => MutantStatus::NotReached,
+                        Status::NotInfected => MutantStatus::NotInfected,
+                        Status::Infected { .. } => MutantStatus::Infected,
+                        Status::Unknown => MutantStatus::Unknown,
+                    },
+                    proxy: status == PROXY,
+                    code: reason.code.to_owned(),
+                    reason: reason.sentence,
+                }
+            })
+            .collect::<Vec<_>>();
+        // StrykerJS's order within a position.
+        verdicts.sort_by_key(|mutant| (mutant.start, mutant.end));
+        mutants.extend(verdicts);
+    }
+    Some(MutationResults {
+        mutant_set,
+        mutants,
+    })
+}
+
+/// Code as one line, cut at 120 characters: a block statement's original
+/// is a whole function.
+fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 120 {
+        format!("{}…", flat.chars().take(119).collect::<String>())
+    } else {
+        flat
+    }
+}
+
+/// The code with the mutant in place, where it is simply written from the
+/// original and the descriptor; otherwise the descriptor.
+fn replaced(mutant: &CandidateMutant) -> String {
+    let original = mutant.original.as_str();
+    let descriptor = mutant.replacement.as_str();
+    let spliced = |at: usize, length: usize, with: &str| {
+        Some(format!(
+            "{}{with}{}",
+            original.get(..at)?,
+            original.get(at + length..)?
+        ))
+    };
+    let text = match mutant.mutator.as_str() {
+        "ArithmeticOperator" | "EqualityOperator" | "LogicalOperator" | "AssignmentOperator" => {
+            mutant
+                .operator
+                .as_ref()
+                .and_then(|operator| spliced(operator.at, operator.text.len(), descriptor))
+        }
+        "UpdateOperator" => ["++", "--"]
+            .into_iter()
+            .find_map(|operator| original.find(operator))
+            .and_then(|at| spliced(at, 2, descriptor)),
+        "UnaryOperator" => match descriptor {
+            "removed" => original.get(1..).map(str::to_owned),
+            operator => spliced(0, 1, operator),
+        },
+        "BooleanLiteral" => match descriptor {
+            "removed" => original.strip_prefix('!').map(str::to_owned),
+            literal => Some(literal.to_owned()),
+        },
+        "ConditionalExpression" if matches!(descriptor, "true" | "false") => {
+            Some(descriptor.to_owned())
+        }
+        "StringLiteral" => Some(match descriptor {
+            "empty" => "\"\"".to_owned(),
+            text => format!("\"{text}\""),
+        }),
+        "MethodExpression" => crate::js_mutants::method_replaced(original, descriptor),
+        "OptionalChaining" => {
+            let (from, to) = match descriptor {
+                "()" => ("?.(".to_owned(), "(".to_owned()),
+                "[]" => ("?.[".to_owned(), "[".to_owned()),
+                name => (format!("?{name}"), name.to_owned()),
+            };
+            original
+                .rfind(&from)
+                .and_then(|at| spliced(at, from.len(), &to))
+        }
+        "ArrowFunction" => Some("() => undefined".to_owned()),
+        "BlockStatement" | "ObjectLiteral" => Some("{}".to_owned()),
+        "ArrayDeclaration" => Some(descriptor.to_owned()),
+        _ => None,
+    };
+    text.unwrap_or_else(|| descriptor.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::js_mutant_links::{ArrowLink, BranchLink, ChainLink, DecisionLink, MutantOperator};
+
+    /// Every test's snapshots and records are observed together, and only
+    /// what a process outside the test process recorded is a server hit.
+    #[test]
+    fn observations_are_every_snapshot_and_record_and_a_server_s_hits() {
+        use crate::coverage_report::{
+            ComparisonSnapshot, DecisionSnapshot, LogicalSnapshot, LogicalVector, RuntimeEvent,
+            RuntimeSnapshot, ServerRecord,
+        };
+        let vector = |values: Vec<Option<bool>>, outcome: bool| McdcVector { values, outcome };
+        let record = |kind: &str, id: &str, vector: Option<McdcVector>| ServerRecord {
+            record_type: kind.into(),
+            vector,
+            id: Some(id.into()),
+            timestamp_ms: None,
+            phase_id: None,
+            scope: None,
+            request: None,
+        };
+        let raw = |runtime: RuntimeSnapshot, browser: Vec<RuntimeSnapshot>, server| {
+            let mut raw: RawTestResult = serde_json::from_value(serde_json::json!({
+                "test": "t", "provenance": {"runner": "r", "kind": "unit", "source": "s"}
+            }))
+            .unwrap();
+            raw.runtime = vec![runtime];
+            raw.browser = browser;
+            raw.server = server;
+            raw
+        };
+        let unit = RuntimeSnapshot {
+            hits: vec!["s".into()],
+            decisions: vec![DecisionSnapshot {
+                id: "d".into(),
+                vectors: vec![vector(vec![Some(true)], true)],
+            }],
+            events: vec![RuntimeEvent {
+                event_type: "decision".into(),
+                id: "d".into(),
+                vector: Some(vector(vec![Some(false)], false)),
+                timestamp_ms: 0,
+                phase_id: None,
+                environment: "server".into(),
+            }],
+            logicals: vec![LogicalSnapshot {
+                id: "b".into(),
+                vectors: vec![LogicalVector {
+                    right: true,
+                    truthy: false,
+                }],
+            }],
+            comparisons: vec![ComparisonSnapshot {
+                id: "c".into(),
+                outcomes: vec!["lt".into()],
+            }],
+            phase_id: None,
+        };
+        let page = RuntimeSnapshot {
+            events: vec![RuntimeEvent {
+                event_type: "hit".into(),
+                id: "page".into(),
+                vector: None,
+                timestamp_ms: 0,
+                phase_id: None,
+                environment: "browser".into(),
+            }],
+            comparisons: vec![ComparisonSnapshot {
+                id: "c".into(),
+                outcomes: vec!["eq".into()],
+            }],
+            ..RuntimeSnapshot::default()
+        };
+        let observed = observations(&[
+            raw(unit.clone(), vec![page], vec![]),
+            raw(
+                unit,
+                vec![],
+                vec![
+                    record("hit", "served", None),
+                    record("decision", "d", Some(vector(vec![Some(true)], true))),
+                ],
+            ),
+        ]);
+        let sorted = |set: &HashSet<String>| {
+            let mut values = set.iter().cloned().collect::<Vec<_>>();
+            values.sort();
+            values
+        };
+        assert_eq!(sorted(&observed.hits), ["page", "s", "served"]);
+        assert_eq!(sorted(&observed.server_hits), ["served"]);
+        let mut vectors = observed.decisions["d"].clone();
+        vectors.sort();
+        assert_eq!(
+            vectors,
+            [(vec![Some(false)], false), (vec![Some(true)], true)]
+        );
+        assert_eq!(observed.logicals["b"], HashSet::from([(true, false)]));
+        assert_eq!(sorted(&observed.comparisons["c"]), ["eq", "lt"]);
+    }
+
+    /// A mutant's code with it in place, where that is simply written.
+    #[test]
+    fn a_replacement_is_written_from_the_original_where_it_can_be() {
+        let cases = [
+            (operated("EqualityOperator", "<=", "a < b", "<"), "a <= b"),
+            (operated("LogicalOperator", "||", "a && b", "&&"), "a || b"),
+            (mutant("UpdateOperator", "--", "i++"), "i--"),
+            (mutant("UnaryOperator", "+", "-x"), "+x"),
+            (mutant("UnaryOperator", "removed", "~x"), "x"),
+            (mutant("BooleanLiteral", "removed", "!ok"), "ok"),
+            (mutant("BooleanLiteral", "false", "true"), "false"),
+            (mutant("ConditionalExpression", "true", "a > b"), "true"),
+            (
+                mutant("ConditionalExpression", "empty", "case 1: x();"),
+                "empty",
+            ),
+            (mutant("StringLiteral", "empty", "\"a\""), "\"\""),
+            (
+                mutant("StringLiteral", "Stryker was here!", "\"\""),
+                "\"Stryker was here!\"",
+            ),
+            (mutant("MethodExpression", "removed", "name.trim()"), "name"),
+            (
+                mutant("MethodExpression", "endsWith", "s.startsWith(\"a.b(\")"),
+                "s.endsWith(\"a.b(\")",
+            ),
+            (
+                mutant("OptionalChaining", ".name", "a?.b?.name"),
+                "a?.b.name",
+            ),
+            (mutant("OptionalChaining", "()", "f?.()"), "f()"),
+            (mutant("OptionalChaining", "[]", "a?.[k]"), "a[k]"),
+            (
+                mutant("ArrowFunction", "undefined", "() => 1"),
+                "() => undefined",
+            ),
+            (mutant("BlockStatement", "{}", "{ x(); }"), "{}"),
+            (mutant("ArrayDeclaration", "[]", "[1, 2]"), "[]"),
+            (mutant("CallExpression", "empty", "x();"), "empty"),
+        ];
+        for (mutant, written) in cases {
+            assert_eq!(replaced(&mutant), written, "{}", mutant.id);
+        }
+        assert_eq!(one_line("{\n  a();\n  b();\n}"), "{ a(); b(); }");
+        assert_eq!(one_line(&"x".repeat(200)).chars().count(), 120);
+    }
 
     /// A mutant of `original` on line 1, in statement `s` of function `f`.
     fn mutant(mutator: &str, replacement: &str, original: &str) -> CandidateMutant {

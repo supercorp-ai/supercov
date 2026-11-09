@@ -322,15 +322,15 @@ pub struct CoverageSummaryData {
     pub test_kind_sources: BTreeMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assertion_coverage: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutants: Option<crate::mutants_query::MutantsRunSummary>,
     pub run: String,
     #[serde(default)]
     pub command: Vec<String>,
-    /// For a merge made with `--allow-changed`: what differed between the
-    /// runs it was merged from.
+    /// For a merge made with `--allow-changed`: what differed between its runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_across: Vec<String>,
-    /// The runs the same command published beside this one: its servers'
-    /// runs, or the browser run a server's run took its tests from.
+    /// Runs the same command published beside this one (servers', a browser's).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<crate::run_store::CompanionRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3346,6 +3346,7 @@ pub fn coverage_summary_query(
     Ok(CoverageSummaryData {
         test_kind_sources,
         assertion_coverage: None,
+        mutants: None,
         run: options.run.into(),
         command: Vec::new(),
         merged_across: Vec::new(),
@@ -3369,8 +3370,7 @@ pub fn coverage_summary_query(
         coverage_by_runner,
         attribution: projection.attribution,
         test_attribution: {
-            let mut counts = TestAttributionCounts::default();
-            // The tests the view counts: a kind or runner narrows these too.
+            let mut counts = TestAttributionCounts::default(); // a kind or runner narrows these
             for test in index.test_summaries(options.view)?.iter().filter(|test| {
                 test.role == "test"
                     && options.kind.is_none_or(|k| test.provenance.kind == k)

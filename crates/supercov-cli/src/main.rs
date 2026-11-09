@@ -163,7 +163,7 @@ fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) 
     // `file` reaches here as the view it asked for.
     if matches!(
         request.command.as_str(),
-        "line" | "file-detail" | "file-decisions" | "decision" | "source"
+        "line" | "file-detail" | "file-decisions" | "decision" | "source" | "mutants"
     ) {
         if let Some(file) = &request.file {
             files.push(file.clone());
@@ -3491,10 +3491,15 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                     say_page_cut(page, asked);
                 }
             }
+            let violated = soundness_violated(&output);
             match output.agent_json() {
                 Ok(output) => {
                     print!("{output}");
-                    ExitCode::SUCCESS
+                    if violated {
+                        ExitCode::from(1)
+                    } else {
+                        ExitCode::SUCCESS
+                    }
                 }
                 Err(error) => {
                     print!("{}", agent_json::failure(Some(&agent_command), &error));
@@ -3509,7 +3514,11 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 }
             }
             println!("{}", render_human(&output));
-            ExitCode::SUCCESS
+            if soundness_violated(&output) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(failure) => {
             if !json_output {
@@ -3528,6 +3537,20 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Whether `mutants --stryker` found a mutant this run says no test infects
+/// or reaches that StrykerJS killed, which fails the command.
+fn soundness_violated(output: &PublicQueryOutput) -> bool {
+    matches!(
+        output,
+        PublicQueryOutput::Coverage { output, .. }
+            if matches!(
+                &output.data,
+                supercov_engine::indexed_query::IndexedQueryData::Mutants(data)
+                    if data.stryker.as_ref().is_some_and(|join| join.soundness_violations.total > 0)
+            )
+    )
 }
 
 fn run_js_direct() -> ExitCode {

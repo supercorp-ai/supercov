@@ -56,6 +56,7 @@ pub mod jvm_project;
 pub mod jvm_run;
 mod kotlin_grammar;
 pub mod lifecycle;
+pub mod mutants_query;
 pub mod orchestration;
 pub mod outside_evidence;
 pub mod owned_evidence;

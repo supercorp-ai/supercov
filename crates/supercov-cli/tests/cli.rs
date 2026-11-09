@@ -20300,3 +20300,362 @@ test("a server the test stops is not a crash", async () => {
     );
     assert!(!output.contains("SIGTERM"), "{output}");
 }
+
+/// A mocha project whose tests leave a boundary unhit and a function
+/// uncalled, with node_modules from the repository.
+#[cfg(unix)]
+fn mutants_project(label: &str) -> Project {
+    let project = Project::empty(label);
+    project.write(
+        "package.json",
+        r#"{ "name": "mutants", "type": "module", "scripts": { "test": "mocha" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write(
+        "src/cart.js",
+        "export function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  return sum > 100 ? sum * 0.9 : sum;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import assert from \"node:assert/strict\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => assert.equal(shipping(80), 0));\n  it(\"charges small orders\", () => assert.equal(shipping(10), 5));\n  it(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("mutants");
+    project
+}
+
+const PROBES: [(&str, &str); 2] = [
+    ("SUPERCOV_COMPARISONS", "1"),
+    ("SUPERCOV_INFECTION_PROBES", "1"),
+];
+
+/// Each mutant's status in a `mutants --json` reply, by id.
+fn mutant_statuses(reply: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    reply["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| {
+            (
+                mutant["id"].as_str().unwrap().to_owned(),
+                mutant["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn mutants_say_how_far_the_tests_got_toward_killing_each() {
+    let project = mutants_project("mutants");
+    project
+        .supercov_with(&["--", "npx", "mocha"], &PROBES)
+        .succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(
+        &summary,
+        &["Mutants      15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown"],
+    );
+    let summary = project.supercov(&["runs", "latest", "--json"]).json();
+    assert_eq!(summary["data"]["mutants"]["mutantSet"], "stryker-js@10.1.1");
+    assert_eq!(summary["data"]["mutants"]["mutants"], 15);
+
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    assert_eq!(reply["command"], "coverage.mutants");
+    let data = &reply["data"];
+    assert_eq!(data["mutantSet"], "stryker-js@10.1.1");
+    assert_eq!(
+        data["levels"],
+        serde_json::json!({"weak": true, "strong": false})
+    );
+    assert_eq!(
+        data["summary"],
+        serde_json::json!({
+            "mutants": 15,
+            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0},
+            "weakScore": 0.5333,
+            "weakScoreReached": 0.8889,
+            "mutationScore": null,
+        })
+    );
+    assert_eq!(data["stryker"], serde_json::Value::Null);
+    let statuses = mutant_statuses(&reply);
+    for (id, status) in [
+        // `sum` was 80 and 10, never 50.
+        ("src/cart.js:2:7-2:16:EqualityOperator:>", "not-infected"),
+        ("src/cart.js:2:7-2:16:EqualityOperator:<", "infected"),
+        (
+            "src/cart.js:2:7-2:16:ConditionalExpression:false",
+            "infected",
+        ),
+        // No test calls `refund`.
+        (
+            "src/cart.js:13:10-13:19:ConditionalExpression:true",
+            "not-reached",
+        ),
+        (
+            "src/cart.js:13:22-13:31:ArithmeticOperator:/",
+            "not-reached",
+        ),
+        ("src/cart.js:9:10-9:21:MethodExpression:removed", "infected"),
+    ] {
+        assert_eq!(
+            statuses.get(id).map(String::as_str),
+            Some(status),
+            "{id}: {statuses:?}"
+        );
+    }
+    let boundary = data["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/cart.js:2:7-2:16:EqualityOperator:>")
+        .unwrap();
+    assert_eq!(
+        boundary,
+        &serde_json::json!({
+            "id": "src/cart.js:2:7-2:16:EqualityOperator:>",
+            "file": "src/cart.js",
+            "span": {"start": [2, 7], "end": [2, 16]},
+            "mutator": "EqualityOperator",
+            "original": "sum >= 50",
+            "replacement": "sum > 50",
+            "status": "not-infected",
+            "weak": {
+                "reach": "reached",
+                "infection": "not-infected",
+                "code": "operands-never-equal",
+                "reason": "`sum` never equal to `50`",
+            },
+            "strong": null,
+            "stryker": null,
+        })
+    );
+
+    // The table, a file by line, and a line with its reasons.
+    let table = project.supercov(&["runs", "latest", "mutants"]).succeeds();
+    contains_all(
+        &table,
+        &[
+            "Mutants of run",
+            "(stryker-js@10.1.1, weak mutation)",
+            "Weak score   53.3% · 88.9% of reached mutants",
+            "File         Mutants  Not infected  Not reached  Infected  Unknown",
+            "src/cart.js       15             1            6         8        0",
+            "showing 1-1 of 1 files",
+        ],
+    );
+    let file = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    contains_all(
+        &file,
+        &[
+            "sum >= 50 → sum > 50",
+            "not-infected  `sum` never equal to `50`",
+            "13:22  ArithmeticOperator",
+            "sum * 0.9 → sum / 0.9",
+            "no test ran its statement",
+            "showing 1-15 of 15",
+        ],
+    );
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js:2"])
+        .succeeds();
+    contains_all(
+        &line,
+        &[
+            "in src/cart.js:2 ",
+            "2:7  EqualityOperator  not-infected",
+            "  why: `sum` never equal to `50` (operands-never-equal)",
+            "  id:  src/cart.js:2:7-2:16:EqualityOperator:>",
+        ],
+    );
+    assert!(!line.contains("13:10"), "{line}");
+
+    // `--status` picks mutants across files; the summary stays the run's.
+    let picked = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--status",
+            "not-infected,not-reached",
+            "--json",
+        ])
+        .json();
+    let statuses = mutant_statuses(&picked);
+    assert_eq!(statuses.len(), 7, "{statuses:?}");
+    assert!(
+        statuses
+            .values()
+            .all(|status| status == "not-infected" || status == "not-reached"),
+        "{statuses:?}"
+    );
+    assert_eq!(picked["data"]["summary"]["mutants"], 15);
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--status", "not-infected"])
+        .succeeds();
+    contains_all(&listed, &["src/cart.js:2:7", "showing 1-1 of 1"]);
+    project
+        .supercov(&["runs", "latest", "mutants", "--status", "killed"])
+        .exits(2);
+
+    // Only the tests a title picks: the boundary they never cross.
+    let narrowed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/cart.js:2",
+            "--title",
+            "ships big",
+            "--json",
+        ])
+        .json();
+    let statuses = mutant_statuses(&narrowed);
+    assert_eq!(
+        statuses
+            .get("src/cart.js:2:7-2:16:ConditionalExpression:true")
+            .map(String::as_str),
+        Some("not-infected"),
+        "{statuses:?}"
+    );
+
+    // StrykerJS's results joined by id: one kill this run agrees with, one it
+    // says was impossible, one survivor it explains, one mutant it lacks.
+    let source = project.read("src/cart.js");
+    let mutant =
+        |mutator: &str, start: [u32; 2], end: [u32; 2], replacement: &str, status: &str| {
+            serde_json::json!({
+                "id": "1",
+                "mutatorName": mutator,
+                "replacement": replacement,
+                "location": {
+                    "start": {"line": start[0], "column": start[1]},
+                    "end": {"line": end[0], "column": end[1]},
+                },
+                "status": status,
+            })
+        };
+    project.write(
+        "reports/mutation.json",
+        &serde_json::json!({
+            "schemaVersion": "1",
+            "thresholds": {"high": 80, "low": 60},
+            "files": {"src/cart.js": {"language": "javascript", "source": source, "mutants": [
+                mutant("ConditionalExpression", [2, 7], [2, 16], "true", "Killed"),
+                mutant("EqualityOperator", [2, 7], [2, 16], "sum > 50", "Killed"),
+                mutant("ConditionalExpression", [13, 10], [13, 19], "true", "Survived"),
+                mutant("StringLiteral", [9, 3], [9, 4], "\"\"", "Survived"),
+                mutant("EqualityOperator", [13, 10], [13, 19], "sum >= 100", "CompileError"),
+            ]}},
+        })
+        .to_string(),
+    );
+    let joined = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--stryker",
+            "reports/mutation.json",
+        ])
+        .exits(1);
+    contains_all(
+        &joined,
+        &[
+            "StrykerJS (reports/mutation.json)",
+            "Matched              3",
+            "Only in StrykerJS    1 (StringLiteral 1)",
+            "Survivors explained  1 of 1",
+            "SOUNDNESS VIOLATIONS 1",
+            "src/cart.js:2:7-2:16:EqualityOperator:>  not-infected here, Killed by StrykerJS",
+        ],
+    );
+    let joined = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "--stryker",
+        "reports/mutation.json",
+        "--json",
+        "--limit",
+        "0",
+    ]);
+    assert_eq!(joined.code(), 1, "{}", joined.stderr());
+    let joined = joined.json();
+    let stryker = &joined["data"]["stryker"];
+    assert_eq!(stryker["matched"], 3);
+    assert_eq!(stryker["onlyStryker"]["byMutator"]["StringLiteral"], 1);
+    assert_eq!(stryker["onlySupercov"]["total"], 12);
+    assert_eq!(stryker["soundnessViolations"]["total"], 1);
+    assert_eq!(
+        stryker["soundnessViolations"]["mutants"][0]["id"],
+        "src/cart.js:2:7-2:16:EqualityOperator:>"
+    );
+    assert_eq!(
+        stryker["survivorsExplained"],
+        serde_json::json!({"survivors": 1, "explained": 1})
+    );
+    let killed = joined["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/cart.js:2:7-2:16:ConditionalExpression:true")
+        .unwrap();
+    assert_eq!(killed["stryker"], "Killed");
+    // Paths relative to another directory are named from the project root.
+    project.write(
+        "reports/nested/mutation.json",
+        &project
+            .read("reports/mutation.json")
+            .replace("\"src/cart.js\"", "\"../../src/cart.js\""),
+    );
+    let rooted = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/cart.js:2",
+            "--stryker",
+            "reports/nested/mutation.json",
+            "--stryker-root",
+            "reports/nested",
+            "--json",
+        ])
+        .json();
+    assert_eq!(rooted["data"]["stryker"]["matched"], 2);
+    assert_eq!(rooted["data"]["stryker"]["onlyStryker"]["total"], 0);
+
+    // A run measured without the probes has no mutants, and says how to get
+    // them.
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    let none = project.supercov(&["runs", "latest", "mutants"]).succeeds();
+    contains_all(
+        &none,
+        &[
+            "This run did not list its mutants",
+            "SUPERCOV_COMPARISONS=1 or SUPERCOV_INFECTION_PROBES=1",
+        ],
+    );
+    let none = project
+        .supercov(&["runs", "latest", "mutants", "--json"])
+        .json();
+    assert_eq!(none["data"]["mutantSet"], serde_json::Value::Null);
+    assert_eq!(none["data"]["levels"]["weak"], false);
+    assert_eq!(
+        none["data"]["summary"]["weakScore"],
+        serde_json::Value::Null
+    );
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(!summary.contains("Mutants "), "{summary}");
+}

@@ -920,6 +920,11 @@ pub struct CoverageReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionResult>,
     pub filters: CoverageFilters,
+    /// Each mutant the run listed, with its weak-mutation verdict from every
+    /// test of the report; `None` when the run listed none. Beside coverage,
+    /// never part of it.
+    #[serde(skip)]
+    pub mutation: Option<crate::coverage_index::MutationResults>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3187,6 +3192,7 @@ pub fn analyze_coverage_results(
         view,
         execution,
         filters: CoverageFilters { passed, failed },
+        mutation: None,
     })
 }
 
@@ -3406,15 +3412,17 @@ fn is_mcdc_journal(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, _) = archive_request(request)?;
-    finish_archive_analysis(normalized, transport)
+    let (_, normalized, transport, _, mutation) = archive_request(request)?;
+    finish_archive_analysis(normalized, transport, mutation)
 }
 
 fn finish_archive_analysis(
     normalized: CoverageReportRequest,
     transport: TransportStats,
+    mutation: Option<crate::coverage_index::MutationResults>,
 ) -> Result<CoverageReport, ReportError> {
     let report = analyze_coverage_results(&normalized).map(|mut report| {
+        report.mutation = mutation;
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
         report.filters.failed.transport = Some(transport);
@@ -3428,8 +3436,8 @@ fn finish_archive_analysis(
 }
 
 /// A stored run's evidence as the request its views are built from, with the
-/// frontend that declared it, what its processes reported, and the digest of
-/// the archive bytes it was read from.
+/// frontend that declared it, what its processes reported, the digest of the
+/// archive bytes it was read from, and its mutants' verdicts.
 pub fn archive_request(
     request: &ArchiveReportRequest,
 ) -> Result<
@@ -3438,6 +3446,7 @@ pub fn archive_request(
         CoverageReportRequest,
         TransportStats,
         crate::evidence_archive::ArchiveDigest,
+        Option<crate::coverage_index::MutationResults>,
     ),
     ReportError,
 > {
@@ -3458,10 +3467,10 @@ pub fn analyze_coverage_entries(
     request: &ArchiveReportRequest,
     entries: &[EvidenceArchiveEntry],
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, ()) = archive_request_from(request, |mut visit| {
+    let (_, normalized, transport, (), mutation) = archive_request_from(request, |mut visit| {
         entries.iter().cloned().try_for_each(&mut visit)
     })?;
-    finish_archive_analysis(normalized, transport)
+    finish_archive_analysis(normalized, transport, mutation)
 }
 
 /// `archive_request`, from entries `read` hands to the visitor in the
@@ -3479,6 +3488,7 @@ fn archive_request_from<D>(
         CoverageReportRequest,
         TransportStats,
         D,
+        Option<crate::coverage_index::MutationResults>,
     ),
     ReportError,
 > {
@@ -3725,6 +3735,13 @@ fn archive_request_from<D>(
                 .any(|raw| raw.provenance.runner == declared.runner)
         });
     }
+    // Each mutant's verdict, from the tests the view keeps.
+    let listed = entries
+        .iter()
+        .find(|entry| entry.path == "mutants.json")
+        .map(parse_entry::<crate::js_mutant_links::MutantsFile>)
+        .transpose()?;
+    let mutation = crate::js_weak_mutation::results(&raw_results, listed);
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
@@ -3740,7 +3757,7 @@ fn archive_request_from<D>(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    Ok((frontend, normalized, transport, digest))
+    Ok((frontend, normalized, transport, digest, mutation))
 }
 
 /// Give a test that ran again under the same identity phases of its own.

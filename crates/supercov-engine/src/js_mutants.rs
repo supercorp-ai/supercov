@@ -244,6 +244,32 @@ pub(crate) fn descriptor_from_stryker(
     Some(descriptor)
 }
 
+/// A MethodExpression mutant's code: the call with its method renamed to
+/// `descriptor`, or only its receiver where the call is `removed`.
+pub(crate) fn method_replaced(original: &str, descriptor: &str) -> Option<String> {
+    let text = original.trim();
+    with_expression(text, |expression| {
+        let Link::Call(call) = link(expression) else {
+            return None;
+        };
+        let (receiver, name) = match link(&call.callee) {
+            Link::Static(member) => (member.object.span(), member.property.span),
+            Link::Computed(member) => (member.object.span(), member.expression.span()),
+            _ => return None,
+        };
+        let slice = |from: u32, to: u32| text.get(from as usize..to as usize);
+        if descriptor == REMOVED {
+            slice(receiver.start, receiver.end).map(str::to_owned)
+        } else {
+            Some(format!(
+                "{}{descriptor}{}",
+                slice(0, name.start)?,
+                text.get(name.end as usize..)?
+            ))
+        }
+    })
+}
+
 /// StrykerJS prints the comments a cloned node carries: a `for` or `case`
 /// replacement can start with the comments above it.
 fn without_leading_comments(code: &str) -> &str {
