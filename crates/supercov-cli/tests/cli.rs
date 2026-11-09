@@ -6118,6 +6118,33 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         said.contains("starts without build output") && said.contains("npm run build && npm test"),
         "{said}"
     );
+    // Nothing built here: the copy lacks nothing this checkout has, and
+    // nothing is said before the suite runs.
+    assert!(!said.contains("starts without `dist/`"), "{said}");
+
+    // Built here, as a CI job builds before it measures: the copy starts
+    // without `dist/`, and that is said before the suite runs, ahead of what
+    // its failure says at the end.
+    let built_here = std::process::Command::new("node")
+        .arg("build.js")
+        .current_dir(&project.root)
+        .status()
+        .unwrap();
+    assert!(built_here.success());
+    let early = project.supercov(&["--", "npm", "test"]);
+    assert_ne!(early.code(), 0, "{}", early.stdout());
+    let said = early.stderr();
+    let note = said
+        .find("the copy the command runs in starts without `dist/`, which this checkout has, and the command does not run `npm run build`")
+        .unwrap_or_else(|| panic!("{said}"));
+    let end = said
+        .find("starts without build output")
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(note < end, "{said}");
+    assert!(
+        said.contains("supercov -- sh -c \"npm run build && npm test\""),
+        "{said}"
+    );
 
     // A command that fails after its tests passed: no test failed, and the
     // build the copy starts without is named as what may be missing.
@@ -6144,10 +6171,11 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
 
     // With the build in the command, it compiles the instrumented copy, and
     // what the tests run is measured.
-    let built = project
-        .supercov(&["--", "sh", "-c", "npm run build && npm test"])
-        .succeeds();
-    assert!(!built.contains("starts without build output"), "{built}");
+    let built = project.supercov(&["--", "sh", "-c", "npm run build && npm test"]);
+    let said = format!("{}{}", built.stdout(), built.stderr());
+    built.succeeds();
+    assert!(!said.contains("starts without build output"), "{said}");
+    assert!(!said.contains("starts without `dist/`"), "{said}");
     let line = project
         .supercov(&["runs", "latest", "line", "src/fee.js:2"])
         .succeeds();
@@ -8286,7 +8314,9 @@ fn merge_says_what_moved_under_each_run_it_leaves_out() {
             1,
         ),
     );
-    left_out("the dependencies have changed");
+    left_out(
+        "the dependencies have changed (runs merge only when every job installs the same lockfile",
+    );
     project.write("package.json", &manifest);
 
     // A configuration file added may change how the tests run; told it does

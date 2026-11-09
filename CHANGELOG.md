@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- When this checkout holds build output (`dist/`, `.next/` and the like) that the copy the command runs in starts without, and the command does not run the project's `build` script, Supercov says so before the suite runs, not only after a failed run.
+- `merge` leaving runs out because `the dependencies have changed` says why that happens across CI jobs: every job must install the same lockfile. The merge docs show how for a repository without a committed lockfile.
+
 ## 4.25.0
 
 **Changed**
