@@ -50,6 +50,7 @@ pub mod javascript_run;
 pub mod js_instrumenter;
 mod js_mutant_links;
 mod js_mutants;
+mod js_weak_mutation;
 pub mod jvm_instrumenter;
 pub mod jvm_project;
 pub mod jvm_run;

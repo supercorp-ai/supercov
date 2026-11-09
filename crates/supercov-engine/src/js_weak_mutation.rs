@@ -1,0 +1,1705 @@
+//! Weak mutation (Howden 1982) for JavaScript and TypeScript: how far one
+//! run's tests got toward killing each StrykerJS mutant, from what the run
+//! observed at the evidence `js_mutant_links` linked it to.
+//!
+//! A mutant is reached when a test ran its code, and infected when some
+//! evaluation there gave the mutant another value than the original's. A
+//! mutant no test infects cannot be killed by these tests, so `NotInfected`
+//! and `NotReached` are claims about StrykerJS's results: each must be a
+//! StrykerJS survivor. Every rule below that says either is sound only from
+//! what was recorded; where the record cannot tell, the verdict is
+//! `Unknown`. `Infected` is a candidate kill, not a kill.
+//!
+//! A server process records hits and decision vectors but no comparisons,
+//! logical outcomes or probe outcomes. A `NotInfected` or `NotReached` read
+//! from those records is therefore `Unknown` when the mutant's statement ran
+//! in a server process: its outcomes there are missing, not absent.
+//!
+//! The rules are those of an earlier research prototype, which matched
+//! evidence by text;
+//! here every rule reads a link made from exact spans.
+
+// Read by the mutants query, which comes next.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+
+use crate::js_mutant_links::{BranchRole, CandidateMutant};
+
+/// How far the run's tests got toward killing a mutant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// No test ran the mutated code.
+    NotReached,
+    /// Reached, but every evaluation gave the mutant the original's value.
+    NotInfected,
+    /// Some evaluation gave the mutant another value. A `proxy` infection is
+    /// only that the code around it ran (a block or call removed).
+    Infected { proxy: bool },
+    /// Reached, but the run cannot tell.
+    Unknown,
+}
+
+/// Why: a stable short code, and a sentence that says, for a mutant not
+/// infected, which input is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reason {
+    pub code: &'static str,
+    pub sentence: String,
+}
+
+/// One evaluation of a decision: its conditions' values (`None` where one
+/// was not evaluated) and its outcome.
+pub(crate) type Vector = (Vec<Option<bool>>, bool);
+
+/// What one run observed, as plain data.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Observations {
+    /// Every point hit, branch outcomes (`id:short`, `id:continued`) among
+    /// them.
+    pub hits: HashSet<String>,
+    /// The hits recorded in a server process.
+    pub server_hits: HashSet<String>,
+    /// Each decision's evaluations.
+    pub decisions: HashMap<String, Vec<Vector>>,
+    /// Each logical selection's outcomes: whether its right side produced
+    /// the value, and whether the value was truthy.
+    pub logicals: HashMap<String, HashSet<(bool, bool)>>,
+    /// Each comparison or infection probe site's outcomes.
+    pub comparisons: HashMap<String, HashSet<String>>,
+}
+
+const BLOCK_STATEMENT: &str = "BlockStatement";
+
+/// The mutant's status, and why.
+pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> (Status, Reason) {
+    let records = Records {
+        observations,
+        read: Cell::new(false),
+    };
+    let (status, reason) = decide(mutant, &records);
+    let in_server = [&mutant.statement, &mutant.function]
+        .into_iter()
+        .flatten()
+        .any(|point| observations.server_hits.contains(point));
+    if records.read.get() && in_server && matches!(status, Status::NotReached | Status::NotInfected)
+    {
+        return (
+            Status::Unknown,
+            reason_of(
+                "server-process",
+                format!(
+                    "ran in a server process, which records no values ({})",
+                    reason.sentence
+                ),
+            ),
+        );
+    }
+    (status, reason)
+}
+
+/// The outcome records a server process does not make, noting each read.
+struct Records<'o> {
+    observations: &'o Observations,
+    read: Cell<bool>,
+}
+
+impl Records<'_> {
+    fn comparisons(&self, site: &str) -> Option<&HashSet<String>> {
+        self.read.set(true);
+        self.observations
+            .comparisons
+            .get(site)
+            .filter(|outcomes| !outcomes.is_empty())
+    }
+
+    fn logicals(&self, branch: &str) -> Option<&HashSet<(bool, bool)>> {
+        self.read.set(true);
+        self.observations
+            .logicals
+            .get(branch)
+            .filter(|outcomes| !outcomes.is_empty())
+    }
+
+    fn hit(&self, id: &str) -> bool {
+        self.observations.hits.contains(id)
+    }
+
+    fn vectors(&self, decision: &str) -> &[Vector] {
+        self.observations
+            .decisions
+            .get(decision)
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+fn reason_of(code: &'static str, sentence: impl Into<String>) -> Reason {
+    Reason {
+        code,
+        sentence: sentence.into(),
+    }
+}
+
+fn verdict_of(status: Status, code: &'static str, sentence: impl Into<String>) -> (Status, Reason) {
+    (status, reason_of(code, sentence))
+}
+
+const INFECTED: Status = Status::Infected { proxy: false };
+const PROXY: Status = Status::Infected { proxy: true };
+
+/// Code as one short line, quoted.
+fn quoted(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short = if flat.chars().count() > 60 {
+        format!("{}…", flat.chars().take(59).collect::<String>())
+    } else {
+        flat
+    };
+    format!("`{short}`")
+}
+
+/// A binary, logical or assignment mutant's operator and operands.
+fn operands(mutant: &CandidateMutant) -> Option<(&str, String, String)> {
+    let operator = mutant.operator.as_ref()?;
+    let left = mutant.original.get(..operator.at)?;
+    let right = mutant.original.get(operator.at + operator.text.len()..)?;
+    Some((
+        operator.text.as_str(),
+        quoted(left.trim()),
+        quoted(right.trim()),
+    ))
+}
+
+fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    if let Some(unreached) = reach(mutant, records) {
+        return unreached;
+    }
+    match mutant.mutator.as_str() {
+        "StringLiteral" | "BooleanLiteral" | "ArrayDeclaration" | "ObjectLiteral"
+        | "UpdateOperator" => verdict_of(
+            INFECTED,
+            "reached",
+            "the code ran, and this replacement differs wherever it is evaluated",
+        ),
+        BLOCK_STATEMENT | "CallExpression" => {
+            if mutant.statement.is_some() {
+                verdict_of(
+                    PROXY,
+                    "statement-ran",
+                    "the statement around it ran (a proxy: removing it may change nothing)",
+                )
+            } else {
+                verdict_of(
+                    PROXY,
+                    "function-ran",
+                    "the function ran (a proxy: emptying it may change nothing)",
+                )
+            }
+        }
+        "EqualityOperator" => equality_operator(mutant, records),
+        "ConditionalExpression" => conditional_expression(mutant, records),
+        "OptionalChaining" => optional_chaining(mutant, records),
+        "LogicalOperator" => logical_operator(mutant, records),
+        "ArithmeticOperator" | "AssignmentOperator" | "MethodExpression" => {
+            probed_operation(mutant, records)
+        }
+        "ArrowFunction" => arrow_function(mutant, records),
+        "Regex" => verdict_of(
+            Status::Unknown,
+            "regex",
+            "regular expression mutants are not decided yet",
+        ),
+        other => verdict_of(
+            Status::Unknown,
+            "no-rule",
+            format!("no rule decides {other} mutants yet"),
+        ),
+    }
+}
+
+/// Whether the mutated code ran: its statement, and its function where the
+/// function is not around the statement (a concise arrow's body), must both
+/// have been hit. A function body, which no statement contains, is reached
+/// by its function.
+fn reach(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Reason)> {
+    let statement = mutant.statement.as_deref();
+    if statement.is_none() && mutant.mutator != BLOCK_STATEMENT {
+        return Some(verdict_of(
+            Status::Unknown,
+            "no-statement-point",
+            "no statement point contains it",
+        ));
+    }
+    if let Some(statement) = statement
+        && !records.hit(statement)
+    {
+        return Some(verdict_of(
+            Status::NotReached,
+            "statement-not-run",
+            "no test ran its statement",
+        ));
+    }
+    match mutant.function.as_deref() {
+        Some(function) if !records.hit(function) => Some(verdict_of(
+            Status::NotReached,
+            "function-not-run",
+            "no test called its function",
+        )),
+        None if statement.is_none() => Some(verdict_of(
+            Status::Unknown,
+            "no-point",
+            "no statement or function point contains it",
+        )),
+        _ => None,
+    }
+}
+
+const BOUNDARIES: &[(&str, &str)] = &[("<", "<="), ("<=", "<"), (">", ">="), (">=", ">")];
+
+fn relational(operator: &str) -> bool {
+    matches!(operator, "<" | "<=" | ">" | ">=")
+}
+
+/// A relational comparison's value for a recorded relation of its operands:
+/// `None` for operands the probe could not order (`other`, or anything it
+/// does not know).
+fn relational_value(operator: &str, relation: &str) -> Option<bool> {
+    match relation {
+        "lt" => Some(matches!(operator, "<" | "<=")),
+        "eq" => Some(matches!(operator, "<=" | ">=")),
+        "gt" => Some(matches!(operator, ">" | ">=")),
+        // NaN: false for every relational operator.
+        "unordered" => Some(false),
+        _ => None,
+    }
+}
+
+fn equality_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let Some((operator, left, right)) = operands(mutant) else {
+        return verdict_of(Status::Unknown, "no-operator", "its operator is not known");
+    };
+    let replacement = mutant.replacement.as_str();
+    if BOUNDARIES.contains(&(operator, replacement)) {
+        let Some(site) = &mutant.compare else {
+            return verdict_of(
+                Status::Unknown,
+                "no-comparison-probe",
+                format!("needs {left} == {right}, and no probe recorded the operands"),
+            );
+        };
+        let Some(relations) = records.comparisons(site) else {
+            return verdict_of(
+                Status::NotReached,
+                "comparison-not-evaluated",
+                "the comparison never ran",
+            );
+        };
+        if relations.contains("eq") {
+            return verdict_of(INFECTED, "operands-equal", "the operands were equal");
+        }
+        if relations
+            .iter()
+            .any(|relation| !matches!(relation.as_str(), "lt" | "gt" | "unordered"))
+        {
+            return verdict_of(
+                Status::Unknown,
+                "non-primitive-operands",
+                "operands the probe could not order",
+            );
+        }
+        return verdict_of(
+            Status::NotInfected,
+            "operands-never-equal",
+            format!("{left} never equal to {right}"),
+        );
+    }
+    // The operator negated: every evaluation differs, but for a relational
+    // one whose operands are not ordered (NaN), which is false either way.
+    if let Some(site) = &mutant.compare {
+        let Some(outcomes) = records.comparisons(site) else {
+            return verdict_of(
+                Status::NotReached,
+                "comparison-not-evaluated",
+                "the comparison never ran",
+            );
+        };
+        if !relational(operator) {
+            return verdict_of(INFECTED, "comparison-evaluated", "the comparison ran");
+        }
+        if outcomes
+            .iter()
+            .any(|relation| matches!(relation.as_str(), "lt" | "eq" | "gt"))
+        {
+            return verdict_of(
+                INFECTED,
+                "comparison-evaluated",
+                "the comparison ran on ordered operands",
+            );
+        }
+        if outcomes.iter().all(|relation| relation == "unordered") {
+            return verdict_of(
+                Status::NotInfected,
+                "operands-never-ordered",
+                format!("{left} and {right} never ordered (always NaN)"),
+            );
+        }
+        return verdict_of(
+            Status::Unknown,
+            "non-primitive-operands",
+            "operands the probe could not order",
+        );
+    }
+    if let Some(decision) = &mutant.decision {
+        let vectors = records.vectors(&decision.id);
+        return match (decision.condition, decision.prefix) {
+            (Some(index), _) => {
+                if vectors
+                    .iter()
+                    .any(|(values, _)| values.get(index).copied().flatten().is_some())
+                {
+                    verdict_of(INFECTED, "condition-evaluated", "the condition ran")
+                } else {
+                    verdict_of(
+                        Status::NotReached,
+                        "condition-not-evaluated",
+                        "the condition never ran",
+                    )
+                }
+            }
+            (None, None) if !vectors.is_empty() => {
+                verdict_of(INFECTED, "decision-evaluated", "the decision ran")
+            }
+            (None, None) => verdict_of(
+                Status::NotReached,
+                "decision-not-evaluated",
+                "the decision never ran",
+            ),
+            (None, Some(_)) => verdict_of(
+                Status::Unknown,
+                "no-rule",
+                "a comparison is never several conditions",
+            ),
+        };
+    }
+    verdict_of(
+        INFECTED,
+        "statement-ran",
+        "the statement ran (a comparison outside a decision)",
+    )
+}
+
+/// The truthiness a short-circuit evaluation gives the first conditions of
+/// a decision made of `&&` and `||`: the last one evaluated decides.
+fn prefix_value(values: &[Option<bool>], width: usize) -> Option<bool> {
+    values.iter().take(width).rev().find_map(|value| *value)
+}
+
+fn not_infected_unless_value_used(
+    mutant: &CandidateMutant,
+    code: &'static str,
+    sentence: String,
+) -> (Status, Reason) {
+    if mutant.value_used {
+        return verdict_of(
+            Status::Unknown,
+            "value-used",
+            format!("{sentence} in truthiness, but its value is used, not only its truthiness"),
+        );
+    }
+    verdict_of(Status::NotInfected, code, sentence)
+}
+
+fn conditional_expression(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let forced = match mutant.replacement.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            return verdict_of(
+                Status::Unknown,
+                "other-form",
+                "a switch case emptied or a loop given a false test: no rule yet",
+            );
+        }
+    };
+    let original = quoted(&mutant.original);
+    if let Some(decision) = &mutant.decision {
+        let vectors = records.vectors(&decision.id);
+        if vectors.is_empty() {
+            return verdict_of(
+                Status::NotReached,
+                "decision-not-evaluated",
+                "the decision never ran",
+            );
+        }
+        let (values, code, sentence) = match (decision.condition, decision.prefix) {
+            (Some(index), _) => (
+                vectors
+                    .iter()
+                    .map(|(values, _)| values.get(index).copied().flatten())
+                    .filter(Option::is_some)
+                    .collect::<HashSet<_>>(),
+                "condition-always",
+                format!("condition {original} always {forced}"),
+            ),
+            (None, Some(width)) => (
+                vectors
+                    .iter()
+                    .map(|(values, _)| prefix_value(values, width))
+                    .collect(),
+                "conditions-always",
+                format!("{original} always {forced}"),
+            ),
+            (None, None) => (
+                vectors.iter().map(|(_, outcome)| Some(*outcome)).collect(),
+                "decision-always",
+                format!("decision always {forced}"),
+            ),
+        };
+        if values.is_empty() {
+            return verdict_of(
+                Status::NotReached,
+                "condition-not-evaluated",
+                "the condition never ran",
+            );
+        }
+        if values.contains(&Some(!forced)) {
+            return verdict_of(
+                INFECTED,
+                "opposite-value",
+                format!("{original} was {} at least once", !forced),
+            );
+        }
+        if values.contains(&None) {
+            return verdict_of(
+                Status::Unknown,
+                "short-circuited",
+                "evaluations that stopped before it",
+            );
+        }
+        return not_infected_unless_value_used(mutant, code, sentence);
+    }
+    if let Some(site) = &mutant.compare {
+        let Some(outcomes) = records.comparisons(site) else {
+            return verdict_of(
+                Status::NotReached,
+                "comparison-not-evaluated",
+                "the comparison never ran",
+            );
+        };
+        let operator = mutant
+            .operator
+            .as_ref()
+            .map_or("", |operator| operator.text.as_str());
+        let values = outcomes
+            .iter()
+            .map(|outcome| {
+                if relational(operator) {
+                    relational_value(operator, outcome)
+                } else {
+                    match outcome.as_str() {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    }
+                }
+            })
+            .collect::<HashSet<_>>();
+        if values.contains(&Some(!forced)) {
+            return verdict_of(
+                INFECTED,
+                "opposite-value",
+                format!("{original} was {} at least once", !forced),
+            );
+        }
+        if values.contains(&None) {
+            return verdict_of(
+                Status::Unknown,
+                "non-primitive-operands",
+                "operands the probe could not compare",
+            );
+        }
+        return not_infected_unless_value_used(
+            mutant,
+            "comparison-always",
+            format!("{original} always {forced}"),
+        );
+    }
+    if let Some(branch) = &mutant.branch {
+        let Some(outcomes) = records.logicals(&branch.id) else {
+            return verdict_of(
+                Status::NotReached,
+                "selection-not-evaluated",
+                "the selection never ran",
+            );
+        };
+        let operator = branch.operator.trim_end_matches('=');
+        let values = match branch.role {
+            BranchRole::Value => outcomes.iter().map(|(_, truthy)| *truthy).collect(),
+            // The left operand's truthiness follows from which side gave
+            // the value; the right one's is the value's when it ran.
+            BranchRole::Left => outcomes
+                .iter()
+                .map(|(right, truthy)| match operator {
+                    "&&" => *right || *truthy,
+                    _ => !*right && *truthy,
+                })
+                .collect(),
+            BranchRole::Right => outcomes
+                .iter()
+                .filter(|(right, _)| *right)
+                .map(|(_, truthy)| *truthy)
+                .collect::<HashSet<_>>(),
+        };
+        if values.is_empty() {
+            return verdict_of(
+                Status::NotReached,
+                "operand-not-evaluated",
+                "the right operand never ran",
+            );
+        }
+        if values.contains(&!forced) {
+            return verdict_of(
+                INFECTED,
+                "opposite-value",
+                format!("{original} was {} at least once", truthy_word(!forced)),
+            );
+        }
+        return not_infected_unless_value_used(
+            mutant,
+            "operand-always",
+            format!("{original} always {}", truthy_word(forced)),
+        );
+    }
+    verdict_of(
+        Status::Unknown,
+        "no-record",
+        "used as a value whose truth no probe recorded",
+    )
+}
+
+fn truthy_word(value: bool) -> &'static str {
+    if value { "truthy" } else { "falsy" }
+}
+
+fn optional_chaining(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let Some(chain) = &mutant.chain else {
+        return verdict_of(
+            Status::Unknown,
+            "no-chain-point",
+            "no optional-chain point at the link",
+        );
+    };
+    if records.hit(&format!("{}:short", chain.id)) {
+        return verdict_of(INFECTED, "nullish-seen", "the receiver was nullish");
+    }
+    if records.hit(&format!("{}:continued", chain.id)) {
+        return verdict_of(
+            Status::NotInfected,
+            "never-nullish",
+            format!(
+                "the receiver of `{}` in {} never null or undefined",
+                mutant.replacement,
+                quoted(&mutant.original)
+            ),
+        );
+    }
+    // The link never ran: where an earlier link stopped the chain, removing
+    // this one's `?` changed nothing.
+    if chain
+        .earlier
+        .iter()
+        .any(|earlier| records.hit(&format!("{earlier}:short")))
+    {
+        return verdict_of(
+            Status::NotInfected,
+            "earlier-link-nullish",
+            "an earlier link of the chain was always nullish",
+        );
+    }
+    verdict_of(
+        Status::NotReached,
+        "chain-not-evaluated",
+        "the chain never ran",
+    )
+}
+
+fn logical_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let Some(operator) = mutant
+        .operator
+        .as_ref()
+        .map(|operator| operator.text.as_str())
+    else {
+        return verdict_of(Status::Unknown, "no-operator", "its operator is not known");
+    };
+    let replacement = mutant.replacement.as_str();
+    // `a && b` as `a || b` over two conditions: both evaluated, the two
+    // differ exactly when the conditions do.
+    if let Some(decision) = &mutant.decision {
+        let vectors = records.vectors(&decision.id);
+        let pair = match (decision.condition, decision.prefix) {
+            (None, Some(2)) => true,
+            (None, None) => vectors.iter().all(|(values, _)| values.len() == 2),
+            _ => false,
+        };
+        if pair {
+            if vectors.is_empty() {
+                return verdict_of(
+                    Status::NotReached,
+                    "decision-not-evaluated",
+                    "the decision never ran",
+                );
+            }
+            let mut infected = false;
+            let mut short_circuited = false;
+            for (values, _) in vectors {
+                match (
+                    values.first().copied().flatten(),
+                    values.get(1).copied().flatten(),
+                ) {
+                    (Some(left), Some(right)) => infected |= left != right,
+                    _ => short_circuited = true,
+                }
+            }
+            if infected {
+                return verdict_of(
+                    INFECTED,
+                    "operands-differ",
+                    "one operand was true and the other false",
+                );
+            }
+            if short_circuited {
+                return verdict_of(
+                    Status::Unknown,
+                    "short-circuited",
+                    "evaluations that never ran the right operand",
+                );
+            }
+            let (_, left, right) = operands(mutant).unwrap_or_default();
+            return not_infected_unless_value_used(
+                mutant,
+                "operands-agree",
+                format!("{left} and {right} never one true and the other false"),
+            );
+        }
+    }
+    let Some(branch) = mutant
+        .branch
+        .as_ref()
+        .filter(|branch| branch.role == BranchRole::Value)
+    else {
+        return verdict_of(
+            Status::Unknown,
+            "no-selection-point",
+            "no logical selection point at the operator",
+        );
+    };
+    let Some(outcomes) = records.logicals(&branch.id) else {
+        return verdict_of(
+            Status::NotReached,
+            "selection-not-evaluated",
+            "the selection never ran",
+        );
+    };
+    // Which side gave the value, and its truthiness, imply the left operand
+    // where the right one ran.
+    let mut infected = false;
+    let mut undecided = false;
+    for &(right, truthy) in outcomes {
+        match (operator, replacement) {
+            ("&&", "||") if right && !truthy => infected = true,
+            ("||", "&&") if right && truthy => infected = true,
+            // A falsy left that is present: both give it.
+            ("??", "&&") if !right && !truthy => {}
+            ("??", "&&") if right && truthy => infected = true,
+            _ => undecided = true,
+        }
+    }
+    if infected {
+        return verdict_of(
+            INFECTED,
+            "operators-differ",
+            "an evaluation the two operators give different values",
+        );
+    }
+    if undecided {
+        return verdict_of(
+            Status::Unknown,
+            "not-decisive",
+            "operand values that do not decide it",
+        );
+    }
+    let (_, left, _) = operands(mutant).unwrap_or_default();
+    verdict_of(
+        Status::NotInfected,
+        "same-value",
+        format!("{left} always present and falsy"),
+    )
+}
+
+fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let operator = mutant
+        .operator
+        .as_ref()
+        .map_or("", |operator| operator.text.as_str());
+    if mutant.mutator == "AssignmentOperator" && matches!(operator, "&&=" | "||=" | "??=") {
+        return verdict_of(
+            Status::Unknown,
+            "logical-assignment",
+            "a logical assignment: no rule yet",
+        );
+    }
+    let Some(site) = &mutant.probe else {
+        return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
+    };
+    let Some(outcomes) = records.comparisons(site) else {
+        // A method probe records nothing for a receiver that is not a
+        // built-in, so its silence is no sign the call never ran.
+        if mutant.mutator == "MethodExpression" {
+            return verdict_of(
+                Status::Unknown,
+                "no-method-record",
+                "no record: never called, or on a receiver that is not a built-in",
+            );
+        }
+        return verdict_of(
+            Status::NotReached,
+            "not-evaluated",
+            "the expression never ran",
+        );
+    };
+    if outcomes.contains("differs") {
+        return verdict_of(
+            INFECTED,
+            "replacement-differs",
+            "StrykerJS's replacement gave another value",
+        );
+    }
+    if outcomes.iter().all(|outcome| outcome == "same") {
+        let replaced = match &mutant.operator {
+            Some(operator) => format!(
+                "{} and {}",
+                quoted(&mutant.original),
+                quoted(&format!(
+                    "{}{}{}",
+                    &mutant.original[..operator.at],
+                    mutant.replacement,
+                    &mutant.original[operator.at + operator.text.len()..]
+                ))
+            ),
+            None => format!(
+                "{} and its `{}`",
+                quoted(&mutant.original),
+                mutant.replacement
+            ),
+        };
+        return verdict_of(
+            Status::NotInfected,
+            "replacement-same",
+            format!("{replaced} always gave the same value"),
+        );
+    }
+    verdict_of(
+        Status::Unknown,
+        "undecided",
+        "values the probe could not compare",
+    )
+}
+
+fn arrow_function(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    if let Some(site) = &mutant.probe
+        && let Some(outcomes) = records.comparisons(site)
+    {
+        if outcomes.contains("defined") {
+            return verdict_of(
+                INFECTED,
+                "returned-value",
+                "the arrow returned a value other than undefined",
+            );
+        }
+        return verdict_of(
+            Status::NotInfected,
+            "always-undefined",
+            "the arrow always returned undefined",
+        );
+    }
+    // Without its own function point, nothing says the arrow ran.
+    if mutant.function.is_none() {
+        return verdict_of(
+            Status::Unknown,
+            "no-function-point",
+            "no function point says the arrow ran",
+        );
+    }
+    match mutant.arrow {
+        Some(arrow) if arrow.effects => verdict_of(
+            PROXY,
+            "effects-ran",
+            "the arrow ran a body with effects (a proxy)",
+        ),
+        Some(arrow) if arrow.never_undefined => verdict_of(
+            INFECTED,
+            "never-undefined",
+            "the arrow ran, and its body is never undefined",
+        ),
+        _ => verdict_of(
+            Status::Unknown,
+            "no-value-record",
+            "no record of the values the arrow returned",
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js_mutant_links::{ArrowLink, BranchLink, ChainLink, DecisionLink, MutantOperator};
+
+    /// A mutant of `original` on line 1, in statement `s` of function `f`.
+    fn mutant(mutator: &str, replacement: &str, original: &str) -> CandidateMutant {
+        let end = original.len() as u32 + 1;
+        CandidateMutant {
+            id: format!("a.ts:1:1-1:{end}:{mutator}:{replacement}"),
+            mutator: mutator.into(),
+            replacement: replacement.into(),
+            start: (1, 1),
+            end: (1, end),
+            original: original.into(),
+            operator: None,
+            value_used: false,
+            statement: Some("s".into()),
+            function: Some("f".into()),
+            decision: None,
+            branch: None,
+            chain: None,
+            compare: None,
+            probe: None,
+            arrow: None,
+        }
+    }
+
+    /// The same, with its operator: the first occurrence of `operator`.
+    fn operated(
+        mutator: &str,
+        replacement: &str,
+        original: &str,
+        operator: &str,
+    ) -> CandidateMutant {
+        CandidateMutant {
+            operator: Some(MutantOperator {
+                text: operator.into(),
+                at: original.find(&format!(" {operator} ")).unwrap() + 1,
+            }),
+            ..mutant(mutator, replacement, original)
+        }
+    }
+
+    fn decided(id: &str, condition: Option<usize>, prefix: Option<usize>) -> Option<DecisionLink> {
+        Some(DecisionLink {
+            id: id.into(),
+            condition,
+            prefix,
+        })
+    }
+
+    fn selection(role: BranchRole, operator: &str) -> Option<BranchLink> {
+        Some(BranchLink {
+            id: "b".into(),
+            role,
+            operator: operator.into(),
+        })
+    }
+
+    /// The statement and function ran.
+    fn ran() -> Observations {
+        let mut observations = Observations::default();
+        observations.hits.extend(["s".to_owned(), "f".to_owned()]);
+        observations
+    }
+
+    fn with_vectors(vectors: &[(&[Option<bool>], bool)]) -> Observations {
+        let mut observations = ran();
+        observations.decisions.insert(
+            "d".into(),
+            vectors
+                .iter()
+                .map(|(values, outcome)| (values.to_vec(), *outcome))
+                .collect(),
+        );
+        observations
+    }
+
+    fn with_outcomes(site: &str, outcomes: &[&str]) -> Observations {
+        let mut observations = ran();
+        observations.comparisons.insert(
+            site.into(),
+            outcomes
+                .iter()
+                .map(|outcome| (*outcome).to_owned())
+                .collect(),
+        );
+        observations
+    }
+
+    fn with_logicals(outcomes: &[(bool, bool)]) -> Observations {
+        let mut observations = ran();
+        observations
+            .logicals
+            .insert("b".into(), outcomes.iter().copied().collect());
+        observations
+    }
+
+    #[track_caller]
+    fn expect(mutant: &CandidateMutant, observations: &Observations, status: Status, code: &str) {
+        let (found, reason) = verdict(mutant, observations);
+        assert_eq!((found, reason.code), (status, code), "{reason:?}");
+    }
+
+    const NOT_REACHED: Status = Status::NotReached;
+    const NOT_INFECTED: Status = Status::NotInfected;
+    const UNKNOWN: Status = Status::Unknown;
+
+    #[test]
+    fn reach_comes_from_the_statement_and_the_function() {
+        let literal = mutant("StringLiteral", "empty", "\"x\"");
+        expect(&literal, &ran(), INFECTED, "reached");
+        expect(
+            &literal,
+            &Observations::default(),
+            NOT_REACHED,
+            "statement-not-run",
+        );
+        // A concise arrow's statement ran when the arrow was made; the arrow
+        // itself never ran.
+        let mut only_statement = Observations::default();
+        only_statement.hits.insert("s".into());
+        expect(&literal, &only_statement, NOT_REACHED, "function-not-run");
+        let outside = CandidateMutant {
+            statement: None,
+            ..literal.clone()
+        };
+        expect(&outside, &ran(), UNKNOWN, "no-statement-point");
+        for mutator in [
+            "BooleanLiteral",
+            "ArrayDeclaration",
+            "ObjectLiteral",
+            "UpdateOperator",
+        ] {
+            expect(&mutant(mutator, "x", "x"), &ran(), INFECTED, "reached");
+        }
+        expect(
+            &mutant("UnaryOperator", "-", "+a"),
+            &ran(),
+            UNKNOWN,
+            "no-rule",
+        );
+        expect(&mutant("Regex", "", "/a/"), &ran(), UNKNOWN, "regex");
+    }
+
+    #[test]
+    fn removed_blocks_and_calls_are_infected_by_proxy() {
+        let call = mutant("CallExpression", "empty", "f();");
+        expect(&call, &ran(), PROXY, "statement-ran");
+        // A function body is in no statement: its function decides.
+        let body = CandidateMutant {
+            statement: None,
+            ..mutant("BlockStatement", "{}", "{ f(); }")
+        };
+        expect(&body, &ran(), PROXY, "function-ran");
+        expect(
+            &body,
+            &Observations::default(),
+            NOT_REACHED,
+            "function-not-run",
+        );
+        let nowhere = CandidateMutant {
+            function: None,
+            ..body
+        };
+        expect(&nowhere, &ran(), UNKNOWN, "no-point");
+    }
+
+    #[test]
+    fn a_boundary_needs_equal_operands() {
+        let boundary = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", "<=", "a < b", "<")
+        };
+        expect(
+            &boundary,
+            &with_outcomes("c", &["lt", "eq"]),
+            INFECTED,
+            "operands-equal",
+        );
+        let (status, reason) = verdict(&boundary, &with_outcomes("c", &["lt", "gt"]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(reason.sentence, "`a` never equal to `b`");
+        // NaN is unequal to everything: `a < b` and `a <= b` are both false.
+        expect(
+            &boundary,
+            &with_outcomes("c", &["unordered"]),
+            NOT_INFECTED,
+            "operands-never-equal",
+        );
+        expect(
+            &boundary,
+            &with_outcomes("c", &["lt", "other"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        expect(&boundary, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        let unprobed = CandidateMutant {
+            compare: None,
+            ..boundary
+        };
+        expect(
+            &unprobed,
+            &with_outcomes("c", &["eq"]),
+            UNKNOWN,
+            "no-comparison-probe",
+        );
+    }
+
+    #[test]
+    fn a_negated_comparison_differs_wherever_it_runs_on_ordered_operands() {
+        let negated = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", ">=", "a < b", "<")
+        };
+        expect(
+            &negated,
+            &with_outcomes("c", &["gt"]),
+            INFECTED,
+            "comparison-evaluated",
+        );
+        expect(
+            &negated,
+            &with_outcomes("c", &["unordered"]),
+            NOT_INFECTED,
+            "operands-never-ordered",
+        );
+        expect(
+            &negated,
+            &with_outcomes("c", &["other"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        expect(&negated, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        // An equality's value recorded where it is a value.
+        let equality = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", "!==", "a === b", "===")
+        };
+        expect(
+            &equality,
+            &with_outcomes("c", &["false"]),
+            INFECTED,
+            "comparison-evaluated",
+        );
+        // Without a probe, the decision says whether it ran.
+        let condition = CandidateMutant {
+            decision: decided("d", Some(1), None),
+            ..operated("EqualityOperator", "!==", "a === b", "===")
+        };
+        expect(
+            &condition,
+            &with_vectors(&[(&[Some(true), Some(false)], false)]),
+            INFECTED,
+            "condition-evaluated",
+        );
+        expect(
+            &condition,
+            &with_vectors(&[(&[Some(false), None], false)]),
+            NOT_REACHED,
+            "condition-not-evaluated",
+        );
+        let whole = CandidateMutant {
+            decision: decided("d", None, None),
+            ..condition.clone()
+        };
+        expect(
+            &whole,
+            &with_vectors(&[(&[Some(true)], true)]),
+            INFECTED,
+            "decision-evaluated",
+        );
+        expect(&whole, &ran(), NOT_REACHED, "decision-not-evaluated");
+        let elsewhere = operated("EqualityOperator", "!==", "a === b", "===");
+        expect(&elsewhere, &ran(), INFECTED, "statement-ran");
+    }
+
+    #[test]
+    fn a_forced_decision_condition_or_prefix_needs_the_other_value() {
+        let whole = CandidateMutant {
+            decision: decided("d", None, None),
+            ..mutant("ConditionalExpression", "true", "a && b")
+        };
+        expect(
+            &whole,
+            &with_vectors(&[
+                (&[Some(true), Some(true)], true),
+                (&[Some(false), None], false),
+            ]),
+            INFECTED,
+            "opposite-value",
+        );
+        let (status, reason) = verdict(&whole, &with_vectors(&[(&[Some(true), Some(true)], true)]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(reason.sentence, "decision always true");
+        expect(&whole, &ran(), NOT_REACHED, "decision-not-evaluated");
+
+        let condition = CandidateMutant {
+            decision: decided("d", Some(1), None),
+            ..mutant("ConditionalExpression", "true", "b")
+        };
+        // Where `a` was false, `b` never ran: the mutant changed nothing.
+        expect(
+            &condition,
+            &with_vectors(&[
+                (&[Some(false), None], false),
+                (&[Some(true), Some(true)], true),
+            ]),
+            NOT_INFECTED,
+            "condition-always",
+        );
+        expect(
+            &condition,
+            &with_vectors(&[(&[Some(true), Some(false)], false)]),
+            INFECTED,
+            "opposite-value",
+        );
+        expect(
+            &condition,
+            &with_vectors(&[(&[Some(false), None], false)]),
+            NOT_REACHED,
+            "condition-not-evaluated",
+        );
+
+        // `(a || b) && c`: the prefix is the last of its conditions run.
+        let prefix = CandidateMutant {
+            decision: decided("d", None, Some(2)),
+            ..mutant("ConditionalExpression", "true", "a || b")
+        };
+        expect(
+            &prefix,
+            &with_vectors(&[
+                (&[Some(true), None, Some(true)], true),
+                (&[Some(false), Some(true), Some(false)], false),
+            ]),
+            NOT_INFECTED,
+            "conditions-always",
+        );
+        expect(
+            &prefix,
+            &with_vectors(&[(&[Some(false), Some(false), None], false)]),
+            INFECTED,
+            "opposite-value",
+        );
+        // A vector that recorded neither condition cannot say.
+        expect(
+            &prefix,
+            &with_vectors(&[(&[None, None, Some(true)], true)]),
+            UNKNOWN,
+            "short-circuited",
+        );
+    }
+
+    #[test]
+    fn a_truthiness_that_agrees_does_not_decide_a_value_that_is_used() {
+        let kept = CandidateMutant {
+            decision: decided("d", None, None),
+            value_used: true,
+            ..mutant("ConditionalExpression", "true", "a && b")
+        };
+        expect(
+            &kept,
+            &with_vectors(&[(&[Some(true), Some(true)], true)]),
+            UNKNOWN,
+            "value-used",
+        );
+        expect(
+            &kept,
+            &with_vectors(&[(&[Some(false), None], false)]),
+            INFECTED,
+            "opposite-value",
+        );
+    }
+
+    #[test]
+    fn a_forced_comparison_used_as_a_value_reads_its_probe() {
+        let equality = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("ConditionalExpression", "false", "a === b", "===")
+        };
+        expect(
+            &equality,
+            &with_outcomes("c", &["true"]),
+            INFECTED,
+            "opposite-value",
+        );
+        let (status, reason) = verdict(&equality, &with_outcomes("c", &["false"]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(reason.sentence, "`a === b` always false");
+        let relational = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("ConditionalExpression", "false", "a <= b", "<=")
+        };
+        expect(
+            &relational,
+            &with_outcomes("c", &["eq"]),
+            INFECTED,
+            "opposite-value",
+        );
+        // NaN makes every relational comparison false.
+        expect(
+            &relational,
+            &with_outcomes("c", &["gt", "unordered"]),
+            NOT_INFECTED,
+            "comparison-always",
+        );
+        expect(
+            &relational,
+            &with_outcomes("c", &["other"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        expect(&relational, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        expect(
+            &mutant("ConditionalExpression", "true", "a > b"),
+            &ran(),
+            UNKNOWN,
+            "no-record",
+        );
+        expect(
+            &mutant("ConditionalExpression", "empty", "case 1: f();"),
+            &ran(),
+            UNKNOWN,
+            "other-form",
+        );
+    }
+
+    #[test]
+    fn a_forced_logical_value_or_operand_reads_its_selection() {
+        let value = CandidateMutant {
+            branch: selection(BranchRole::Value, "&&"),
+            ..mutant("ConditionalExpression", "true", "a > 0 && b > 0")
+        };
+        expect(
+            &value,
+            &with_logicals(&[(false, false)]),
+            INFECTED,
+            "opposite-value",
+        );
+        expect(
+            &value,
+            &with_logicals(&[(true, true)]),
+            NOT_INFECTED,
+            "operand-always",
+        );
+        expect(&value, &ran(), NOT_REACHED, "selection-not-evaluated");
+        let kept = CandidateMutant {
+            value_used: true,
+            ..value
+        };
+        expect(
+            &kept,
+            &with_logicals(&[(true, true)]),
+            UNKNOWN,
+            "value-used",
+        );
+
+        // `a > 0 && x`: the left operand was truthy whenever the right ran.
+        let left = CandidateMutant {
+            branch: selection(BranchRole::Left, "&&"),
+            ..mutant("ConditionalExpression", "true", "a > 0")
+        };
+        expect(
+            &left,
+            &with_logicals(&[(true, false), (true, true)]),
+            NOT_INFECTED,
+            "operand-always",
+        );
+        expect(
+            &left,
+            &with_logicals(&[(false, false)]),
+            INFECTED,
+            "opposite-value",
+        );
+        let left_of_or = CandidateMutant {
+            branch: selection(BranchRole::Left, "||"),
+            ..mutant("ConditionalExpression", "false", "a > 0")
+        };
+        expect(
+            &left_of_or,
+            &with_logicals(&[(true, true)]),
+            NOT_INFECTED,
+            "operand-always",
+        );
+        expect(
+            &left_of_or,
+            &with_logicals(&[(false, true)]),
+            INFECTED,
+            "opposite-value",
+        );
+        // `x ?? (a > 0)`: the left side's truthiness is known too.
+        let coalesced = CandidateMutant {
+            branch: selection(BranchRole::Left, "??"),
+            ..mutant("ConditionalExpression", "true", "a > 0")
+        };
+        expect(
+            &coalesced,
+            &with_logicals(&[(true, true)]),
+            INFECTED,
+            "opposite-value",
+        );
+
+        let right = CandidateMutant {
+            branch: selection(BranchRole::Right, "??"),
+            ..mutant("ConditionalExpression", "true", "a > 0")
+        };
+        expect(
+            &right,
+            &with_logicals(&[(true, true), (false, false)]),
+            NOT_INFECTED,
+            "operand-always",
+        );
+        expect(
+            &right,
+            &with_logicals(&[(true, false)]),
+            INFECTED,
+            "opposite-value",
+        );
+        // The right side never ran: neither did the mutant.
+        expect(
+            &right,
+            &with_logicals(&[(false, true)]),
+            NOT_REACHED,
+            "operand-not-evaluated",
+        );
+    }
+
+    #[test]
+    fn an_optional_link_is_infected_by_a_nullish_receiver() {
+        let link = CandidateMutant {
+            chain: Some(ChainLink {
+                id: "o".into(),
+                earlier: vec!["e".into()],
+            }),
+            ..mutant("OptionalChaining", ".b", "x?.a?.b")
+        };
+        let hits = |ids: &[&str]| {
+            let mut observations = ran();
+            observations
+                .hits
+                .extend(ids.iter().map(|id| (*id).to_owned()));
+            observations
+        };
+        expect(
+            &link,
+            &hits(&["o:short", "o:continued"]),
+            INFECTED,
+            "nullish-seen",
+        );
+        let (status, reason) = verdict(&link, &hits(&["o:continued"]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(
+            reason.sentence,
+            "the receiver of `.b` in `x?.a?.b` never null or undefined"
+        );
+        expect(
+            &link,
+            &hits(&["e:short"]),
+            NOT_INFECTED,
+            "earlier-link-nullish",
+        );
+        expect(
+            &link,
+            &hits(&["e:continued"]),
+            NOT_REACHED,
+            "chain-not-evaluated",
+        );
+        let unlinked = mutant("OptionalChaining", ".b", "x?.b");
+        expect(&unlinked, &ran(), UNKNOWN, "no-chain-point");
+        // Hits are recorded in a server process too: nothing to downgrade.
+        let mut server = hits(&["o:continued"]);
+        server.server_hits.insert("s".into());
+        expect(&link, &server, NOT_INFECTED, "never-nullish");
+    }
+
+    #[test]
+    fn two_conditions_swap_their_operator_where_they_differ() {
+        let swapped = CandidateMutant {
+            decision: decided("d", None, None),
+            ..operated("LogicalOperator", "||", "a && b", "&&")
+        };
+        expect(
+            &swapped,
+            &with_vectors(&[(&[Some(true), Some(false)], false)]),
+            INFECTED,
+            "operands-differ",
+        );
+        let (status, reason) = verdict(
+            &swapped,
+            &with_vectors(&[(&[Some(true), Some(true)], true)]),
+        );
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(
+            reason.sentence,
+            "`a` and `b` never one true and the other false"
+        );
+        // `a` false: the original never ran `b`, the mutant would have.
+        expect(
+            &swapped,
+            &with_vectors(&[
+                (&[Some(false), None], false),
+                (&[Some(true), Some(true)], true),
+            ]),
+            UNKNOWN,
+            "short-circuited",
+        );
+        expect(&swapped, &ran(), NOT_REACHED, "decision-not-evaluated");
+        let kept = CandidateMutant {
+            value_used: true,
+            ..swapped.clone()
+        };
+        expect(
+            &kept,
+            &with_vectors(&[(&[Some(true), Some(true)], true)]),
+            UNKNOWN,
+            "value-used",
+        );
+        // The first two of more conditions.
+        let prefix = CandidateMutant {
+            decision: decided("d", None, Some(2)),
+            ..swapped.clone()
+        };
+        expect(
+            &prefix,
+            &with_vectors(&[(&[Some(false), Some(true), Some(true)], true)]),
+            INFECTED,
+            "operands-differ",
+        );
+        // The whole of three conditions is no pair.
+        expect(
+            &swapped,
+            &with_vectors(&[(&[Some(true), Some(true), Some(true)], true)]),
+            UNKNOWN,
+            "no-selection-point",
+        );
+    }
+
+    #[test]
+    fn a_swapped_logical_value_follows_its_outcomes() {
+        let case = |operator: &str, replacement: &str| CandidateMutant {
+            branch: selection(BranchRole::Value, operator),
+            ..operated(
+                "LogicalOperator",
+                replacement,
+                &format!("a {operator} b"),
+                operator,
+            )
+        };
+        let and = case("&&", "||");
+        expect(
+            &and,
+            &with_logicals(&[(true, false)]),
+            INFECTED,
+            "operators-differ",
+        );
+        expect(
+            &and,
+            &with_logicals(&[(true, true), (false, false)]),
+            UNKNOWN,
+            "not-decisive",
+        );
+        expect(&and, &ran(), NOT_REACHED, "selection-not-evaluated");
+        let or = case("||", "&&");
+        expect(
+            &or,
+            &with_logicals(&[(true, true)]),
+            INFECTED,
+            "operators-differ",
+        );
+        expect(
+            &or,
+            &with_logicals(&[(false, true)]),
+            UNKNOWN,
+            "not-decisive",
+        );
+        let coalesce = case("??", "&&");
+        expect(
+            &coalesce,
+            &with_logicals(&[(false, false)]),
+            NOT_INFECTED,
+            "same-value",
+        );
+        expect(
+            &coalesce,
+            &with_logicals(&[(true, true)]),
+            INFECTED,
+            "operators-differ",
+        );
+        expect(
+            &coalesce,
+            &with_logicals(&[(false, false), (false, true)]),
+            UNKNOWN,
+            "not-decisive",
+        );
+        expect(
+            &operated("LogicalOperator", "||", "a && b", "&&"),
+            &ran(),
+            UNKNOWN,
+            "no-selection-point",
+        );
+    }
+
+    #[test]
+    fn arithmetic_assignment_and_method_probes_compare_the_replacement() {
+        let arithmetic = CandidateMutant {
+            probe: Some("p".into()),
+            ..operated("ArithmeticOperator", "-", "a + b", "+")
+        };
+        expect(
+            &arithmetic,
+            &with_outcomes("p", &["same", "differs"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        let (status, reason) = verdict(&arithmetic, &with_outcomes("p", &["same"]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(
+            reason.sentence,
+            "`a + b` and `a - b` always gave the same value"
+        );
+        expect(
+            &arithmetic,
+            &with_outcomes("p", &["same", "unknown"]),
+            UNKNOWN,
+            "undecided",
+        );
+        // A probe placed and no record: the expression never ran.
+        expect(&arithmetic, &ran(), NOT_REACHED, "not-evaluated");
+        let unprobed = CandidateMutant {
+            probe: None,
+            ..arithmetic.clone()
+        };
+        expect(&unprobed, &ran(), UNKNOWN, "no-probe");
+        let assignment = CandidateMutant {
+            probe: Some("p".into()),
+            ..operated("AssignmentOperator", "-=", "x += 1", "+=")
+        };
+        expect(
+            &assignment,
+            &with_outcomes("p", &["differs"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        let logical = operated("AssignmentOperator", "&&=", "x ||= y", "||=");
+        expect(&logical, &ran(), UNKNOWN, "logical-assignment");
+        // A method on a receiver that is not a built-in records nothing.
+        let method = CandidateMutant {
+            probe: Some("p".into()),
+            ..mutant("MethodExpression", "every", "xs.some(f)")
+        };
+        expect(&method, &ran(), UNKNOWN, "no-method-record");
+        let (status, reason) = verdict(&method, &with_outcomes("p", &["same"]));
+        assert_eq!(status, NOT_INFECTED);
+        assert_eq!(
+            reason.sentence,
+            "`xs.some(f)` and its `every` always gave the same value"
+        );
+    }
+
+    #[test]
+    fn an_arrow_is_decided_by_its_values_or_by_its_body() {
+        let probed = CandidateMutant {
+            probe: Some("p".into()),
+            arrow: Some(ArrowLink {
+                effects: false,
+                never_undefined: false,
+            }),
+            ..mutant("ArrowFunction", "undefined", "(x) => x.id")
+        };
+        expect(
+            &probed,
+            &with_outcomes("p", &["undefined", "defined"]),
+            INFECTED,
+            "returned-value",
+        );
+        expect(
+            &probed,
+            &with_outcomes("p", &["undefined"]),
+            NOT_INFECTED,
+            "always-undefined",
+        );
+        expect(&probed, &ran(), UNKNOWN, "no-value-record");
+        let effects = CandidateMutant {
+            probe: None,
+            arrow: Some(ArrowLink {
+                effects: true,
+                never_undefined: false,
+            }),
+            ..probed.clone()
+        };
+        expect(&effects, &ran(), PROXY, "effects-ran");
+        let defined = CandidateMutant {
+            probe: None,
+            arrow: Some(ArrowLink {
+                effects: false,
+                never_undefined: true,
+            }),
+            ..probed.clone()
+        };
+        expect(&defined, &ran(), INFECTED, "never-undefined");
+        let mut only_statement = Observations::default();
+        only_statement.hits.insert("s".into());
+        expect(&defined, &only_statement, NOT_REACHED, "function-not-run");
+        let pointless = CandidateMutant {
+            function: None,
+            ..defined
+        };
+        expect(&pointless, &ran(), UNKNOWN, "no-function-point");
+    }
+
+    #[test]
+    fn a_verdict_from_outcomes_a_server_process_does_not_record_is_unknown_there() {
+        let mut server = ran();
+        server.server_hits.insert("s".into());
+        let boundary = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", "<=", "a < b", "<")
+        };
+        // No record, and outcomes that say "never equal": both may be the
+        // server's silence.
+        expect(&boundary, &server, UNKNOWN, "server-process");
+        let mut never_equal = with_outcomes("c", &["lt"]);
+        never_equal.server_hits.insert("s".into());
+        expect(&boundary, &never_equal, UNKNOWN, "server-process");
+        // An infection seen is seen.
+        let mut equal = with_outcomes("c", &["eq"]);
+        equal.server_hits.insert("s".into());
+        expect(&boundary, &equal, INFECTED, "operands-equal");
+        let arithmetic = CandidateMutant {
+            probe: Some("p".into()),
+            ..operated("ArithmeticOperator", "-", "a + b", "+")
+        };
+        expect(&arithmetic, &server, UNKNOWN, "server-process");
+        let selection = CandidateMutant {
+            branch: selection(BranchRole::Value, "&&"),
+            ..mutant("ConditionalExpression", "true", "a > 0 && b > 0")
+        };
+        expect(&selection, &server, UNKNOWN, "server-process");
+        // Decision vectors are recorded there: a verdict from them stands.
+        let mut vectors = with_vectors(&[(&[Some(true), Some(true)], true)]);
+        vectors.server_hits.insert("s".into());
+        let decision = CandidateMutant {
+            decision: decided("d", None, None),
+            ..mutant("ConditionalExpression", "true", "a && b")
+        };
+        expect(&decision, &vectors, NOT_INFECTED, "decision-always");
+        // A statement never run is not reached wherever the code lives.
+        let mut elsewhere = Observations::default();
+        elsewhere.server_hits.insert("t".into());
+        expect(&boundary, &elsewhere, NOT_REACHED, "statement-not-run");
+    }
+}
