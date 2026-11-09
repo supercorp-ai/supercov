@@ -2264,10 +2264,12 @@ function compareRelation(left, right) {
   }
   return "other";
 }
+// Op 4: an equality the program evaluated as the argument; its value is
+// recorded as "true" or "false" and handed back.
 function compareV2(site, left, right, op) {
-  const result = op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
+  const result = op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
   try {
-    const relation = compareRelation(left, right);
+    const relation = op === 4 ? result ? "true" : "false" : compareRelation(left, right);
     let outcomes = state.comparisons.get(site);
     if (outcomes === void 0) {
       outcomes = /* @__PURE__ */ new Set();

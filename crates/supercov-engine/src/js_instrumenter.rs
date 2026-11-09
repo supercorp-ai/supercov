@@ -3691,6 +3691,132 @@ fn comparisons_enabled() -> bool {
     std::env::var_os("SUPERCOV_COMPARISONS").is_some_and(|value| value == "1")
 }
 
+/// The equality comparisons (`===`, `!==`, `==`, `!=`) whose value can be
+/// recorded without changing what TypeScript infers: those whose result is
+/// only a value -- an object property, an argument, an array element, a JSX
+/// value, an assignment's right side, a template's part -- and a returned one
+/// unless an operand is a bare name, which TypeScript 5.5 may turn into an
+/// inferred type predicate. Conditions, `&&` / `||` / `??` operands and
+/// constants' initializers narrow, and are left as written (their values are
+/// recorded elsewhere, by the decisions and the logical outcomes).
+#[derive(Default)]
+struct EqualityValueSites {
+    sites: HashSet<SpanKey>,
+}
+
+impl EqualityValueSites {
+    fn equality(expression: &Expression<'_>) -> Option<Span> {
+        let mut expression = expression;
+        while let Expression::ParenthesizedExpression(inner) = expression {
+            expression = &inner.expression;
+        }
+        match expression {
+            Expression::BinaryExpression(binary)
+                if matches!(
+                    binary.operator,
+                    BinaryOperator::StrictEquality
+                        | BinaryOperator::StrictInequality
+                        | BinaryOperator::Equality
+                        | BinaryOperator::Inequality
+                ) =>
+            {
+                Some(binary.span)
+            }
+            _ => None,
+        }
+    }
+
+    fn bare_name(expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::Identifier(_) => true,
+            Expression::ParenthesizedExpression(inner) => Self::bare_name(&inner.expression),
+            Expression::UnaryExpression(unary) => {
+                unary.operator == UnaryOperator::Typeof && Self::bare_name(&unary.argument)
+            }
+            _ => false,
+        }
+    }
+
+    fn note(&mut self, expression: &Expression<'_>) {
+        if let Some(span) = Self::equality(expression) {
+            self.sites.insert(span_key(span));
+        }
+    }
+
+    fn note_returned(&mut self, expression: &Expression<'_>) {
+        let mut inner = expression;
+        while let Expression::ParenthesizedExpression(parenthesized) = inner {
+            inner = &parenthesized.expression;
+        }
+        if let Expression::BinaryExpression(binary) = inner
+            && (Self::bare_name(&binary.left) || Self::bare_name(&binary.right))
+        {
+            return;
+        }
+        self.note(expression);
+    }
+}
+
+impl<'a> Visit<'a> for EqualityValueSites {
+    fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
+        if !property.method && !property.shorthand {
+            self.note(&property.value);
+        }
+        walk::walk_object_property(self, property);
+    }
+
+    fn visit_argument(&mut self, argument: &Argument<'a>) {
+        if let Some(expression) = argument.as_expression() {
+            self.note(expression);
+        }
+        walk::walk_argument(self, argument);
+    }
+
+    fn visit_array_expression_element(&mut self, element: &ArrayExpressionElement<'a>) {
+        if let Some(expression) = element.as_expression() {
+            self.note(expression);
+        }
+        walk::walk_array_expression_element(self, element);
+    }
+
+    fn visit_jsx_expression_container(&mut self, container: &JSXExpressionContainer<'a>) {
+        if let Some(expression) = container.expression.as_expression() {
+            self.note(expression);
+        }
+        walk::walk_jsx_expression_container(self, container);
+    }
+
+    fn visit_template_literal(&mut self, template: &oxc_ast::ast::TemplateLiteral<'a>) {
+        for expression in &template.expressions {
+            self.note(expression);
+        }
+        walk::walk_template_literal(self, template);
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if assignment.operator == AssignmentOperator::Assign {
+            self.note(&assignment.right);
+        }
+        walk::walk_assignment_expression(self, assignment);
+    }
+
+    fn visit_return_statement(&mut self, statement: &oxc_ast::ast::ReturnStatement<'a>) {
+        if let Some(argument) = &statement.argument {
+            self.note_returned(argument);
+        }
+        walk::walk_return_statement(self, statement);
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        if arrow.expression
+            && let [Statement::ExpressionStatement(statement)] = arrow.body.statements.as_slice()
+        {
+            self.note_returned(&statement.expression);
+        }
+        walk::walk_arrow_function_expression(self, arrow);
+    }
+}
+
 /// `a < b` as `compareV2("file:line:column", a, b, 0)`: the runtime evaluates
 /// the operands' relation once, from the values the program computed, and
 /// returns the comparison's own result. Relational operators narrow no types,
@@ -3698,6 +3824,7 @@ fn comparisons_enabled() -> bool {
 struct ComparisonTransformer<'a, 'b> {
     ast: AstBuilder<'a>,
     compare_v2: String,
+    equality_sites: HashSet<SpanKey>,
     file: &'b str,
     source: &'b str,
     source_sensitive_functions: HashSet<SpanKey>,
@@ -3734,6 +3861,14 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
             BinaryOperator::LessEqualThan => 1,
             BinaryOperator::GreaterThan => 2,
             BinaryOperator::GreaterEqualThan => 3,
+            BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality
+            | BinaryOperator::Equality
+            | BinaryOperator::Inequality
+                if self.equality_sites.contains(&span_key(binary.span)) =>
+            {
+                4
+            }
             _ => return,
         };
         // Generated comparisons (loop counters a pass added) have no source.
@@ -3743,8 +3878,25 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
         let (line, column) = line_and_utf16_column(self.source, binary.span.start as usize);
         let site = format!("{}:{}:{}", self.file, line, column);
         let span = binary.span;
-        let left = binary.left.take_in(self.ast.allocator);
-        let right = binary.right.take_in(self.ast.allocator);
+        // An equality's own value is what is recorded: the comparison stays
+        // whole, as the call's argument, and is evaluated once, there.
+        let (left, right) = if code == 4 {
+            let whole = expression.take_in(self.ast.allocator);
+            (
+                whole,
+                self.ast.expression_numeric_literal(
+                    Span::default(),
+                    0.0,
+                    None,
+                    NumberBase::Decimal,
+                ),
+            )
+        } else {
+            (
+                binary.left.take_in(self.ast.allocator),
+                binary.right.take_in(self.ast.allocator),
+            )
+        };
         *expression = self.ast.expression_call(
             span,
             self.ast
@@ -4223,6 +4375,8 @@ fn instrument_candidate_with_binding(
         value_logical_nodes: HashSet::new(),
     };
     collector.visit_program(&parsed.program);
+    let mut equality_values = EqualityValueSites::default();
+    equality_values.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
         &allocator,
         &mut parsed.program,
@@ -4599,6 +4753,7 @@ fn instrument_candidate_with_binding(
     let mut comparison_transformer = ComparisonTransformer {
         ast,
         compare_v2: compare_v2.clone(),
+        equality_sites: equality_values.sites,
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
@@ -13463,6 +13618,34 @@ export function shapes(n: number): unknown {
                 probed.code.contains(expected),
                 "missing {expected}:\n{}",
                 probed.code
+            );
+        }
+        // Equalities: recorded where their value is only a value, left as
+        // written where TypeScript narrows through them.
+        let source = "export function g(x: string | null, s: { status: string }, n: number) {\n  const o = { main: s.status === 'a', both: x !== null && x.length > n };\n  if (x === null) return [s.status !== 'b'];\n  const named = x === 'y';\n  return x === 'z';\n}\nexport const h = (s: { status: string }) => s.status === 'active';\n";
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
+        let equalities = instrument_candidate(source, "src/equal.ts");
+        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
+        let equalities = equalities.unwrap().code;
+        for expected in [
+            "\"src/equal.ts:2:21\", s.status === \"a\", 0, 4)",
+            "\"src/equal.ts:3:27\", s.status !== \"b\", 0, 4)",
+            "\"src/equal.ts:7:45\", s.status === \"active\", 0, 4)",
+        ] {
+            assert!(
+                equalities.contains(expected),
+                "missing {expected}:\n{equalities}"
+            );
+        }
+        for untouched in [
+            "src/equal.ts:2:45",
+            "src/equal.ts:3:7",
+            "src/equal.ts:4:17",
+            "src/equal.ts:5:10",
+        ] {
+            assert!(
+                !equalities.contains(untouched),
+                "{untouched} must stay as written:\n{equalities}"
             );
         }
         // The manifest still names each condition by its source text.
