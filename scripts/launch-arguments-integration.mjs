@@ -232,7 +232,7 @@ function observe(launcher, shell, cwd, commandLine, expected, extraEnv = {}) {
     npmConfigArgv: seen?.npm_config_argv ?? null,
     userAgent: seen?.user_agent ?? null,
     status: result.status,
-    output: ok ? undefined : `${result.stderr}\n${result.stdout}`.trim().slice(-800),
+    output: exact || recovered ? undefined : `${result.stderr}\n${result.stdout}`.trim().slice(-800),
   });
 }
 
