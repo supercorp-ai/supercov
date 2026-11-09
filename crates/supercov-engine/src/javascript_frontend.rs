@@ -2094,6 +2094,7 @@ pub fn prepare_javascript_frontend(
                 crate::coverage_report::ProbeTableIds {
                     points: table.points,
                     decisions: table.decisions,
+                    follows: table.follows,
                 },
             );
         }

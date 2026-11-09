@@ -97,6 +97,10 @@ pub struct CoverageManifest {
 pub struct ProbeTableIds {
     pub points: Vec<String>,
     pub decisions: Vec<String>,
+    /// Places whose probe the module dropped for the probe right before it,
+    /// as `[place, leader]`: each hit of the leader is the place's hit too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follows: Vec<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3751,51 +3755,123 @@ fn resolve_probe_places(
     if tables.is_empty() {
         return;
     }
-    let places = ProbePlaces(
-        tables
+    let places = ProbePlaces {
+        tables: tables
             .iter()
             .map(|(key, table)| (key.as_str(), table))
             .collect(),
-    );
+        followers: tables
+            .iter()
+            .filter(|(_, table)| !table.follows.is_empty())
+            .map(|(key, table)| {
+                let mut followers = std::collections::HashMap::<usize, Vec<&str>>::new();
+                for [place, leader] in &table.follows {
+                    if let Some(id) = table.points.get(*place) {
+                        followers.entry(*leader).or_default().push(id);
+                    }
+                }
+                (key.as_str(), followers)
+            })
+            .collect(),
+    };
     for raw in raw_results.iter_mut() {
         for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
-            for id in &mut snapshot.hits {
-                places.point(id);
+            // A dropped probe's hit comes right after its leader's, where
+            // the probe ran.
+            let hits = std::mem::take(&mut snapshot.hits);
+            snapshot.hits.reserve(hits.len());
+            for mut id in hits {
+                let followers = places.followers(&id);
+                places.point(&mut id);
+                snapshot.hits.push(id);
+                snapshot
+                    .hits
+                    .extend(followers.iter().map(|follower| (*follower).to_owned()));
             }
             for decision in &mut snapshot.decisions {
                 places.decision(&mut decision.id);
             }
-            for event in &mut snapshot.events {
-                match event.event_type.as_str() {
-                    "hit" => places.point(&mut event.id),
-                    "decision" => places.decision(&mut event.id),
-                    _ => {}
-                }
+            let events = std::mem::take(&mut snapshot.events);
+            snapshot.events.reserve(events.len());
+            for mut event in events {
+                let followers = match event.event_type.as_str() {
+                    "hit" => {
+                        let followers = places.followers(&event.id);
+                        places.point(&mut event.id);
+                        followers
+                    }
+                    "decision" => {
+                        places.decision(&mut event.id);
+                        &[]
+                    }
+                    _ => &[],
+                };
+                let copies = followers
+                    .iter()
+                    .map(|follower| RuntimeEvent {
+                        id: (*follower).to_owned(),
+                        ..event.clone()
+                    })
+                    .collect::<Vec<_>>();
+                snapshot.events.push(event);
+                snapshot.events.extend(copies);
             }
             places.logicals(&mut snapshot.logicals);
         }
-        for record in &mut raw.server {
-            let Some(id) = record.id.as_mut() else {
-                continue;
-            };
-            match record.record_type.as_str() {
-                "hit" => places.point(id),
-                "decision" => places.decision(id),
-                _ => {}
+        let records = std::mem::take(&mut raw.server);
+        raw.server.reserve(records.len());
+        for mut record in records {
+            let mut copies = Vec::new();
+            if let Some(id) = record.id.as_mut() {
+                match record.record_type.as_str() {
+                    "hit" => {
+                        let followers = places.followers(id);
+                        places.point(id);
+                        copies.extend(followers.iter().map(|follower| ServerRecord {
+                            id: Some((*follower).to_owned()),
+                            ..record.clone()
+                        }));
+                    }
+                    "decision" => places.decision(id),
+                    _ => {}
+                }
             }
+            raw.server.push(record);
+            raw.server.extend(copies);
         }
     }
 }
 
-struct ProbePlaces<'a>(std::collections::HashMap<&'a str, &'a ProbeTableIds>);
+struct ProbePlaces<'a> {
+    tables: std::collections::HashMap<&'a str, &'a ProbeTableIds>,
+    /// For each table with dropped probes, the ids each leader place carries.
+    followers: std::collections::HashMap<&'a str, std::collections::HashMap<usize, Vec<&'a str>>>,
+}
 
-impl ProbePlaces<'_> {
+impl<'a> ProbePlaces<'a> {
+    /// The ids whose probes were dropped for the point `name` labels.
+    fn followers(&self, name: &str) -> &[&'a str] {
+        let Some((key, place)) = name
+            .strip_prefix("~p")
+            .and_then(|rest| rest.split_once('.'))
+        else {
+            return &[];
+        };
+        let Ok(place) = place.parse::<usize>() else {
+            return &[];
+        };
+        self.followers
+            .get(key)
+            .and_then(|followers| followers.get(&place))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The id `~<kind><key>.<place>` names, when it is one.
     fn id(&self, name: &str, kind: char) -> Option<&String> {
         let rest = name.strip_prefix('~')?.strip_prefix(kind)?;
         let (key, place) = rest.split_once('.')?;
         let place = place.parse::<usize>().ok()?;
-        let table = self.0.get(key)?;
+        let table = self.tables.get(key)?;
         if kind == 'p' {
             table.points.get(place)
         } else {
@@ -4261,6 +4337,7 @@ mod tests {
                     "plain".into(),
                 ],
                 decisions: vec!["d1".into()],
+                follows: Vec::new(),
             },
         )]);
         let mut result = raw(
@@ -4366,6 +4443,69 @@ mod tests {
                 .map(|record| record.id.as_deref().unwrap())
                 .collect::<Vec<_>>(),
             ["s1", "d1", "~pk.0"]
+        );
+    }
+
+    /// A probe dropped for the one before it is hit wherever that one is:
+    /// in the hits, the events and the server's records, right after it, in
+    /// its phase and at its time.
+    #[test]
+    fn a_dropped_probe_is_hit_with_its_leader() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec!["f".into(), "s1".into(), "s2".into(), "s3".into()],
+                decisions: Vec::new(),
+                follows: vec![[1, 0], [2, 0]],
+            },
+        )]);
+        let mut result = raw("a", 0, "passed", &["~pk.0", "~pk.3"]);
+        let event = |id: &str, timestamp_ms: i64| RuntimeEvent {
+            event_type: "hit".into(),
+            id: id.into(),
+            vector: None,
+            timestamp_ms,
+            phase_id: Some("p".into()),
+            environment: "browser".into(),
+        };
+        result.runtime[0].events = vec![event("~pk.3", 1), event("~pk.0", 2)];
+        result.server = vec![ServerRecord {
+            record_type: "hit".into(),
+            vector: None,
+            id: Some("~pk.0".into()),
+            timestamp_ms: Some(3),
+            phase_id: Some("p".into()),
+            scope: None,
+            request: Some(4),
+        }];
+        let mut results = vec![result];
+        resolve_probe_places(&mut results, &tables);
+        let result = &results[0];
+        assert_eq!(result.runtime[0].hits, ["f", "s1", "s2", "s3"]);
+        assert_eq!(
+            result.runtime[0].events,
+            [
+                event("s3", 1),
+                event("f", 2),
+                event("s1", 2),
+                event("s2", 2)
+            ]
+        );
+        assert_eq!(
+            result
+                .server
+                .iter()
+                .map(|record| (
+                    record.id.as_deref().unwrap(),
+                    record.timestamp_ms,
+                    record.request
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("f", Some(3), Some(4)),
+                ("s1", Some(3), Some(4)),
+                ("s2", Some(3), Some(4))
+            ]
         );
     }
 

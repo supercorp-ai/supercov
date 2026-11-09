@@ -121,13 +121,22 @@ pub struct ProbeTable {
     pub key: String,
     pub points: Vec<String>,
     pub decisions: Vec<String>,
+    /// Places whose probe was dropped for the one right before it, as
+    /// `[place, leader]`: the leader's hit is the place's as well.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follows: Vec<[usize; 2]>,
 }
 
 impl ProbeTable {
     /// The key is a digest of the file and both lists, so a module built
     /// again from the same source -- a bundler's cache -- names the same
     /// table, and two different tables never share a key.
-    pub fn new(file: &str, points: Vec<String>, decisions: Vec<String>) -> Self {
+    pub fn new(
+        file: &str,
+        points: Vec<String>,
+        decisions: Vec<String>,
+        follows: Vec<[usize; 2]>,
+    ) -> Self {
         let mut digest = Sha256::new();
         for part in [file]
             .into_iter()
@@ -138,6 +147,12 @@ impl ProbeTable {
             digest.update((part.len() as u64).to_le_bytes());
             digest.update(part.as_bytes());
         }
+        // Which probes were dropped is part of the table: one module built
+        // with them and one without must not share a key.
+        for [place, leader] in &follows {
+            digest.update((*place as u64).to_le_bytes());
+            digest.update((*leader as u64).to_le_bytes());
+        }
         let key = digest.finalize()[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -146,7 +161,149 @@ impl ProbeTable {
             key,
             points,
             decisions,
+            follows,
         }
+    }
+}
+
+/// Drops each statement probe that comes right after another statement
+/// probe in the same list, and returns the dropped places beside the probe
+/// that stays. Nothing runs between two such probes and nothing can jump
+/// between them, so the second runs exactly when the first does, in the
+/// same phase: a function's entry and its first statement, a statement and
+/// the next. The report gives the first's hits to both; the module carries a
+/// probe fewer, which the browser parses, compiles and runs on every load.
+///
+/// Both probes must be statement points, each named by that one call in the
+/// module and by an id no other place has: a place another call names can
+/// be hit without its neighbour, and one whose id repeats is recorded under
+/// the first place with that id.
+fn merge_adjacent_probes(
+    program: &mut Program<'_>,
+    hit: &str,
+    file: &str,
+    statement_points: &[String],
+    repeated: &[usize],
+) -> Vec<[usize; 2]> {
+    let mut named = PlacesNamed {
+        file,
+        counts: HashMap::new(),
+    };
+    named.visit_program(program);
+    let shared = repeated.iter().copied().collect::<HashSet<_>>();
+    let mergeable = (0..statement_points.len())
+        .filter(|place| named.counts.get(place) == Some(&1) && !shared.contains(place))
+        .collect();
+    let mut merger = AdjacentProbeMerger {
+        hit,
+        file,
+        mergeable,
+        follows: Vec::new(),
+    };
+    merger.visit_program(program);
+    merger.follows.sort_unstable();
+    merger.follows
+}
+
+/// How many calls name each place, as `(file, place, ...)`.
+struct PlacesNamed<'n> {
+    file: &'n str,
+    counts: HashMap<usize, usize>,
+}
+
+impl<'a> Visit<'a> for PlacesNamed<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Some(place) = place_argument(call, self.file) {
+            *self.counts.entry(place).or_default() += 1;
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+/// The place a call names after the file, as in `hit(file, place)`.
+fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
+    let [first, second, ..] = call.arguments.as_slice() else {
+        return None;
+    };
+    let Argument::Identifier(identifier) = first else {
+        return None;
+    };
+    if identifier.name != file {
+        return None;
+    }
+    let Argument::NumericLiteral(number) = second else {
+        return None;
+    };
+    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+}
+
+/// The place of a statement probe, `clock.fast && hits[place] === clock.epoch
+/// || hit(file, place);`.
+fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    let Expression::LogicalExpression(logical) = &statement.expression else {
+        return None;
+    };
+    if logical.operator != LogicalOperator::Or {
+        return None;
+    }
+    let Expression::LogicalExpression(guard) = &logical.left else {
+        return None;
+    };
+    if guard.operator != LogicalOperator::And {
+        return None;
+    }
+    let Expression::CallExpression(call) = &logical.right else {
+        return None;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return None;
+    };
+    if callee.name != hit || call.arguments.len() != 2 {
+        return None;
+    }
+    place_argument(call, file)
+}
+
+struct AdjacentProbeMerger<'n> {
+    hit: &'n str,
+    file: &'n str,
+    mergeable: HashSet<usize>,
+    follows: Vec<[usize; 2]>,
+}
+
+impl<'a> VisitMut<'a> for AdjacentProbeMerger<'_> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        walk_mut::walk_statements(self, statements);
+        let mut leader = None;
+        let mut keep = Vec::with_capacity(statements.len());
+        for statement in statements.iter() {
+            let place = statement_probe_place(statement, self.hit, self.file);
+            let dropped = match (leader, place) {
+                (Some(first), Some(place))
+                    if self.mergeable.contains(&first) && self.mergeable.contains(&place) =>
+                {
+                    self.follows.push([place, first]);
+                    true
+                }
+                _ => false,
+            };
+            if !dropped {
+                leader = place;
+            }
+            keep.push(!dropped);
+        }
+        if keep.iter().all(|kept| *kept) {
+            return;
+        }
+        let mut index = 0;
+        statements.retain(|_| {
+            let kept = keep[index];
+            index += 1;
+            kept
+        });
     }
 }
 
@@ -4571,20 +4728,29 @@ fn instrument_candidate_with_binding(
     // at the top of the module, where a bundler that drops a route's
     // server-only `loader` and `action` keeps it, and it carried their
     // conditions (`process.env.QSTASH_RETRIES`) into browser chunks.
+    let point_ids = point_analysis
+        .points
+        .iter()
+        .map(|point| point.id.clone())
+        .chain(default_point_ids.iter().cloned())
+        .chain(extra.ids.iter().cloned())
+        .collect::<Vec<_>>();
+    let follows = merge_adjacent_probes(
+        &mut parsed.program,
+        &coverage_hit_v2,
+        &probe_file_v2,
+        &point_ids[..point_analysis.points.len()],
+        &repeated_places(&point_ids),
+    );
     let probe_table = ProbeTable::new(
         file,
-        point_analysis
-            .points
-            .iter()
-            .map(|point| point.id.clone())
-            .chain(default_point_ids.iter().cloned())
-            .chain(extra.ids.iter().cloned())
-            .collect(),
+        point_ids,
         collector
             .decisions
             .iter()
             .map(|decision| decision.id.clone())
             .collect(),
+        follows,
     );
     let mut registration = serde_json::json!({
         "key": &probe_table.key,
@@ -10995,6 +11161,52 @@ export const r = v && w && q;
         assert_eq!(again.probe_table.as_ref(), Some(table));
         let other = instrument_candidate(source, "src/other.js").unwrap();
         assert_ne!(other.probe_table.unwrap().key, table.key);
+    }
+
+    /// A function's entry and its first statement are one probe, which the
+    /// table says is both; a statement after a call keeps its own, since the
+    /// call can throw before it.
+    #[test]
+    fn a_probe_right_after_another_is_carried_by_it() {
+        let source = "export function f(x) {\n  const y = g(x);\n  return y;\n}\n";
+        let output = instrument_candidate(source, "src/f.js").unwrap();
+        let table = output.probe_table.as_ref().unwrap();
+        assert_eq!(table.follows.len(), 1, "{}", output.code);
+        let [place, leader] = table.follows[0];
+        let id = |place: usize| table.points[place].as_str();
+        let point = |id: &str| output.points.iter().find(|point| point.id == id).unwrap();
+        assert_eq!(point(id(leader)).kind, "function", "{:?}", table);
+        assert_eq!(point(id(place)).kind, "statement", "{:?}", table);
+        let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
+        assert!(probed(leader) && !probed(place), "{}", output.code);
+        // The statement after the call keeps its probe.
+        assert_eq!(
+            output.code.matches(".fast &&").count(),
+            2,
+            "{}",
+            output.code
+        );
+        // Another table than a module with every probe would name.
+        assert_eq!(
+            table.key,
+            ProbeTable::new(
+                "src/f.js",
+                table.points.clone(),
+                table.decisions.clone(),
+                table.follows.clone()
+            )
+            .key
+        );
+        assert_ne!(
+            table.key,
+            ProbeTable::new(
+                "src/f.js",
+                table.points.clone(),
+                table.decisions.clone(),
+                Vec::new()
+            )
+            .key
+        );
     }
 
     #[test]
