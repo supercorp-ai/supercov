@@ -162,6 +162,7 @@ jobs:
             ${{ runner.temp }}/speed/profile-top-*.txt
             ${{ runner.temp }}/speed/profile-processes-*.txt
             ${{ runner.temp }}/speed/profile-callers-*.txt
+            ${{ runner.temp }}/speed/browser-profile-*
             ${{ runner.temp }}/speed/logs/
             ${{ runner.temp }}/speed/results/**/trace.zip
           retention-days: 7

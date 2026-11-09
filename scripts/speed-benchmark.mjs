@@ -181,6 +181,10 @@ export default {
   workers: 1,
   retries: 0,
   reporter: [['list'], ['json']],
+  // The profiled pass reads the pages' JavaScript through a port of its own.
+  ...(process.env.SPEED_DEVTOOLS_PORT
+    ? { use: { ...base.use, launchOptions: { args: [\`--remote-debugging-port=\${process.env.SPEED_DEVTOOLS_PORT}\`] } } }
+    : {}),
   webServer: {
     ...base.webServer,
     command: 'NODE_ENV=test npx next build && npx next start --port 3002',
@@ -196,6 +200,7 @@ export default {
     return {
       project,
       description: 'the e2e suite once',
+      browserProfile: true,
       suites: [
         { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
         // A slow runner times a test out now and then: counted, and the
@@ -246,7 +251,7 @@ export default {
 };
 const application = process.env.SPEED_APP ?? 'bulletproof';
 assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
-const { project, description, suites, reset, outputs = ['.next'] } = applications[application]();
+const { project, description, suites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so
@@ -423,7 +428,21 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       mkdirSync(directory, { recursive: true });
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
-      run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options, SUPERCOV_KEEP_WORKSPACE: '1' }, true);
+      // The browser's pages too, for a suite that drives one.
+      const pages = browserProfile && suite.name === 'e2e' ? join(output, `browser-profile-${variant}.json`) : undefined;
+      const pageProfiler = pages
+        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages], { stdio: 'inherit' })
+        : undefined;
+      try {
+        run(project, command, args, `profile-${variant}-${suite.name}`, {
+          NODE_OPTIONS: options,
+          SUPERCOV_KEEP_WORKSPACE: '1',
+          ...(pages ? { SPEED_DEVTOOLS_PORT: '9333' } : {}),
+        }, true);
+      } finally {
+        pageProfiler?.kill('SIGTERM');
+      }
+      if (pages) writeFileSync(join(output, `browser-profile-${variant}.txt`), browserProfileText(pages));
       const { totals, functions, processes, callers } = profileSelfTime(directory);
       // Each process that kept a CPU busy for a second or more: which one
       // the time went to, by whose code.
@@ -568,6 +587,17 @@ for label, row in sorted(totals.items()):
   writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}\n${shipped}`);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   console.log(table);
+}
+
+// The pages' profile as text: how long their JavaScript ran, and the
+// functions that ran longest, by script and line.
+function browserProfileText(file) {
+  if (!existsSync(file)) return 'no profile\n';
+  const { chunks, busyMs, idleMs, functions } = JSON.parse(readFileSync(file, 'utf8'));
+  return [
+    `chunks ${chunks}, busy ${(busyMs / 1000).toFixed(2)}s, idle ${(idleMs / 1000).toFixed(2)}s`,
+    ...functions.slice(0, 80).map(([what, ms]) => `${(ms / 1000).toFixed(3)}s  ${what}`),
+  ].join('\n') + '\n';
 }
 
 // A directory of `.cpuprofile` files as seconds of self-time by whose code
