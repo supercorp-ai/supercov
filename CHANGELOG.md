@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- `supercov -- bun test` failed with `Unknown command: bun` when Bun ran the script (`[run] bun = true` in `bunfig.toml`, `bun --bun run`, `bun run supercov`): Bun drops a leading `--` before Supercov sees it. Yarn 1's `yarn supercov -- ...` and PowerShell's way into a package manager's `.ps1` shim drop one too, and Yarn 1 also took `--exact-attribution` for its own, so the run went ahead without it. A first word that is no Supercov command but a program on `PATH`, or a path to one, is now measured as the test command, and Yarn 1's words are restored from what Yarn recorded ([#209](https://github.com/supercorp-ai/supercov/issues/209)).
+- The gem's `supercov`, started with no arguments from a directory whose path holds a space or a parenthesis, failed: its wrapper handed the path to a shell.
+
+**Contributors**
+
+- [@Fidasek009](https://github.com/Fidasek009)
+
 ## 4.25.0
 
 **Changed**

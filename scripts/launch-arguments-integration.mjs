@@ -552,6 +552,10 @@ else {
   }
 }
 
+// In CI every launcher is installed, so one that is missing is a failure,
+// not a case quietly left out.
+if (process.env.SUPERCOV_REQUIRE_LAUNCHERS)
+  for (const each of results.filter((result) => result.skipped)) each.ok = false;
 const failed = results.filter((each) => each.ok === false);
 const passed = results.filter((each) => each.ok === true);
 for (const each of results.filter((result) => result.known))

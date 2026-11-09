@@ -117,6 +117,7 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:check": "node scripts/sync-docs.mjs --check",
     "test:launcher": "go vet ./cmd/... && go test ./cmd/...",
+    "test:launch-arguments": "cargo build -p supercov && node scripts/launch-arguments-integration.mjs --binary target/debug/supercov",
     "test:sweep-target": "node scripts/sweep-target-test.mjs",
     "test:go-versions": "cargo build -p supercov-engine --tests && node scripts/go-version-matrix.mjs",
     "test:skip-guard": "node scripts/skip-guard-test.mjs",

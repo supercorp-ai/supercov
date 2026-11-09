@@ -102,6 +102,49 @@ jobs:
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
 
+  # What each way of starting Supercov hands its binary: the packed npm
+  # package installed by npm, pnpm, Yarn 1 and 4 and Bun, started by their
+  # scripts, `exec`/`x` commands and shims from sh, cmd and PowerShell, the
+  # gem's wrapper, the wheel through uv and pipx, and `go run`. Bun, Yarn 1
+  # and PowerShell each drop a `--` on the way (#209); real suites are
+  # measured through them end to end.
+  launch-arguments:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: launch-arguments
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: corepack enable
+      - run: cargo build -p supercov
+      - run: node scripts/launch-arguments-integration.mjs --binary target/debug/supercov${{ runner.os == 'Windows' && '.exe' || '' }}
+        env:
+          SUPERCOV_REQUIRE_LAUNCHERS: "1"
+      - if: failure() && github.event_name == 'pull_request'
+        uses: ./.github/actions/stop-on-failure
+
   # `cargo fmt` and clippy, once: each Node's check job ran them again.
   lint:
     runs-on: ubuntu-latest
