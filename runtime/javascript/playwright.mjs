@@ -124,6 +124,17 @@ function timingCount(bucket, milliseconds = 0) {
     entry.ms += milliseconds;
     timingBuckets.set(bucket, entry);
 }
+// How late the test process's event loop runs, while timing: an awaited
+// round trip waits for its reply on this loop as well as on the browser.
+if (timingBuckets) {
+    let expected = performance.now() + 5;
+    setInterval(() => {
+        const now = performance.now();
+        if (now - expected > 1)
+            timingCount("probe.loopLag", now - expected);
+        expected = now + 5;
+    }, 5).unref?.();
+}
 async function timed(bucket, work) {
     if (!timingBuckets)
         return work();
@@ -908,6 +919,31 @@ class CoveragePhaseController {
             timed("activate.pageScript", () => Promise.all([...this.pages]
                 .filter((page) => this.adoptedContexts.has(page.context()))
                 .map((page) => this.activatePage(page, phaseId)))),
+            timingBuckets ? this.probeRoundTrips() : undefined,
+        ]);
+    }
+    /**
+     * While timing, beside each activation: how long a call that does nothing
+     * takes to reach a page and come back, and a cookie read of the browser,
+     * so an activation's time can be told apart from the round trip's.
+     */
+    async probeRoundTrips() {
+        const page = [...this.pages].find((candidate) => !candidate.isClosed?.());
+        if (!page)
+            return;
+        const clock = () => performance.timeOrigin + performance.now();
+        await Promise.all([
+            (async () => {
+                const sent = clock();
+                const inPage = await page.mainFrame().evaluate(() => performance.timeOrigin + performance.now()).catch(() => undefined);
+                const back = clock();
+                timingCount("probe.noopEvaluate", back - sent);
+                if (typeof inPage === "number") {
+                    timingCount("probe.toPage", inPage - sent);
+                    timingCount("probe.fromPage", back - inPage);
+                }
+            })(),
+            timed("probe.noopCookies", () => page.context().cookies("http://supercov.invalid/").catch(() => undefined)),
         ]);
     }
     async activateFrames(phaseId, pages = this.pages) {
