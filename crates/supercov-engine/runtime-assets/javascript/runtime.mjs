@@ -1224,18 +1224,22 @@ function appendServer(record) {
     throw serverTransportError(runId, cause);
   }
 }
-// Read on every probe outside a test, and the variable rarely changes: decode
-// it once per value.
-var decodedEnvironmentCarrier = { raw: void 0, context: void 0 };
+// The context a parent process gave this one, in SUPERCOV_CONTEXT: read on
+// every first hit, and fixed for the process's life. Supercov only ever gives
+// it to a child, at spawn, so it is read once per environment object: a
+// read of process.env, an interceptor, on every first hit of a large suite's
+// tests was the runtime's largest cost. A suite that swaps process.env for
+// another object is read again.
+var decodedEnvironmentCarrier = { env: void 0, context: void 0 };
 function environmentRequestContext() {
   if (isBrowser || typeof process === "undefined")
     return void 0;
-  const raw = process.env[COVERAGE_CARRIER_ENV];
-  if (raw === decodedEnvironmentCarrier.raw)
+  const env = process.env;
+  if (env === decodedEnvironmentCarrier.env)
     return decodedEnvironmentCarrier.context;
-  const carrier = decodeCoverageCarrier(raw);
+  const carrier = decodeCoverageCarrier(env[COVERAGE_CARRIER_ENV]);
   const context = carrier ? __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {}) : void 0;
-  decodedEnvironmentCarrier = { raw, context };
+  decodedEnvironmentCarrier = { env, context };
   return context;
 }
 function currentRequestContext() {
