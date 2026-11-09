@@ -3727,10 +3727,28 @@ impl EqualityValueSites {
         }
     }
 
+    /// An operand TypeScript narrows through: a name, `this`, or a property
+    /// read from one (`x.kind`, `x?.kind`, `x["kind"]`, `x!.kind`), or the
+    /// `typeof` of one. `(s) => s.kind === "circle"` over a union infers
+    /// `s is Circle` (TypeScript 5.5), and a call around the comparison made
+    /// it `boolean`: an exported predicate, and `xs.filter` with it, widened.
     fn bare_name(expression: &Expression<'_>) -> bool {
         match expression {
-            Expression::Identifier(_) => true,
+            Expression::Identifier(_) | Expression::ThisExpression(_) => true,
             Expression::ParenthesizedExpression(inner) => Self::bare_name(&inner.expression),
+            Expression::TSNonNullExpression(inner) => Self::bare_name(&inner.expression),
+            Expression::StaticMemberExpression(member) => Self::bare_name(&member.object),
+            Expression::PrivateFieldExpression(member) => Self::bare_name(&member.object),
+            Expression::ComputedMemberExpression(member) => {
+                matches!(
+                    member.expression,
+                    Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+                ) && Self::bare_name(&member.object)
+            }
+            Expression::ChainExpression(chain) => chain
+                .expression
+                .as_member_expression()
+                .is_some_and(|member| Self::bare_name(member.object())),
             Expression::UnaryExpression(unary) => {
                 unary.operator == UnaryOperator::Typeof && Self::bare_name(&unary.argument)
             }
@@ -14205,7 +14223,6 @@ export function shapes(n: number): unknown {
         for expected in [
             "\"src/equal.ts:2:21\", s.status === \"a\", 0, 4)",
             "\"src/equal.ts:3:27\", s.status !== \"b\", 0, 4)",
-            "\"src/equal.ts:7:45\", s.status === \"active\", 0, 4)",
         ] {
             assert!(
                 equalities.contains(expected),
@@ -14217,6 +14234,8 @@ export function shapes(n: number): unknown {
             "src/equal.ts:3:7",
             "src/equal.ts:4:17",
             "src/equal.ts:5:10",
+            // returned, over a property TypeScript narrows its object by
+            "src/equal.ts:7:45",
         ] {
             assert!(
                 !equalities.contains(untouched),
