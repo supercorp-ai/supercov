@@ -137,26 +137,28 @@ impl ProbeTable {
         decisions: Vec<String>,
         follows: Vec<[usize; 2]>,
     ) -> Self {
-        let mut digest = Sha256::new();
+        // SipHash, not SHA-256: the key only tells one run's tables apart,
+        // as a 64-bit digest of either would, and on a CPU without SHA
+        // instructions hashing every id a second time with SHA-256 cost
+        // instrumentation time. The ids themselves stay SHA-256 digests.
+        use std::hash::Hasher as _;
+        let mut digest = siphasher::sip::SipHasher13::new();
         for part in [file]
             .into_iter()
             .chain(points.iter().map(String::as_str))
             .chain(["\0"])
             .chain(decisions.iter().map(String::as_str))
         {
-            digest.update((part.len() as u64).to_le_bytes());
-            digest.update(part.as_bytes());
+            digest.write_u64(part.len() as u64);
+            digest.write(part.as_bytes());
         }
         // Which probes were dropped is part of the table: one module built
         // with them and one without must not share a key.
         for [place, leader] in &follows {
-            digest.update((*place as u64).to_le_bytes());
-            digest.update((*leader as u64).to_le_bytes());
+            digest.write_u64(*place as u64);
+            digest.write_u64(*leader as u64);
         }
-        let key = digest.finalize()[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let key = format!("{:016x}", digest.finish());
         Self {
             key,
             points,
