@@ -681,12 +681,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1538",
+            "fs.open_with#process_supervision.rs:1614",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1538");
+    terminal.wait_for("test fault at fs (process_supervision.rs:1614");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -12630,7 +12630,7 @@ fn the_wrapped_command_exits_as_it_would_alone_and_a_missing_root_is_named() {
     );
     assert!(
         project
-            .supercov(&["--exact-attribution", "node"])
+            .supercov(&["--exact-attribution", "frobnicate"])
             .exits(2)
             .contains("--exact-attribution goes before the command")
     );
@@ -14849,7 +14849,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1450", watchdog),
+        ("fs.read_dir#process_supervision.rs:1526", watchdog),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -17016,7 +17016,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#lifecycle.rs:1338",
         "fs.create_dir_all#javascript_run.rs:674",
         "fs.write#javascript_run.rs:969",
-        "fs.canonicalize#process_supervision.rs:1719",
+        "fs.canonicalize#process_supervision.rs:1795",
         "fs.create_dir_all#javascript_run.rs:1040",
         "fs.create_dir_all#javascript_run.rs:1211",
         "fs.read_dir#evidence_archive.rs:262",
