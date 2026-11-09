@@ -2283,6 +2283,292 @@ function compareV2(site, left, right, op) {
   }
   return result;
 }
+// Infection research, Phases 3-5 (SUPERCOV_INFECTION_PROBES=1). Each helper
+// gets the values the program computed, does the program's own operation or
+// call once, and records whether Stryker's replacement would have given a
+// different value ("differs"), the same one ("same"), or cannot be told
+// ("unknown"), under the site's id in the comparison records. Counterparts
+// are computed only by built-ins on primitives (or on verified built-in
+// arrays, strings, dates and Math), so no user code runs an extra time.
+function recordProbeOutcome(site, outcome) {
+  let outcomes = state.comparisons.get(site);
+  if (outcomes === void 0) {
+    outcomes = /* @__PURE__ */ new Set();
+    state.comparisons.set(site, outcomes);
+  }
+  if (!outcomes.has(outcome)) {
+    outcomes.add(outcome);
+    workerEvidenceChanged();
+  }
+}
+function probePrimitive(value) {
+  return value === null || typeof value !== "object" && typeof value !== "function" && typeof value !== "symbol";
+}
+// + - * / % << >> & | ; Stryker's replacement of each: - + / * * >> << | &
+const probeArithmeticSwap = [1, 0, 3, 2, 2, 6, 5, 8, 7];
+function probeArithmetic(left, right, op) {
+  switch (op) {
+    case 0: return left + right;
+    case 1: return left - right;
+    case 2: return left * right;
+    case 3: return left / right;
+    case 4: return left % right;
+    case 5: return left << right;
+    case 6: return left >> right;
+    case 7: return left & right;
+    default: return left | right;
+  }
+}
+function probeCounterpart(result, left, right, op) {
+  if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  let other;
+  try {
+    other = probeArithmetic(left, right, probeArithmeticSwap[op]);
+  } catch {
+    return "differs";
+  }
+  return Object.is(result, other) ? "same" : "differs";
+}
+function arithV2(site, left, right, op) {
+  const result = probeArithmetic(left, right, op);
+  try {
+    recordProbeOutcome(site, probeCounterpart(result, left, right, op));
+  } catch {
+  }
+  return result;
+}
+// `x op= value`: `current` is x as the assignment read it, before `value`.
+function assignV2(site, current, value, op) {
+  try {
+    let result;
+    let outcome;
+    try {
+      result = probeArithmetic(current, value, op);
+      outcome = probeCounterpart(result, current, value, op);
+    } catch {
+      outcome = "unknown";
+    }
+    recordProbeOutcome(site, outcome);
+  } catch {
+  }
+  return value;
+}
+// A concise arrow's value: Stryker's mutant returns undefined.
+function valueV2(site, value) {
+  try {
+    recordProbeOutcome(site, value === void 0 ? "undefined" : "defined");
+  } catch {
+  }
+  return value;
+}
+const probeRegexSites = /* @__PURE__ */ new WeakMap();
+function regexV2(site, value) {
+  try {
+    if (value instanceof RegExp) probeRegexSites.set(value, site);
+  } catch {
+  }
+  return value;
+}
+// A regular expression's input, kept for matching against Stryker's patterns
+// after the run: "t:" test, "e:" exec, "m:" match, "s:" search. A stateful
+// (g or y) expression's result depends on lastIndex, which is not kept.
+function probeRegexInput(regex, kind, input) {
+  const site = probeRegexSites.get(regex);
+  if (site === void 0) return;
+  if (typeof input !== "string" || regex.global || regex.sticky) {
+    recordProbeOutcome(site, "unknown");
+    return;
+  }
+  const outcomes = state.comparisons.get(site);
+  if (input.length > 200 || outcomes !== void 0 && outcomes.size >= 32) {
+    recordProbeOutcome(site, "overflow");
+    return;
+  }
+  recordProbeOutcome(site, kind + ":" + JSON.stringify(input));
+}
+const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype, probeRegExp = RegExp.prototype;
+const probeBuiltins = {
+  array: new Map(["some", "every", "filter", "reverse", "slice", "sort", "find", "findIndex", "findLast", "findLastIndex"].filter((name) => typeof probeArray[name] === "function").map((name) => [name, probeArray[name]])),
+  string: new Map(["charAt", "endsWith", "startsWith", "substr", "substring", "slice", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart", "match", "search"].filter((name) => typeof probeString[name] === "function").map((name) => [name, probeString[name]])),
+  date: new Map(["setDate", "setTime", "setFullYear", "setMonth", "setHours", "setMinutes", "setSeconds", "setMilliseconds", "setUTCDate", "setUTCFullYear", "setUTCMonth", "setUTCHours", "setUTCMinutes", "setUTCSeconds", "setUTCMilliseconds"].map((name) => [name, probeDate[name]])),
+  min: Math.min,
+  max: Math.max,
+  test: probeRegExp.test,
+  exec: probeRegExp.exec,
+  getTime: probeDate.getTime
+};
+// Stryker's swaps (StrykerJS 10.1.1); a name it removes has none.
+const probeSwaps = {
+  endsWith: "startsWith", startsWith: "endsWith", every: "some", some: "every",
+  toLocaleLowerCase: "toLocaleUpperCase", toLocaleUpperCase: "toLocaleLowerCase",
+  toLowerCase: "toUpperCase", toUpperCase: "toLowerCase", trimEnd: "trimStart", trimStart: "trimEnd",
+  min: "max", max: "min", setDate: "setTime", setTime: "setDate", setFullYear: "setMonth", setMonth: "setFullYear",
+  setHours: "setMinutes", setMinutes: "setHours", setSeconds: "setMilliseconds", setMilliseconds: "setSeconds",
+  setUTCDate: "setTime", setUTCFullYear: "setUTCMonth", setUTCMonth: "setUTCFullYear",
+  setUTCHours: "setUTCMinutes", setUTCMinutes: "setUTCHours", setUTCSeconds: "setUTCMilliseconds",
+  setUTCMilliseconds: "setUTCSeconds"
+};
+const probeRemoved = /* @__PURE__ */ new Set(["charAt", "filter", "reverse", "slice", "sort", "substr", "substring", "trim"]);
+function probeAllPrimitive(values) {
+  for (const value of values) if (!probePrimitive(value)) return false;
+  return true;
+}
+// The callback the program passed, called exactly as the built-in calls it;
+// the wrapper only reads what it returned.
+function probeObservedCallback(callback, arrow, observe) {
+  return function(value, index) {
+    const result = Reflect.apply(callback, this, arguments);
+    try {
+      observe(result, index);
+      if (arrow !== void 0) recordProbeOutcome(arrow, result === void 0 ? "undefined" : "defined");
+    } catch {
+    }
+    return result;
+  };
+}
+function probeArrayCall(site, receiver, name, arrow, args) {
+  const builtin = probeBuiltins.array.get(name);
+  const length = receiver.length;
+  if (name === "some" || name === "every" || name === "filter" || name.startsWith("find")) {
+    if (typeof args[0] !== "function") return Reflect.apply(builtin, receiver, args);
+    let calls = 0, lastIndex = -1;
+    const observed = [probeObservedCallback(args[0], arrow, (_, index) => {
+      calls++;
+      lastIndex = index;
+    })];
+    for (let index = 1; index < args.length; index++) observed.push(args[index]);
+    const result = Reflect.apply(builtin, receiver, observed);
+    try {
+      if (name === "filter") recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+      else if (name === "some" || name === "every") {
+        // some stops at its first truthy outcome, every at its first falsy
+        // one; the other method's value follows from the outcomes seen,
+        // except when it stopped at the first element of several.
+        const stoppedEarly = name === "some" ? result : !result;
+        let outcome;
+        if (calls === 0) outcome = "differs";
+        else if (!stoppedEarly) outcome = "same";
+        else if (calls > 1) outcome = "differs";
+        else outcome = lastIndex === length - 1 ? "same" : "unknown";
+        recordProbeOutcome(site, outcome);
+      }
+    } catch {
+    }
+    return result;
+  }
+  if (name === "sort" || name === "reverse") {
+    const before = probeBuiltins.array.get("slice").call(receiver);
+    const result = Reflect.apply(builtin, receiver, args);
+    try {
+      let changed = before.length !== receiver.length;
+      for (let index = 0; !changed && index < before.length; index++) changed = !Object.is(before[index], receiver[index]);
+      recordProbeOutcome(site, changed ? "differs" : "same");
+    } catch {
+    }
+    return result;
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+  } catch {
+  }
+  return result;
+}
+function probeStringCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.string.get(name);
+  if ((name === "match" || name === "search") && args[0] instanceof RegExp && probeRegexSites.has(args[0])) {
+    try {
+      probeRegexInput(args[0], name === "match" ? "m" : "s", receiver);
+    } catch {
+    }
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (probeRemoved.has(name)) recordProbeOutcome(site, Object.is(result, receiver) ? "same" : "differs");
+    else if (probeSwaps[name] !== void 0) {
+      if (!probeAllPrimitive(args)) recordProbeOutcome(site, "unknown");
+      else {
+        let other, threw = false;
+        try {
+          other = Reflect.apply(probeBuiltins.string.get(probeSwaps[name]), receiver, args);
+        } catch {
+          threw = true;
+        }
+        recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+      }
+    }
+  } catch {
+  }
+  return result;
+}
+function probeDateCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.date.get(name);
+  let copy;
+  try {
+    copy = probeAllPrimitive(args) ? new Date(probeBuiltins.getTime.call(receiver)) : void 0;
+  } catch {
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (copy === void 0) recordProbeOutcome(site, "unknown");
+    else {
+      let other, threw = false;
+      try {
+        other = Reflect.apply(probeBuiltins.date.get(probeSwaps[name]), copy, args);
+      } catch {
+        threw = true;
+      }
+      recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+    }
+  } catch {
+  }
+  return result;
+}
+function probeMathCall(site, name, args) {
+  const result = Reflect.apply(probeBuiltins[name], Math, args);
+  try {
+    let numbers = true;
+    for (const value of args) if (typeof value !== "number") numbers = false;
+    if (!numbers) recordProbeOutcome(site, "unknown");
+    else recordProbeOutcome(site, Object.is(result, Reflect.apply(probeBuiltins[probeSwaps[name]], Math, args)) ? "same" : "differs");
+  } catch {
+  }
+  return result;
+}
+// `receiver.name(...)` as `methodV2(site, receiver, "name", arrow).name(...)`.
+// For a built-in receiver whose method is the built-in, the stand-in makes
+// the program's one call itself and compares Stryker's replacement; any
+// other receiver comes back unchanged and the call is the program's own.
+function methodV2(site, receiver, name, arrow) {
+  try {
+    let call;
+    if (Array.isArray(receiver)) {
+      if (Object.getPrototypeOf(receiver) === probeArray && probeBuiltins.array.has(name) && receiver[name] === probeBuiltins.array.get(name))
+        call = (args) => probeArrayCall(site, receiver, name, arrow, args);
+    } else if (typeof receiver === "string") {
+      if (probeBuiltins.string.has(name) && probeString[name] === probeBuiltins.string.get(name))
+        call = (args) => probeStringCall(site, receiver, name, args);
+    } else if (receiver instanceof Date) {
+      if (Object.getPrototypeOf(receiver) === probeDate && probeBuiltins.date.has(name) && receiver[name] === probeBuiltins.date.get(name))
+        call = (args) => probeDateCall(site, receiver, name, args);
+    } else if (receiver === Math) {
+      if ((name === "min" || name === "max") && Math[name] === probeBuiltins[name])
+        call = (args) => probeMathCall(site, name, args);
+    } else if (receiver instanceof RegExp) {
+      if ((name === "test" || name === "exec") && Object.getPrototypeOf(receiver) === probeRegExp && receiver[name] === probeBuiltins[name] && probeRegexSites.has(receiver))
+        call = (args) => {
+          try {
+            probeRegexInput(receiver, name === "test" ? "t" : "e", args[0]);
+          } catch {
+          }
+          return Reflect.apply(probeBuiltins[name], receiver, args);
+        };
+    }
+    if (call !== void 0) return { [name]: (...args) => call(args) };
+  } catch {
+  }
+  return receiver;
+}
 function renderedValueV2(file, index, value) {
   coverageHitV2(file, index);
   return value;
@@ -2588,6 +2874,11 @@ const directRuntimeApi = {
   selectShortV2,
   selectRightV2,
   compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
+  regexV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -2658,6 +2949,11 @@ export {
   selectShortV2,
   selectRightV2,
   compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
+  regexV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

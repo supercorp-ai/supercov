@@ -1192,3 +1192,79 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   // whole point: the enclosing JSX statement alone used to imply both.
   assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
 });
+
+test("infection probes record whether Stryker's replacement would differ, running the program's code once", async () => {
+  const { arithV2, assignV2, methodV2, valueV2, regexV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  resetCoverage("infection-probes");
+  const outcomes = () =>
+    Object.fromEntries((coverageSnapshot().comparisons ?? []).map(({ id, outcomes }) => [id, [...outcomes].sort()]));
+  // Arithmetic: 3 + 0 is 3 - 0; 6 * 2 is not 6 / 2; 2n / 0n throws, so it
+  // differs; an object operand is unknown, and its valueOf runs once.
+  assert.equal(arithV2("a", 3, 0, 0), 3);
+  assert.equal(arithV2("b", 6, 2, 2), 12);
+  assert.equal(arithV2("c", 2n, 0n, 2), 0n);
+  let valueOfCalls = 0;
+  assert.equal(arithV2("d", { valueOf: () => (valueOfCalls++, 4) }, 1, 1), 3);
+  assert.equal(valueOfCalls, 1);
+  // `x += 0` is `x -= 0`; the assigned value comes back.
+  assert.equal(assignV2("e", 5, 0, 0), 0);
+  // some/every: the callback runs as the built-in runs it.
+  let calls = 0;
+  const above1 = (x) => (calls++, x > 1);
+  assert.equal(methodV2("f", [0, 2, 3], "some", "f-arrow").some(above1), true);
+  assert.equal(calls, 2);
+  assert.equal(methodV2("g", [2, 0], "some").some(above1), true);
+  assert.equal(calls, 3);
+  assert.equal(methodV2("h", [2], "every").every(above1), true);
+  assert.equal(methodV2("i", [], "every").every(above1), true);
+  // filter and sort removal, by what the call changed.
+  assert.deepEqual(methodV2("j", [1, 2, 3], "filter", "j-arrow").filter((x) => (x > 1 ? x : undefined)), [2, 3]);
+  assert.deepEqual(methodV2("k", [1, 2, 3], "filter").filter(Boolean), [1, 2, 3]);
+  const sorted = [1, 2];
+  assert.equal(methodV2("l", sorted, "sort").sort(), sorted);
+  // Strings, Math and dates, against the built-in counterpart.
+  assert.equal(methodV2("m", "ABC", "toUpperCase").toUpperCase(), "ABC");
+  assert.equal(methodV2("n", "a", "trim").trim(), "a");
+  assert.equal(methodV2("o", "http", "startsWith").startsWith("http"), true);
+  assert.equal(methodV2("p", Math, "min").min(2, 2), 2);
+  const date = new Date(0);
+  assert.equal(methodV2("q", date, "setUTCHours").setUTCHours(1), 3_600_000);
+  assert.equal(date.getUTCHours(), 1);
+  // Any other receiver comes back as it is.
+  const custom = { some: () => "own" };
+  assert.equal(methodV2("r", custom, "some"), custom);
+  const plain = [1];
+  assert.equal(methodV2("r", plain, "map"), plain);
+  // A concise arrow's value, and a regular expression's inputs.
+  assert.equal(valueV2("s", undefined), undefined);
+  const literal = regexV2("t", /^a+$/);
+  assert.equal(methodV2("u", literal, "test").test("aa"), true);
+  const global = regexV2("v", /a/g);
+  assert.equal(methodV2("w", global, "test").test("a"), true);
+  assert.deepEqual(outcomes(), {
+    a: ["same"],
+    b: ["differs"],
+    c: ["differs"],
+    d: ["unknown"],
+    e: ["same"],
+    f: ["differs"],
+    "f-arrow": ["defined"],
+    g: ["unknown"],
+    h: ["same"],
+    i: ["differs"],
+    j: ["differs"],
+    "j-arrow": ["defined", "undefined"],
+    k: ["same"],
+    l: ["same"],
+    m: ["differs"],
+    n: ["same"],
+    o: ["same"],
+    p: ["same"],
+    q: ["differs"],
+    s: ["undefined"],
+    t: ['t:"aa"'],
+    v: ["unknown"],
+  });
+});
