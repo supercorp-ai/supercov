@@ -918,6 +918,12 @@ own:
 - run: npx supercov merge
 ```
 
+A merged run lists the mutants of every file a run listed (see
+[Mutants](#mutants)), once. Runs that listed different mutants of a file
+recorded with the same bytes are not merged. A run measured without the probes
+adds no mutants, and where its tests ran a mutant, a verdict that needs values
+they did not record is `unknown`.
+
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record

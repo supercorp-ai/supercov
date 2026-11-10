@@ -45,6 +45,10 @@ pub struct MutantsFile {
     pub schema_version: u32,
     pub mutant_set: Option<String>,
     pub files: BTreeMap<String, Vec<CandidateMutant>>,
+    /// Of a merged run: the tests of the runs merged into it that listed no
+    /// mutants. Their hits say what ran; they recorded no values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests_without_values: Vec<String>,
 }
 
 /// One StrykerJS mutant and the evidence that decides it.
@@ -1329,6 +1333,7 @@ mod tests {
             schema_version: MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
             files: BTreeMap::from([("src/links.ts".to_owned(), output.mutants.clone())]),
+            tests_without_values: Vec::new(),
         };
         let encoded = serde_json::to_string(&file).unwrap();
         assert!(encoded.starts_with(

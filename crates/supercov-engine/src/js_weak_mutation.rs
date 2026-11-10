@@ -61,6 +61,9 @@ pub(crate) struct Observations {
     pub hits: HashSet<String>,
     /// The hits recorded in a server process.
     pub server_hits: HashSet<String>,
+    /// The hits of tests measured without the probes (a merged run's
+    /// `testsWithoutValues`): they ran the code and recorded no values.
+    pub unvalued_hits: HashSet<String>,
     /// Each decision's evaluations.
     pub decisions: HashMap<String, Vec<Vector>>,
     /// Each logical selection's outcomes: whether its right side produced
@@ -79,18 +82,32 @@ pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> 
         read: Cell::new(false),
     };
     let (status, reason) = decide(mutant, &records);
-    let in_server = [&mutant.statement, &mutant.function]
-        .into_iter()
-        .flatten()
-        .any(|point| observations.server_hits.contains(point));
-    if records.read.get() && in_server && matches!(status, Status::NotReached | Status::NotInfected)
-    {
+    let ran_in = |hits: &HashSet<String>| {
+        [&mutant.statement, &mutant.function]
+            .into_iter()
+            .flatten()
+            .any(|point| hits.contains(point))
+    };
+    let unkilled = records.read.get() && matches!(status, Status::NotReached | Status::NotInfected);
+    if unkilled && ran_in(&observations.server_hits) {
         return (
             Status::Unknown,
             reason_of(
                 "server-process",
                 format!(
                     "ran in a server process, which records no values ({})",
+                    reason.sentence
+                ),
+            ),
+        );
+    }
+    if unkilled && ran_in(&observations.unvalued_hits) {
+        return (
+            Status::Unknown,
+            reason_of(
+                "values-not-recorded",
+                format!(
+                    "ran in tests of a merged run measured without the probes, which recorded no values ({})",
                     reason.sentence
                 ),
             ),
@@ -924,7 +941,22 @@ pub(crate) fn results(
 ) -> Option<MutationResults> {
     let listed = listed?;
     let mutant_set = listed.mutant_set?;
-    let observations = observations(raw_results);
+    let mut observations = observations(raw_results);
+    let without_values = listed.tests_without_values.iter().collect::<HashSet<_>>();
+    if !without_values.is_empty() {
+        let unvalued = raw_results
+            .iter()
+            .filter(|raw| {
+                raw.test_id
+                    .as_ref()
+                    .is_some_and(|id| without_values.contains(id))
+            })
+            .collect::<Vec<_>>();
+        for raw in unvalued {
+            let hits = self::observations(std::slice::from_ref(raw)).hits;
+            observations.unvalued_hits.extend(hits);
+        }
+    }
     let mut mutants = Vec::new();
     for (file, candidates) in listed.files {
         let mut verdicts = candidates
@@ -2025,5 +2057,28 @@ mod tests {
         let mut elsewhere = Observations::default();
         elsewhere.server_hits.insert("t".into());
         expect(&boundary, &elsewhere, NOT_REACHED, "statement-not-run");
+    }
+
+    /// A merged run's tests measured without the probes ran code and
+    /// recorded no values: what their silence would decide is unknown.
+    #[test]
+    fn a_verdict_from_values_tests_measured_without_the_probes_lack_is_unknown() {
+        let boundary = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", "<=", "a < b", "<")
+        };
+        let mut unvalued = ran();
+        unvalued.unvalued_hits.insert("s".into());
+        expect(&boundary, &unvalued, UNKNOWN, "values-not-recorded");
+        let mut never_equal = with_outcomes("c", &["lt"]);
+        never_equal.unvalued_hits.insert("s".into());
+        expect(&boundary, &never_equal, UNKNOWN, "values-not-recorded");
+        let mut equal = with_outcomes("c", &["eq"]);
+        equal.unvalued_hits.insert("s".into());
+        expect(&boundary, &equal, INFECTED, "operands-equal");
+        // Only where those tests ran it.
+        let mut elsewhere = with_outcomes("c", &["lt"]);
+        elsewhere.unvalued_hits.insert("t".into());
+        expect(&boundary, &elsewhere, NOT_INFECTED, "operands-never-equal");
     }
 }

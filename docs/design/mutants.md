@@ -246,6 +246,32 @@ durationMs }`. `stryker` holds the joined StrykerJS status when `--stryker`
 was given. A reader that knows only `status` keeps working when strong results
 arrive.
 
+## Merged runs
+
+A run's mutants are archived as one `mutants.json`. `supercov merge` writes
+exactly one for the merged run, as it writes one `manifest.json`, instead of
+keeping each run's under `shards/<n>/` (which the reader, looking for the one
+at the top, did not see: merged runs had no mutants). The list is the union by
+file of the runs that listed mutants, each file's from the run whose manifest
+the merge takes (the latest, where the tests grew) or else the first that
+listed it. Runs that recorded a file with the same bytes enumerate the same
+mutants of it, so where two such runs listed different mutant ids for it, or
+one listed it and the other did not, the merge is refused; the same mutant set
+(`stryker-js@10.1.1`) is required too. A file recorded with other bytes keeps
+the first run's list.
+
+A run that listed no mutants (measured without the probes, or before mutants
+were listed) adds no files, and its tests still count: their hits say what ran.
+They recorded no comparison or probe values, though, so their silence is not
+evidence. Their ids go in the merged list's `testsWithoutValues`, and a verdict
+of not-reached or not-infected that reads values, at a mutant whose statement
+or function those tests ran, is `unknown` (`values-not-recorded`), as for code
+that ran in a server process. A test id that is in both kinds of run is counted
+as one without values.
+
+`statement-exclusions.json` is still kept once per run under `shards/<n>/`;
+the reader requires every copy to be the same, which runs of one source are.
+
 ## What stays out
 
 - Regex mutants are listed but stay `unknown`. Recording the regex inputs

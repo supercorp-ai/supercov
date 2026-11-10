@@ -2164,6 +2164,7 @@ pub fn prepare_javascript_frontend(
         mutant_set: crate::js_instrumenter::mutants_enabled()
             .then(|| crate::js_mutants::MUTANT_SET.to_owned()),
         files: mutants,
+        tests_without_values: Vec::new(),
     };
     atomic_write(
         &evidence.join("mutants.json"),
