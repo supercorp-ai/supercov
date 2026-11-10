@@ -197,6 +197,15 @@ function createState() {
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
+    // Per relational comparison site ("file:line:column"): the operand
+    // relations seen -- lt, eq, gt, unordered (NaN), or other (objects that
+    // are not Dates) -- that decide comparison mutants, beside the coverage.
+    // Each relation maps to the epoch a process writing records last wrote
+    // it in (0 where none did): see noteValue.
+    comparisons: /* @__PURE__ */ new Map(),
+    // Per logical selection, outside a snapshot: each outcome's epoch, as
+    // for comparisons.
+    logicalEpochs: /* @__PURE__ */ new Map(),
     // The events already recorded, by phase: a hit by its id, anything else
     // by its type and what tells it apart (eventSeen).
     eventKeys: /* @__PURE__ */ new Map(),
@@ -299,6 +308,11 @@ function activateProbeV2Key(key, force = false) {
             vectors.clear();
         }
       }
+      for (const outcomes of state.comparisons.values()) {
+        for (const outcome of outcomes.keys())
+          outcomes.set(outcome, 0);
+      }
+      state.logicalEpochs.clear();
     }
     epoch = state.probeV2NextEpoch;
     builtinMapSet.call(state.probeV2ContextEpochs, key, epoch);
@@ -419,13 +433,22 @@ function logicalSnapshot() {
     vectors: [...vectors.values()]
   }));
 }
+function comparisonSnapshot() {
+  return [...state.comparisons.entries()].map(([id, outcomes]) => ({
+    id,
+    outcomes: [...outcomes.keys()]
+  }));
+}
 function coverageSnapshot() {
-  return {
+  const snapshot = {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
     events: eventObjects(state.eventLog),
     logicals: logicalSnapshot()
   };
+  if (state.comparisons.size)
+    snapshot.comparisons = comparisonSnapshot();
+  return snapshot;
 }
 // coverageSnapshot as snapshots.mjs's columnarEvents gives it, built from the
 // columns the events are kept in rather than from an object per event.
@@ -483,6 +506,8 @@ function resetCoverage(testId2) {
   state.hits.clear();
   state.eventLog = emptyEventLog();
   state.logicals.clear();
+  state.comparisons.clear();
+  state.logicalEpochs.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
@@ -656,6 +681,8 @@ function evidenceSize() {
     size += decision.vectors.size;
   for (const vectors of state.logicals.values())
     size += vectors.size;
+  for (const outcomes of state.comparisons.values())
+    size += outcomes.size;
   return size;
 }
 // The evidence's size when this document gave it to the Playwright collector
@@ -722,8 +749,14 @@ function persistBrowser() {
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
 }
+// Every writer says, before its first record, that it records the values
+// its comparisons, selections and probes see (`comparison` and `logical`
+// records): a writer that does not, a runtime older than them, leaves its
+// silence about values unread rather than read as "never seen".
+var valuesRecord = { type: "values" };
 // An attempt's file says its scope once per writing process: each line
-// without one is of the scope of the line before it in the same file.
+// without one is of the scope of the line before it in the same file. The
+// first is the writer's note that it records values.
 var scopedPathsWritten = /* @__PURE__ */ new Set();
 function serverLine(record, path) {
   if (!path)
@@ -731,13 +764,13 @@ function serverLine(record, path) {
   const { scope, ...line } = record;
   if (scope && !scopedPathsWritten.has(path)) {
     scopedPathsWritten.add(path);
-    line.scope = scope;
+    return JSON.stringify(__spreadProps(__spreadValues({}, valuesRecord), { scope })) + "\n" + JSON.stringify(line);
   }
   return JSON.stringify(line);
 }
 function serverRecordKey(record) {
   var _a8;
-  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.id;
+  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.outcome !== void 0 ? `${record.id}\0${record.outcome}` : record.id;
   // Each request that names no test keeps its own first hits: the report
   // credits them to the test running when it came, and a later request's
   // work belongs to whichever test was running then.
@@ -950,6 +983,9 @@ function writeBackgroundLines(fs, runId, payload) {
   if (!path) {
     const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
     const writer = `${shard}-${process.pid}-${backgroundWriterToken()}`;
+    // A writer's records are read together, by its name: its first says it
+    // records values.
+    payload = JSON.stringify(valuesRecord) + "\n" + payload;
     const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
     state.backgroundSequence = nextSequence;
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
@@ -1280,6 +1316,9 @@ function scheduleServerFlush() {
 function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
+    // A snapshot holds its values itself.
+    if (record.type !== "hit" && record.type !== "decision")
+      return;
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision")
       recordBrowserEvent("decision", record.id, record.vector, timestampMs, record.phaseId, "server");
@@ -2399,12 +2438,353 @@ function recordLogicalOutcome(branchId, outcome) {
     builtinMapSet.call(vectors, key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
     workerEvidenceChanged();
   }
+  if (isBrowser || state.runtimeSnapshots)
+    return;
+  let epochs = state.logicalEpochs.get(branchId);
+  if (epochs === void 0) {
+    epochs = /* @__PURE__ */ new Map();
+    state.logicalEpochs.set(branchId, epochs);
+  }
+  const clock = state.probeV2Clock;
+  if (!clock.fast || epochs.get(key) !== clock.e)
+    noteValue(epochs, "logical", branchId, key);
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
 // that returns the value through. Like optionalSelect, it records after the
 // value evaluates: an expression that throws is reported unevaluated rather
 // than covered.
+// `a < b` (op 0), `a <= b` (1), `a > b` (2), `a >= b` (3). The operands were
+// evaluated once, by the program, before this call; the relation is read
+// from them only when both are primitives of one kind or both Dates, which
+// no user code can observe, and the comparison itself runs once as written.
+function compareRelation(left, right) {
+  const lt = typeof left, rt = typeof right;
+  if (lt === "number" && rt === "number" || lt === "string" && rt === "string" || lt === "bigint" && rt === "bigint") {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left === right ? "eq" : "unordered";
+  }
+  if (left instanceof Date && right instanceof Date) {
+    const a = Date.prototype.getTime.call(left), b = Date.prototype.getTime.call(right);
+    return a < b ? "lt" : a > b ? "gt" : a === b ? "eq" : "unordered";
+  }
+  if ((lt === "number" || lt === "bigint") && (rt === "number" || rt === "bigint")) {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left == right ? "eq" : "unordered";
+  }
+  return "other";
+}
+// Op 4: an equality the program evaluated as the argument; its value is
+// recorded as "true" or "false" and handed back.
+function compareV2(site, left, right, op) {
+  const result = op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
+  try {
+    recordProbeOutcome(site, op === 4 ? result ? "true" : "false" : compareRelation(left, right));
+  } catch {
+  }
+  return result;
+}
+// The mutants' probes (on unless SUPERCOV_MUTANTS=0). Each helper gets the
+// values the program computed, does the program's own operation or
+// call once, and records whether Stryker's replacement would have given a
+// different value ("differs"), the same one ("same"), or cannot be told
+// ("unknown"), under the site's id in the comparison records. Counterparts
+// are computed only by built-ins on primitives (or on verified built-in
+// arrays, strings, dates and Math), so no user code runs an extra time.
+// Every repeat in the same context ends at the first check, as a hit's does:
+// a snapshot keeps each outcome once per test, a process writing records
+// once per context.
+function recordProbeOutcome(site, outcome) {
+  let outcomes = state.comparisons.get(site);
+  if (outcomes === void 0) {
+    outcomes = /* @__PURE__ */ new Map();
+    state.comparisons.set(site, outcomes);
+  }
+  const seen = outcomes.get(outcome);
+  const clock = state.probeV2Clock;
+  if (seen !== void 0 && (clock.fast && seen === clock.e || isBrowser || state.runtimeSnapshots))
+    return;
+  noteValue(outcomes, "comparison", site, outcome);
+}
+// An outcome new to this test's snapshot, or to this context's records. A
+// process that writes records rather than snapshots -- a server, or a
+// node:test, AVA or tap test process -- writes each outcome a site sees once
+// per context, as recordCoverageHit writes a point's hit: the report reads
+// those records as it reads a snapshot's values. `epochs` maps each outcome
+// to the epoch it was last written in.
+function noteValue(epochs, type, id, outcome) {
+  const known = epochs.has(outcome);
+  if (isBrowser || state.runtimeSnapshots) {
+    if (!known) {
+      epochs.set(outcome, 0);
+      workerEvidenceChanged();
+    }
+    return;
+  }
+  const clock = state.probeV2Clock;
+  let epoch = clock.e;
+  if (!clock.fast) {
+    const previousEpoch = clock.e;
+    activateProbeV2Context(currentRequestContext());
+    epoch = clock.e;
+    clock.e = previousEpoch;
+  } else if (epoch !== epoch) {
+    epoch = resolveProbeV2Epoch();
+  }
+  if (epochs.get(outcome) === epoch)
+    return;
+  epochs.set(outcome, epoch);
+  if (!known)
+    workerEvidenceChanged();
+  const phaseId = currentPhaseId();
+  appendServer(__spreadValues({
+    type,
+    id,
+    outcome,
+    timestampMs: Date.now()
+  }, phaseId ? { phaseId } : {}));
+}
+function probePrimitive(value) {
+  return value === null || typeof value !== "object" && typeof value !== "function" && typeof value !== "symbol";
+}
+// + - * / % << >> & | ; Stryker's replacement of each: - + / * * >> << | &
+const probeArithmeticSwap = [1, 0, 3, 2, 2, 6, 5, 8, 7];
+function probeArithmetic(left, right, op) {
+  switch (op) {
+    case 0: return left + right;
+    case 1: return left - right;
+    case 2: return left * right;
+    case 3: return left / right;
+    case 4: return left % right;
+    case 5: return left << right;
+    case 6: return left >> right;
+    case 7: return left & right;
+    default: return left | right;
+  }
+}
+function probeCounterpart(result, left, right, op) {
+  if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  let other;
+  try {
+    other = probeArithmetic(left, right, probeArithmeticSwap[op]);
+  } catch {
+    return "differs";
+  }
+  return Object.is(result, other) ? "same" : "differs";
+}
+function arithV2(site, left, right, op) {
+  const result = probeArithmetic(left, right, op);
+  try {
+    recordProbeOutcome(site, probeCounterpart(result, left, right, op));
+  } catch {
+  }
+  return result;
+}
+// `x op= value`: `current` is x as the assignment read it, before `value`.
+function assignV2(site, current, value, op) {
+  try {
+    let result;
+    let outcome;
+    try {
+      result = probeArithmetic(current, value, op);
+      outcome = probeCounterpart(result, current, value, op);
+    } catch {
+      outcome = "unknown";
+    }
+    recordProbeOutcome(site, outcome);
+  } catch {
+  }
+  return value;
+}
+// A concise arrow's value: Stryker's mutant returns undefined.
+function valueV2(site, value) {
+  try {
+    recordProbeOutcome(site, value === void 0 ? "undefined" : "defined");
+  } catch {
+  }
+  return value;
+}
+const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype;
+const probeBuiltins = {
+  array: new Map(["some", "every", "filter", "reverse", "slice", "sort", "find", "findIndex", "findLast", "findLastIndex"].filter((name) => typeof probeArray[name] === "function").map((name) => [name, probeArray[name]])),
+  string: new Map(["charAt", "endsWith", "startsWith", "substr", "substring", "slice", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart"].filter((name) => typeof probeString[name] === "function").map((name) => [name, probeString[name]])),
+  date: new Map(["setDate", "setTime", "setFullYear", "setMonth", "setHours", "setMinutes", "setSeconds", "setMilliseconds", "setUTCDate", "setUTCFullYear", "setUTCMonth", "setUTCHours", "setUTCMinutes", "setUTCSeconds", "setUTCMilliseconds"].map((name) => [name, probeDate[name]])),
+  min: Math.min,
+  max: Math.max,
+  getTime: probeDate.getTime
+};
+// Stryker's swaps (StrykerJS 10.1.1); a name it removes has none.
+const probeSwaps = {
+  endsWith: "startsWith", startsWith: "endsWith", every: "some", some: "every",
+  toLocaleLowerCase: "toLocaleUpperCase", toLocaleUpperCase: "toLocaleLowerCase",
+  toLowerCase: "toUpperCase", toUpperCase: "toLowerCase", trimEnd: "trimStart", trimStart: "trimEnd",
+  min: "max", max: "min", setDate: "setTime", setTime: "setDate", setFullYear: "setMonth", setMonth: "setFullYear",
+  setHours: "setMinutes", setMinutes: "setHours", setSeconds: "setMilliseconds", setMilliseconds: "setSeconds",
+  setUTCDate: "setTime", setUTCFullYear: "setUTCMonth", setUTCMonth: "setUTCFullYear",
+  setUTCHours: "setUTCMinutes", setUTCMinutes: "setUTCHours", setUTCSeconds: "setUTCMilliseconds",
+  setUTCMilliseconds: "setUTCSeconds"
+};
+const probeRemoved = /* @__PURE__ */ new Set(["charAt", "filter", "reverse", "slice", "sort", "substr", "substring", "trim"]);
+function probeAllPrimitive(values) {
+  for (const value of values) if (!probePrimitive(value)) return false;
+  return true;
+}
+// The callback the program passed, called exactly as the built-in calls it;
+// the wrapper only reads what it returned.
+function probeObservedCallback(callback, arrow, observe) {
+  return function(value, index) {
+    const result = Reflect.apply(callback, this, arguments);
+    try {
+      observe(result, index);
+      if (arrow !== void 0) recordProbeOutcome(arrow, result === void 0 ? "undefined" : "defined");
+    } catch {
+    }
+    return result;
+  };
+}
+// `pure` is a copy of a some/every callback the instrumenter found pure
+// (pure_callback: no calls, no writes, only its parameters' properties), without
+// the program's probes: where the call stopped at the first of several
+// elements, the probe runs it through the other method to decide.
+function probeArrayCall(site, receiver, name, arrow, args, pure) {
+  const builtin = probeBuiltins.array.get(name);
+  const length = receiver.length;
+  if (name === "some" || name === "every" || name === "filter" || name.startsWith("find")) {
+    if (typeof args[0] !== "function") return Reflect.apply(builtin, receiver, args);
+    let calls = 0, lastIndex = -1;
+    const observed = [probeObservedCallback(args[0], arrow, (_, index) => {
+      calls++;
+      lastIndex = index;
+    })];
+    for (let index = 1; index < args.length; index++) observed.push(args[index]);
+    const result = Reflect.apply(builtin, receiver, observed);
+    try {
+      if (name === "filter") recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+      else if (name === "some" || name === "every") {
+        // some stops at its first truthy outcome, every at its first falsy
+        // one; the other method's value follows from the outcomes seen,
+        // except when it stopped at the first element of several.
+        const stoppedEarly = name === "some" ? result : !result;
+        let outcome;
+        if (calls === 0) outcome = "differs";
+        else if (!stoppedEarly) outcome = "same";
+        else if (calls > 1) outcome = "differs";
+        else if (lastIndex === length - 1) outcome = "same";
+        else if (typeof pure === "function") {
+          // A throw from the copy (a property of null) is no answer.
+          try {
+            const other = Reflect.apply(probeBuiltins.array.get(name === "some" ? "every" : "some"), receiver, [pure]);
+            outcome = other === result ? "same" : "differs";
+          } catch {
+            outcome = "unknown";
+          }
+        } else outcome = "unknown";
+        recordProbeOutcome(site, outcome);
+      }
+    } catch {
+    }
+    return result;
+  }
+  if (name === "sort" || name === "reverse") {
+    const before = probeBuiltins.array.get("slice").call(receiver);
+    const result = Reflect.apply(builtin, receiver, args);
+    try {
+      let changed = before.length !== receiver.length;
+      for (let index = 0; !changed && index < before.length; index++) changed = !Object.is(before[index], receiver[index]);
+      recordProbeOutcome(site, changed ? "differs" : "same");
+    } catch {
+    }
+    return result;
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+  } catch {
+  }
+  return result;
+}
+function probeStringCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.string.get(name);
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (probeRemoved.has(name)) recordProbeOutcome(site, Object.is(result, receiver) ? "same" : "differs");
+    else if (probeSwaps[name] !== void 0) {
+      if (!probeAllPrimitive(args)) recordProbeOutcome(site, "unknown");
+      else {
+        let other, threw = false;
+        try {
+          other = Reflect.apply(probeBuiltins.string.get(probeSwaps[name]), receiver, args);
+        } catch {
+          threw = true;
+        }
+        recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+      }
+    }
+  } catch {
+  }
+  return result;
+}
+function probeDateCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.date.get(name);
+  let copy;
+  try {
+    copy = probeAllPrimitive(args) ? new Date(probeBuiltins.getTime.call(receiver)) : void 0;
+  } catch {
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (copy === void 0) recordProbeOutcome(site, "unknown");
+    else {
+      let other, threw = false;
+      try {
+        other = Reflect.apply(probeBuiltins.date.get(probeSwaps[name]), copy, args);
+      } catch {
+        threw = true;
+      }
+      recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+    }
+  } catch {
+  }
+  return result;
+}
+function probeMathCall(site, name, args) {
+  const result = Reflect.apply(probeBuiltins[name], Math, args);
+  try {
+    let numbers = true;
+    for (const value of args) if (typeof value !== "number") numbers = false;
+    if (!numbers) recordProbeOutcome(site, "unknown");
+    else recordProbeOutcome(site, Object.is(result, Reflect.apply(probeBuiltins[probeSwaps[name]], Math, args)) ? "same" : "differs");
+  } catch {
+  }
+  return result;
+}
+// `receiver.name(...)` as `methodV2(site, receiver, "name", arrow).name(...)`.
+// For a built-in receiver whose method is the built-in, the stand-in makes
+// the program's one call itself and compares Stryker's replacement; any
+// other receiver comes back unchanged and the call is the program's own.
+function methodV2(site, receiver, name, arrow, pure) {
+  try {
+    let call;
+    if (Array.isArray(receiver)) {
+      if (Object.getPrototypeOf(receiver) === probeArray && probeBuiltins.array.has(name) && receiver[name] === probeBuiltins.array.get(name))
+        call = (args) => probeArrayCall(site, receiver, name, arrow, args, pure);
+    } else if (typeof receiver === "string") {
+      if (probeBuiltins.string.has(name) && probeString[name] === probeBuiltins.string.get(name))
+        call = (args) => probeStringCall(site, receiver, name, args);
+    } else if (receiver instanceof Date) {
+      if (Object.getPrototypeOf(receiver) === probeDate && probeBuiltins.date.has(name) && receiver[name] === probeBuiltins.date.get(name))
+        call = (args) => probeDateCall(site, receiver, name, args);
+    } else if (receiver === Math) {
+      if ((name === "min" || name === "max") && Math[name] === probeBuiltins[name])
+        call = (args) => probeMathCall(site, name, args);
+    }
+    if (call !== void 0) return { [name]: (...args) => call(args) };
+  } catch {
+  }
+  return receiver;
+}
 function renderedValueV2(file, index, value) {
   coverageHitV2(file, index);
   return value;
@@ -2700,6 +3080,11 @@ const directRuntimeApi = {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -2770,6 +3155,11 @@ export {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

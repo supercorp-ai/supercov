@@ -4085,7 +4085,7 @@ mod tests {
                     hits: vec!["function".into(), "work".into(), "declined".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),

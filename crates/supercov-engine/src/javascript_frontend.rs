@@ -394,7 +394,8 @@ fn frontend_artifact_paths(
         ".supercov/vitest.config.mjs".to_owned(),
         ".supercov/vitestCommands.mjs".to_owned(),
         ".supercov/manifest.json".to_owned(),
-        ".supercov/statement-exclusions.json".to_owned(),
+        ".supercov/frontend-evidence/statement-exclusions.json".to_owned(),
+        ".supercov/frontend-evidence/mutants.json".to_owned(),
         ".supercov/instrumentation-complete".to_owned(),
     ];
     artifacts.extend(
@@ -402,10 +403,9 @@ fn frontend_artifact_paths(
             .iter()
             .map(|(name, _)| format!(".supercov/node_modules/{name}")),
     );
-    // Scope entries outside the instrumented set may still be rewritten
-    // (assertion attribution, capability imports), so they are cached like
-    // instrumented sources. Both populations feed the cache key through the
-    // source digest -- nothing cached here escapes the fingerprint.
+    // Scope entries outside the instrumented set may still be rewritten (assertion attribution,
+    // capability imports), so they are cached like instrumented sources. Both populations feed
+    // the cache key through the source digest -- nothing cached here escapes the fingerprint.
     artifacts.extend(project.source_files.iter().cloned());
     artifacts.extend(
         project
@@ -1019,7 +1019,7 @@ fn runtime_declarations() -> String {
     // Next.js runs the project's eslint over the build graph, and
     // @typescript-eslint/no-explicit-any turned every `any` below into a
     // hard "Failed to compile" for a real monorepo.
-    let mut text = String::from("/* eslint-disable */\n");
+    let mut text = String::from(RUNTIME_DECLARATIONS_HEAD);
     for (name, before) in VALUES {
         let leading = (0..*before)
             .map(|index| format!("a{index}: any, "))
@@ -2066,6 +2066,8 @@ pub fn prepare_javascript_frontend(
     let instrumented = crate::threads::parallel_map(&project.source_files, |file| {
         instrument_source(&options, file)
     });
+    // Each file's mutants with their links, kept beside the manifest.
+    let mut mutants = BTreeMap::new();
     for (file, instrumented) in project.source_files.iter().zip(instrumented) {
         let output = match instrumented? {
             InstrumentedSource::Measured(output) => *output,
@@ -2076,6 +2078,9 @@ pub fn prepare_javascript_frontend(
         };
         authored.insert(file.clone());
         exclusions.extend(output.excluded_statements);
+        if !output.mutants.is_empty() {
+            mutants.insert(file.clone(), output.mutants);
+        }
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
         }
@@ -2164,9 +2169,22 @@ pub fn prepare_javascript_frontend(
         &workspace.join(AUTHORED_LIST),
         &serde_json::to_vec(&authored).expect("plain data serializes"),
     )?;
+    // The run archives this directory whole, each file by its name.
+    let evidence = generated.join("frontend-evidence");
     atomic_write(
-        &generated.join("statement-exclusions.json"),
+        &evidence.join("statement-exclusions.json"),
         &serde_json::to_vec(&exclusions).expect("plain data serializes"),
+    )?;
+    let mutants = crate::js_mutant_links::MutantsFile {
+        schema_version: crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
+        mutant_set: crate::js_instrumenter::mutants_enabled()
+            .then(|| crate::js_mutants::MUTANT_SET.to_owned()),
+        files: mutants,
+        tests_without_values: Vec::new(),
+    };
+    atomic_write(
+        &evidence.join("mutants.json"),
+        &serde_json::to_vec(&mutants).expect("plain data serializes"),
     )?;
     let manifest_path = generated.join("manifest.json");
     let mut encoded = serde_json::to_vec_pretty(&manifest).expect("plain data serializes");
@@ -2188,6 +2206,19 @@ pub fn prepare_javascript_frontend(
         assertion_calls,
     })
 }
+
+/// The first lines of the runtime's declarations: the lint exemption, then the
+/// mutants' probe helpers, whose types are not a plain value pass-through.
+const RUNTIME_DECLARATIONS_HEAD: &str = concat!(
+    "/* eslint-disable */\n",
+    "export declare function compareV2(site: string, left: any, right: any, op: number): boolean;\n",
+    // `+` is a string when either side is, `any` when either side is; the
+    // other operators give a number, or a bigint for bigints.
+    "export declare function arithV2<L, R>(site: string, left: L, right: R, op: number): 0 extends 1 & L ? any : 0 extends 1 & R ? any : L extends string ? string : R extends string ? string : L extends bigint ? bigint : number;\n",
+    "export declare function assignV2<T>(site: string, current: any, value: T, op: number): T;\n",
+    "export declare function methodV2<T>(site: string, receiver: T, method: string, arrow?: string, copy?: (...args: any[]) => unknown): T;\n",
+    "export declare function valueV2<T>(site: string, value: T): T;\n",
+);
 
 #[cfg(test)]
 mod tests {

@@ -25,8 +25,8 @@ use crate::{
 };
 
 const MAX_RUN_METADATA_BYTES: u64 = 1024 * 1024;
-pub const RUST_ANALYSIS_ABI_VERSION: u32 = 1;
-pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 4;
+pub const RUST_ANALYSIS_ABI_VERSION: u32 = 2;
+pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 5;
 pub const RUST_QUERY_INDEX_FILE: &str = "query-index.v1.bin";
 /// The statements that continue onto later lines, written at publication.
 pub const STATEMENT_SPANS_FILE: &str = "statement-spans.json";
@@ -333,7 +333,7 @@ fn create_analyzable_run(
             ],
             events: vec![],
             logicals: vec![],
-            phase_id: None,
+            ..Default::default()
         }],
         browser: vec![],
         server: vec![],
@@ -357,7 +357,7 @@ fn create_analyzable_run(
             hits: vec![],
             events: vec![],
             logicals: vec![],
-            phase_id: None,
+            ..Default::default()
         }];
         vec![unclaimed, parallel]
     } else {
@@ -1143,7 +1143,7 @@ fn index_sections(
     RunIndexError,
 > {
     use crate::coverage_index::CoverageViewId;
-    let (_, normalized, transport, read) =
+    let (_, normalized, transport, read, mutation) =
         crate::coverage_report::archive_request(&ArchiveReportRequest {
             archive_path: run.evidence_path.clone(),
             run_id: run.id.clone(),
@@ -1167,13 +1167,13 @@ fn index_sections(
             CoverageViewId::Failed,
         ]
     };
-    let sections = crate::coverage_index::coverage_index_sections_with_whole_passed(
+    let mut sections = crate::coverage_index::coverage_index_sections_with_whole_passed(
         crate::coverage_report::coverage_views(&normalized, views, Some(transport))?
             .map(|view| view.map_err(RunIndexError::Report)),
         passed_is_whole,
     )?;
-    // Every test's records, freed by nobody's wait.
-    std::thread::spawn(move || drop(normalized));
+    sections.extend(crate::coverage_index::mutation_sections(mutation.as_ref())?);
+    std::thread::spawn(move || drop(normalized)); // every test's records, freed by nobody's wait
     Ok((sections, read))
 }
 
@@ -2116,6 +2116,135 @@ mod tests {
             index.verify_all().unwrap();
         }
         assert_eq!(fs::read(&run.query_index_path).unwrap(), canonical);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A published run that listed its mutants answers with their verdicts,
+    /// worked out while its index is built; an index written before mutants
+    /// were indexed is rebuilt with them.
+    #[test]
+    fn a_published_run_s_index_holds_its_mutants_verdicts() {
+        let root = temporary_directory("mutants");
+        let candidate = |mutator: &str, descriptor: &str, extra: serde_json::Value| {
+            let mut mutant = serde_json::json!({
+                "id": format!("src/app.js:1:5-1:18:{mutator}:{descriptor}"),
+                "mutator": mutator,
+                "replacement": descriptor,
+                "start": [1, 5],
+                "end": [1, 18],
+                "original": "left && right",
+                "statement": "statement",
+            });
+            mutant
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            mutant
+        };
+        let decision = serde_json::json!({ "decision": { "id": "decision" } });
+        let listed = serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": "stryker-js@10.1.1",
+            "files": { "src/app.js": [
+                candidate("ConditionalExpression", "true", decision.clone()),
+                candidate("ConditionalExpression", "false", decision.clone()),
+                candidate("LogicalOperator", "||", serde_json::json!({
+                    "decision": { "id": "decision" },
+                    "operator": { "text": "&&", "at": 5 },
+                })),
+                candidate("StringLiteral", "empty", serde_json::json!({ "statement": "elsewhere" })),
+            ]},
+        });
+        create_analyzable_test_run_with(
+            &root,
+            "mutants-run",
+            vec![EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&listed).unwrap(),
+            }],
+        );
+        let run = discover_runs(&root).unwrap().runs.remove(0);
+        let read = |run: &StoredRun| {
+            let container = open_or_rebuild_query_index(run).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let mutation = index.mutation().unwrap().unwrap();
+            let summary = crate::mutants_query::run_summary(&index).unwrap().unwrap();
+            let verdicts = mutation
+                .files
+                .iter()
+                .flat_map(|file| index.mutants_of(file).unwrap())
+                .map(|mutant| (mutant.id(), mutant.status, mutant.replacement))
+                .collect::<Vec<_>>();
+            (mutation.mutant_set, summary.summary.weak_score, verdicts)
+        };
+        use crate::coverage_index::MutantStatus::{Infected, NotReached};
+        let expected = (
+            "stryker-js@10.1.1".to_owned(),
+            Some(0.75),
+            vec![
+                (
+                    "src/app.js:1:5-1:18:ConditionalExpression:true".to_owned(),
+                    Infected,
+                    "true".to_owned(),
+                ),
+                (
+                    "src/app.js:1:5-1:18:ConditionalExpression:false".to_owned(),
+                    Infected,
+                    "false".to_owned(),
+                ),
+                (
+                    "src/app.js:1:5-1:18:LogicalOperator:||".to_owned(),
+                    Infected,
+                    "left || right".to_owned(),
+                ),
+                (
+                    "src/app.js:1:5-1:18:StringLiteral:empty".to_owned(),
+                    NotReached,
+                    "\"\"".to_owned(),
+                ),
+            ],
+        );
+        assert_eq!(read(&run), expected);
+
+        // The same coverage without the mutant sections, under the index
+        // schema before them: rebuilt, not misread.
+        let container =
+            QueryIndex::open(&run.query_index_path, &query_index_identity(&run).unwrap()).unwrap();
+        let old = [
+            crate::coverage_index::SECTION_MUTATION,
+            crate::coverage_index::SECTION_MUTATION_FILES,
+            crate::coverage_index::SECTION_MUTANTS,
+            crate::coverage_index::SECTION_MUTANT_TEXT,
+        ];
+        let identity = query_index_identity(&run).unwrap();
+        let sections = (0..=crate::coverage_index::SECTION_COVERAGE_MODEL)
+            .filter(|kind| !old.contains(kind))
+            .filter_map(|kind| {
+                let descriptor = container.descriptor(kind).ok()?;
+                Some(crate::query_index::QueryIndexSection {
+                    kind,
+                    record_size: descriptor.record_size,
+                    count: descriptor.count,
+                    bytes: container
+                        .bytes(kind, 0, descriptor.length)
+                        .unwrap()
+                        .to_vec(),
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(container);
+        write_query_index(&sections, &identity, &run.query_index_path).unwrap();
+        let mut bytes = fs::read(&run.query_index_path).unwrap();
+        bytes[8..12].copy_from_slice(&(QUERY_INDEX_SCHEMA_VERSION - 1).to_le_bytes());
+        let checksum_at = crate::query_index::QUERY_INDEX_HEADER_SIZE - 32;
+        let checksum = Sha256::digest(&bytes[..checksum_at]);
+        bytes[checksum_at..crate::query_index::QUERY_INDEX_HEADER_SIZE].copy_from_slice(&checksum);
+        fs::write(&run.query_index_path, bytes).unwrap();
+        assert!(matches!(
+            QueryIndex::open(&run.query_index_path, &identity),
+            Err(QueryIndexError::InvalidHeader("schema version"))
+        ));
+        assert_eq!(read(&run), expected);
         fs::remove_dir_all(root).unwrap();
     }
 

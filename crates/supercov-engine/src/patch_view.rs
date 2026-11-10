@@ -25,10 +25,45 @@ pub type ChangedLines = BTreeMap<String, BTreeSet<usize>>;
 ///
 /// Only the post-image side is read. A deleted line has no line in the new
 /// file to cover, and counting it would ask a patch to test code it removed.
+///
+/// A hunk's header says how many old and new lines follow it, and those
+/// lines are read as lines, whatever they start with: an added line that
+/// reads `++ x` comes out as `+++ x`, which is not a file header there.
 pub fn changed_lines(diff: &str) -> ChangedLines {
     let mut changed = ChangedLines::new();
     let mut file: Option<String> = None;
+    // Lines of the current hunk still to come, old and new.
+    let mut pending = (0_usize, 0_usize);
     for line in diff.lines() {
+        if pending != (0, 0) {
+            let consumed = match line.as_bytes().first() {
+                Some(b'-') => {
+                    pending.0 = pending.0.saturating_sub(1);
+                    true
+                }
+                Some(b'+') => {
+                    pending.1 = pending.1.saturating_sub(1);
+                    true
+                }
+                Some(b' ') => {
+                    pending = (pending.0.saturating_sub(1), pending.1.saturating_sub(1));
+                    true
+                }
+                // `\ No newline at end of file` belongs to the line before.
+                Some(b'\\') => true,
+                _ => {
+                    pending = (0, 0);
+                    false
+                }
+            };
+            if consumed {
+                continue;
+            }
+        }
+        if line.starts_with("diff --git ") {
+            file = None;
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("+++ ") {
             // `/dev/null` is a deletion; it has no post-image to attribute to.
             file = rest
@@ -41,22 +76,29 @@ pub fn changed_lines(diff: &str) -> ChangedLines {
         let Some(rest) = line.strip_prefix("@@ ") else {
             continue;
         };
+        // "@@ -12,0 +13,4 @@" -- each side is start[,count], count
+        // defaulting to 1 and 0 meaning nothing on that side.
+        let side = |sign: char| {
+            let part = rest
+                .split_whitespace()
+                .find(|part| part.starts_with(sign))?;
+            let mut numbers = part[1..].split(',');
+            let start = numbers.next()?.parse::<usize>().ok()?;
+            let count = match numbers.next() {
+                Some(count) => count.parse::<usize>().ok()?,
+                None => 1,
+            };
+            Some((start, count))
+        };
+        let old = side('-').map_or(0, |(_, count)| count);
+        let Some((start, count)) = side('+') else {
+            pending = (old, 0);
+            continue;
+        };
+        pending = (old, count);
         let Some(file) = file.as_ref() else {
             continue;
         };
-        // "@@ -12,0 +13,4 @@" -- the "+" side is start[,count], count
-        // defaulting to 1 and 0 meaning a pure deletion.
-        let Some(plus) = rest.split_whitespace().find(|part| part.starts_with('+')) else {
-            continue;
-        };
-        let mut numbers = plus[1..].split(',');
-        let Some(start) = numbers.next().and_then(|n| n.parse::<usize>().ok()) else {
-            continue;
-        };
-        let count = numbers
-            .next()
-            .map_or(Some(1), |n| n.parse::<usize>().ok())
-            .unwrap_or(1);
         if count == 0 {
             continue;
         }
@@ -297,19 +339,40 @@ mod tests {
     #[test]
     fn only_the_post_image_of_a_diff_becomes_a_denominator() {
         // A deleted line has nothing left to cover, and a pure deletion hunk
-        // (`+13,0`) must not claim line 13 of the new file.
+        // (`+21,0`) must not claim line 21 of the new file.
         let diff = "\
+diff --git a/src/a.ts b/src/a.ts
 --- a/src/a.ts
 +++ b/src/a.ts
 @@ -1,2 +1,3 @@
+-one
+-two
++one
++two
++three
 @@ -20,4 +21,0 @@
+-a
+-b
+-c
+-d
+diff --git a/src/gone.ts b/src/gone.ts
+deleted file mode 100644
 --- a/src/gone.ts
 +++ /dev/null
 @@ -1,5 +0,0 @@
+-1
+-2
+-3
+-4
+-5
+diff --git a/src/b.ts b/src/b.ts
 --- a/src/b.ts
 +++ b/src/b.ts
 @@ -7 +7 @@
+-x
++y
 @@ -9 @@
+-z
 @@ -10 +x,2 @@
 ";
         let changed = changed_lines(diff);
@@ -318,6 +381,54 @@ mod tests {
         assert_eq!(changed["src/b.ts"], BTreeSet::from([7]));
         assert!(!changed.contains_key("/dev/null"));
         assert!(!changed.contains_key("src/gone.ts"));
+    }
+
+    /// What a hunk's lines say is content, whatever it starts with; a
+    /// renamed file's lines are its new name's; a new file is all added;
+    /// the marker of a last line without a newline is no line.
+    #[test]
+    fn a_diff_is_read_hunk_by_hunk() {
+        let diff = "\
+diff --git a/src/old.ts b/src/new.ts
+similarity index 90%
+rename from src/old.ts
+rename to src/new.ts
+--- a/src/old.ts
++++ b/src/new.ts
+@@ -3 +3,2 @@
+--- not a header
++++ not a header either
++const added = 1;
+diff --git a/src/same.ts b/src/moved.ts
+similarity index 100%
+rename from src/same.ts
+rename to src/moved.ts
+diff --git a/src/fresh.ts b/src/fresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/fresh.ts
+@@ -0,0 +1,2 @@
++export const a = 1;
++export const b = 2;
+\\ No newline at end of file
+diff --git a/src/tail.ts b/src/tail.ts
+--- a/src/tail.ts
++++ b/src/tail.ts
+@@ -4 +4 @@
+-end
+\\ No newline at end of file
++end;
+\\ No newline at end of file
+";
+        let changed = changed_lines(diff);
+        assert_eq!(
+            changed,
+            ChangedLines::from([
+                ("src/fresh.ts".to_owned(), BTreeSet::from([1, 2])),
+                ("src/new.ts".to_owned(), BTreeSet::from([3, 4])),
+                ("src/tail.ts".to_owned(), BTreeSet::from([4])),
+            ])
+        );
     }
 
     #[test]

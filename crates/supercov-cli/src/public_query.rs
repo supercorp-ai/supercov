@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each JavaScript mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -73,6 +73,9 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         "test" => {
             "supercov runs <run-id> test <id|name-fragment> [--filter <all|passed|failed>] [--json]"
         }
+        "mutants" => {
+            return Some(MUTANTS_HELP.into());
+        }
         "minimize" => {
             "supercov runs <run-id> minimize [--target <0..100>] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--json]"
         }
@@ -80,6 +83,45 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     };
     Some(format!("Usage: {usage}\n"))
 }
+
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
+
+Weak mutation: for each mutant StrykerJS would make, whether a test ran the
+mutated code (reach) and whether its value differed there (infection), read
+from the run without running anything. JavaScript and TypeScript runs list
+their mutants unless measured with SUPERCOV_MUTANTS=0.
+
+Without a file, a table of files by how many mutants no test infects, then
+by how many no test reaches; with a file, its mutants by line; with
+file:line, that line's mutants and why.
+
+Options:
+  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent
+  --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
+  --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
+                            of them (every .json file inside, recursively); a file to query goes before it
+  --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)
+  --diff <base>             only mutants on lines the change added or modified since it left <base> (a git
+                            ref, such as origin/main): the run's commit against the merge base, or the
+                            working tree where the run had uncommitted changes; not infected and not
+                            reached listed first
+  --fail-on <s1,s2>         exit 1 when any mutant asked about has one of these statuses: a CI gate
+  --kind, --runner, --tag, --title, --test-file
+                            only the verdicts of those tests: a mutant only other tests infect is not infected there
+  --offset <n>
+  --limit <n>               entries per page (default 20; 0 for all)
+  --json                    the coverage.mutants reply, a page at a time
+  --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
+  --format markdown         the not-infected and not-reached mutants (or --status's) as a table for a pull
+                            request's comment, the first 25 and the command for the rest
+  --output <file>           with --format, write them there instead of to standard output
+
+Exit codes:
+  0  the answer was given
+  1  with --stryker, a soundness violation: a mutant this run says no test infects or reaches, which StrykerJS killed;
+     with --fail-on, a mutant with one of its statuses
+  2  the run cannot answer, or the request is invalid
+";
 
 #[derive(Debug)]
 pub struct PublicQueryError {
@@ -163,6 +205,14 @@ struct QueryOptions {
     /// `diff --gained`.
     gained: bool,
     sort: DecisionSort,
+    /// `mutants --status`, `--mutator`, `--stryker`, `--stryker-root`.
+    statuses: Vec<supercov_engine::coverage_index::MutantStatus>,
+    mutator: Option<String>,
+    stryker: Vec<String>,
+    stryker_root: Option<String>,
+    /// `mutants --diff`, `--fail-on`.
+    diff_base: Option<String>,
+    fail_on: Vec<supercov_engine::coverage_index::MutantStatus>,
     positional: Vec<String>,
 }
 
@@ -188,6 +238,12 @@ impl Default for QueryOptions {
             depth: None,
             gained: false,
             sort: DecisionSort::Location,
+            statuses: Vec::new(),
+            mutator: None,
+            stryker: Vec::new(),
+            stryker_root: None,
+            diff_base: None,
+            fail_on: Vec::new(),
             positional: Vec::new(),
         }
     }
@@ -398,6 +454,96 @@ fn parse_options(
                     }
                 }
             }
+            flag @ ("--status" | "--mutator" | "--stryker" | "--stryker-root" | "--diff"
+            | "--fail-on") => {
+                if command != "mutants" {
+                    return Err(PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        format!("{flag} is only supported by: supercov runs <run-id> mutants"),
+                    ));
+                }
+                index += 1;
+                let Some(value) = arguments.get(index).filter(|value| !value.is_empty()) else {
+                    return Err(PublicQueryError::invalid(
+                        Some(&agent_command),
+                        json_output,
+                        match flag {
+                            "--status" => {
+                                "--status requires statuses, such as not-infected,not-reached"
+                            }
+                            "--mutator" => {
+                                "--mutator requires a StrykerJS mutator, such as EqualityOperator"
+                            }
+                            "--stryker" => "--stryker requires a StrykerJS mutation.json report",
+                            "--diff" => {
+                                "--diff requires a git ref to compare with, such as origin/main"
+                            }
+                            "--fail-on" => {
+                                "--fail-on requires statuses, such as not-infected,not-reached"
+                            }
+                            _ => "--stryker-root requires a directory",
+                        },
+                    ));
+                };
+                match flag {
+                    "--status" | "--fail-on" => {
+                        for name in value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                        {
+                            let name = name.to_lowercase();
+                            let Some(status) =
+                                supercov_engine::coverage_index::MutantStatus::parse(&name)
+                            else {
+                                let message = if matches!(
+                                    name.as_str(),
+                                    "killed" | "survived" | "timeout"
+                                ) {
+                                    format!(
+                                        "{flag} {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
+                                    )
+                                } else {
+                                    format!(
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
+                                    )
+                                };
+                                return Err(PublicQueryError::invalid(
+                                    Some(&agent_command),
+                                    json_output,
+                                    message,
+                                ));
+                            };
+                            let statuses = if flag == "--status" {
+                                &mut options.statuses
+                            } else {
+                                &mut options.fail_on
+                            };
+                            if !statuses.contains(&status) {
+                                statuses.push(status);
+                            }
+                        }
+                    }
+                    "--mutator" => options.mutator = Some(value.clone()),
+                    "--diff" => options.diff_base = Some(value.clone()),
+                    "--stryker" => {
+                        // Every report after it, as a shell's glob gives
+                        // them: the words that are a `.json` file or a
+                        // directory. A file to query goes before it.
+                        options.stryker.push(value.clone());
+                        while let Some(next) = arguments.get(index + 1).filter(|next| {
+                            !next.starts_with('-')
+                                && (next.to_ascii_lowercase().ends_with(".json")
+                                    || std::path::Path::new(next.as_str()).is_dir())
+                        }) {
+                            options.stryker.push(next.clone());
+                            index += 1;
+                        }
+                    }
+                    _ => options.stryker_root = Some(value.clone()),
+                }
+            }
             "--gained" => options.gained = true,
             "--depth" => {
                 index += 1;
@@ -440,6 +586,20 @@ fn parse_options(
             _ => options.positional.push(value.clone()),
         }
         index += 1;
+    }
+    if options.stryker_root.is_some() && options.stryker.is_empty() {
+        return Err(PublicQueryError::invalid(
+            Some(&agent_command),
+            json_output,
+            "--stryker-root requires --stryker",
+        ));
+    }
+    if command == "mutants" && options.filter != "all" {
+        return Err(PublicQueryError::invalid(
+            Some(&agent_command),
+            json_output,
+            "mutants are worked out from every attempt; --filter passed and failed are not supported. Narrow the tests with --kind, --runner, --tag, --title or --test-file",
+        ));
     }
     if options.sort != DecisionSort::Location && !options.group_decision {
         return Err(PublicQueryError::invalid(
@@ -531,10 +691,11 @@ pub(crate) fn coverage_request(
         tags: options.tags.clone(),
         titles: options.titles.clone(),
         test_files: options.test_files.clone(),
+        mutants: supercov_engine::mutants_query::MutantsOptions::default(),
     };
     // A word a query does not take would be read as a filter it is not.
     let takes = match command {
-        "file" | "decision" => 1,
+        "file" | "decision" | "mutants" => 1,
         "line" | "test" => usize::MAX,
         _ => 0,
     };
@@ -549,6 +710,37 @@ pub(crate) fn coverage_request(
     }
     match command {
         "summary" | "kinds" | "runners" | "gaps" | "tests-without-evidence" => {}
+        "mutants" => {
+            if let Some(selector) = options.positional.first() {
+                match parse_location(selector) {
+                    Some((file, line)) => {
+                        request.file = Some(file);
+                        request.line = Some(line);
+                    }
+                    None => request.file = Some(selector.clone()),
+                }
+            }
+            request.mutants.statuses = options.statuses.clone();
+            request.mutants.mutator = options.mutator.clone();
+            request.mutants.diff_base = options.diff_base.clone();
+            // A change's mutants for a reader: what its tests leave alive.
+            // The JSON and the export list them all unless asked.
+            if options.diff_base.is_some() && options.statuses.is_empty() && !json_output {
+                request.mutants.statuses = vec![
+                    supercov_engine::coverage_index::MutantStatus::NotInfected,
+                    supercov_engine::coverage_index::MutantStatus::NotReached,
+                ];
+            }
+            request.mutants.fail_on = options.fail_on.clone();
+            if !options.stryker.is_empty() {
+                request.mutants.stryker = Some(
+                    read_stryker_reports(&options.stryker, options.stryker_root.as_deref())
+                        .map_err(|message| {
+                            PublicQueryError::invalid(Some(&agent_command), json_output, message)
+                        })?,
+                );
+            }
+        }
         "files" => {
             if options.group_dir {
                 request.group = Some("dir".into());
@@ -651,6 +843,95 @@ pub(crate) fn coverage_request(
     Ok((request, options.json))
 }
 
+/// StrykerJS's reports, each mutant's file from the project root: a report's
+/// paths are relative to `root` (the project root when not given), or
+/// absolute.
+fn read_stryker_reports(
+    paths: &[String],
+    root: Option<&str>,
+) -> Result<supercov_engine::mutants_query::StrykerReports, String> {
+    use std::path::{Component, Path, PathBuf};
+    let project = std::env::current_dir()
+        .map_err(|error| format!("Could not resolve the current directory: {error}"))?;
+    let base = project.join(root.unwrap_or("."));
+    let normal = |path: &Path| {
+        let mut normal = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normal.pop();
+                }
+                other => normal.push(other),
+            }
+        }
+        normal
+    };
+    let project = normal(&project);
+    let path_of = |file: &str| {
+        let full = normal(&base.join(file));
+        full.strip_prefix(&project)
+            .unwrap_or(&full)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut reports = supercov_engine::mutants_query::StrykerReports {
+        given: paths.to_vec(),
+        root: root.map(str::to_owned),
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    for path in paths {
+        if Path::new(path).is_dir() {
+            let found = json_files(Path::new(path))
+                .map_err(|error| format!("Could not read {path}: {error}"))?;
+            if found.is_empty() {
+                return Err(format!("{path} holds no .json report"));
+            }
+            files.extend(found);
+        } else {
+            files.push(path.clone());
+        }
+    }
+    for path in files {
+        // A report named twice, or found in two directories given, once.
+        if reports.reports.contains(&path) {
+            continue;
+        }
+        let text = supercov_engine::fault_fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read {path}: {error}"))?;
+        let mutants = supercov_engine::mutants_query::parse_stryker_report(&text, path_of)
+            .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
+        reports.reports.push(path);
+        reports.mutants.extend(mutants);
+    }
+    Ok(reports)
+}
+
+/// Every `.json` file under `directory`, in order of path, named as
+/// `directory` was given with the rest joined by `/`.
+fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in supercov_engine::fault_fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            {
+                found.push(path.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 pub fn parse_public_query(
     command: &str,
     arguments: &[String],
@@ -708,6 +989,7 @@ pub fn parse_public_query(
                 tags: options.tags.clone(),
                 titles: options.titles.clone(),
                 test_files: options.test_files.clone(),
+                mutants: supercov_engine::mutants_query::MutantsOptions::default(),
             }),
             newer_run_id: Some(newer.clone()),
             agent_command: "diff".into(),
@@ -747,6 +1029,7 @@ pub fn parse_public_query(
             | "line"
             | "test"
             | "minimize"
+            | "mutants"
     ) {
         return Err(PublicQueryError::unknown(
             Some(&format!("coverage.{child}")),
@@ -791,6 +1074,7 @@ mod tests {
             "line",
             "test",
             "minimize",
+            "mutants",
         ] {
             let usage = help(child);
             let named = if child == "summary" {
@@ -875,6 +1159,123 @@ mod tests {
         assert_eq!(request.runner.as_deref(), Some("playwright"));
         assert_eq!(request.offset, 40);
         assert_eq!(request.limit, 20);
+    }
+
+    #[test]
+    fn mutants_take_a_file_or_a_line_and_pick_statuses_and_a_mutator() {
+        let request = |arguments: &[&str]| {
+            let PublicQueryInvocation::Coverage {
+                request,
+                agent_command,
+                ..
+            } = parse_public_query("runs", &args(arguments)).unwrap()
+            else {
+                panic!("expected a mutants query");
+            };
+            assert_eq!(agent_command, "coverage.mutants");
+            request
+        };
+        let line = request(&[
+            "run-1",
+            "mutants",
+            "src/a.ts:42",
+            "--status",
+            "not-infected,not-reached,not-infected",
+            "--mutator",
+            "EqualityOperator",
+            "--kind",
+            "unit",
+        ]);
+        assert_eq!(line.command, "mutants");
+        assert_eq!(
+            (line.file.as_deref(), line.line),
+            (Some("src/a.ts"), Some(42))
+        );
+        assert_eq!(
+            line.mutants.statuses,
+            [
+                supercov_engine::coverage_index::MutantStatus::NotInfected,
+                supercov_engine::coverage_index::MutantStatus::NotReached
+            ]
+        );
+        assert_eq!(line.mutants.mutator.as_deref(), Some("EqualityOperator"));
+        // A kind picks the tests whose verdicts are read.
+        assert_eq!(
+            line.test_filter().and_then(|filter| filter.kind),
+            Some("unit".to_owned())
+        );
+        let file = request(&["run-1", "mutants", "src/a.ts"]);
+        assert_eq!((file.file.as_deref(), file.line), (Some("src/a.ts"), None));
+        let run = request(&["run-1", "mutants"]);
+        assert_eq!((run.file, run.line), (None, None));
+        for (arguments, message) in [
+            (
+                &["run-1", "mutants", "--status", "nope"][..],
+                "is not a status",
+            ),
+            (
+                &["run-1", "mutants", "--status", "survived"],
+                "reserved for strong mutation",
+            ),
+            (
+                &["run-1", "gaps", "--status", "infected"],
+                "only supported by: supercov runs <run-id> mutants",
+            ),
+            (
+                &["run-1", "mutants", "--stryker-root", "x"],
+                "--stryker-root requires --stryker",
+            ),
+            (
+                &["run-1", "mutants", "--filter", "passed"],
+                "--filter passed and failed are not supported",
+            ),
+            (
+                &[
+                    "run-1",
+                    "mutants",
+                    "--stryker",
+                    "/nonexistent/mutation.json",
+                ],
+                "Could not read /nonexistent/mutation.json",
+            ),
+            (
+                &["run-1", "mutants", "a.ts", "b.ts"],
+                "Unexpected argument: b.ts",
+            ),
+        ] {
+            let error = parse_public_query("runs", &args(arguments)).unwrap_err();
+            assert!(
+                error.error.message.contains(message),
+                "{arguments:?}: {}",
+                error.error.message
+            );
+        }
+    }
+
+    /// `--stryker` takes every report after it, as a glob gives them, and
+    /// stops at an option or a word that is no report.
+    #[test]
+    fn one_stryker_option_takes_several_reports() {
+        let options = parse_options(
+            "mutants",
+            &args(&[
+                "--stryker",
+                "r/r00.json",
+                "r/r01.JSON",
+                "src/a.ts",
+                "--stryker",
+                "x.json",
+                "--json",
+            ]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(options.stryker, ["r/r00.json", "r/r01.JSON", "x.json"]);
+        assert_eq!(options.positional, ["src/a.ts"]);
+        assert!(options.json);
+        // The first word is a report whatever it is named.
+        let options = parse_options("mutants", &args(&["--stryker", "reports"]), false).unwrap();
+        assert_eq!(options.stryker, ["reports"]);
     }
 
     #[test]

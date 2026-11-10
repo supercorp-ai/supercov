@@ -168,6 +168,11 @@ function runtimePrelude(transformed) {
     loopEntered: "function(){}",
     loopEnd: "function(){}",
     withRequestPhase: "function(handler){return handler;}",
+    compareV2: "function(site,left,right,op){return op===4?left:op===0?left<right:op===1?left<=right:op===2?left>right:left>=right;}",
+    arithV2: "function(site,left,right,op){switch(op){case 0:return left+right;case 1:return left-right;case 2:return left*right;case 3:return left/right;case 4:return left%right;case 5:return left<<right;case 6:return left>>right;case 7:return left&right;default:return left|right;}}",
+    assignV2: "function(site,current,value){return value;}",
+    methodV2: "function(site,receiver){return receiver;}",
+    valueV2: "function(site,value){return value;}",
   };
   if (!importMatch) {
     const implementations = globalMatches.map(([, , imported]) => {

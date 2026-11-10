@@ -11,6 +11,10 @@
 //
 // And a request that names its test, whose handler reads the body: Node
 // emits the body's events outside the handler, and that work was no test's.
+//
+// The app server records the values its comparisons see, credited as its
+// hits are: a boundary mutant in either handler is decided from them, not
+// left unknown for having run outside the test process.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,8 +30,8 @@ const workers = [workerPorts.slice(0, 2), workerPorts.slice(2, 4)];
 
 const files = {
   'package.json': '{ "name": "background-by-time", "private": true, "type": "module" }\n',
-  'src/webhook.js': "export function settle(event) {\n  if (event.type === 'charge.succeeded') return 'paid';\n  return 'ignored';\n}\n",
-  'src/note.js': "export function note(body) {\n  if (body.text) return body.text.trim();\n  return '';\n}\n",
+  'src/webhook.js': "export function settle(event) {\n  if (event.type.length > 3 && event.type === 'charge.succeeded') return 'paid';\n  return 'ignored';\n}\n",
+  'src/note.js': "export function note(body) {\n  if (body.text && body.text.length < 200) return body.text.trim();\n  return '';\n}\n",
   'src/server.js': `import { createServer } from 'node:http';\nimport { settle } from './webhook.js';\nimport { note } from './note.js';\n\nlet state = 'none';\ncreateServer((request, response) => {\n  if (request.url === '/ready') return response.end('ready');\n  if (request.url === '/note') {\n    let body = '';\n    request.on('data', (chunk) => (body += chunk));\n    request.on('end', () => response.end(note(JSON.parse(body))));\n    return;\n  }\n  if (request.url === '/state') return response.end(state);\n  if (request.url === '/checkout') {\n    state = 'pending';\n    fetch('http://127.0.0.1:' + (process.argv[3] ?? ${stripe}) + '/charge', { method: 'POST' }).then(() => response.end('started'));\n    return;\n  }\n  if (request.url === '/webhook') {\n    let body = '';\n    request.on('data', (chunk) => (body += chunk));\n    request.on('end', () => { state = settle(JSON.parse(body)); response.end('ok'); });\n    return;\n  }\n  response.end('?');\n}).listen(Number(process.argv[2] ?? ${app}), '127.0.0.1');\n`,
   // The mock: answers the charge, then calls the app's webhook by itself.
   'mocks/stripe.mjs': `import { createServer } from 'node:http';\n\ncreateServer((request, response) => {\n  if (request.url === '/charge') {\n    response.end('{}');\n    setTimeout(() => fetch('http://127.0.0.1:' + (process.argv[3] ?? ${app}) + '/webhook', { method: 'POST', body: JSON.stringify({ type: 'charge.succeeded' }) }), 100);\n    return;\n  }\n  response.end('ready');\n}).listen(Number(process.argv[2] ?? ${stripe}), '127.0.0.1');\n`,
@@ -64,6 +68,18 @@ try {
   const kept = run(binary, ['runs', runId, 'test', 'a note is kept']);
   assert.match(kept.stdout, /src\/note\.js/u, `the note handler's body work is not the test's:\n${kept.stdout}`);
   assert.doesNotMatch(kept.stdout, /credited by time/u, kept.stdout);
+  // Boundaries never crossed, in work credited by time and in a request
+  // that named its test: values the server recorded say so.
+  const mutants = (file) => JSON.parse(run(binary, ['runs', runId, 'mutants', file, '--json', '--limit', '0']).stdout).data.mutants;
+  for (const [file, original, replacement] of [
+    ['src/webhook.js', 'event.type.length > 3', 'event.type.length >= 3'],
+    ['src/note.js', 'body.text.length < 200', 'body.text.length <= 200'],
+  ]) {
+    const listed = mutants(file);
+    const boundary = listed.find((mutant) => mutant.original === original && mutant.replacement === replacement);
+    assert.equal(boundary?.status, 'not-infected', `${file}: ${JSON.stringify(listed, null, 2)}`);
+    assert.equal(boundary.weak.code, 'operands-never-equal', JSON.stringify(boundary));
+  }
   const summary = run(binary, ['runs', runId]).stdout;
   assert.match(summary, /Attribution {6}2 exact, 1 with server work credited by time/u, summary);
   assert.match(summary, /no test {20}lines/u, summary);
@@ -77,7 +93,7 @@ try {
     assert.match(page, /src\/webhook\.js/u, `${name}: the webhook is not its test's:\n${page}`);
     assert.match(page, /credited by time/u, page);
   }
-  console.log('[background-by-time] a webhook an unmeasured process sends is credited, by time, to the test running then; a request body is read under its test');
+  console.log('[background-by-time] a webhook an unmeasured process sends is credited, by time, to the test running then; a request body is read under its test; the values the server recorded decide its mutants');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'background-by-time-'))) rmSync(root, { recursive: true, force: true });
 }

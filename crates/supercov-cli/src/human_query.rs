@@ -991,10 +991,625 @@ fn render_lines(
     format!("{answered}\n\nNot answered\n{failed}")
 }
 
+/// A mutation score as the summary line and the report write it.
+fn score(value: Option<f64>) -> String {
+    value.map_or_else(|| "—".into(), |value| format!("{:.1}%", value * 100.0))
+}
+
+/// The run summary's line: `Mutants  2,955 · weak score 85.0% · ...`.
+fn mutants_summary_line(mutants: &supercov_engine::mutants_query::MutantsRunSummary) -> String {
+    let summary = &mutants.summary;
+    format!(
+        "Mutants      {} · weak score {} · {} · {} not reached · {} unknown · {} equivalent",
+        count(summary.mutants),
+        score(summary.weak_score),
+        not_infected(summary),
+        count(summary.status.not_reached),
+        count(summary.status.unknown),
+        count(summary.status.equivalent),
+    )
+}
+
+/// `211 not infected`, and how many of them are at a clock or random
+/// boundary where there are any.
+fn not_infected(summary: &supercov_engine::mutants_query::MutantsSummary) -> String {
+    let not_infected = format!("{} not infected", count(summary.status.not_infected));
+    if summary.untestable == 0 {
+        not_infected
+    } else {
+        format!(
+            "{not_infected} ({} at a clock or random boundary)",
+            count(summary.untestable)
+        )
+    }
+}
+
+/// A mutant's code: the part it changes where its original is too long or
+/// on several lines (`….slice(0, n) → …`), and otherwise all of it.
+pub(crate) fn mutant_change(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    match &mutant.changed {
+        Some(changed) => format!("{} → {}", changed.from, changed.to),
+        None => format!("{} → {}", mutant.original, mutant.replacement),
+    }
+}
+
+/// The hint that a mutant not infected is practically untestable.
+fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    match mutant.weak.untestable {
+        Some(kind)
+            if mutant.status == supercov_engine::coverage_index::MutantStatus::NotInfected =>
+        {
+            format!("  ({} boundary)", kind.name())
+        }
+        _ => String::new(),
+    }
+}
+
+/// Text cut to `width` characters, with `…` where it was cut.
+fn clipped(text: &str, width: usize) -> String {
+    if text.chars().count() > width {
+        format!("{}…", text.chars().take(width - 1).collect::<String>())
+    } else {
+        text.to_owned()
+    }
+}
+
+/// `runs <run> mutants` with the location and options asked, for the next
+/// page or another file.
+pub(crate) fn mutants_command(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+    location: Option<&str>,
+) -> String {
+    let mut command = coverage_command(&data.run, request, "mutants");
+    if let Some(location) = location {
+        command.push_str(&format!(" {}", shell_quote(location)));
+    }
+    let options = &request.mutants;
+    if !options.statuses.is_empty() {
+        let names = options
+            .statuses
+            .iter()
+            .map(|status| status.name())
+            .collect::<Vec<_>>();
+        command.push_str(&format!(" --status {}", names.join(",")));
+    }
+    if let Some(mutator) = &options.mutator {
+        command.push_str(&format!(" --mutator {}", shell_quote(mutator)));
+    }
+    if let Some(base) = &options.diff_base {
+        command.push_str(&format!(" --diff {}", shell_quote(base)));
+    }
+    if let Some(stryker) = &options.stryker {
+        command.push_str(&format!(" --stryker {}", stryker_given(stryker)));
+        if let Some(root) = &stryker.root {
+            command.push_str(&format!(" --stryker-root {}", shell_quote(root)));
+        }
+    }
+    command
+}
+
+/// The most reports or directories a command is written with in full; more
+/// are `<56 reports>`, and a hint says so once.
+const NAMED_REPORTS: usize = 3;
+
+/// What `--stryker` was given, as a command repeats it: in full, or, for
+/// more than a few, `<56 reports>`.
+fn stryker_given(stryker: &supercov_engine::mutants_query::StrykerReports) -> String {
+    if stryker.given.len() > NAMED_REPORTS {
+        format!("<{} reports>", count(stryker.reports.len()))
+    } else {
+        stryker
+            .given
+            .iter()
+            .map(|given| shell_quote(given))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// The reports joined, as the StrykerJS block's heading names them.
+fn stryker_named(stryker: &supercov_engine::mutants_query::StrykerReports) -> String {
+    let reports = stryker.reports.len();
+    if stryker.given.len() > NAMED_REPORTS {
+        format!("{} reports", count(reports))
+    } else if reports == stryker.given.len() {
+        stryker.given.join(", ")
+    } else {
+        format!("{} reports in {}", count(reports), stryker.given.join(", "))
+    }
+}
+
+fn render_mutants(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+    page: &AgentPagination,
+) -> String {
+    let mut text = mutants_text(request, data, page);
+    // The commands above stand for the reports without naming them.
+    if let Some(stryker) = &request.mutants.stryker
+        && stryker.given.len() > NAMED_REPORTS
+    {
+        let placeholder = stryker_given(stryker);
+        if text.contains(&placeholder) {
+            text.push_str(&format!(
+                "\n{placeholder} in these commands: the reports given to --stryker"
+            ));
+        }
+    }
+    if data.diff.is_none()
+        && let Some(gate) = gate_failure(data)
+    {
+        text.push('\n');
+        text.push_str(&gate);
+    }
+    text
+}
+
+/// `--fail-on`'s refusal, where any mutant asked about has a status it names.
+pub(crate) fn gate_failure(
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+) -> Option<String> {
+    let gate = data.fail_on.as_ref().filter(|gate| gate.mutants > 0)?;
+    Some(format!(
+        "FAILED --fail-on {}: {} {} (exit 1)",
+        gate.statuses
+            .iter()
+            .map(|status| status.name())
+            .collect::<Vec<_>>()
+            .join(","),
+        count(gate.mutants),
+        if gate.mutants == 1 {
+            "mutant"
+        } else {
+            "mutants"
+        }
+    ))
+}
+
+/// What a change's mutants come to: a heading for what the change was read
+/// against, the mutants its tests leave alive by status, each with the part
+/// it changes and why, and one line for the rest.
+fn diff_mutants_text(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+    page: &AgentPagination,
+    diff: &supercov_engine::mutants_query::DiffSummary,
+    mut lines: Vec<String>,
+) -> String {
+    use supercov_engine::coverage_index::MutantStatus;
+    let short = |commit: &str| commit.chars().take(12).collect::<String>();
+    lines.insert(
+        1,
+        format!(
+            "  Change       {} (where it left {}) to {}",
+            short(&diff.merge_base),
+            diff.base,
+            diff.commit.as_deref().map_or_else(
+                || "the working tree: the run was measured with uncommitted changes, or records no commit".to_owned(),
+                short
+            )
+        ),
+    );
+    lines.insert(
+        2,
+        format!(
+            "  Lines        {} added or changed, {} with mutants",
+            count(diff.changed_lines),
+            count(diff.lines_with_mutants)
+        ),
+    );
+    if data.summary.mutants == 0 {
+        lines.extend([
+            String::new(),
+            "No mutant is on a line this change added or changed.".to_owned(),
+        ]);
+        return lines.join("\n");
+    }
+    let stryker = |status: &Option<String>| {
+        status
+            .as_deref()
+            .map_or_else(String::new, |status| format!("  stryker: {status}"))
+    };
+    let position = |mutant: &supercov_engine::mutants_query::MutantEntry| {
+        format!(
+            "{}:{}:{}",
+            mutant.file, mutant.span.start[0], mutant.span.start[1]
+        )
+    };
+    let width = data
+        .mutants
+        .iter()
+        .map(|mutant| position(mutant).chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut heading = None;
+    for mutant in &data.mutants {
+        if heading != Some(mutant.status) {
+            heading = Some(mutant.status);
+            let name = mutant.status.name().replace('-', " ");
+            let mut title = name.clone();
+            title[..1].make_ascii_uppercase();
+            lines.extend([String::new(), title]);
+        }
+        lines.push(format!(
+            "  {:<width$}  {}  {}{}",
+            position(mutant),
+            mutant.mutator,
+            clipped(
+                &mutant_change(mutant),
+                supercov_engine::mutants_query::SHOWN_WHOLE
+            ),
+            untestable_suffix(mutant),
+        ));
+        lines.push(format!(
+            "  {:<width$}  why: {}{}",
+            "",
+            mutant.weak.reason,
+            stryker(&mutant.stryker)
+        ));
+    }
+    if data.mutants.is_empty() {
+        lines.extend([
+            String::new(),
+            "No mutant on this change is left that way.".to_owned(),
+        ]);
+    }
+    if page.total > page.limit.min(page.total.saturating_sub(page.offset)) + page.offset
+        || page.offset > 0
+    {
+        lines.push(page_label(page));
+    }
+    let shown = &request.mutants.statuses;
+    let rest = MutantStatus::ALL
+        .into_iter()
+        .filter(|status| !shown.is_empty() && !shown.contains(status))
+        .filter(|status| data.summary.status.of(*status) > 0)
+        .collect::<Vec<_>>();
+    if !rest.is_empty() {
+        lines.extend([
+            String::new(),
+            format!(
+                "Not listed: {}. List them: {} --status {}",
+                rest.iter()
+                    .map(|status| format!(
+                        "{} {}",
+                        count(data.summary.status.of(*status)),
+                        status.name().replace('-', " ")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                {
+                    let mut asked = request.clone();
+                    asked.mutants.statuses.clear();
+                    mutants_command(&asked, data, data.file.as_deref())
+                },
+                rest.iter()
+                    .map(|status| status.name())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ]);
+    }
+    if let Some(next) = next_page(&mutants_command(request, data, data.file.as_deref()), page) {
+        lines.push(format!("next page: {next}"));
+    }
+    lines.extend(gate_failure(data));
+    lines.join("\n")
+}
+
+fn mutants_text(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+    page: &AgentPagination,
+) -> String {
+    use supercov_engine::coverage_index::MutantStatus;
+    let label = filter_label(request);
+    let place = match (&data.file, data.line) {
+        (Some(file), Some(line)) => format!(" in {file}:{line}"),
+        (Some(file), None) => format!(" in {file}"),
+        _ => String::new(),
+    };
+    let mut lines = vec![format!(
+        "Mutants of run {}{place}{}{}",
+        data.run,
+        data.mutant_set
+            .as_deref()
+            .map_or_else(String::new, |set| format!(" ({set}, weak mutation)")),
+        if label.is_empty() {
+            String::new()
+        } else {
+            format!(" — {label}")
+        }
+    )];
+    if let Some(note) = &data.note
+        && data.summary.mutants == 0
+    {
+        lines.extend([String::new(), note.clone()]);
+        if data.stryker.is_none() {
+            return lines.join("\n");
+        }
+    }
+    let summary = &data.summary;
+    if summary.mutants > 0 {
+        lines.extend([
+            format!(
+                "  Weak score   {} · {} of reached mutants",
+                score(summary.weak_score),
+                score(summary.weak_score_reached)
+            ),
+            format!(
+                "  Mutants      {} · {} infected · {} · {} not reached · {} unknown · {} equivalent",
+                count(summary.mutants),
+                count(summary.status.infected),
+                not_infected(summary),
+                count(summary.status.not_reached),
+                count(summary.status.unknown),
+                count(summary.status.equivalent),
+            ),
+        ]);
+    }
+    if let Some(diff) = &data.diff {
+        return diff_mutants_text(request, data, page, diff, lines);
+    }
+    if let Some(stryker) = &data.stryker {
+        let by_mutator = |counts: &supercov_engine::mutants_query::MutatorCounts| {
+            if counts.by_mutator.is_empty() {
+                count(counts.total)
+            } else {
+                format!(
+                    "{} ({})",
+                    count(counts.total),
+                    counts
+                        .by_mutator
+                        .iter()
+                        .map(|(mutator, n)| format!("{mutator} {}", count(*n)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        };
+        let survivors = &stryker.survivors_explained;
+        lines.extend([
+            String::new(),
+            format!(
+                "StrykerJS ({})",
+                request
+                    .mutants
+                    .stryker
+                    .as_ref()
+                    .map_or_else(|| stryker.reports.join(", "), stryker_named)
+            ),
+            format!("  Matched              {}", count(stryker.matched)),
+            format!("  Only in Supercov     {}", by_mutator(&stryker.only_supercov)),
+            format!("  Only in StrykerJS    {}", by_mutator(&stryker.only_stryker)),
+            format!(
+                "  Survivors explained  {} of {} StrykerJS survivors are not infected or not reached here",
+                count(survivors.explained),
+                count(survivors.survivors)
+            ),
+        ]);
+        let violations = &stryker.soundness_violations;
+        if violations.total == 0 {
+            lines.push("  Soundness violations 0".into());
+        } else {
+            lines.push(format!(
+                "  SOUNDNESS VIOLATIONS {}: not infected or not reached here, killed by StrykerJS (exit 1)",
+                count(violations.total)
+            ));
+            for violation in &violations.mutants {
+                lines.push(format!(
+                    "    {}  {} here, {} by StrykerJS: {}",
+                    violation.id,
+                    violation.status.name(),
+                    violation.stryker,
+                    violation.reason
+                ));
+            }
+            if violations.total > violations.mutants.len() {
+                lines.push(format!(
+                    "    … and {} more (--json lists them by mutant: --status not-infected,not-reached)",
+                    count(violations.total - violations.mutants.len())
+                ));
+            }
+        }
+    }
+    let unfiltered = request.mutants.statuses.is_empty() && request.mutants.mutator.is_none();
+    if data.file.is_none() && unfiltered {
+        // The files by how many mutants their tests reach and do not infect,
+        // then by how many no test reaches (`mutants_query` orders them).
+        let rows = data
+            .files
+            .iter()
+            .skip(page.offset)
+            .take(page.limit)
+            .collect::<Vec<_>>();
+        let width = rows
+            .iter()
+            .map(|row| row.file.chars().count())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        lines.extend([
+            String::new(),
+            format!(
+                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}  {:>10}",
+                "File",
+                "Mutants",
+                "Not infected",
+                "Not reached",
+                "Infected",
+                "Unknown",
+                "Equivalent"
+            ),
+        ]);
+        for row in &rows {
+            lines.push(format!(
+                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}  {:>10}",
+                row.file,
+                count(row.status.total()),
+                count(row.status.not_infected),
+                count(row.status.not_reached),
+                count(row.status.infected),
+                count(row.status.unknown),
+                count(row.status.equivalent),
+            ));
+        }
+        let files = supercov_engine::agent_json::pagination(
+            page.offset,
+            page.limit,
+            rows.len(),
+            data.files.len(),
+        );
+        lines.push(format!("{} files", page_label(&files)));
+        let unreached = data
+            .files
+            .iter()
+            .filter(|row| row.unreached())
+            .collect::<Vec<_>>();
+        if !unreached.is_empty() {
+            lines.push(format!(
+                "{} {} no test ran, with {} mutants, {} listed last",
+                count(unreached.len()),
+                if unreached.len() == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                count(unreached.iter().map(|row| row.status.total()).sum()),
+                if unreached.len() == 1 { "is" } else { "are" },
+            ));
+        }
+        if let Some(first) = rows.first() {
+            lines.push(format!(
+                "inspect a file: {}",
+                mutants_command(request, data, Some(&first.file))
+            ));
+        }
+        if let Some(next) = next_page(&mutants_command(request, data, None), &files) {
+            lines.push(format!("next page: {next}"));
+        }
+        if summary.status.not_infected > 0 {
+            lines.push(format!(
+                "list the mutants no test infects: {} --status not-infected",
+                mutants_command(request, data, None)
+            ));
+        }
+        return lines.join("\n");
+    }
+    lines.push(String::new());
+    if data.mutants.is_empty() {
+        lines.push(if page.total == 0 {
+            "No mutants match.".into()
+        } else {
+            page_label(page)
+        });
+        return lines.join("\n");
+    }
+    let stryker = |status: &Option<String>| {
+        status
+            .as_deref()
+            .map_or_else(String::new, |status| format!("  stryker: {status}"))
+    };
+    if data.line.is_some() {
+        // One line's mutants, each with its whole reason.
+        for mutant in &data.mutants {
+            lines.extend([
+                format!(
+                    "{}:{}  {}  {}{}{}",
+                    mutant.span.start[0],
+                    mutant.span.start[1],
+                    mutant.mutator,
+                    mutant.status.name(),
+                    untestable_suffix(mutant),
+                    stryker(&mutant.stryker)
+                ),
+                format!("  {}", mutant_change(mutant)),
+            ]);
+            if mutant.changed.is_some() {
+                lines.push(format!("  in:  {}", mutant.original));
+            }
+            lines.push(format!(
+                "  why: {} ({})",
+                mutant.weak.reason, mutant.weak.code
+            ));
+            if let Some(reason) = &mutant.weak.untestable_reason {
+                lines.push(format!("  untestable in practice: {reason}"));
+            }
+            lines.push(format!("  id:  {}", mutant.id));
+        }
+    } else {
+        let position = |mutant: &supercov_engine::mutants_query::MutantEntry| {
+            let at = format!("{}:{}", mutant.span.start[0], mutant.span.start[1]);
+            if data.file.is_some() {
+                at
+            } else {
+                format!("{}:{at}", mutant.file)
+            }
+        };
+        let change = |mutant: &supercov_engine::mutants_query::MutantEntry| {
+            clipped(
+                &mutant_change(mutant),
+                supercov_engine::mutants_query::SHOWN_WHOLE,
+            )
+        };
+        let widths = data.mutants.iter().fold([0; 4], |widths, mutant| {
+            [
+                widths[0].max(position(mutant).chars().count()),
+                widths[1].max(mutant.mutator.chars().count()),
+                widths[2].max(change(mutant).chars().count()),
+                widths[3].max(mutant.status.name().len()),
+            ]
+        });
+        let [at, mutator, code, status] = widths;
+        for mutant in &data.mutants {
+            lines.push(format!(
+                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {}{}{}",
+                position(mutant),
+                mutant.mutator,
+                change(mutant),
+                mutant.status.name(),
+                mutant.weak.reason,
+                untestable_suffix(mutant),
+                stryker(&mutant.stryker)
+            ));
+        }
+    }
+    lines.push(page_label(page));
+    let location = match (&data.file, data.line) {
+        (Some(file), Some(line)) => Some(format!("{file}:{line}")),
+        (file, _) => file.clone(),
+    };
+    if let Some(next) = next_page(&mutants_command(request, data, location.as_deref()), page) {
+        lines.push(format!("next page: {next}"));
+    }
+    if data.line.is_none()
+        && let Some(first) = data.mutants.iter().find(|mutant| {
+            matches!(
+                mutant.status,
+                MutantStatus::NotInfected | MutantStatus::NotReached
+            )
+        })
+    {
+        lines.push(format!(
+            "one line's mutants and why: {}",
+            mutants_command(
+                request,
+                data,
+                Some(&format!("{}:{}", first.file, first.span.start[0]))
+            )
+        ));
+    }
+    lines.join("\n")
+}
+
 fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -> String {
     let page = output.pagination.as_ref();
     match &output.data {
         IndexedQueryData::Lines(data) => render_lines(request, data),
+        IndexedQueryData::Mutants(data) => {
+            render_mutants(request, data, page.expect("mutants are paginated"))
+        }
         IndexedQueryData::Summary(data) => {
             let label = filter_label(request);
             let mut first = format!("run {}", data.run);
@@ -1103,6 +1718,9 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             ]);
             if let Some(assertions) = &data.assertion_coverage {
                 lines.extend(assertion_summary_lines(assertions));
+            }
+            if let Some(mutants) = &data.mutants {
+                lines.push(mutants_summary_line(mutants));
             }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
@@ -2487,6 +3105,86 @@ mod tests {
         );
     }
 
+    /// A pull request's comment: the survivors' table, cut at its cap with
+    /// the command that lists the rest; pipes and backticks kept in cells.
+    #[test]
+    fn a_markdown_table_of_mutants_is_capped_and_escaped() {
+        use supercov_engine::coverage_index::{MutantCounts, MutantStatus};
+        use supercov_engine::mutants_query::{
+            CoverageMutantsData, DiffSummary, MutantEntry, MutantLevels, MutantSpan,
+            MutantsSummary, WeakResult,
+        };
+        let mutant = |line: u32, status: MutantStatus| MutantEntry {
+            id: format!("src/a.ts:{line}:3-{line}:9:LogicalOperator:&&"),
+            file: "src/a.ts".into(),
+            span: MutantSpan {
+                start: [line, 3],
+                end: [line, 9],
+            },
+            mutator: "LogicalOperator".into(),
+            original: "a || `b`".into(),
+            replacement: "a && `b`".into(),
+            changed: None,
+            status,
+            weak: WeakResult {
+                reach: "reached",
+                infection: Some(status.name()),
+                code: "c".into(),
+                reason: "`a` was always true | never false".into(),
+                proxy: false,
+                rule: None,
+                untestable: None,
+                untestable_reason: None,
+            },
+            strong: None,
+            stryker: None,
+        };
+        let mut mutants = (1..=30)
+            .map(|line| mutant(line, MutantStatus::NotInfected))
+            .collect::<Vec<_>>();
+        mutants.push(mutant(40, MutantStatus::Infected));
+        let mut counts = MutantCounts::default();
+        mutants.iter().for_each(|mutant| counts.add(mutant.status));
+        let data = CoverageMutantsData {
+            run: "run_1".into(),
+            mutant_set: Some("stryker-js@10.1.1".into()),
+            levels: MutantLevels {
+                weak: true,
+                strong: false,
+            },
+            file: None,
+            line: None,
+            summary: MutantsSummary::of(counts, 0),
+            note: None,
+            mutants,
+            stryker: None,
+            files: Vec::new(),
+            diff: Some(DiffSummary {
+                base: "origin/main".into(),
+                merge_base: "0123456789abcdef0123".into(),
+                commit: None,
+                changed_lines: 40,
+                lines_with_mutants: 31,
+            }),
+            fail_on: None,
+        };
+        let mut asked = request();
+        asked.command = "coverage.mutants".into();
+        asked.mutants.diff_base = Some("origin/main".into());
+        let text = crate::mutants_export::markdown(&asked, &data);
+        assert!(text.starts_with("### Mutants on this change\n\n**31 mutants** on 31 of 40 changed lines since `origin/main` (from `0123456789ab`): weak score **3.2%** · 30 not infected · 1 infected\n"), "{text}");
+        assert_eq!(text.matches("| `src/a.ts:").count(), 25, "{text}");
+        assert!(
+            text.contains("| `src/a.ts:1:3` | `` a \\|\\| `b` → a && `b` `` | not infected | `a` was always true \\| never false |"),
+            "{text}"
+        );
+        assert!(!text.contains("src/a.ts:40:"), "{text}");
+        assert!(
+            text.contains("_…and 5 more: `supercov runs 'run_1' mutants --status not-infected,not-reached --diff 'origin/main'`_"),
+            "{text}"
+        );
+    }
+
     fn request() -> IndexedQueryRequest {
         IndexedQueryRequest {
             run_id: "run_00b780f05c9ae324".into(),
@@ -2514,6 +3212,7 @@ mod tests {
             tags: Vec::new(),
             titles: Vec::new(),
             test_files: Vec::new(),
+            mutants: Default::default(),
         }
     }
 
@@ -2926,7 +3625,7 @@ mod tests {
                     hits: vec!["point".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),

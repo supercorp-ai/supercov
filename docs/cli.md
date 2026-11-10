@@ -23,6 +23,7 @@ npx supercov --help
 | See each test's answer for one statement | `npx supercov runs latest assertions <path>:<line>` |
 | See what one test is judged to catch | `npx supercov runs latest assertions --test <name>` |
 | List what is asserted on a weak answer | `npx supercov runs latest assertions --weak` |
+| See how far the tests got toward killing each mutant | `npx supercov runs latest mutants` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |
@@ -176,6 +177,7 @@ npx supercov runs <run-id> [query] [options]
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
+| `mutants [path[:line]]` | See, for each JavaScript mutant StrykerJS would make, whether a test reached it and changed its value |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -288,6 +290,143 @@ about the statements they ran and saves the result apart from the run's whole
 assessment; its answers are kept, so a later `assess` asks only what is left.
 `assertions --tag @e2e` reads what those tests assert: a statement that only
 other tests catch is not asserted there.
+
+### Mutants
+
+```sh supercov-example
+npx supercov runs <run-id> mutants
+npx supercov runs <run-id> mutants app/checkout.ts
+npx supercov runs <run-id> mutants app/checkout.ts:42
+npx supercov runs <run-id> mutants --status not-infected,not-reached
+npx supercov runs <run-id> mutants --mutator EqualityOperator --json
+npx supercov runs <run-id> mutants --stryker reports/mutation/mutation.json
+npx supercov runs <run-id> mutants --format jsonl --output mutants.jsonl
+npx supercov runs <run-id> mutants --diff origin/main
+npx supercov runs <run-id> mutants --diff origin/main --format markdown --output mutants.md
+npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not-reached
+```
+
+`mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
+would make, whether a test ran the mutated code and whether the mutant's value
+would have differed there. Nothing runs again. Every JavaScript or TypeScript
+run lists its mutants unless its command is measured with `SUPERCOV_MUTANTS=0`;
+any other run says it has none and how to get them, and its summary shows no
+`Mutants` line.
+
+Each mutant has one status:
+
+| Status | Meaning |
+| --- | --- |
+| `not-reached` | No test ran the mutated code |
+| `not-infected` | A test ran it, and every evaluation gave the mutant the original's value: these tests cannot kill it |
+| `infected` | Some evaluation gave the mutant another value: a candidate kill, not a kill |
+| `unknown` | The run cannot tell, such as code that ran where values are not recorded |
+| `equivalent` | No input can make it differ, shown by a static rule from the code alone, whatever the tests did |
+
+The weak score is `infected / (infected + not-infected + not-reached)`, with
+unknown and equivalent mutants left out, and beside it the same over reached
+mutants alone. They are shown beside coverage and never change it.
+
+A not-infected boundary comparison (`<` and `<=`, `>` and `>=`) with an
+operand that is a clock reading (`Date.now()`, `new Date()`,
+`performance.now()`, and arithmetic, `.getTime()` or date-fns `add*`/`sub*` of
+one, through up to two consts or local functions) or a `Math.random()` reading
+is listed with `(clock boundary)` or `(random boundary)`: only one exact
+reading would make it differ, so a test can hardly reach it. It stays not
+infected, and the summary counts these beside the not-infected ones
+(`211 not infected (12 at a clock or random boundary)`).
+
+Without a file, `mutants` shows a table of files, a page at a time, ordered by
+how many mutants a test reaches and does not infect, which only this report
+shows, then by how many no test reaches, then by name. Files no test ran at all
+come last, however many mutants they hold, and a line counts them. With a file
+it lists the file's mutants by line, as `line:column  Mutator  original →
+replacement  status  reason`; with `file:line`, that line's mutants each with its
+reason and id. A mutant whose code is on several lines or too long to show is
+shown by the part it changes, with `…` for what it shares with the original:
+`….slice(0, maxUsers) → …` for a chain without its last call. `--status` and `--mutator` pick mutants, across files when no
+file is given. The scores are of the mutants asked about: the run, a file or a
+line, and one mutator with `--mutator`. The run summary shows one line,
+`Mutants  15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown ·
+0 equivalent`, and `data.mutants` in its JSON.
+
+`--kind`, `--runner`, `--tag`, `--title` and `--test-file` read the verdicts of
+those tests alone: a mutant only other tests infect is not infected there.
+`--filter passed` and `--filter failed` are not supported.
+
+In `--json` the reply is `coverage.mutants`: `mutantSet`, `levels`
+(`weak: true`, `strong: false`), `summary` with the counts by status,
+`untestable` (the not-infected mutants at a clock or random boundary),
+`weakScore`, `weakScoreReached` and `mutationScore` (null until tests run
+against mutants), and a page of `mutants`, each with its `id`
+(`file:line:column-line:column:Mutator:descriptor`), `span`, `original`,
+`replacement`, `changed` (`from`, `to`: the part shown, where it is shown
+instead), `status`, `weak` (`reach`, `infection`, `code`, `reason`; `rule` for
+an equivalent mutant; `untestable` and `untestableReason` for a clock or
+random boundary), `strong` (null) and `stryker`. Mutants are listed by file path, and within a
+file by position, whatever the table's order.
+
+`--format jsonl` writes every mutant asked about, one JSON object per line,
+each as `--json` lists it, with nothing paged; `--output <file>` writes them
+to a file instead of standard output. A file, `--status`, `--mutator`,
+`--stryker` and the options that narrow the tests apply as they do to the
+query.
+
+`--stryker` joins StrykerJS's own reports by mutant id. It takes several
+reports, as a glob gives them (`--stryker reports/*.json`), and directories of
+them, whose every `.json` file is read, recursively; a file to query goes
+before it. Give `--stryker-root <dir>` when a report's paths are relative to
+another directory than the project root. The commands the reply suggests repeat
+what `--stryker` was given, or `<56 reports>` for more than three. Each mutant
+then shows StrykerJS's status, and a `stryker` block counts the mutants
+matched, those only Supercov or only StrykerJS made (by mutator), and how many
+of StrykerJS's survivors this run says no test infects or reaches. A mutant
+this run says is not infected, not reached or equivalent that StrykerJS killed
+is a soundness violation: each is listed, and the command exits `1`.
+
+The HTML report (`supercov report`) shows a run's mutants where it shows its
+coverage: the weak score and the counts by status, a column of each file's
+not-infected and not-reached mutants, and, in a file's source, a mark on each
+line such a mutant is on, whose evidence lists each with its change, status
+and reason. A run without mutants shows none.
+
+#### Mutants on a pull request
+
+`--diff <base>` keeps the mutants on lines a change added or modified since it
+left `<base>`, a git ref such as `origin/main`. The change is the commit the
+run measured against its merge base with `<base>`; a run measured with
+uncommitted changes, or one that records no commit, is compared as the working
+tree, untracked files added whole, and the output says so. Everything else
+composes with it: a file or line, `--status`, `--mutator`, the test filters,
+`--json`, `--format`, `--stryker`, and the scores, which are of the change's
+mutants. A base git does not know (a shallow checkout's) fails with exit `2`.
+
+The output names the base, the merge base and how many changed lines hold a
+mutant, then lists the mutants the tests leave alive, not infected first and
+then not reached, each with the part it changes and why, and counts the rest
+in one line. `--json` lists every mutant of the change, survivors first, with
+`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`).
+
+`--format markdown` writes a table for a pull request's comment: the counts in
+one line, then up to 25 not-infected and not-reached mutants (or those
+`--status` names) with where they are, what they change, their status and why,
+and the command that lists the rest.
+
+`--fail-on <statuses>` exits `1` when any mutant asked about has one of them,
+`--diff`'s mutants with it: a gate CI can hold a change to. Without it the exit
+codes are as before. In GitHub Actions, after the tests are measured:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    fetch-depth: 0 # the base and the merge base
+- run: npx supercov -- npm test
+- run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --format markdown --output mutants.md
+- run: gh pr comment ${{ github.event.number }} --body-file mutants.md --edit-last --create-if-none
+  env:
+    GH_TOKEN: ${{ github.token }}
+- run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --fail-on not-infected
+```
 
 ## Fail CI below a coverage floor
 
@@ -427,6 +566,9 @@ condition and the vectors observed. `--metric`, `--filter`, `--kind`,
 `--runner`, `--tag`, `--title` and `--test-file` narrow it as they narrow
 `gaps`, and nothing is paged, so a tool or an agent reads a run's every gap in
 one pass instead of a page at a time.
+
+`runs <id> mutants --format jsonl` exports a run's mutants the same way, one
+mutant per line (see [Mutants](#mutants)).
 
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info
@@ -854,6 +996,12 @@ without one resolves its dependencies anew in each job, and `merge` leaves
 every run out as `the dependencies have changed`: resolve the lockfile once in
 a first job, pass it to the others as an artifact, and `npm ci` it there.
 
+A merged run lists the mutants of every file a run listed (see
+[Mutants](#mutants)), once. Runs that listed different mutants of a file
+recorded with the same bytes are not merged. A run measured with
+`SUPERCOV_MUTANTS=0` adds no mutants, and where its tests ran a mutant, a
+verdict that needs values they did not record is `unknown`.
+
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a
 merged run is answered from the runs it was merged from, which hold the record
@@ -946,6 +1094,7 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
+| `SUPERCOV_MUTANTS` | Set to `0` to measure a JavaScript or TypeScript run without the probes that decide its mutants, and without listing them (see [Mutants](#mutants)) |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:
@@ -963,7 +1112,7 @@ SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 | Wrapped command's code | The test command failed and Supercov preserved its status |
 | `127`, `126` | The test command could not start: no such program, or one that may not be run, as a shell reports it |
 | `124` | The test command ran past `SUPERCOV_COMMAND_TIMEOUT_MS` and was stopped |
-| `1` | A valid measurement failed a policy you set, such as a coverage floor |
+| `1` | A valid measurement failed a policy you set, such as a coverage floor, or `mutants --stryker` found a soundness violation |
 | `2` | Supercov could not complete the request, or the evidence cannot answer it |
 
 `quality` and `security` exit `0` for a complete report in which some files

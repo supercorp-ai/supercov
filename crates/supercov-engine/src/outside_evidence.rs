@@ -637,7 +637,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                     hits,
                     events: vec![],
                     logicals: vec![],
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: vec![],
                 server: vec![],
