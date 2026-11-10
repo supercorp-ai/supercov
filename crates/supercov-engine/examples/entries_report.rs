@@ -40,7 +40,7 @@ fn main() {
                 started.elapsed().as_secs_f64() * 1000.0
             });
             let started = Instant::now();
-            analyze_coverage_entries(&request, &entries).expect("entries analysed");
+            analyze_coverage_entries(&request, &entries, None).expect("entries analysed");
             (
                 writer.join().unwrap(),
                 started.elapsed().as_secs_f64() * 1000.0,
@@ -65,7 +65,7 @@ fn main() {
     if std::env::args().nth(2).as_deref() == Some("alone") {
         let entries = read_archive(&request.archive_path).expect("archive read");
         let started = Instant::now();
-        analyze_coverage_entries(&request, &entries).expect("entries analysed");
+        analyze_coverage_entries(&request, &entries, None).expect("entries analysed");
         println!(
             "alone only: analysis {:.0} ms",
             started.elapsed().as_secs_f64() * 1000.0
@@ -74,7 +74,8 @@ fn main() {
     }
     let entries = read_archive(&request.archive_path).expect("archive read");
     let started = Instant::now();
-    let from_entries = analyze_coverage_entries(&request, &entries).expect("entries analysed");
+    let from_entries =
+        analyze_coverage_entries(&request, &entries, None).expect("entries analysed");
     let entries_ms = started.elapsed().as_secs_f64() * 1000.0;
     drop(entries);
     let started = Instant::now();
@@ -93,7 +94,7 @@ fn main() {
             started.elapsed().as_secs_f64() * 1000.0
         });
         let started = Instant::now();
-        analyze_coverage_entries(&request, &entries).expect("entries analysed");
+        analyze_coverage_entries(&request, &entries, None).expect("entries analysed");
         let beside = started.elapsed().as_secs_f64() * 1000.0;
         (writer.join().unwrap(), beside)
     });

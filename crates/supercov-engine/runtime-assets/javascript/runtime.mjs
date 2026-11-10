@@ -138,6 +138,17 @@ function backgroundEvidencePath(runId, processId = typeof process === "undefined
 }
 
 // dist/runtime.js
+// The collections a probe records into, called through the built-in methods
+// as they were when the runtime loaded: a test that spies on
+// Map.prototype.set counts the calls its own code makes, and Supercov's
+// first hits made three more, failing a test that passes without it.
+var builtinMapGet = Map.prototype.get;
+var builtinMapSet = Map.prototype.set;
+var builtinMapHas = Map.prototype.has;
+var builtinSetAdd = Set.prototype.add;
+var builtinSetHas = Set.prototype.has;
+var builtinWeakMapGet = WeakMap.prototype.get;
+var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
@@ -161,12 +172,28 @@ function getFs() {
     return void 0;
   }
 }
+function emptyEventLog() {
+  return { type: [], id: [], vector: [], timestampMs: [], phaseId: [], environment: [] };
+}
+// The events as they were recorded, each the object hitEvent or
+// decisionEvent built, in their key order.
+function eventObjects(log) {
+  const events = new Array(log.id.length);
+  for (let position = 0; position < events.length; position += 1) {
+    const phaseId = log.phaseId[position];
+    events[position] = log.type[position] === "hit" ? hitEvent(log.id[position], log.timestampMs[position], phaseId, log.environment[position]) : decisionEvent(log.id[position], log.vector[position], log.timestampMs[position], phaseId, log.environment[position]);
+  }
+  return events;
+}
 function createState() {
   var _a8, _b, _c, _d;
   const state2 = {
     decisions: /* @__PURE__ */ new Map(),
     hits: /* @__PURE__ */ new Set(),
-    events: [],
+    // The events as columns, one entry per event: a first hit of every point
+    // of every test was an object of its own, millions on a large suite,
+    // turned into columns again for the evidence (eventColumns).
+    eventLog: emptyEventLog(),
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
@@ -193,8 +220,13 @@ function createState() {
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
+    // Each registered file, held weakly where the engine can: only the
+    // epochs' wrap below reads them, to clear what live files remember.
     probeV2Files: /* @__PURE__ */ new Set(),
-    probeV2Clock: { epoch: Number.NaN, fast: false },
+    probeV2FilesSweepAt: 1024,
+    // `e` is the epoch: every statement probe reads it by name, and a
+    // minifier keeps a property's name, so it is one letter in every bundle.
+    probeV2Clock: { e: Number.NaN, fast: false },
     probeV2ContextEpochs: /* @__PURE__ */ new Map(),
     probeV2NextEpoch: 1,
     probeV2HookInstalled: false,
@@ -216,10 +248,8 @@ function createState() {
     }
     for (const id of (_c = stored.hits) != null ? _c : [])
       state2.hits.add(id);
-    for (const event of (_d = stored.events) != null ? _d : []) {
-      state2.events.push(event);
-      eventSeen(state2.eventKeys, event);
-    }
+    for (const event of (_d = stored.events) != null ? _d : [])
+      recordEvent(state2, event.type, event.id, event.vector, event.timestampMs, event.phaseId, event.environment);
   } catch (e) {
   }
   return state2;
@@ -259,18 +289,18 @@ function probeV2ContextKey(context) {
   return `scope\0${attemptKey(context.scope)}\0${phase}`;
 }
 function activateProbeV2Key(key, force = false) {
-  let epoch = force ? void 0 : state.probeV2ContextEpochs.get(key);
+  let epoch = force ? void 0 : builtinMapGet.call(state.probeV2ContextEpochs, key);
   if (epoch === void 0) {
     state.probeV2NextEpoch += 1;
     if (state.probeV2NextEpoch >= 4294967295) {
       state.probeV2NextEpoch = 1;
       state.probeV2ContextEpochs.clear();
       state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
-      for (const file of state.probeV2Files) {
+      for (const held of state.probeV2Files) {
+        const file = typeof held.deref === "function" ? held.deref() : held;
+        if (file === void 0)
+          continue;
         file.hitEpochs.fill(0);
-        file.decisionObservationEpochs.fill(0);
-        file.decisionObservationCounts.fill(0);
-        file.decisionCompleteEpochs.fill(0);
         for (const vectors of file.decisionEpochs) {
           if (vectors.size === void 0)
             vectors.fill(0);
@@ -285,9 +315,9 @@ function activateProbeV2Key(key, force = false) {
       state.logicalEpochs.clear();
     }
     epoch = state.probeV2NextEpoch;
-    state.probeV2ContextEpochs.set(key, epoch);
+    builtinMapSet.call(state.probeV2ContextEpochs, key, epoch);
   }
-  state.probeV2Clock.epoch = epoch;
+  state.probeV2Clock.e = epoch;
   return epoch;
 }
 // The async hook activates the current request's context before every
@@ -308,28 +338,51 @@ function activateProbeV2Context(context) {
     state.probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
     state.probeV2EpochGeneration = 0;
   }
-  const cached = state.probeV2ContextEpochCache.get(context);
+  const cached = builtinWeakMapGet.call(state.probeV2ContextEpochCache, context);
   if (cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
-    state.probeV2Clock.epoch = cached.epoch;
+    state.probeV2Clock.e = cached.epoch;
     return cached.epoch;
   }
   const epoch = activateProbeV2Key(probeV2ContextKey(context));
-  state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
+  builtinWeakMapSet.call(state.probeV2ContextEpochCache, context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
+}
+// While the speed benchmark times a run: how often a server's async hook ran
+// and how often a probe then had to work out its context, said once when the
+// process ends.
+var serverTiming = !isBrowser && typeof process !== "undefined" && process.env && process.env["SUPERCOV_PHASE_TIMING"] === "1" ? { asyncHookCallbacks: 0, contextResolutions: 0 } : void 0;
+if (serverTiming) {
+  try {
+    process.once("exit", () => {
+      if (serverTiming.asyncHookCallbacks || serverTiming.contextResolutions)
+        process.stderr.write(`[supercov-timing] server ${process.pid} asyncHookCallbacks=${serverTiming.asyncHookCallbacks} contextResolutions=${serverTiming.contextResolutions}\n`);
+    });
+  } catch (e) {
+  }
 }
 // The context the async hook leaves to a callback's first probe: the
 // request's store, or else the one the environment carries.
 function resolveProbeV2Epoch() {
   var _a8, _b;
+  if (serverTiming)
+    serverTiming.contextResolutions += 1;
   return activateProbeV2Context((_b = (_a8 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a8 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
 }
+// A statement probe trusts the clock's epoch with no check of `fast`: while
+// the clock is not fast -- no async hook keeps it -- its epoch is NaN wherever
+// instrumented code can run, which no recorded epoch equals, so every probe
+// takes the slow path and works out its context there, as it did when probes
+// checked `fast` first. What sets the epoch while not fast restores it before
+// instrumented code runs, or does not set it.
 function withProbeV2Context(context, callback) {
-  const previous = state.probeV2Clock.epoch;
+  if (!state.probeV2Clock.fast)
+    return callback();
+  const previous = state.probeV2Clock.e;
   activateProbeV2Context(context);
   try {
     return callback();
   } finally {
-    state.probeV2Clock.epoch = previous;
+    state.probeV2Clock.e = previous;
   }
 }
 function installProbeV2AsyncHook() {
@@ -349,12 +402,14 @@ function installProbeV2AsyncHook() {
       // environment twice and built a key each time: on a Next app's suite,
       // more of the server's time than any of Supercov's other work.
       before() {
-        epochs.push(state.probeV2Clock.epoch);
-        state.probeV2Clock.epoch = NaN;
+        if (serverTiming)
+          serverTiming.asyncHookCallbacks += 1;
+        epochs.push(state.probeV2Clock.e);
+        state.probeV2Clock.e = NaN;
       },
       after() {
         var _a9;
-        state.probeV2Clock.epoch = (_a9 = epochs.pop()) != null ? _a9 : state.probeV2Clock.epoch;
+        state.probeV2Clock.e = (_a9 = epochs.pop()) != null ? _a9 : state.probeV2Clock.e;
       }
     }).enable();
     state.probeV2HookInstalled = true;
@@ -388,17 +443,68 @@ function coverageSnapshot() {
   const snapshot = {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
-    events: state.events,
+    events: eventObjects(state.eventLog),
     logicals: logicalSnapshot()
   };
   if (state.comparisons.size)
     snapshot.comparisons = comparisonSnapshot();
   return snapshot;
 }
+// coverageSnapshot as snapshots.mjs's columnarEvents gives it, built from the
+// columns the events are kept in rather than from an object per event.
+function coverageSnapshotColumns() {
+  const log = state.eventLog;
+  const decisions = decisionSnapshot();
+  const hits = [...state.hits];
+  const logicals = logicalSnapshot();
+  if (log.id.length === 0)
+    return { decisions, hits, events: [], logicals };
+  const tables = { types: /* @__PURE__ */ new Map(), phases: /* @__PURE__ */ new Map(), environments: /* @__PURE__ */ new Map() };
+  const index = (table, value) => {
+    let found = table.get(value);
+    if (found === void 0) {
+      found = table.size;
+      table.set(value, found);
+    }
+    return found;
+  };
+  // An event that is one of the hits names it by its position in `hits`
+  // (snapshots.mjs's columnarEvents says why).
+  const hitAt = /* @__PURE__ */ new Map();
+  for (let position = 0; position < hits.length; position += 1)
+    hitAt.set(hits[position], position);
+  const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
+  let previous = 0;
+  for (let position = 0; position < log.id.length; position += 1) {
+    const id = log.id[position];
+    const at = hitAt.get(id);
+    columns.id.push(at === void 0 ? id : at);
+    const phaseId = log.phaseId[position];
+    columns.type.push(index(tables.types, log.type[position]));
+    // An event built without a phase -- phaseId falsy -- has none.
+    columns.phase.push(phaseId ? index(tables.phases, phaseId) : -1);
+    columns.environment.push(index(tables.environments, log.environment[position]));
+    columns.t.push(log.timestampMs[position] - previous);
+    previous = log.timestampMs[position];
+    if (log.type[position] !== "hit")
+      columns.vector[position] = log.vector[position];
+  }
+  return {
+    decisions,
+    hits,
+    logicals,
+    eventColumns: {
+      types: [...tables.types.keys()],
+      phases: [...tables.phases.keys()],
+      environments: [...tables.environments.keys()],
+      ...columns
+    }
+  };
+}
 function resetCoverage(testId2) {
   state.decisions.clear();
   state.hits.clear();
-  state.events.length = 0;
+  state.eventLog = emptyEventLog();
   state.logicals.clear();
   state.comparisons.clear();
   state.logicalEpochs.clear();
@@ -406,6 +512,8 @@ function resetCoverage(testId2) {
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
+  if (!state.probeV2Clock.fast)
+    state.probeV2Clock.e = NaN;
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
   if (isBrowser) {
@@ -568,7 +676,7 @@ var persistBrowserListenersInstalled = false;
 // How much evidence the document holds. Every part of it only grows until a
 // reset, so the same size twice is the same evidence.
 function evidenceSize() {
-  let size = state.hits.size + state.events.length;
+  let size = state.hits.size + state.eventLog.id.length;
   for (const decision of state.decisions.values())
     size += decision.vectors.size;
   for (const vectors of state.logicals.values())
@@ -1213,9 +1321,9 @@ function appendServer(record) {
       return;
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision")
-      recordBrowserEvent(decisionEvent(record.id, record.vector, timestampMs, record.phaseId, "server"));
+      recordBrowserEvent("decision", record.id, record.vector, timestampMs, record.phaseId, "server");
     else
-      recordBrowserEvent(hitEvent(record.id, timestampMs, record.phaseId, "server"));
+      recordBrowserEvent("hit", record.id, void 0, timestampMs, record.phaseId, "server");
     return;
   }
   const fs = getFs();
@@ -1509,13 +1617,16 @@ function enterCoverageCarrier(carrier) {
     return () => {
     };
   const previousStore = serverPhaseStorage.getStore();
-  const previousEpoch = state.probeV2Clock.epoch;
+  const previousEpoch = state.probeV2Clock.e;
+  const fast = state.probeV2Clock.fast;
   const context = __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {});
   serverPhaseStorage.enterWith(context);
-  activateProbeV2Context(context);
+  if (fast)
+    activateProbeV2Context(context);
   return () => {
     serverPhaseStorage.enterWith(previousStore);
-    state.probeV2Clock.epoch = previousEpoch;
+    if (fast)
+      state.probeV2Clock.e = previousEpoch;
   };
 }
 var inertAssertionPhase = { close: (value) => value, fail: (error) => error };
@@ -1976,23 +2087,42 @@ function withRequestPhase(handler, event) {
 // Whether `event` was already recorded, recording it if not. Kept per phase,
 // so a first hit looks up its id alone: one key joining the phase, the type
 // and the id was built and hashed for every first hit of every test.
-function eventSeen(seen, event) {
-  const phase = event.phaseId != null ? event.phaseId : "unscoped";
-  let keys = seen.get(phase);
+function eventSeen(seen, type, id, vector, phaseId) {
+  const phase = phaseId != null ? phaseId : "unscoped";
+  let keys = builtinMapGet.call(seen, phase);
   if (keys === void 0) {
     keys = /* @__PURE__ */ new Set();
-    seen.set(phase, keys);
+    builtinMapSet.call(seen, phase, keys);
   }
-  const key = event.type === "hit" ? event.id : `${event.type}\0${event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id}`;
-  if (keys.has(key))
+  const key = type === "hit" ? id : `${type}\0${type === "decision" ? `${id}:${vectorKey(vector)}` : id}`;
+  if (builtinSetHas.call(keys, key))
     return true;
-  keys.add(key);
+  builtinSetAdd.call(keys, key);
   return false;
 }
-function recordBrowserEvent(event) {
-  if (eventSeen(state.eventKeys, event))
+// The phase eventSeen keys an event under: an event object built without a
+// falsy phase (hitEvent, decisionEvent) had none, which is "unscoped".
+function phaseEventKey(phaseId) {
+  return phaseId ? phaseId : void 0;
+}
+// An event's fields into the columns, unless it was recorded already; what
+// hitEvent or decisionEvent would build of them is what coverageSnapshot
+// gives back.
+function recordEvent(into, type, id, vector, timestampMs, phaseId, environment) {
+  if (eventSeen(into.eventKeys, type, id, vector, phaseEventKey(phaseId)))
     return false;
-  state.events.push(event);
+  const log = into.eventLog;
+  log.type[log.type.length] = type;
+  log.id[log.id.length] = id;
+  log.vector[log.vector.length] = vector;
+  log.timestampMs[log.timestampMs.length] = timestampMs;
+  log.phaseId[log.phaseId.length] = phaseId;
+  log.environment[log.environment.length] = environment;
+  return true;
+}
+function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment) {
+  if (!recordEvent(state, type, id, vector, timestampMs, phaseId, environment))
+    return false;
   workerEvidenceChanged();
   return true;
 }
@@ -2002,34 +2132,38 @@ function recordBrowserEvent(event) {
 // repeat.
 function coverageHit(id) {
   const clock = state.probeV2Clock;
-  if (clock.fast && state.hitEpochs !== void 0 && state.hitEpochs.get(id) === clock.epoch)
+  if (clock.fast && state.hitEpochs !== void 0 && builtinMapGet.call(state.hitEpochs, id) === clock.e)
     return;
   recordCoverageHit(id);
 }
 // resetCoverage forces a fresh epoch, so a hit skipped above was recorded in
 // this epoch after the last reset and is in state.hits already.
 function recordCoverageHit(id) {
-  state.hits.add(id);
+  builtinSetAdd.call(state.hits, id);
   const clock = state.probeV2Clock;
-  let epoch = clock.epoch;
+  let epoch = clock.e;
   if (!clock.fast) {
-    const previousEpoch = clock.epoch;
+    const previousEpoch = clock.e;
     activateProbeV2Context(currentRequestContext());
-    epoch = clock.epoch;
-    clock.epoch = previousEpoch;
+    epoch = clock.e;
+    clock.e = previousEpoch;
   } else if (epoch !== epoch) {
     epoch = resolveProbeV2Epoch();
   }
   if (!state.hitEpochs)
     state.hitEpochs = /* @__PURE__ */ new Map();
-  if (state.hitEpochs.get(id) === epoch)
+  if (builtinMapGet.call(state.hitEpochs, id) === epoch)
     return;
-  state.hitEpochs.set(id, epoch);
+  builtinMapSet.call(state.hitEpochs, id, epoch);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "browser")))
+    if (recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "browser"))
       persistBrowser();
+  } else if (state.runtimeSnapshots) {
+    // What appendServer does with a snapshot-kept run's record, without the
+    // record: an object built per first hit only to be read once.
+    recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "server");
   } else {
     appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
   }
@@ -2059,7 +2193,7 @@ function probePlaceName(names, aliases, count, kind, key, place) {
     return void 0;
   let name = names[place];
   if (name === void 0) {
-    const first = aliases.get(place);
+    const first = builtinMapGet.call(aliases, place);
     name = names[place] = first === void 0 ? `~${kind}${key}.${place}` : probePlaceName(names, aliases, count, kind, key, first);
   }
   return name;
@@ -2073,7 +2207,6 @@ function probeDecisionName(file, place) {
 function registerProbeV2(definition) {
   var _a8, _b;
   const pointCount = definition.points;
-  const decisionCount = definition.decisionWidths.length;
   const file = {
     key: definition.key,
     pointCount,
@@ -2089,13 +2222,6 @@ function registerProbeV2(definition) {
     // the global on every evaluation, and under Vitest's jsdom environment
     // each read is a getter call, most of a canvas app's measured unit time.
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
-    decisionVectorCounts: definition.decisionWidths.map((_, index) => {
-      var _a9, _b2;
-      return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
-    }),
-    decisionObservationEpochs: new Uint32Array(decisionCount),
-    decisionObservationCounts: new Uint16Array(decisionCount),
-    decisionCompleteEpochs: new Uint32Array(decisionCount),
     pendingDefaults: new Uint32Array(definition.defaultCount || 0),
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.
@@ -2106,7 +2232,18 @@ function registerProbeV2(definition) {
     selectionChoices: (definition.selectionTrees || []).map((tree) => tree[1]),
     none: optionalCallEmptySpread
   };
-  state.probeV2Files.add(file);
+  rememberProbeV2File(file);
+  // What a probe calls: this file's hit, by place alone. Outside a loop the
+  // probe is the call alone and this makes its check, so it stays small
+  // enough for V8 to inline where the code is hot. The epoch is NaN wherever
+  // the clock is not fast, which no recorded epoch equals, so the check needs
+  // no `fast` of its own (coverageHitV2's).
+  const hitEpochs = file.hitEpochs;
+  const clock = file.clock;
+  file.hit = (index) => {
+    if (hitEpochs[index] !== clock.e)
+      recordCoverageHitV2(file, index);
+  };
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);
@@ -2116,10 +2253,30 @@ function registerProbeV2(definition) {
     // before any did -- a script's own top level -- found it NaN, which no
     // epoch equals, so every probe there took the slow path every time: a
     // million-iteration loop ran 1,700 times slower than without Supercov.
-    if (Number.isNaN(state.probeV2Clock.epoch))
+    if (state.probeV2Clock.fast && Number.isNaN(state.probeV2Clock.e))
       activateProbeV2Context(currentRequestContext());
   }
   return file;
+}
+// Vitest evaluates a module again for every test file, and each evaluation
+// registers its file anew: held strongly, every evaluation's arrays stayed
+// alive for the worker's life, and the collector walked them all. A file no
+// module holds runs no probe, so the wrap has nothing of it to clear, and the
+// set is swept of them as it doubles.
+function rememberProbeV2File(file) {
+  const files = state.probeV2Files;
+  if (typeof WeakRef !== "function") {
+    files.add(file);
+    return;
+  }
+  files.add(new WeakRef(file));
+  if (files.size < state.probeV2FilesSweepAt)
+    return;
+  for (const held of files) {
+    if (held.deref() === void 0)
+      files.delete(held);
+  }
+  state.probeV2FilesSweepAt = Math.max(1024, 2 * files.size);
 }
 // Every repeat of a probe in the same context ends at the first check, so it
 // stays small enough for V8 to inline into the instrumented function; the
@@ -2128,7 +2285,7 @@ function registerProbeV2(definition) {
 // at ten times the uninstrumented time.
 function coverageHitV2(file, index) {
   const clock = file.clock;
-  if (clock.fast && file.hitEpochs[index] === clock.epoch)
+  if (clock.fast && file.hitEpochs[index] === clock.e)
     return;
   recordCoverageHitV2(file, index);
 }
@@ -2137,23 +2294,25 @@ function recordCoverageHitV2(file, index) {
   if (!id)
     return;
   const fallbackEpoch = !file.clock.fast;
-  const previousEpoch = file.clock.epoch;
+  const previousEpoch = file.clock.e;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
   else if (previousEpoch !== previousEpoch)
     resolveProbeV2Epoch();
   try {
-    const epoch = file.clock.epoch;
+    const epoch = file.clock.e;
     if (file.hitEpochs[index] === epoch)
       return;
     file.hitEpochs[index] = epoch;
-    coverageHit(id);
+    // New in this context for this file: recordCoverageHit makes the check
+    // coverageHit would, across files and aliases, without a second lookup.
+    recordCoverageHit(id);
     const selections = file.selectionPoints;
     if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
       recordLogicalOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
-      file.clock.epoch = previousEpoch;
+      file.clock.e = previousEpoch;
   }
 }
 function decodeProbeV2Vector(conditionCount, encoded, outcome) {
@@ -2163,7 +2322,7 @@ function decodeProbeV2Vector(conditionCount, encoded, outcome) {
   let remaining = encoded;
   for (let index = 0; index < conditionCount; index += 1) {
     const digit = remaining % 3;
-    values.push(digit === 0 ? null : digit === 2);
+    values[index] = digit === 0 ? null : digit === 2;
     remaining = Math.floor(remaining / 3);
   }
   return remaining === 0 ? { values, outcome } : void 0;
@@ -2176,13 +2335,12 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
   const clock = file.clock;
   if (clock.fast) {
     const seen = file.decisionEpochs[decisionIndex];
-    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
+    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.e)
       return value;
   }
   return recordMcdcEndV2(file, decisionIndex, encoded, value);
 }
 function recordMcdcEndV2(file, decisionIndex, encoded, value) {
-  var _a8, _b;
   const id = probeDecisionName(file, decisionIndex);
   if (!id || !Number.isSafeInteger(encoded) || encoded < 0)
     return value;
@@ -2191,13 +2349,13 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   if (!Number.isSafeInteger(vectorIndex))
     return value;
   const fallbackEpoch = !file.clock.fast;
-  const previousEpoch = file.clock.epoch;
+  const previousEpoch = file.clock.e;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
   else if (previousEpoch !== previousEpoch)
     resolveProbeV2Epoch();
   try {
-    const epoch = file.clock.epoch;
+    const epoch = file.clock.e;
     const seen = file.decisionEpochs[decisionIndex];
     if (!seen)
       return value;
@@ -2206,28 +2364,17 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
         return value;
       seen[vectorIndex] = epoch;
     } else {
-      if (seen.get(vectorIndex) === epoch)
+      if (builtinMapGet.call(seen, vectorIndex) === epoch)
         return value;
-      seen.set(vectorIndex, epoch);
+      builtinMapSet.call(seen, vectorIndex, epoch);
     }
-    const expectedCount = (_a8 = file.decisionVectorCounts[decisionIndex]) != null ? _a8 : 0;
-    if (expectedCount > 0) {
-      if (file.decisionObservationEpochs[decisionIndex] !== epoch) {
-        file.decisionObservationEpochs[decisionIndex] = epoch;
-        file.decisionObservationCounts[decisionIndex] = 0;
-      }
-      const observedCount = ((_b = file.decisionObservationCounts[decisionIndex]) != null ? _b : 0) + 1;
-      file.decisionObservationCounts[decisionIndex] = observedCount;
-      if (observedCount >= expectedCount)
-        file.decisionCompleteEpochs[decisionIndex] = epoch;
-    }
-    if (!state.decisions.has(id))
-      state.decisions.set(id, { id, vectors: /* @__PURE__ */ new Map() });
+    if (!builtinMapHas.call(state.decisions, id))
+      builtinMapSet.call(state.decisions, id, { id, vectors: /* @__PURE__ */ new Map() });
     const vector = decodeProbeV2Vector(file.decisionWidths[decisionIndex], encoded, outcome);
     return vector ? mcdcEnd({ id, values: vector.values }, value) : value;
   } finally {
     if (fallbackEpoch)
-      file.clock.epoch = previousEpoch;
+      file.clock.e = previousEpoch;
   }
 }
 function selectionBegin(shortId, rightId) {
@@ -2281,14 +2428,14 @@ function recordSelectionOutcome(id, outcome) {
 // The outcomes of a selection by its branch id, or by the name of its point
 // that was hit, whose branch the report reads from the point's id.
 function recordLogicalOutcome(branchId, outcome) {
-  let vectors = state.logicals.get(branchId);
+  let vectors = builtinMapGet.call(state.logicals, branchId);
   if (!vectors) {
     vectors = /* @__PURE__ */ new Map();
-    state.logicals.set(branchId, vectors);
+    builtinMapSet.call(state.logicals, branchId, vectors);
   }
   const key = selectionOutcomeKeys[outcome];
-  if (!vectors.has(key)) {
-    vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
+  if (!builtinMapHas.call(vectors, key)) {
+    builtinMapSet.call(vectors, key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
     workerEvidenceChanged();
   }
   if (isBrowser || state.runtimeSnapshots)
@@ -2299,7 +2446,7 @@ function recordLogicalOutcome(branchId, outcome) {
     state.logicalEpochs.set(branchId, epochs);
   }
   const clock = state.probeV2Clock;
-  if (!clock.fast || epochs.get(key) !== clock.epoch)
+  if (!clock.fast || epochs.get(key) !== clock.e)
     noteValue(epochs, "logical", branchId, key);
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
@@ -2358,7 +2505,7 @@ function recordProbeOutcome(site, outcome) {
   }
   const seen = outcomes.get(outcome);
   const clock = state.probeV2Clock;
-  if (seen !== void 0 && (clock.fast && seen === clock.epoch || isBrowser || state.runtimeSnapshots))
+  if (seen !== void 0 && (clock.fast && seen === clock.e || isBrowser || state.runtimeSnapshots))
     return;
   noteValue(outcomes, "comparison", site, outcome);
 }
@@ -2378,12 +2525,12 @@ function noteValue(epochs, type, id, outcome) {
     return;
   }
   const clock = state.probeV2Clock;
-  let epoch = clock.epoch;
+  let epoch = clock.e;
   if (!clock.fast) {
-    const previousEpoch = clock.epoch;
+    const previousEpoch = clock.e;
     activateProbeV2Context(currentRequestContext());
-    epoch = clock.epoch;
-    clock.epoch = previousEpoch;
+    epoch = clock.e;
+    clock.e = previousEpoch;
   } else if (epoch !== epoch) {
     epoch = resolveProbeV2Epoch();
   }
@@ -2913,17 +3060,19 @@ function mcdcCondition(frame, index, value) {
   return value;
 }
 function mcdcEnd(frame, value) {
-  const decision = state.decisions.get(frame.id);
+  const decision = builtinMapGet.call(state.decisions, frame.id);
   if (!decision)
     return value;
   const vector = { values: frame.values, outcome: Boolean(value) };
   const key = vectorKey(vector);
-  decision.vectors.set(key, vector);
+  builtinMapSet.call(decision.vectors, key, vector);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "browser")))
+    if (recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "browser"))
       persistBrowser();
+  } else if (state.runtimeSnapshots) {
+    recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "server");
   } else {
     appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
@@ -2941,6 +3090,7 @@ const directRuntimeApi = {
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
+  coverageSnapshotColumns,
   decodeProbeV2Vector,
   defaultEntered,
   defaultEnteredV2,
@@ -3015,6 +3165,7 @@ export {
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
+  coverageSnapshotColumns,
   decodeProbeV2Vector,
   defaultEntered,
   defaultEnteredV2,

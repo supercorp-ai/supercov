@@ -211,14 +211,17 @@ struct RuntimeSnapshotWire {
 /// Events by column. `type`, `phase` and `environment` index the tables of
 /// their names (a phase of -1 is none), `t` holds each timestamp as its
 /// difference from the one before it (the first from 0), and `vector` holds
-/// each decision event's vector under its position.
+/// each decision event's vector under its position. An `id` is the event's
+/// id, or, where it is one of the snapshot's hits, that hit's position in
+/// `hits`: a test's every first hit is in both, and writing each id twice
+/// was a third of what a test's evidence held.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EventColumns {
     types: Vec<String>,
     phases: Vec<String>,
     environments: Vec<String>,
-    id: Vec<String>,
+    id: Vec<EventId>,
     #[serde(rename = "type")]
     event_type: Vec<usize>,
     phase: Vec<i64>,
@@ -228,8 +231,35 @@ struct EventColumns {
     vector: BTreeMap<usize, McdcVector>,
 }
 
+/// An event's id as a column holds it: written out, or the position of the
+/// snapshot's hit it is.
+enum EventId {
+    Text(String),
+    Hit(usize),
+}
+
+impl<'de> Deserialize<'de> for EventId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = EventId;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an event id or the position of a hit")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<EventId, E> {
+                Ok(EventId::Text(value.to_owned()))
+            }
+            // A position no snapshot has is refused where it is looked up.
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<EventId, E> {
+                Ok(EventId::Hit(usize::try_from(value).unwrap_or(usize::MAX)))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 impl EventColumns {
-    fn decode(self) -> Result<Vec<RuntimeEvent>, String> {
+    fn decode(self, hits: &[String]) -> Result<Vec<RuntimeEvent>, String> {
         let count = self.id.len();
         if [
             self.event_type.len(),
@@ -246,6 +276,13 @@ impl EventColumns {
         let mut timestamp = 0_i64;
         let mut events = Vec::with_capacity(count);
         for (index, id) in self.id.into_iter().enumerate() {
+            let id = match id {
+                EventId::Text(id) => id,
+                EventId::Hit(at) => hits
+                    .get(at)
+                    .ok_or("an event naming a hit the snapshot does not have")?
+                    .clone(),
+            };
             timestamp = timestamp
                 .checked_add(self.t[index])
                 .ok_or("an event timestamp overflows")?;
@@ -291,7 +328,7 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
     fn try_from(wire: RuntimeSnapshotWire) -> Result<Self, Self::Error> {
         let mut events = wire.events;
         if let Some(columns) = wire.event_columns {
-            events.extend(columns.decode()?);
+            events.extend(columns.decode(&wire.hits)?);
         }
         Ok(Self {
             decisions: wire.decisions,
@@ -968,6 +1005,18 @@ pub struct CoverageReport {
     /// never part of it.
     #[serde(skip)]
     pub mutation: Option<crate::coverage_index::MutationResults>,
+    /// Every result passed, so the passed view is the whole view
+    /// ([`passing_is_every_result`]): its query index records are the whole
+    /// view's, copied.
+    #[serde(skip)]
+    pub passed_is_whole: bool,
+}
+
+/// Whether the passing results are all of them: then they are all of them in
+/// order, and the passed view is the whole view. Publication and a query that
+/// rebuilds the index both decide by it, so both write the same bytes.
+pub fn passing_is_every_result(results: &[RawTestResult]) -> bool {
+    passing_coverage_results(results).len() == results.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3203,13 +3252,22 @@ pub fn analyze_coverage_results(
             &mut Interner::default(),
         )
     };
+    // A run whose every result passed has passing results that are all of
+    // them, in the same order (the filter keeps order), so its passed view is
+    // the whole view: built again, it was a second whole view's work beside
+    // the first, on a large Vitest run 6.5 s of a core.
+    let passing_is_all = passing.len() == all.len();
+    debug_assert_eq!(
+        passing_is_all,
+        passing_is_every_result(&request.raw_results)
+    );
     let (view, passed, failed) = std::thread::scope(|scope| {
-        let passed = scope.spawn(|| build(&passing));
+        let passed = (!passing_is_all).then(|| scope.spawn(|| build(&passing)));
         let failed = scope.spawn(|| build(&failing));
         let view = build(&all);
         (
             view,
-            passed.join().unwrap_or_else(crate::threads::rethrow),
+            passed.map(|passed| passed.join().unwrap_or_else(crate::threads::rethrow)),
             failed.join().unwrap_or_else(crate::threads::rethrow),
         )
     });
@@ -3217,7 +3275,7 @@ pub fn analyze_coverage_results(
     // what built whole builds in part.
     let view = view?;
     let (passed, failed) = (
-        passed.expect("built whole above"),
+        passed.map_or_else(|| view.clone(), |passed| passed.expect("built whole above")),
         failed.expect("built whole above"),
     );
     let execution = match request.test_exit_code {
@@ -3240,6 +3298,7 @@ pub fn analyze_coverage_results(
         execution,
         filters: CoverageFilters { passed, failed },
         mutation: None,
+        passed_is_whole: passing_is_all,
     })
 }
 
@@ -3569,7 +3628,7 @@ pub fn archive_request(
     ),
     ReportError,
 > {
-    archive_request_from(request, |visit| {
+    archive_request_from(request, None, |visit| {
         crate::evidence_archive::read_archive_each(
             Path::new(&request.archive_path),
             |_| true,
@@ -3585,17 +3644,25 @@ pub fn archive_request(
 pub fn analyze_coverage_entries(
     request: &ArchiveReportRequest,
     entries: &[EvidenceArchiveEntry],
+    parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, (), mutation) = archive_request_from(request, |mut visit| {
-        entries.iter().cloned().try_for_each(&mut visit)
-    })?;
+    let (_, normalized, transport, (), mutation) =
+        archive_request_from(request, parsed, |mut visit| {
+            entries.iter().cloned().try_for_each(&mut visit)
+        })?;
     finish_archive_analysis(normalized, transport, mutation)
 }
+
+/// The results of a run's `mcdc.json` and `.mcdc.jsonl` entries, by path, as
+/// a frontend parsed them already from the same bytes: what the analysis
+/// would parse again, taken instead.
+pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 
 /// `archive_request`, from entries `read` hands to the visitor in the
 /// archive's order.
 fn archive_request_from<D>(
     request: &ArchiveReportRequest,
+    mut parsed: Option<ParsedResults>,
     read: impl FnOnce(
         &mut dyn FnMut(
             EvidenceArchiveEntry,
@@ -3627,6 +3694,20 @@ fn archive_request_from<D>(
         if failure.is_some() {
             results.clear();
             journals.clear();
+            return;
+        }
+        if let Some(parsed) = parsed.as_mut() {
+            let mut take = |entry: &EvidenceArchiveEntry| {
+                parsed
+                    .remove(&entry.path)
+                    .expect("a frontend parses every result entry it hands over")
+            };
+            results
+                .drain(..)
+                .for_each(|entry| raw_results.extend(take(&entry)));
+            journals
+                .drain(..)
+                .for_each(|entry| journal_results.extend(take(&entry)));
             return;
         }
         let parsed = parse_in_parallel(&results.iter().collect::<Vec<_>>(), |entry| {
@@ -3909,7 +3990,7 @@ fn resolve_probe_places(
             .iter()
             .filter(|(_, table)| !table.follows.is_empty())
             .map(|(key, table)| {
-                let mut followers = std::collections::HashMap::<usize, Vec<&str>>::new();
+                let mut followers = rustc_hash::FxHashMap::<usize, Vec<&str>>::default();
                 for [place, leader] in &table.follows {
                     if let Some(id) = table.points.get(*place) {
                         followers.entry(*leader).or_default().push(id);
@@ -3919,15 +4000,46 @@ fn resolve_probe_places(
             })
             .collect(),
     };
-    for raw in raw_results.iter_mut() {
+    // Each result is its own, and the tables are only read: on every core,
+    // a chunk of results at a time, the next chunk to whichever is free.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(raw_results.len().max(1));
+    let chunks = std::sync::Mutex::new(raw_results.chunks_mut(64));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let Some(chunk) = chunks.lock().expect("no worker panics holding it").next()
+                    else {
+                        return;
+                    };
+                    chunk.iter_mut().for_each(|raw| places.resolve(raw));
+                }
+            });
+        }
+    });
+}
+
+// Keyed by a table's 16-hex key and a place: a hasher made for short keys,
+// as every hit, event and server record of a run is looked up here.
+struct ProbePlaces<'a> {
+    tables: rustc_hash::FxHashMap<&'a str, &'a ProbeTableIds>,
+    /// For each table with dropped probes, the ids each leader place carries.
+    followers: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashMap<usize, Vec<&'a str>>>,
+}
+
+impl<'a> ProbePlaces<'a> {
+    /// Every place `raw` names, named by its id.
+    fn resolve(&self, raw: &mut RawTestResult) {
+        let places = self;
         for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
             // A dropped probe's hit comes right after its leader's, where
             // the probe ran.
             let hits = std::mem::take(&mut snapshot.hits);
             snapshot.hits.reserve(hits.len());
             for mut id in hits {
-                let followers = places.followers(&id);
-                places.point(&mut id);
+                let followers = places.resolve_point(&mut id);
                 snapshot.hits.push(id);
                 snapshot
                     .hits
@@ -3940,11 +4052,7 @@ fn resolve_probe_places(
             snapshot.events.reserve(events.len());
             for mut event in events {
                 let followers = match event.event_type.as_str() {
-                    "hit" => {
-                        let followers = places.followers(&event.id);
-                        places.point(&mut event.id);
-                        followers
-                    }
+                    "hit" => places.resolve_point(&mut event.id),
                     "decision" => {
                         places.decision(&mut event.id);
                         &[]
@@ -3970,8 +4078,7 @@ fn resolve_probe_places(
             if let Some(id) = record.id.as_mut() {
                 match record.record_type.as_str() {
                     "hit" => {
-                        let followers = places.followers(id);
-                        places.point(id);
+                        let followers = places.resolve_point(id);
                         copies.extend(followers.iter().map(|follower| ServerRecord {
                             id: Some((*follower).to_owned()),
                             ..record.clone()
@@ -3985,30 +4092,30 @@ fn resolve_probe_places(
             raw.server.extend(copies);
         }
     }
-}
 
-struct ProbePlaces<'a> {
-    tables: std::collections::HashMap<&'a str, &'a ProbeTableIds>,
-    /// For each table with dropped probes, the ids each leader place carries.
-    followers: std::collections::HashMap<&'a str, std::collections::HashMap<usize, Vec<&'a str>>>,
-}
-
-impl<'a> ProbePlaces<'a> {
-    /// The ids whose probes were dropped for the point `name` labels.
-    fn followers(&self, name: &str) -> &[&'a str] {
+    /// A point's id in place of the name `~p<key>.<place>` labels it by,
+    /// with the ids whose probes were dropped beside it: the name read once
+    /// for both, where each read it again.
+    fn resolve_point(&self, name: &mut String) -> &[&'a str] {
         let Some((key, place)) = name
             .strip_prefix("~p")
             .and_then(|rest| rest.split_once('.'))
+            .and_then(|(key, place)| Some((key, place.parse::<usize>().ok()?)))
         else {
             return &[];
         };
-        let Ok(place) = place.parse::<usize>() else {
+        let Some(table) = self.tables.get(key) else {
             return &[];
         };
-        self.followers
+        let followers = self
+            .followers
             .get(key)
             .and_then(|followers| followers.get(&place))
-            .map_or(&[], Vec::as_slice)
+            .map_or(&[][..], Vec::as_slice);
+        if let Some(resolved) = table.points.get(place) {
+            name.clone_from(resolved);
+        }
+        followers
     }
 
     /// The id `~<kind><key>.<place>` names, when it is one.
@@ -4021,12 +4128,6 @@ impl<'a> ProbePlaces<'a> {
             table.points.get(place)
         } else {
             table.decisions.get(place)
-        }
-    }
-
-    fn point(&self, id: &mut String) {
-        if let Some(resolved) = self.id(id, 'p') {
-            id.clone_from(resolved);
         }
     }
 
@@ -4237,6 +4338,14 @@ mod tests {
         let columnar: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":["a","b","d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
         assert_eq!(columnar, written);
         assert_eq!(columnar.events.len(), 5);
+        // A hit named by its position in `hits` is that hit; any other id is
+        // written out.
+        let positions: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":[0,1,"d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
+        assert_eq!(positions, written);
+        let past = r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":[1],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(past).is_err());
+        let negative = r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":[-1],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(negative).is_err());
         let uneven = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
         assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
         let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
@@ -5529,6 +5638,49 @@ mod tests {
         // Two that both lie within the millisecond: the later, as before.
         let instant = [phase("first", 200, 200), phase("second", 200, 210)];
         assert_eq!(phase_at(&instant, 200), Some("second"));
+    }
+
+    /// A run whose every result passed takes its passed view from the whole
+    /// view rather than building it again, and it is what building it again
+    /// gives: the passing results are all of them, in order.
+    #[test]
+    fn a_run_that_all_passed_has_the_whole_view_as_its_passed_view() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("a", 1), point("b", 2), point("unreached", 3)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let request = CoverageReportRequest {
+            run_id: "run".into(),
+            manifest,
+            raw_results: vec![
+                raw("first", 0, "passed", &["a"]),
+                raw("second", 0, "passed", &["a", "b"]),
+            ],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        };
+        let report = analyze_coverage_results(&request).unwrap();
+        let passing = passing_coverage_results(&request.raw_results);
+        assert_eq!(passing.len(), request.raw_results.len());
+        let built = create_coverage_view_with_model(
+            &request.manifest,
+            &passing,
+            &request.generated_at,
+            &javascript_coverage_model(),
+            &mut Interner::default(),
+        )
+        .unwrap();
+        assert_eq!(report.filters.passed, built);
+        assert_eq!(report.filters.passed, report.view);
+        assert!(report.filters.failed.tests.is_empty());
     }
 
     #[test]

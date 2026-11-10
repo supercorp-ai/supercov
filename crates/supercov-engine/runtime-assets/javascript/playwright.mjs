@@ -585,12 +585,14 @@ class CoveragePhaseController {
         // leaves the others.
         const parts = [];
         // A context that outlives its test (a worker-scoped browser fixture)
-        // is registered again by every later test, so this script accumulates
-        // on it and each new document runs every copy in registration order.
-        // That is made harmless rather than avoided: every copy publishes its
-        // own attempt, so the newest wins; the fetch patch is installed once
-        // and reads the attempt at call time, so a stale copy can never pin an
-        // old scope onto a request the way nested wrappers would.
+        // is registered again by every later test. Every copy publishes its
+        // own attempt, so the newest wins, and the fetch patch is installed
+        // once and reads the attempt at call time: a stale copy can never pin
+        // an old scope onto a request. Where Playwright can remove a script
+        // (its `addInitScript` returns a disposable), the previous test's copy is
+        // removed once this one is in place, so a document runs one copy:
+        // they accumulated to some fifty per context on a long suite, each
+        // sent to every new page and frame and run by every document.
         parts.push(`(${announceAttempt})(${JSON.stringify({
             attemptId: this.scope.attemptId,
             scopeHeader: COVERAGE_SCOPE_HEADER,
@@ -606,10 +608,20 @@ class CoveragePhaseController {
             phaseCookie: COVERAGE_DOCUMENT_PHASE_COOKIE,
             phaseSiteCookie: COVERAGE_DOCUMENT_PHASE_SITE_COOKIE,
         })});`);
-        await Promise.all([
+        const [added] = await Promise.all([
             context.addInitScript({ content: separately(parts) }).catch(() => undefined),
             adopted ? undefined : this.updateContextHeaders(context, this.requestPhaseId(), this.lastActionId),
         ]);
+        if (typeof added?.dispose === "function") {
+            const previous = contextInitScripts.get(context);
+            contextInitScripts.set(context, added);
+            // Not awaited: the test waits for nothing it needs here, and a
+            // context closed meanwhile has no script left to remove.
+            if (previous)
+                void internally(context, () => previous.dispose()).catch(() => undefined);
+            if (timingBuckets)
+                contextScriptCopies.set(context, 1);
+        }
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
@@ -1148,6 +1160,8 @@ function announceAttempt({ attemptId, scopeHeader, scopeValue, scopeCookie, scop
 // While timing: how many tests' scripts each context has run (a context
 // that outlives its test is registered by every later test).
 const contextScriptCopies = new WeakMap();
+// The disposable of the script each context's newest registration added.
+const contextInitScripts = new WeakMap();
 const LEAVING_BINDING = "__supercovLeaving";
 /** Scripts as one, each part run on its own as separate scripts were. */
 function separately(parts) {

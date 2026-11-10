@@ -1090,9 +1090,58 @@ fn scope_projection<'a>(
 }
 
 /// `scope` is the view's own, read once for all its projections.
+/// What a projection's records need of its selection that reads every line,
+/// point, branch and decision of the view, and no string: worked out for
+/// every selection at once, each on its own thread, before the records that
+/// intern strings in their order.
+struct Projected {
+    /// None where only the gaps are filed: the files every test together
+    /// covers.
+    summary: Option<CoverageSummary>,
+    gaps: Vec<(String, MutableFileGap)>,
+}
+
+impl Projected {
+    fn of(view: &CoverageView, selected: Option<&Selected>, summarized: bool) -> Self {
+        Self {
+            summary: summarized.then(|| {
+                selected.map_or_else(
+                    || view.summary.clone(),
+                    |ids| {
+                        coverage_summary_for_tests(view, &ids.iter().cloned().collect())
+                            .expect(CHECKED)
+                    },
+                )
+            }),
+            gaps: file_gaps(view, selected),
+        }
+    }
+}
+
+/// [`Projected`] for each selection, in their order, and whether it is
+/// summarized.
+fn projected_all(view: &CoverageView, selections: &[(Option<&Selected>, bool)]) -> Vec<Projected> {
+    std::thread::scope(|scope| {
+        let workers = selections
+            .iter()
+            .map(|&(selected, summarized)| {
+                scope.spawn(move || Projected::of(view, selected, summarized))
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .expect("a projection is worked out without a panic")
+            })
+            .collect()
+    })
+}
+
 fn projection_record(
     (view_id, view, scope): (CoverageViewId, &CoverageView, &Option<ScopeProjection<'_>>),
-    selected: Option<&Selected>,
+    (selected, projected): (Option<&Selected>, &Projected),
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1129,11 +1178,15 @@ fn projection_record(
     put_u64(&mut record, 24, roots_offset);
     put_u32(&mut record, 32, u64_u32(roots_count));
 
-    let summary = selected.map_or_else(
-        || view.summary.clone(),
-        |ids| coverage_summary_for_tests(view, &ids.iter().cloned().collect()).expect(CHECKED),
+    put_summary_payload(
+        &mut record,
+        36,
+        40,
+        projected
+            .summary
+            .as_ref()
+            .expect("a projection's selection is summarized"),
     );
-    put_summary_payload(&mut record, 36, 40, &summary);
 
     let mut limitation_kinds = [0_usize; 3];
     let mut limitation_files = BTreeSet::new();
@@ -1206,7 +1259,7 @@ fn projection_record(
             put_u64(&mut record, 280 + index * 8, usize_u64(count));
         });
 
-    let gaps = file_gaps(view, selected);
+    let gaps = &projected.gaps;
     put_u64(
         &mut record,
         320,
@@ -1660,26 +1713,25 @@ fn anchor_record(
 
 fn test_retry_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     retry: usize,
-    strings: &mut StringTable,
 ) -> [u8; TEST_RETRY_RECORD_SIZE] {
     let mut record = [0_u8; TEST_RETRY_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u64(&mut record, 8, usize_u64(retry));
     record
 }
 
 fn test_attempt_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     attempt: &crate::coverage_report::TestAttempt,
     strings: &mut StringTable,
 ) -> [u8; TEST_ATTEMPT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_ATTEMPT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u64(&mut record, 8, usize_u64(attempt.retry));
     put_u32(&mut record, 16, strings.intern(&attempt.status));
     put_u32(
@@ -1692,28 +1744,28 @@ fn test_attempt_record(
 
 fn test_line_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     line: &crate::coverage_report::SourceLine,
     strings: &mut StringTable,
 ) -> [u8; TEST_LINE_RECORD_SIZE] {
     let mut record = [0_u8; TEST_LINE_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
-    put_u32(&mut record, 8, strings.intern(&line.file));
+    put_u32(&mut record, 4, test_string);
+    put_u32(&mut record, 8, strings.intern_shared(&line.file));
     put_u64(&mut record, 16, usize_u64(line.line));
     record
 }
 
 fn test_hit_record(
     view_id: CoverageViewId,
-    test_id: &str,
-    hit: &str,
+    test_string: u32,
+    hit: &Id,
     strings: &mut StringTable,
 ) -> [u8; TEST_HIT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_HIT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
-    put_u32(&mut record, 8, strings.intern(hit));
+    put_u32(&mut record, 4, test_string);
+    put_u32(&mut record, 8, strings.intern_shared(hit));
     record
 }
 
@@ -1732,7 +1784,7 @@ fn test_vector_record(vector: &McdcVector, values: &mut Vec<u8>) -> [u8; TEST_VE
 
 fn test_decision_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     decision_id: &str,
     vectors_offset: usize,
     vectors_count: usize,
@@ -1740,7 +1792,7 @@ fn test_decision_record(
 ) -> [u8; TEST_DECISION_RECORD_SIZE] {
     let mut record = [0_u8; TEST_DECISION_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u32(&mut record, 8, strings.intern(decision_id));
     put_u64(&mut record, 16, usize_u64(vectors_offset));
     put_u64(&mut record, 24, usize_u64(vectors_count));
@@ -1966,13 +2018,14 @@ fn coverage_model_record(
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
-    let mut sections = coverage_index_sections_from(
+    let mut sections = sections_from(
         [
             (CoverageViewId::All, &report.view),
             (CoverageViewId::Passed, &report.filters.passed),
             (CoverageViewId::Failed, &report.filters.failed),
         ]
         .map(Ok::<_, CoverageIndexError>),
+        report.passed_is_whole,
     )?;
     sections.extend(mutation_sections(report.mutation.as_ref())?);
     Ok(sections)
@@ -1983,6 +2036,37 @@ pub fn coverage_index_sections(
 /// at once. The first view must be [`CoverageViewId::All`].
 pub fn coverage_index_sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+) -> Result<Vec<QueryIndexSection>, E>
+where
+    V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
+    E: From<CoverageIndexError>,
+{
+    sections_from(views, false)
+}
+
+/// [`coverage_index_sections_from`], told whether the passed view is the
+/// whole view (`passing_is_every_result`), which it then need not be given:
+/// its records are the whole view's with the passed view's id, written right
+/// after the whole view's,
+/// copied where they were built again -- on a large all-passing run the most
+/// of a second whole index, alone after the analysis. Each copied record
+/// points into the shared confidence, vector and condition records at the
+/// whole view's entries, which are the same; its strings and string runs
+/// are interned once already.
+pub fn coverage_index_sections_with_whole_passed<V, E>(
+    views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+    passed_is_whole: bool,
+) -> Result<Vec<QueryIndexSection>, E>
+where
+    V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
+    E: From<CoverageIndexError>,
+{
+    sections_from(views, passed_is_whole)
+}
+
+fn sections_from<V, E>(
+    views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+    passed_is_whole: bool,
 ) -> Result<Vec<QueryIndexSection>, E>
 where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
@@ -2021,8 +2105,59 @@ where
     let mut decision_vector_observations = Vec::new();
     let mut decision_conditions = Vec::new();
     let mut limitations = Vec::new();
+    // Every section whose records are a view's own, each record starting
+    // with its view's id, and the size of its records.
+    macro_rules! per_view {
+        ($apply:ident $(, $ranges:ident)?) => {
+            $apply!(
+                $($ranges;)?
+                summaries: SUMMARY_RECORD_SIZE,
+                gaps: FILE_GAP_RECORD_SIZE,
+                decision_gaps: DECISION_GAP_RECORD_SIZE,
+                dimensions: DIMENSION_RECORD_SIZE,
+                projection_records: PROJECTION_RECORD_SIZE,
+                scope_entries: SCOPE_ENTRY_RECORD_SIZE,
+                line_records: LINE_RECORD_SIZE,
+                test_summaries: TEST_SUMMARY_RECORD_SIZE,
+                phase_summaries: PHASE_SUMMARY_RECORD_SIZE,
+                anchors: ANCHOR_RECORD_SIZE,
+                test_retries: TEST_RETRY_RECORD_SIZE,
+                test_attempts: TEST_ATTEMPT_RECORD_SIZE,
+                test_lines: TEST_LINE_RECORD_SIZE,
+                test_hits: TEST_HIT_RECORD_SIZE,
+                test_decisions: TEST_DECISION_RECORD_SIZE,
+                hit_metadata: HIT_METADATA_RECORD_SIZE,
+                decision_metadata: DECISION_METADATA_RECORD_SIZE,
+                decision_details: DECISION_DETAIL_RECORD_SIZE,
+                limitations: LIMITATION_RECORD_SIZE,
+            )
+        };
+    }
+    macro_rules! lengths {
+        ($($records:ident: $size:expr),* $(,)?) => {
+            [$($records.len()),*]
+        };
+    }
+    macro_rules! copy_whole_as_passed {
+        ($whole:ident; $($records:ident: $size:expr),* $(,)?) => {{
+            let mut ranges = $whole.iter();
+            $(
+                let (start, end) = *ranges.next().expect("a range per section");
+                let mut copied = $records[start..end].to_vec();
+                copied
+                    .chunks_exact_mut($size)
+                    .for_each(|record| record[0] = CoverageViewId::Passed as u8);
+                $records.extend_from_slice(&copied);
+            )*
+        }};
+    }
     for item in views {
         let (id, owned) = item?;
+        // Written with the whole view's, below.
+        if id == CoverageViewId::Passed && passed_is_whole {
+            continue;
+        }
+        let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
         let view = owned.borrow();
         check_view(view)?;
         let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
@@ -2030,9 +2165,30 @@ where
             model_of_all = Some((view.variant.clone(), view.model.clone()));
         }
         summaries.extend_from_slice(&summary_record(id, view, &mut strings));
+        // What the tests cover of each file, all kinds together: a directory
+        // read e2e 18.18%, every other kind 0.00% and 100.00% in all, and
+        // nothing said that the rest ran while no test was running. Filed
+        // under the name the tests' own dimension has, which no kind can be.
+        let tested = crate::coverage_report::entries_in_kind_rows(view)
+            .into_iter()
+            .collect::<Selected>();
+        let selections = projections(view);
+        let mut projected = projected_all(
+            view,
+            &std::iter::once((None, true))
+                .chain(
+                    selections
+                        .iter()
+                        .map(|(_, _, selected)| (Some(selected), true)),
+                )
+                .chain((!tested.is_empty()).then_some((Some(&tested), false)))
+                .collect::<Vec<_>>(),
+        )
+        .into_iter();
+        let whole = projected.next().expect("the whole view is projected");
         projection_records.extend_from_slice(&projection_record(
             (id, view, &scope),
-            None,
+            (None, &whole),
             None,
             None,
             &mut strings,
@@ -2066,27 +2222,30 @@ where
                 &mut strings,
                 &mut relations,
             )?);
+            // Interned by its summary: each record of the test names it by
+            // that number rather than hashing the long id again.
+            let test_string = strings.intern(&test.id);
             for retry in &test.retries {
-                test_retries.extend_from_slice(&test_retry_record(
-                    id,
-                    &test.id,
-                    *retry,
-                    &mut strings,
-                ));
+                test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
             }
             for attempt in &test.attempts {
                 test_attempts.extend_from_slice(&test_attempt_record(
                     id,
-                    &test.id,
+                    test_string,
                     attempt,
                     &mut strings,
                 ));
             }
             for line in &test.lines {
-                test_lines.extend_from_slice(&test_line_record(id, &test.id, line, &mut strings));
+                test_lines.extend_from_slice(&test_line_record(
+                    id,
+                    test_string,
+                    line,
+                    &mut strings,
+                ));
             }
             for hit in &test.hits {
-                test_hits.extend_from_slice(&test_hit_record(id, &test.id, hit, &mut strings));
+                test_hits.extend_from_slice(&test_hit_record(id, test_string, hit, &mut strings));
             }
             for decision in &test.decisions {
                 let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
@@ -2095,7 +2254,7 @@ where
                 }
                 test_decisions.extend_from_slice(&test_decision_record(
                     id,
-                    &test.id,
+                    test_string,
                     &decision.id,
                     vectors_offset,
                     decision.vectors.len(),
@@ -2327,13 +2486,14 @@ where
                 &mut strings,
             ));
         }
-        for (file, gap) in file_gaps(view, None) {
-            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings));
+        for (file, gap) in &whole.gaps {
+            gaps.extend_from_slice(&file_gap_record(id, file, gap, None, None, &mut strings));
         }
-        for (kind, runner, selected) in projections(view) {
+        for (kind, runner, selected) in &selections {
+            let projected = projected.next().expect("each selection is projected");
             projection_records.extend_from_slice(&projection_record(
                 (id, view, &scope),
-                Some(&selected),
+                (Some(selected), &projected),
                 kind.as_deref(),
                 runner.as_deref(),
                 &mut strings,
@@ -2343,41 +2503,43 @@ where
                 decision_gaps.extend_from_slice(&decision_gap_record(
                     id,
                     decision,
-                    Some(&selected),
+                    Some(selected),
                     kind.as_deref(),
                     runner.as_deref(),
                     &mut strings,
                 ));
             }
-            for (file, gap) in file_gaps(view, Some(&selected)) {
+            for (file, gap) in &projected.gaps {
                 gaps.extend_from_slice(&file_gap_record(
                     id,
-                    &file,
-                    &gap,
+                    file,
+                    gap,
                     kind.as_deref(),
                     runner.as_deref(),
                     &mut strings,
                 ));
             }
         }
-        // What the tests cover of each file, all kinds together: a directory
-        // read e2e 18.18%, every other kind 0.00% and 100.00% in all, and
-        // nothing said that the rest ran while no test was running. Filed
-        // under the name the tests' own dimension has, which no kind can be.
-        let tested = crate::coverage_report::entries_in_kind_rows(view)
-            .into_iter()
-            .collect::<Selected>();
-        if !tested.is_empty() {
-            for (file, gap) in file_gaps(view, Some(&tested)) {
+        if let Some(tested) = projected.next() {
+            for (file, gap) in &tested.gaps {
                 gaps.extend_from_slice(&file_gap_record(
                     id,
-                    &file,
-                    &gap,
+                    file,
+                    gap,
                     Some(ALL_TESTS),
                     None,
                     &mut strings,
                 ));
             }
+        }
+        if let Some(starts) = starts
+            && passed_is_whole
+        {
+            let whole = starts
+                .into_iter()
+                .zip(per_view!(lengths))
+                .collect::<Vec<_>>();
+            per_view!(copy_whole_as_passed, whole);
         }
     }
     let (variant, model) =
@@ -6116,6 +6278,111 @@ mod tests {
         }
     }
     /// Everything a query can read from an index, in every view.
+    /// What every reader returns for every view, as text.
+    fn everything_read(index: &CoverageIndex<'_>) -> String {
+        let mut read = format!("{:?}\n", index.model().unwrap());
+        for view in [
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ] {
+            read += &format!("{view:?} summary {:?}\n", index.summary(view).unwrap());
+            read += &format!("gaps {:?}\n", index.file_gaps(view, None, None).unwrap());
+            for dimension in [
+                CoverageDimension::Kind,
+                CoverageDimension::Runner,
+                CoverageDimension::Tests,
+            ] {
+                read += &format!(
+                    "dimension {:?}\n",
+                    index.dimensions(view, dimension).unwrap()
+                );
+            }
+            read += &format!("scope {:?}\n", index.scope_entries(view).unwrap());
+            read += &format!(
+                "projection {:?}\n",
+                index.projection(view, None, None).unwrap()
+            );
+            let lines = index.lines(view).unwrap();
+            read += &format!("lines {lines:?}\n");
+            for line in &lines {
+                read += &format!(
+                    "anchors {:?}\n",
+                    index.anchors(view, &line.file, line.line).unwrap()
+                );
+                read += &format!(
+                    "line {:?}\n",
+                    index.line(view, &line.file, line.line).unwrap()
+                );
+            }
+            for file in lines
+                .iter()
+                .map(|line| line.file.as_str())
+                .collect::<BTreeSet<_>>()
+            {
+                read += &format!(
+                    "decision gaps {:?}\n",
+                    index.decision_gaps(view, None, None, file).unwrap()
+                );
+                read += &format!("in file {:?}\n", index.lines_in_file(view, file).unwrap());
+                read += &format!(
+                    "hits in file {:?}\n",
+                    index.hit_metadata_in_file(view, file).unwrap()
+                );
+                read += &format!(
+                    "details in file {:?}\n",
+                    index.decision_details_in_file(view, file).unwrap()
+                );
+                read += &format!(
+                    "limits in file {:?}\n",
+                    index.limitations_in_file(view, file).unwrap()
+                );
+            }
+            read += &format!("tests {:?}\n", index.test_summaries(view).unwrap());
+            read += &format!("test details {:?}\n", index.test_details(view).unwrap());
+            read += &format!("hits {:?}\n", index.hit_metadata(view).unwrap());
+            read += &format!("limits {:?}\n", index.limitations(view).unwrap());
+            read += &format!("decisions {:?}\n", index.decision_metadata(view).unwrap());
+            read += &format!("details {:?}\n", index.decision_details(view).unwrap());
+            read += &format!("phases {:?}\n", index.phase_summaries(view).unwrap());
+        }
+        read
+    }
+
+    /// A run whose passed view is its whole view has that view's records
+    /// copied under the passed view's id, and every reader answers as it did
+    /// when the passed view's records were built again.
+    #[test]
+    fn a_passed_view_that_is_the_whole_reads_as_when_built_again() {
+        for mut whole in [report(), scoped_report(), phased_report()] {
+            whole.filters.passed = whole.view.clone();
+            whole.passed_is_whole = true;
+            let copied = coverage_index_sections(&whole).unwrap();
+            let mut built = sections_from::<_, CoverageIndexError>(
+                [
+                    (CoverageViewId::All, &whole.view),
+                    (CoverageViewId::Passed, &whole.filters.passed),
+                    (CoverageViewId::Failed, &whole.filters.failed),
+                ]
+                .map(Ok),
+                false,
+            )
+            .unwrap();
+            built.extend(mutation_sections(whole.mutation.as_ref()).unwrap());
+            let read = |sections: &[QueryIndexSection]| {
+                let root = root();
+                let path = root.join("query-index.v1.bin");
+                write_query_index(sections, &identity(), &path).unwrap();
+                let container = QueryIndex::open(&path, &identity()).unwrap();
+                // The index is closed before its directory is removed.
+                everything_read(&CoverageIndex::new(&container).unwrap())
+            };
+            let (copied_read, built_read) = (read(&copied), read(&built));
+            assert!(copied_read.contains("Passed summary"), "{copied_read}");
+            assert_eq!(copied_read, built_read);
+        }
+    }
+
     fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
         let mut read = 0;
         index.model()?;

@@ -124,7 +124,10 @@ export function expandSnapshot(value) {
 /**
  * A snapshot's events as columns: each event's type, phase and environment
  * as an index into a table of the distinct ones, its time as the difference
- * from the event before it. The reader gives back the same events.
+ * from the event before it, and its id, where it is one of the snapshot's
+ * hits, as that hit's position in `hits`: every first hit of a test is in
+ * both, and writing each id twice was a third of a test's evidence. The
+ * reader gives back the same events.
  */
 export function columnarEvents(snapshot) {
     const events = snapshot?.events;
@@ -139,10 +142,13 @@ export function columnarEvents(snapshot) {
         }
         return found;
     };
+    const hitAt = new Map();
+    (snapshot.hits ?? []).forEach((id, position) => hitAt.set(id, position));
     const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
     let previous = 0;
     events.forEach((event, position) => {
-        columns.id.push(event.id);
+        const at = hitAt.get(event.id);
+        columns.id.push(at === undefined ? event.id : at);
         columns.type.push(index(tables.types, event.type));
         columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
         columns.environment.push(index(tables.environments, event.environment));
