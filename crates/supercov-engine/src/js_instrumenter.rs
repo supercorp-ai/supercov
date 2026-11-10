@@ -3681,40 +3681,42 @@ fn runtime_helper_type<'a>(
 
 #[cfg(test)]
 thread_local! {
-    pub(crate) static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(crate) static INFECTION_PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(crate) static MUTANTS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// In this crate's tests, on the thread that sets it: the mutants on or
+    /// off whatever `SUPERCOV_MUTANTS` says.
+    pub(crate) static MUTANTS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// With the mutants on, one group of probes left out, so a test can
+    /// compare the links each makes.
+    pub(crate) static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(crate) static INFECTION_PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(crate) static REGEX_INPUTS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The comparison probe runs only with `SUPERCOV_COMPARISONS=1` (or, in this
-/// crate's tests, on the thread that asked for it), so every other run's
-/// instrumented code is byte for byte what it was.
 /// The probe switches, for the frontend cache key: instrumentation cached
 /// with the probes off must not be reused once they are on, or the reverse.
-pub(crate) fn probe_options() -> (bool, bool, bool) {
-    (
-        comparisons_enabled(),
-        infection_probes_enabled(),
-        mutants_enabled(),
-    )
+pub(crate) fn probe_options() -> (bool, bool) {
+    (mutants_enabled(), regex_inputs_enabled())
 }
 
-/// Whether instrumentation enumerates StrykerJS's mutants and links each to
-/// its evidence: whenever a probe that decides some of them is on.
+/// Whether instrumentation places the probes and enumerates StrykerJS's
+/// mutants, each linked to its evidence: unless `SUPERCOV_MUTANTS=0`. Each
+/// probe's helper is imported only by a file with a site of its kind, so a
+/// file without one is instrumented byte for byte as with them off.
 pub(crate) fn mutants_enabled() -> bool {
     #[cfg(test)]
-    if MUTANTS_FOR_TEST.with(|flag| flag.get()) {
-        return true;
+    if let Some(on) = MUTANTS_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
     }
-    comparisons_enabled() || infection_probes_enabled()
+    std::env::var("SUPERCOV_MUTANTS").map_or(true, |value| !matches!(value.trim(), "0" | "false"))
 }
 
+/// The comparison probe: relational comparisons, and equalities whose value
+/// is only a value.
 fn comparisons_enabled() -> bool {
     #[cfg(test)]
-    if COMPARISONS_FOR_TEST.with(|flag| flag.get()) {
-        return true;
+    if !COMPARISONS_FOR_TEST.with(std::cell::Cell::get) {
+        return false;
     }
-    std::env::var_os("SUPERCOV_COMPARISONS").is_some_and(|value| value == "1")
+    mutants_enabled()
 }
 
 /// The equality comparisons (`===`, `!==`, `==`, `!=`) whose value can be
@@ -3861,13 +3863,49 @@ impl<'a> Visit<'a> for EqualityValueSites {
     }
 }
 
+/// The runtime's probe helpers, in the order a file imports them.
+const PROBE_HELPERS: [&str; 6] = [
+    "compareV2",
+    "arithV2",
+    "assignV2",
+    "methodV2",
+    "valueV2",
+    "regexV2",
+];
+
+/// The probes' helpers, each named the first time a site of its kind is
+/// probed. Named with the file's other helpers' suffix counter and after
+/// them, they change no other name; named only where used, a file without a
+/// site of a kind imports nothing for it and keeps the names it had.
+struct ProbeHelpers<'s> {
+    names: CandidateNames<'s>,
+    /// By the runtime's export (`compareV2`), in the order they were named.
+    named: Vec<(&'static str, String)>,
+}
+
+impl ProbeHelpers<'_> {
+    fn name(&mut self, export: &'static str) -> String {
+        if let Some((_, name)) = self.named.iter().find(|(named, _)| *named == export) {
+            return name.clone();
+        }
+        let mut letters = export.chars();
+        let capitalized = letters
+            .next()
+            .map(|first| first.to_ascii_uppercase().to_string() + letters.as_str())
+            .unwrap_or_default();
+        let name = self.names.allocate(&format!("__supercov{capitalized}"));
+        self.named.push((export, name.clone()));
+        name
+    }
+}
+
 /// `a < b` as `compareV2("file:line:column", a, b, 0)`: the runtime evaluates
 /// the operands' relation once, from the values the program computed, and
 /// returns the comparison's own result. Relational operators narrow no types,
 /// so a call in their place changes nothing TypeScript infers.
 struct ComparisonTransformer<'a, 'b> {
     ast: AstBuilder<'a>,
-    compare_v2: String,
+    helpers: ProbeHelpers<'b>,
     equality_sites: HashSet<SpanKey>,
     file: &'b str,
     source: &'b str,
@@ -3945,10 +3983,11 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
                 binary.right.take_in(self.ast.allocator),
             )
         };
+        let compare_v2 = self.helpers.name("compareV2");
         *expression = self.ast.expression_call(
             span,
             self.ast
-                .expression_identifier(Span::default(), self.ast.ident(&self.compare_v2)),
+                .expression_identifier(Span::default(), self.ast.ident(&compare_v2)),
             NONE,
             self.ast.vec_from_array([
                 Argument::from(self.ast.expression_string_literal(
@@ -3970,17 +4009,27 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
     }
 }
 
-/// Infection research, Phases 3-5 (feat/infection): probes for the Stryker
-/// mutator groups whose infection no other record decides -- arithmetic and
-/// arithmetic compound assignment, method calls Stryker swaps or removes,
-/// concise arrows' return values, and regular expressions' inputs. Off unless
-/// `SUPERCOV_INFECTION_PROBES=1`, so every other run's code is unchanged.
+/// The probes for the Stryker mutator groups whose infection no other
+/// record decides: arithmetic and arithmetic compound assignment, method
+/// calls Stryker swaps or removes, and concise arrows' return values.
 fn infection_probes_enabled() -> bool {
     #[cfg(test)]
-    if INFECTION_PROBES_FOR_TEST.with(|flag| flag.get()) {
-        return true;
+    if !INFECTION_PROBES_FOR_TEST.with(std::cell::Cell::get) {
+        return false;
     }
-    std::env::var_os("SUPERCOV_INFECTION_PROBES").is_some_and(|value| value == "1")
+    mutants_enabled()
+}
+
+/// The regex probe, which records up to 200 characters of each string a
+/// regular expression is matched against: user input, in the evidence. Only
+/// with `SUPERCOV_REGEX_INPUTS=1`, and no regex mutant is enumerated yet.
+fn regex_inputs_enabled() -> bool {
+    #[cfg(test)]
+    if REGEX_INPUTS_FOR_TEST.with(std::cell::Cell::get) {
+        return infection_probes_enabled();
+    }
+    infection_probes_enabled()
+        && std::env::var_os("SUPERCOV_REGEX_INPUTS").is_some_and(|value| value == "1")
 }
 
 /// StrykerJS 10.1.1's MethodExpression names, then the calls the probe reads
@@ -4294,11 +4343,9 @@ impl<'a> Visit<'a> for InfectionSites {
 /// - `/re/` -> `regexV2(site, /re/)`: the expression is tagged with its site.
 struct InfectionProbeTransformer<'a, 'b> {
     ast: AstBuilder<'a>,
-    arith_v2: String,
-    assign_v2: String,
-    method_v2: String,
-    value_v2: String,
-    regex_v2: String,
+    helpers: ProbeHelpers<'b>,
+    /// `SUPERCOV_REGEX_INPUTS=1`: regular expressions' inputs recorded.
+    regex_inputs: bool,
     sites: InfectionSites,
     file: &'b str,
     source: &'b str,
@@ -4400,9 +4447,10 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
         };
         self.placed.push(site.clone());
         let body = value.take_in(self.ast.allocator);
+        let value_v2 = self.helpers.name("valueV2");
         *value = self.call(
             Span::default(),
-            &self.value_v2,
+            &value_v2,
             vec![self.string(&site), Argument::from(body)],
         );
     }
@@ -4435,9 +4483,10 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 self.placed.push(site.clone());
                 let left = binary.left.take_in(self.ast.allocator);
                 let right = binary.right.take_in(self.ast.allocator);
+                let arith_v2 = self.helpers.name("arithV2");
                 *expression = self.call(
                     span,
-                    &self.arith_v2,
+                    &arith_v2,
                     vec![
                         self.string(&site),
                         Argument::from(left),
@@ -4469,9 +4518,10 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 let site = self.site(assignment.span, "assign");
                 self.placed.push(site.clone());
                 let right = assignment.right.take_in(self.ast.allocator);
+                let assign_v2 = self.helpers.name("assignV2");
                 assignment.right = self.call(
                     Span::default(),
-                    &self.assign_v2,
+                    &assign_v2,
                     vec![
                         self.string(&site),
                         Argument::from(self.ast.expression_identifier(Span::default(), name)),
@@ -4481,16 +4531,17 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 );
             }
             Expression::RegExpLiteral(regex) => {
-                if regex.span.is_unspanned() {
+                if !self.regex_inputs || regex.span.is_unspanned() {
                     return;
                 }
                 let span = regex.span;
                 let site = self.site(span, "regex");
                 self.placed.push(site.clone());
                 let literal = expression.take_in(self.ast.allocator);
+                let regex_v2 = self.helpers.name("regexV2");
                 *expression = self.call(
                     span,
-                    &self.regex_v2,
+                    &regex_v2,
                     vec![self.string(&site), Argument::from(literal)],
                 );
             }
@@ -4518,7 +4569,8 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 if let Some(arrow_site) = arrow_site {
                     arguments.push(self.string(&arrow_site));
                 }
-                member.object = self.call(Span::default(), &self.method_v2, arguments);
+                let method_v2 = self.helpers.name("methodV2");
+                member.object = self.call(Span::default(), &method_v2, arguments);
             }
             _ => {}
         }
@@ -5099,29 +5151,6 @@ fn instrument_candidate_with_binding(
     let optional_call_end_v2 = names.allocate("__supercovOptionalCallEndV2");
     let default_selected_v2 = names.allocate("__supercovDefaultSelectedV2");
     let default_entered_v2 = names.allocate("__supercovDefaultEnteredV2");
-    // Infection research, off unless asked for: see ComparisonTransformer. Its
-    // helper's name is allocated only then, so every other name is unchanged.
-    let comparisons_enabled = comparisons_enabled();
-    let compare_v2 = if comparisons_enabled {
-        names.allocate("__supercovCompareV2")
-    } else {
-        String::new()
-    };
-    let infection_probes_enabled = infection_probes_enabled();
-    let [arith_v2, assign_v2, method_v2, value_v2, regex_v2] = [
-        "__supercovArithV2",
-        "__supercovAssignV2",
-        "__supercovMethodV2",
-        "__supercovValueV2",
-        "__supercovRegexV2",
-    ]
-    .map(|name| {
-        if infection_probes_enabled {
-            names.allocate(name)
-        } else {
-            String::new()
-        }
-    });
     let typescript = parsed.program.source_type.is_typescript();
     let ast = AstBuilder::new(&allocator);
     let mut assignment_name_safety = AssignmentNameSafetyTransformer {
@@ -5379,38 +5408,44 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
-    // Infection research (feat/infection): each relational comparison of the
-    // source records whether its operands were less, equal, greater or
-    // unordered, beside (never in) the coverage figures. Last of the
-    // expression passes, so every other pass has matched its spans first.
+    // The probes (unless SUPERCOV_MUTANTS=0): each relational comparison of
+    // the source records whether its operands were less, equal, greater or
+    // unordered, and the infection probes whether Stryker's replacement
+    // would have differed, beside (never in) the coverage figures. Last of
+    // the expression passes, so every other pass has matched its spans first.
+    // The probes' helpers are named after every other name the file's
+    // allocator gives, the decisions' among them, and each only once a site
+    // of its kind is probed: see ProbeHelpers.
+    let helpers = ProbeHelpers {
+        names: transformer.names,
+        named: Vec::new(),
+    };
     let mut comparison_transformer = ComparisonTransformer {
         ast,
-        compare_v2: compare_v2.clone(),
+        helpers,
         equality_sites: equality_values.sites,
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         placed: Vec::new(),
     };
-    if comparisons_enabled {
+    if comparisons_enabled() {
         comparison_transformer.visit_program(&mut parsed.program);
     }
     let mut infection_transformer = InfectionProbeTransformer {
         ast,
-        arith_v2: arith_v2.clone(),
-        assign_v2: assign_v2.clone(),
-        method_v2: method_v2.clone(),
-        value_v2: value_v2.clone(),
-        regex_v2: regex_v2.clone(),
+        helpers: comparison_transformer.helpers,
+        regex_inputs: regex_inputs_enabled(),
         sites: infection_sites,
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         placed: Vec::new(),
     };
-    if infection_probes_enabled {
+    if infection_probes_enabled() {
         infection_transformer.visit_program(&mut parsed.program);
     }
+    let probe_helpers = infection_transformer.helpers.named;
     let mutants = mutant_facts.map_or_else(Vec::new, |(ledger, facts)| {
         crate::js_mutant_links::link(
             file,
@@ -5547,15 +5582,12 @@ fn instrument_candidate_with_binding(
         ("defaultSelectedV2", &default_selected_v2),
         ("defaultEnteredV2", &default_entered_v2),
     ];
-    if comparisons_enabled {
-        runtime_imports.push(("compareV2", &compare_v2));
-    }
-    if infection_probes_enabled {
-        runtime_imports.push(("arithV2", &arith_v2));
-        runtime_imports.push(("assignV2", &assign_v2));
-        runtime_imports.push(("methodV2", &method_v2));
-        runtime_imports.push(("valueV2", &value_v2));
-        runtime_imports.push(("regexV2", &regex_v2));
+    // The probes' helpers this file named, in one order whatever order
+    // its sites named them in.
+    for export in PROBE_HELPERS {
+        if let Some((_, local)) = probe_helpers.iter().find(|(named, _)| *named == export) {
+            runtime_imports.push((export, local));
+        }
     }
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
@@ -13703,8 +13735,19 @@ export function shapes(n: number): unknown {
     /// The instrumented code with what records a decision's outcome written
     /// `END(`, and the decisions' temporaries named `t0`, `t1`, … in the order
     /// they are declared.
+    /// `source` instrumented with the probes off, which are not what these
+    /// shapes are of: with them on, a relational condition is also the
+    /// comparison probe's call, and nothing else changes (see
+    /// `relational_comparisons_record_their_operands_relation`).
+    fn without_probes(source: &str, file: &str) -> CandidateOutput {
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
+        let output = instrument_candidate(source, file);
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        output.unwrap()
+    }
+
     fn decision_shape(source: &str, file: &str) -> String {
-        let output = instrument_candidate(source, file).unwrap();
+        let output = without_probes(source, file);
         let runtime = output.runtime.as_ref().expect("candidate runtime binding");
         let call = format!("{}(", runtime.mcdc_end_v2);
         let start = output.code.find(&call).expect("an outcome is recorded") + call.len();
@@ -14030,10 +14073,11 @@ export function shapes(n: number): unknown {
         // where the block's brace used to take that mapping from it.
         assert_eq!(at("for (const item of list)"), Some(Some((2, 2))));
         assert_eq!(at("continue;"), Some(Some((4, 25))));
-        assert_eq!(at("total -= 1;"), Some(Some((5, 9))));
+        // The infection probes' calls keep the spans of what they wrap.
+        assert_eq!(at("total -= __supercovAssignV2"), Some(Some((5, 9))));
         // The arrow's body, made a block, returns what the expression it was
         // evaluated: the line maps where that expression starts.
-        assert_eq!(at("return value * 2;"), Some(Some((9, 25))));
+        assert_eq!(at("return __supercovArithV2"), Some(Some((9, 25))));
         // Every line of the program starting with a closing brace maps where
         // it starts, so a tool that looks a position up on its own line finds
         // a mapping.
@@ -14051,7 +14095,7 @@ export function shapes(n: number): unknown {
     /// The instrumented code with the calls that record a value tree written
     /// `END2(`, `END(` and `HIT(`, and the trees' frames named `s0`, `s1`, …
     fn value_shape(source: &str, file: &str) -> String {
-        let output = instrument_candidate(source, file).unwrap();
+        let output = without_probes(source, file);
         let runtime = output.runtime.as_ref().expect("candidate runtime binding");
         let call = format!("{}(", runtime.select_end2_v2);
         let start = output.code.find(&call).expect("a value tree is recorded") + call.len();
@@ -14270,35 +14314,82 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn the_cache_key_follows_each_probe_switch() {
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let on = probe_options();
+        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(true));
+        let regex = probe_options();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
+        // Regular expressions' inputs are recorded only with the probes on.
         let off = probe_options();
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
-        let comparisons = probe_options();
-        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(true));
-        let both = probe_options();
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
-        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(false));
-        MUTANTS_FOR_TEST.with(|flag| flag.set(true));
-        let mutants = probe_options();
-        MUTANTS_FOR_TEST.with(|flag| flag.set(false));
-        assert_eq!(off, (false, false, false));
-        assert_eq!(comparisons, (true, false, true));
-        assert_eq!(both, (true, true, true));
-        assert_eq!(mutants, (false, false, true));
+        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(false));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        assert_eq!(on, (true, false));
+        assert_eq!(regex, (true, true));
+        assert_eq!(off, (false, false));
+    }
+
+    /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are
+    /// on otherwise, and a file with no site of a kind imports nothing for
+    /// it, its every name as it was with them off.
+    #[test]
+    fn probes_are_on_unless_turned_off_and_only_where_a_file_has_sites() {
+        let instrumented = |on: bool, source: &str| {
+            MUTANTS_FOR_TEST.with(|flag| flag.set(Some(on)));
+            let output = instrument_candidate(source, "src/sites.ts");
+            MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+            output.unwrap()
+        };
+        // No comparison, arithmetic, method, arrow or regex site.
+        let siteless = "export function f(a: boolean, b: boolean) {\n  if (a && b) {\n    return 'both';\n  }\n  const o = a ? { x: 1 } : null;\n  return o?.x;\n}\n";
+        let (on, off) = (instrumented(true, siteless), instrumented(false, siteless));
+        assert_eq!(on.code, off.code);
+        assert!(!on.mutants.is_empty());
+        assert!(off.mutants.is_empty());
+        // A file with only arithmetic imports its helper alone, and no other
+        // name changes.
+        let arithmetic = "export function f(a: boolean, n: number) {\n  if (a) {\n    return n * 2;\n  }\n  return n;\n}\n";
+        let (on, off) = (
+            instrumented(true, arithmetic),
+            instrumented(false, arithmetic),
+        );
+        for absent in ["CompareV2", "AssignV2", "MethodV2", "ValueV2", "RegexV2"] {
+            assert!(!on.code.contains(absent), "{absent}:\n{}", on.code);
+        }
+        // Every generated name, which begins with `_`.
+        let generated = |code: &str| {
+            code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .filter(|word| word.starts_with('_'))
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let (with, without) = (generated(&on.code), generated(&off.code));
+        let added = with.difference(&without).collect::<Vec<_>>();
+        assert!(
+            matches!(added.as_slice(), [helper] if helper.starts_with("__supercovArithV2")),
+            "{added:?}:\n{}",
+            on.code
+        );
+        assert!(without.is_subset(&with), "{}", on.code);
+        assert!(
+            on.code
+                .contains("(\"src/sites.ts:3:12-3:17#arith\", n, 2, 2)"),
+            "{}",
+            on.code
+        );
     }
 
     #[test]
-    fn relational_comparisons_record_their_operands_relation_behind_the_flag() {
+    fn relational_comparisons_record_their_operands_relation() {
         let source = "export function f(a: number, b: number, d: Date) {\n  const late = a <= b;\n  if (a > 0 && b >= a) return late;\n  return d < new Date();\n}\n";
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/compare.ts").unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
         assert!(
             !plain.code.contains("CompareV2"),
-            "off by default:\n{}",
+            "off with SUPERCOV_MUTANTS=0:\n{}",
             plain.code
         );
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
-        let probed = instrument_candidate(source, "src/compare.ts");
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
-        let probed = probed.unwrap();
+        let probed = instrument_candidate(source, "src/compare.ts").unwrap();
         for expected in [
             "\"src/compare.ts:2:16\", a, b, 1)",
             "\"src/compare.ts:3:7\", a, 0, 2)",
@@ -14314,10 +14405,7 @@ export function shapes(n: number): unknown {
         // Equalities: recorded where their value is only a value, left as
         // written where TypeScript narrows through them.
         let source = "export function g(x: string | null, s: { status: string }, n: number) {\n  const o = { main: s.status === 'a', both: x !== null && x.length > n };\n  if (x === null) return [s.status !== 'b'];\n  const named = x === 'y';\n  return x === 'z';\n}\nexport const h = (s: { status: string }) => s.status === 'active';\n";
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(true));
-        let equalities = instrument_candidate(source, "src/equal.ts");
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(false));
-        let equalities = equalities.unwrap().code;
+        let equalities = instrument_candidate(source, "src/equal.ts").unwrap().code;
         for expected in [
             "\"src/equal.ts:2:21\", s.status === \"a\", 0, 4)",
             "\"src/equal.ts:3:27\", s.status !== \"b\", 0, 4)",
@@ -14353,7 +14441,7 @@ export function shapes(n: number): unknown {
     }
 
     #[test]
-    fn infection_probes_wrap_strykers_sites_behind_the_flag() {
+    fn infection_probes_wrap_strykers_sites() {
         let source = concat!(
             "export function f(a: number, b: number, xs: { id?: string; ok: boolean }[], s: string) {\n",
             "  let total = a * 1000 + b;\n",
@@ -14367,17 +14455,27 @@ export function shapes(n: number): unknown {
             "enum E { A = 1 + 2 }\n",
             "export const sum = (n: number) => n + 1;\n",
         );
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/infection.ts").unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
         for helper in ["ArithV2", "AssignV2", "MethodV2", "ValueV2", "RegexV2"] {
             assert!(
                 !plain.code.contains(helper),
-                "off by default:\n{}",
+                "off with SUPERCOV_MUTANTS=0:\n{}",
                 plain.code
             );
         }
-        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(true));
+        // Regular expressions' inputs are user strings: recorded only when
+        // asked for.
+        let unasked = instrument_candidate(source, "src/infection.ts")
+            .unwrap()
+            .code;
+        assert!(unasked.contains("ArithV2"), "{unasked}");
+        assert!(!unasked.contains("RegexV2"), "{unasked}");
+        assert!(!unasked.contains("#regex"), "{unasked}");
+        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(true));
         let probed = instrument_candidate(source, "src/infection.ts");
-        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(false));
+        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(false));
         let probed = probed.unwrap().code;
         for expected in [
             // arithmetic, inner and outer; a bare name's compound assignment

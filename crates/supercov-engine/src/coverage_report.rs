@@ -130,9 +130,9 @@ pub struct LogicalSnapshot {
 }
 
 /// One relational comparison site's operand relations (`lt`, `eq`, `gt`,
-/// `unordered`, `other`), keyed `file:line:column`. Infection research only:
-/// carried through the evidence for weak-mutation verdicts, never counted
-/// in coverage.
+/// `unordered`, `other`), keyed `file:line:column`, and the infection probes'
+/// outcomes: carried through the evidence for weak-mutation verdicts, never
+/// counted in coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComparisonSnapshot {

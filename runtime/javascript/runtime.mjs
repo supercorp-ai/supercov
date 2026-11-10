@@ -2283,7 +2283,8 @@ function compareV2(site, left, right, op) {
   }
   return result;
 }
-// Infection research, Phases 3-5 (SUPERCOV_INFECTION_PROBES=1). Each helper
+// The infection probes (on unless SUPERCOV_MUTANTS=0; regexV2 only with
+// SUPERCOV_REGEX_INPUTS=1, as it keeps user strings). Each helper
 // gets the values the program computed, does the program's own operation or
 // call once, and records whether Stryker's replacement would have given a
 // different value ("differs"), the same one ("same"), or cannot be told

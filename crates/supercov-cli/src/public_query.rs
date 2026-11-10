@@ -89,8 +89,7 @@ const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line
 Weak mutation: for each mutant StrykerJS would make, whether a test ran the
 mutated code (reach) and whether its value differed there (infection), read
 from the run without running anything. JavaScript and TypeScript runs list
-their mutants when measured with SUPERCOV_COMPARISONS=1 or
-SUPERCOV_INFECTION_PROBES=1.
+their mutants unless measured with SUPERCOV_MUTANTS=0.
 
 Without a file, a table of files by how many mutants no test infects, then
 by how many no test reaches; with a file, its mutants by line; with

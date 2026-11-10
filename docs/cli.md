@@ -296,10 +296,10 @@ npx supercov runs <run-id> mutants --format jsonl --output mutants.jsonl
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
 would make, whether a test ran the mutated code and whether the mutant's value
-would have differed there. Nothing runs again. A JavaScript or TypeScript run
-lists its mutants when its command is measured with `SUPERCOV_COMPARISONS=1`
-or `SUPERCOV_INFECTION_PROBES=1`; any other run says it has none and how to
-get them.
+would have differed there. Nothing runs again. Every JavaScript or TypeScript
+run lists its mutants unless its command is measured with `SUPERCOV_MUTANTS=0`;
+any other run says it has none and how to get them, and its summary shows no
+`Mutants` line.
 
 Each mutant has one status:
 
@@ -920,9 +920,9 @@ own:
 
 A merged run lists the mutants of every file a run listed (see
 [Mutants](#mutants)), once. Runs that listed different mutants of a file
-recorded with the same bytes are not merged. A run measured without the probes
-adds no mutants, and where its tests ran a mutant, a verdict that needs values
-they did not record is `unknown`.
+recorded with the same bytes are not merged. A run measured with
+`SUPERCOV_MUTANTS=0` adds no mutants, and where its tests ran a mutant, a
+verdict that needs values they did not record is `unknown`.
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a
@@ -1016,6 +1016,8 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
+| `SUPERCOV_MUTANTS` | Set to `0` to measure a JavaScript or TypeScript run without the probes that decide its mutants, and without listing them (see [Mutants](#mutants)) |
+| `SUPERCOV_REGEX_INPUTS` | Set to `1` to record, with the mutants, up to 200 characters of each string a regular expression is matched against. Off by default: those strings are often user input, and they are kept in the run's evidence |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

@@ -39,6 +39,32 @@ A mutant's id is stable across runs: the file, its span, the mutator and the
 replacement. A later strong pass can reuse a result while the file's hash and
 the tests that reach it are unchanged.
 
+### On by default
+
+Every JavaScript and TypeScript run places the probes and lists its mutants;
+`SUPERCOV_MUTANTS=0` turns both off. The research switches they replace,
+`SUPERCOV_COMPARISONS=1` and `SUPERCOV_INFECTION_PROBES=1`, are gone rather
+than kept as aliases: each turned on one group of probes, which is now on,
+and no switch turns one group off alone. The probes measured about 0% of run
+time on a large Next.js app's unit, integration and browser e2e suites. Instrumenting
+its 511 source files took 0.56 s of one core with them, against 0.42 s
+without, and wrote 2% more code; its `mutants.json` lists 58,000 mutants in
+24 MB (2.5 MB compressed in the archive).
+
+Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
+`valueV2`, `regexV2`) is named only once the file has a site of that kind,
+after every other name the file's allocator gives. A file with no site of a
+kind imports nothing for it, and the names of everything else in it are those
+it has with the probes off: a file with no site at all is instrumented byte
+for byte as with `SUPERCOV_MUTANTS=0`.
+
+The regex probe stays off unless `SUPERCOV_REGEX_INPUTS=1`. It keeps up to 200
+characters of every string a regular expression is matched against, which is
+user input (emails, names, URLs a test typed) written into the run's evidence
+and archived with it. No regex mutant is enumerated yet, so nothing uses
+those inputs; a later step can compare the original and the mutated regex in
+the page or process instead of storing what they matched.
+
 ### Ids and descriptors
 
 An id is `file:startLine:startCol-endLine:endCol:Mutator:descriptor`, with
@@ -213,7 +239,7 @@ because the weak pass already knows:
 
 Beside this shape the reply has `run`; `file` and `line` when one was asked;
 and `note` when there are no mutants, saying why and how to get them (the run
-did not list them: measure it again with the probes on). `weak.code` is a
+did not list them: measure it again without `SUPERCOV_MUTANTS=0`). `weak.code` is a
 stable code for the reason, and `weak.proxy` is `true` for an infection that is
 only that the code around it ran (a block or a call removed). `reach` is
 `unknown` where no statement or function point contains the mutant;
@@ -260,7 +286,7 @@ one listed it and the other did not, the merge is refused; the same mutant set
 (`stryker-js@10.1.1`) is required too. A file recorded with other bytes keeps
 the first run's list.
 
-A run that listed no mutants (measured without the probes, or before mutants
+A run that listed no mutants (measured with `SUPERCOV_MUTANTS=0`, or before mutants
 were listed) adds no files, and its tests still count: their hits say what ran.
 They recorded no comparison or probe values, though, so their silence is not
 evidence. Their ids go in the merged list's `testsWithoutValues`, and a verdict
@@ -274,10 +300,10 @@ the reader requires every copy to be the same, which runs of one source are.
 
 ## What stays out
 
-- Regex mutants are listed but stay `unknown`. Recording the regex inputs
-  stored user strings in the evidence, and comparing JavaScript regexes needs
-  a JavaScript engine. A later step compares the original and mutated regex in
-  the page or process instead.
+- Regex mutants are not enumerated. Recording the regex inputs stores user
+  strings in the evidence (only with `SUPERCOV_REGEX_INPUTS=1`), and comparing
+  JavaScript regexes needs a JavaScript engine. A later step compares the
+  original and mutated regex in the page or process instead.
 - Code that ran in a server process records hits but no values until those
   processes report outcomes too, so its outcome-based verdicts stay `unknown`.
   Runners whose test process records the way a server does, with records

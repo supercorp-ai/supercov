@@ -20330,11 +20330,6 @@ fn mutants_project(label: &str) -> Project {
     project
 }
 
-const PROBES: [(&str, &str); 2] = [
-    ("SUPERCOV_COMPARISONS", "1"),
-    ("SUPERCOV_INFECTION_PROBES", "1"),
-];
-
 /// Each mutant's status in a `mutants --json` reply, by id.
 fn mutant_statuses(reply: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
     reply["data"]["mutants"]
@@ -20354,9 +20349,8 @@ fn mutant_statuses(reply: &serde_json::Value) -> std::collections::BTreeMap<Stri
 #[test]
 fn mutants_say_how_far_the_tests_got_toward_killing_each() {
     let project = mutants_project("mutants");
-    project
-        .supercov_with(&["--", "npx", "mocha"], &PROBES)
-        .succeeds();
+    // Listed by default.
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(
         &summary,
@@ -20768,15 +20762,17 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         .supercov(&["runs", "latest", "mutants", "--format", "csv"])
         .exits(2);
 
-    // A run measured without the probes has no mutants, and says how to get
+    // A run measured with them off has no mutants, and says how to get
     // them.
-    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "0")])
+        .succeeds();
     let none = project.supercov(&["runs", "latest", "mutants"]).succeeds();
     contains_all(
         &none,
         &[
             "This run did not list its mutants",
-            "SUPERCOV_COMPARISONS=1 or SUPERCOV_INFECTION_PROBES=1",
+            "Measure it again without SUPERCOV_MUTANTS=0",
         ],
     );
     let none = project

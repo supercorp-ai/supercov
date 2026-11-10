@@ -904,16 +904,13 @@ mod tests {
 
     /// `source` instrumented with the mutants on, and the probes asked for.
     fn instrumented(source: &str, comparisons: bool, probes: bool) -> CandidateOutput {
-        MUTANTS_FOR_TEST.with(|flag| flag.set(true));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         COMPARISONS_FOR_TEST.with(|flag| flag.set(comparisons));
         INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(probes));
         let output = instrument_candidate(source, "src/links.ts");
-        for flag in [
-            &MUTANTS_FOR_TEST,
-            &COMPARISONS_FOR_TEST,
-            &INFECTION_PROBES_FOR_TEST,
-        ] {
-            flag.with(|flag| flag.set(false));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        for flag in [&COMPARISONS_FOR_TEST, &INFECTION_PROBES_FOR_TEST] {
+            flag.with(|flag| flag.set(true));
         }
         output.unwrap()
     }
@@ -973,7 +970,10 @@ mod tests {
     fn nothing_is_enumerated_with_the_gate_off_and_the_code_is_unchanged_with_it_on() {
         let source =
             "export function f(a: number) {\n  if (a > 0) return \"x\";\n  return a + 1;\n}\n";
-        let off = instrument_candidate(source, "src/links.ts").unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
+        let off = instrument_candidate(source, "src/links.ts");
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        let off = off.unwrap();
         assert!(off.mutants.is_empty());
         let serialized = serde_json::to_value(&off).unwrap();
         assert!(serialized.get("mutants").is_none(), "{serialized}");

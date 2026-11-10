@@ -105,7 +105,7 @@ Compare, combine, and maintain:
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
 
-Settings, in the environment of the measured command:
+Settings, in the environment of the measured command (supercov docs cli says what each does):
   SUPERCOV_SOURCE_ROOTS=src,app        measure only these directories or files
   SUPERCOV_TEST_ROOTS=test/src         an Ant build's tests, where its batches cannot be read
   SUPERCOV_TEST_KIND=e2e               the test level of the command's tests
@@ -113,7 +113,7 @@ Settings, in the environment of the measured command:
   SUPERCOV_SOURCE_TOOLS=<names>        run these linters on your files, not the copy
   SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
-  supercov docs cli                    what each does
+  SUPERCOV_MUTANTS=0                   no mutants or their probes; SUPERCOV_REGEX_INPUTS=1 keeps regex inputs
 
 Guides:
   supercov docs                        list bundled guides
