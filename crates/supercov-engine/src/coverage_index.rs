@@ -1702,26 +1702,25 @@ fn anchor_record(
 
 fn test_retry_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     retry: usize,
-    strings: &mut StringTable,
 ) -> [u8; TEST_RETRY_RECORD_SIZE] {
     let mut record = [0_u8; TEST_RETRY_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u64(&mut record, 8, usize_u64(retry));
     record
 }
 
 fn test_attempt_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     attempt: &crate::coverage_report::TestAttempt,
     strings: &mut StringTable,
 ) -> [u8; TEST_ATTEMPT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_ATTEMPT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u64(&mut record, 8, usize_u64(attempt.retry));
     put_u32(&mut record, 16, strings.intern(&attempt.status));
     put_u32(
@@ -1734,13 +1733,13 @@ fn test_attempt_record(
 
 fn test_line_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     line: &crate::coverage_report::SourceLine,
     strings: &mut StringTable,
 ) -> [u8; TEST_LINE_RECORD_SIZE] {
     let mut record = [0_u8; TEST_LINE_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u32(&mut record, 8, strings.intern(&line.file));
     put_u64(&mut record, 16, usize_u64(line.line));
     record
@@ -1748,13 +1747,13 @@ fn test_line_record(
 
 fn test_hit_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     hit: &str,
     strings: &mut StringTable,
 ) -> [u8; TEST_HIT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_HIT_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u32(&mut record, 8, strings.intern(hit));
     record
 }
@@ -1774,7 +1773,7 @@ fn test_vector_record(vector: &McdcVector, values: &mut Vec<u8>) -> [u8; TEST_VE
 
 fn test_decision_record(
     view_id: CoverageViewId,
-    test_id: &str,
+    test_string: u32,
     decision_id: &str,
     vectors_offset: usize,
     vectors_count: usize,
@@ -1782,7 +1781,7 @@ fn test_decision_record(
 ) -> [u8; TEST_DECISION_RECORD_SIZE] {
     let mut record = [0_u8; TEST_DECISION_RECORD_SIZE];
     record[0] = view_id as u8;
-    put_u32(&mut record, 4, strings.intern(test_id));
+    put_u32(&mut record, 4, test_string);
     put_u32(&mut record, 8, strings.intern(decision_id));
     put_u64(&mut record, 16, usize_u64(vectors_offset));
     put_u64(&mut record, 24, usize_u64(vectors_count));
@@ -2212,27 +2211,30 @@ where
                 &mut strings,
                 &mut relations,
             )?);
+            // Interned by its summary: each record of the test names it by
+            // that number rather than hashing the long id again.
+            let test_string = strings.intern(&test.id);
             for retry in &test.retries {
-                test_retries.extend_from_slice(&test_retry_record(
-                    id,
-                    &test.id,
-                    *retry,
-                    &mut strings,
-                ));
+                test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
             }
             for attempt in &test.attempts {
                 test_attempts.extend_from_slice(&test_attempt_record(
                     id,
-                    &test.id,
+                    test_string,
                     attempt,
                     &mut strings,
                 ));
             }
             for line in &test.lines {
-                test_lines.extend_from_slice(&test_line_record(id, &test.id, line, &mut strings));
+                test_lines.extend_from_slice(&test_line_record(
+                    id,
+                    test_string,
+                    line,
+                    &mut strings,
+                ));
             }
             for hit in &test.hits {
-                test_hits.extend_from_slice(&test_hit_record(id, &test.id, hit, &mut strings));
+                test_hits.extend_from_slice(&test_hit_record(id, test_string, hit, &mut strings));
             }
             for decision in &test.decisions {
                 let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
@@ -2241,7 +2243,7 @@ where
                 }
                 test_decisions.extend_from_slice(&test_decision_record(
                     id,
-                    &test.id,
+                    test_string,
                     &decision.id,
                     vectors_offset,
                     decision.vectors.len(),
