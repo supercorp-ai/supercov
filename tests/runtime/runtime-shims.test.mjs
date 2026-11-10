@@ -1342,6 +1342,57 @@ test("a registered file no module holds is collected, and the epochs' wrap clear
   assert.equal(epoch, 1);
 });
 
+// Vitest compiles every instrumented module again in each test file's
+// worker. The first worker leaves what V8 compiled, the next starts from it
+// and gets the same results; text that is not instrumented, and the
+// filename-only form, go to vm as they came.
+test("a worker compiles instrumented modules from the code the worker before it left", () => {
+  const cacheUrl = new URL("../../runtime/javascript/compileCache.mjs", import.meta.url).href;
+  const directory = mkdtempSync(resolve(tmpdir(), "supercov-compile-cache-"));
+  const script = `
+    const vm = (await import("node:vm")).default;
+    const { readdirSync } = await import("node:fs");
+    const { installCompileCache, saveCompileCache } = await import(${JSON.stringify(cacheUrl)});
+    installCompileCache(${JSON.stringify(directory)});
+    installCompileCache(${JSON.stringify(directory)});
+    const state = vm.runInThisContext[Symbol.for("supercov.compileCache")];
+    const module = "(function () { const __supercovHits = new Uint32Array(2); return function sum(n) { let t = 0; for (let i = 0; i < n; i += 1) t += i; __supercovHits[0] += 1; return [t, __supercovHits[0]]; }; })";
+    const sum = vm.runInThisContext(module, { filename: "/project/src/sum.ts", lineOffset: 0, columnOffset: -12 })();
+    const results = [sum(10), sum(100)];
+    const compiled = state.unsaved.length;
+    const plain = vm.runInThisContext("6 * 7", { filename: "plain.js" });
+    const named = vm.runInThisContext("'__supercov' + 1", "named.js");
+    const unsavedAfterPlain = state.unsaved.length;
+    saveCompileCache();
+    let thrown;
+    try { vm.runInThisContext("__supercovMissing()", { filename: "/project/src/throws.ts" }); } catch (error) { thrown = error.constructor.name; }
+    console.log(JSON.stringify({ results, compiled, plain, named, unsavedAfterPlain, files: readdirSync(${JSON.stringify(directory)}).length, thrown }));
+  `;
+  const run = () => {
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    return JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  };
+  try {
+    const first = run();
+    const second = run();
+    for (const each of [first, second]) {
+      assert.deepEqual(each.results, [[45, 1], [4950, 2]]);
+      assert.equal(each.plain, 42);
+      assert.equal(each.named, "__supercov1");
+      // Only the instrumented module is kept: one file.
+      assert.equal(each.files, 1);
+      assert.equal(each.unsavedAfterPlain, each.compiled);
+      assert.equal(each.thrown, "ReferenceError");
+    }
+    // The first compiled it; the second started from what the first left.
+    assert.equal(first.compiled, 1);
+    assert.equal(second.compiled, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // Events are kept as columns, not an object each. What a snapshot-kept run
 // writes (coverageSnapshotColumns) is what columnarEvents made of the
 // snapshot's events, byte for byte, and coverageSnapshot still gives every

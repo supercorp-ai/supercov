@@ -48,6 +48,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "bootstrap.cjs",
     "bunTest.mjs",
     "capability.mjs",
+    "compileCache.mjs",
     "jest.cjs",
     "jest.config.mjs",
     "jestReporter.mjs",

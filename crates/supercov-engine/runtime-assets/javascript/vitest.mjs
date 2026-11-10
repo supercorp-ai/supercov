@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
-import { afterEach, beforeEach } from "vitest";
+import { afterAll, afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, coverageSnapshotColumns as localCoverageSnapshotColumns, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
+import { installCompileCache, saveCompileCache } from "./compileCache.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
@@ -21,6 +22,10 @@ const runtime = runtimeGlobal.__SUPERCOV_DIRECT_RUNTIME__ ?? {
 // events through the server JSONL transport would be both redundant and
 // unattributed, and turns hot unit-test loops into synchronous filesystem IO.
 runtime.enableRuntimeSnapshotEvidence();
+// Each worker compiles the instrumented modules from what the workers before
+// it compiled, and leaves what it compiled for the ones after.
+installCompileCache(process.env["SUPERCOV_COMPILE_CACHE"]);
+afterAll(saveCompileCache);
 function attemptStatus(state) {
     if (state === "pass")
         return "passed";

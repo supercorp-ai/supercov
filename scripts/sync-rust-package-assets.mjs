@@ -57,6 +57,7 @@ const mappings = [
     "bootstrap.cjs",
     "bunTest.mjs",
     "capability.mjs",
+    "compileCache.mjs",
     "launchSupervisor.mjs",
     "mocha.mjs",
     "nodeAssert.mjs",
