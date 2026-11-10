@@ -48,8 +48,9 @@ than kept as aliases: each turned on one group of probes, which is now on,
 and no switch turns one group off alone. The probes measured about 0% of run
 time on a large Next.js app's unit, integration and browser e2e suites. Instrumenting
 its 511 source files took 0.56 s of one core with them, against 0.42 s
-without, and wrote 2% more code; its `mutants.json` lists 58,000 mutants in
-24 MB (2.5 MB compressed in the archive).
+without, and wrote 2% more code; its `mutants.json` listed 58,000 mutants in
+24 MB (2.5 MB compressed in the archive) as version 1 stored them, about
+two thirds of that as version 2 does (see The stored list).
 
 Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
 `valueV2`, `regexV2`) is named only once the file has a site of that kind,
@@ -309,6 +310,31 @@ mutant whose statement or function such a test ran, stays `unknown`
 The note is per test, not per process: a test credited with the work of two
 processes, one of them measured by an older Supercov (a server that outlived
 an upgrade and was reused), is read as if both recorded values.
+
+## The stored list
+
+A run's mutants are archived as `mutants.json`: each file's mutants with the
+evidence each is linked to. Version 2 leaves out what reading it works out
+again. A mutant's `id` is its file, span, mutator and descriptor, and is
+written only where it is not exactly those. Of a long `original` (a block
+statement's is a whole function body) it keeps what is shown of it: the
+start of the whole, or of each operand around an operator, up to the first
+121 characters once whitespace is flattened, with `operator.at` moved to
+where the operator is in what is kept. A mutant's line, its replacement's and
+every reason that quotes its code are cut from no more than that. The writer
+keeps the whole original wherever a shorter one would not show exactly the
+same, as where the replacement is written by parsing all of it (a method
+call's) or from its end (an optional link's). The run's sources are not in
+the archive, which keeps only their hashes, so nothing is read back from
+them. Version 1, with every id and original whole, is read as it was.
+
+A probe or comparison site in the mutant's own file is written from its line
+too (`:3:9` for `src/a.ts:3:9`). On the engine's fixtures (the StrykerJS
+parity files and the runtime's own modules, 12,008 mutants) version 1 took
+4.55 MB (471 KB gzipped) and version 2 takes 2.92 MB (329 KB): 243 bytes a
+mutant, of 379. At that ratio a large app's 61,000 mutants, 414 bytes each in
+version 1, come to about 16 MB (1.8 MB compressed), and less where its longer
+originals (JSX under `&&`) are cut.
 
 ## Merged runs
 

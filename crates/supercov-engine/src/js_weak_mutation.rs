@@ -1007,15 +1007,81 @@ pub(crate) fn results(
     })
 }
 
+/// How many characters of code a mutant is listed with.
+const ONE_LINE: usize = 120;
+
 /// Code as one line, cut at 120 characters: a block statement's original
 /// is a whole function.
 fn one_line(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 120 {
-        format!("{}…", flat.chars().take(119).collect::<String>())
+    if flat.chars().count() > ONE_LINE {
+        format!("{}…", flat.chars().take(ONE_LINE - 1).collect::<String>())
     } else {
         flat
     }
+}
+
+/// Everything shown of a mutant's code: the line it is listed with, its
+/// replacement's, and the operands reasons quote. What else a reason
+/// quotes is cut from one of those lines (`quoted` shows less of a text than
+/// `one_line` does).
+fn shown(mutant: &CandidateMutant) -> (String, String, Option<(String, String)>) {
+    (
+        one_line(&mutant.original),
+        one_line(&replaced(mutant)),
+        operands(mutant).map(|(_, left, right)| (left, right)),
+    )
+}
+
+/// The start of `text` whose whitespace flattens to more than `ONE_LINE`
+/// characters, or all of it: a flattened start of a text is a start of the
+/// text flattened, and no more of it is shown.
+fn shown_start(text: &str) -> &str {
+    let mut flat = 0;
+    let mut spaced = false;
+    for (at, character) in text.char_indices() {
+        if character.is_whitespace() {
+            spaced = flat > 0;
+            continue;
+        }
+        flat += 1 + usize::from(spaced);
+        spaced = false;
+        if flat > ONE_LINE {
+            return &text[..at + character.len_utf8()];
+        }
+    }
+    text
+}
+
+/// `mutant` with as much of its original as is shown of it, where that is
+/// less than all of it: the start of each operand around its operator, or of
+/// the whole. `None` where everything shown of the shorter one would not be
+/// exactly what is shown of the mutant, as where a replacement is written by
+/// parsing the whole original or from its end.
+pub(crate) fn abbreviated(mutant: &CandidateMutant) -> Option<CandidateMutant> {
+    let (original, operator) = match &mutant.operator {
+        Some(operator) => {
+            let end = operator.at + operator.text.len();
+            let left = shown_start(mutant.original.get(..operator.at)?);
+            let written = mutant.original.get(operator.at..end)?;
+            let right = shown_start(mutant.original.get(end..)?);
+            let operator = crate::js_mutant_links::MutantOperator {
+                text: operator.text.clone(),
+                at: left.len(),
+            };
+            (format!("{left}{written}{right}"), Some(operator))
+        }
+        None => (shown_start(&mutant.original).to_owned(), None),
+    };
+    if original.len() >= mutant.original.len() {
+        return None;
+    }
+    let shorter = CandidateMutant {
+        original,
+        operator,
+        ..mutant.clone()
+    };
+    (shown(&shorter) == shown(mutant)).then_some(shorter)
 }
 
 /// The code with the mutant in place, where it is simply written from the

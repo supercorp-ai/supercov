@@ -34,28 +34,130 @@ use crate::js_instrumenter::{
 };
 use crate::js_mutants::LedgerMutant;
 
-/// The version of `mutants.json`.
-pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 1;
+/// The version of `mutants.json` written. Version 2 leaves out what a reader
+/// works out again: a mutant's `id`, from its file, span, mutator and
+/// descriptor, and of a long `original` all but what is shown of it (see
+/// `js_weak_mutation::abbreviated`). Version 1, which holds both whole, is
+/// read as it was.
+pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 2;
 
 /// `.supercov/frontend-evidence/mutants.json`: every instrumented file's
 /// mutants, or none when the run did not enumerate them (`mutantSet` null).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(from = "StoredMutants", into = "StoredMutants")]
 pub struct MutantsFile {
+    /// The version read; a file is always written as the current one.
     pub schema_version: u32,
     pub mutant_set: Option<String>,
     pub files: BTreeMap<String, Vec<CandidateMutant>>,
     /// Of a merged run: the tests of the runs merged into it that listed no
     /// mutants. Their hits say what ran; they recorded no values.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests_without_values: Vec<String>,
+}
+
+/// `mutants.json` as it is stored: each mutant without what is worked out
+/// again when it is read. An `id` is left out (empty) where it is the one its
+/// file, span, mutator and descriptor make, a probe or comparison site in the
+/// mutant's own file is written from its line (`:L:C`, which no file name
+/// starts), and a long original is cut to what is shown of it where that
+/// shows exactly the same.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredMutants {
+    schema_version: u32,
+    mutant_set: Option<String>,
+    files: BTreeMap<String, Vec<CandidateMutant>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tests_without_values: Vec<String>,
+}
+
+/// The id a mutant of `file` has from its span, mutator and descriptor.
+fn mutant_id(file: &str, mutant: &CandidateMutant) -> String {
+    format!(
+        "{file}:{}:{}-{}:{}:{}:{}",
+        mutant.start.0,
+        mutant.start.1,
+        mutant.end.0,
+        mutant.end.1,
+        mutant.mutator,
+        mutant.replacement
+    )
+}
+
+impl From<MutantsFile> for StoredMutants {
+    fn from(file: MutantsFile) -> Self {
+        let files = file
+            .files
+            .into_iter()
+            .map(|(path, mutants)| {
+                let stored = mutants
+                    .into_iter()
+                    .map(|mutant| {
+                        let mut stored =
+                            crate::js_weak_mutation::abbreviated(&mutant).unwrap_or(mutant);
+                        if stored.id == mutant_id(&path, &stored) {
+                            stored.id.clear();
+                        }
+                        for site in [&mut stored.compare, &mut stored.probe]
+                            .into_iter()
+                            .flatten()
+                        {
+                            if let Some(local) = site
+                                .strip_prefix(path.as_str())
+                                .filter(|local| local.starts_with(':'))
+                            {
+                                *site = local.to_owned();
+                            }
+                        }
+                        stored
+                    })
+                    .collect();
+                (path, stored)
+            })
+            .collect();
+        Self {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: file.mutant_set,
+            files,
+            tests_without_values: file.tests_without_values,
+        }
+    }
+}
+
+impl From<StoredMutants> for MutantsFile {
+    fn from(stored: StoredMutants) -> Self {
+        let mut files = stored.files;
+        for (path, mutants) in &mut files {
+            for mutant in mutants.iter_mut() {
+                if mutant.id.is_empty() {
+                    mutant.id = mutant_id(path, mutant);
+                }
+                for site in [&mut mutant.compare, &mut mutant.probe]
+                    .into_iter()
+                    .flatten()
+                {
+                    if site.starts_with(':') {
+                        site.insert_str(0, path);
+                    }
+                }
+            }
+        }
+        Self {
+            schema_version: stored.schema_version,
+            mutant_set: stored.mutant_set,
+            files,
+            tests_without_values: stored.tests_without_values,
+        }
+    }
 }
 
 /// One StrykerJS mutant and the evidence that decides it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateMutant {
-    /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`.
+    /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`. Left
+    /// out of `mutants.json` (version 2) where it is exactly that.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     pub mutator: String,
     /// The descriptor (see `js_mutants`).
@@ -63,7 +165,9 @@ pub struct CandidateMutant {
     /// 1-based line and 1-based UTF-16 column, as StrykerJS reports them.
     pub start: (u32, u32),
     pub end: (u32, u32),
-    /// The mutated span's source text.
+    /// The mutated span's source text. In `mutants.json` (version 2), of a
+    /// long span only what is shown of it: the start of each operand around
+    /// an operator, or of the whole, with `operator.at` where it is there.
     pub original: String,
     /// The operator of a binary, logical or assignment expression mutated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1335,11 +1439,149 @@ mod tests {
             files: BTreeMap::from([("src/links.ts".to_owned(), output.mutants.clone())]),
             tests_without_values: Vec::new(),
         };
+        // Written without the ids its mutants' places make.
         let encoded = serde_json::to_string(&file).unwrap();
         assert!(encoded.starts_with(
-            "{\"schemaVersion\":1,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"id\":"
+            "{\"schemaVersion\":2,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"mutator\":"
         ));
+        let stored: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        for mutant in stored["files"]["src/links.ts"].as_array().unwrap() {
+            assert!(mutant.get("id").is_none(), "{mutant}");
+            // A site in the file is written from its line.
+            if let Some(site) = mutant.get("compare") {
+                assert_eq!(site, ":1:49");
+            }
+        }
         let decoded: MutantsFile = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, file);
+        // Version 1 held every id, and is read as it was.
+        let first = serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": crate::js_mutants::MUTANT_SET,
+            "files": {"src/links.ts": output.mutants},
+        });
+        assert!(first.to_string().contains("\"id\":\"src/links.ts:1:"));
+        let read: MutantsFile = serde_json::from_value(first).unwrap();
+        assert_eq!(read.files, file.files);
+        assert_eq!(read.schema_version, 1);
+    }
+
+    /// The JavaScript of every source a file of mutants could be made of:
+    /// the StrykerJS parity fixtures and the runtime's own modules.
+    fn corpus() -> Vec<(String, String)> {
+        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut sources = Vec::new();
+        for directory in ["tests/fixtures/stryker-parity", "runtime-assets/javascript"] {
+            let mut entries = std::fs::read_dir(crate_root.join(directory))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.extension().is_some_and(|extension| {
+                        ["js", "mjs", "cjs", "ts", "tsx"].contains(&extension.to_str().unwrap())
+                    })
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                let name = format!(
+                    "{directory}/{}",
+                    path.file_name().unwrap().to_str().unwrap()
+                );
+                sources.push((name, std::fs::read_to_string(path).unwrap()));
+            }
+        }
+        sources
+    }
+
+    /// A stored file of mutants is read back as one that shows each mutant
+    /// exactly as the whole one did, in less: every verdict and every text
+    /// shown is the same, from no evidence and from every point run and
+    /// every probe seen.
+    #[test]
+    fn a_stored_file_of_mutants_shows_what_the_whole_one_did_in_less() {
+        use crate::js_weak_mutation::{Observations, verdict};
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let mut files = BTreeMap::new();
+        for (name, source) in corpus() {
+            let output = instrument_candidate(&source, &name).unwrap();
+            files.insert(name, output.mutants);
+        }
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        let file = MutantsFile {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            files,
+            tests_without_values: Vec::new(),
+        };
+        let whole = file.files.values().flatten().collect::<Vec<_>>();
+        let count = whole.len();
+        assert!(count > 3_000, "{count} mutants");
+        let first = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": file.mutant_set,
+            "files": file.files,
+        }))
+        .unwrap();
+        let stored = serde_json::to_vec(&file).unwrap();
+        let read: MutantsFile = serde_json::from_slice(&stored).unwrap();
+        let kept = read.files.values().flatten().collect::<Vec<_>>();
+        assert_eq!(kept.len(), count);
+        // What a run saw: nothing, and then everything.
+        let mut ran = Observations::default();
+        for mutant in &whole {
+            for point in [&mutant.statement, &mutant.function].into_iter().flatten() {
+                ran.hits.insert(point.clone());
+            }
+            if let Some(chain) = &mutant.chain {
+                ran.hits.insert(format!("{}:continued", chain.id));
+            }
+            for site in [&mutant.compare, &mutant.probe].into_iter().flatten() {
+                ran.comparisons.insert(
+                    site.clone(),
+                    ["lt", "same"].map(str::to_owned).into_iter().collect(),
+                );
+            }
+            if let Some(branch) = &mutant.branch {
+                ran.logicals
+                    .insert(branch.id.clone(), [(true, false)].into_iter().collect());
+            }
+        }
+        let mut abbreviated = 0;
+        for (whole, kept) in whole.iter().zip(&kept) {
+            assert_eq!(whole.id, kept.id);
+            if whole.original != kept.original {
+                abbreviated += 1;
+            }
+            for observations in [&Observations::default(), &ran] {
+                assert_eq!(
+                    verdict(whole, observations),
+                    verdict(kept, observations),
+                    "{}",
+                    whole.id
+                );
+            }
+        }
+        let listed = |file: MutantsFile| {
+            crate::js_weak_mutation::results(&[], Some(file))
+                .unwrap()
+                .mutants
+        };
+        assert_eq!(listed(read), listed(file));
+        assert!(abbreviated > 100, "{abbreviated} of {count} originals cut");
+        let gzip = |bytes: &[u8]| {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes).unwrap();
+            encoder.finish().unwrap().len()
+        };
+        let sizes = format!(
+            "{count} mutants, {abbreviated} originals cut: version 1 {} bytes ({} gzipped), version 2 {} bytes ({} gzipped)",
+            first.len(),
+            gzip(&first),
+            stored.len(),
+            gzip(&stored)
+        );
+        assert!(stored.len() * 10 < first.len() * 7, "{sizes}");
     }
 }
