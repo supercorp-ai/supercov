@@ -1422,6 +1422,40 @@ test("a process compiles into the run's cache unless the command named its own",
   }
 });
 
+// A test that spies on a built-in collection method counts its own code's
+// calls: a probe's first hit, a decision's end and a selection record through
+// the built-ins as the runtime found them, so the count is what it is without
+// Supercov.
+test("a test's spy on Map, Set or Array methods sees none of the runtime's calls", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    runtime.enableRuntimeSnapshotEvidence();
+    const file = runtime.registerProbeV2({ key: "spied", points: 8, decisionWidths: [2], selectionPoints: [4, 1] });
+    runtime.resetCoverage("spied");
+    const counts = { mapSet: 0, mapGet: 0, mapHas: 0, setAdd: 0, setHas: 0, push: 0 };
+    const spy = (proto, name, count) => {
+      const original = proto[name];
+      proto[name] = function (...args) { counts[count] += 1; return original.apply(this, args); };
+      return () => { proto[name] = original; };
+    };
+    const restore = [spy(Map.prototype, "set", "mapSet"), spy(Map.prototype, "get", "mapGet"), spy(Map.prototype, "has", "mapHas"),
+      spy(Set.prototype, "add", "setAdd"), spy(Set.prototype, "has", "setHas"), spy(Array.prototype, "push", "push")];
+    for (let index = 0; index < 4; index += 1) file.hit(index);
+    runtime.mcdcEndV2(file, 0, 1 + 3, true);
+    runtime.selectShortV2(file, 4, 0, "or");
+    restore.forEach((undo) => undo());
+    const snapshot = runtime.coverageSnapshot();
+    console.log(JSON.stringify({ counts, hits: snapshot.hits.length, decisions: snapshot.decisions.length }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { counts, hits, decisions } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  assert.deepEqual(counts, { mapSet: 0, mapGet: 0, mapHas: 0, setAdd: 0, setHas: 0, push: 0 });
+  assert.ok(hits >= 4, `${hits}`);
+  assert.equal(decisions, 1);
+});
+
 // Events are kept as columns, not an object each. What a snapshot-kept run
 // writes (coverageSnapshotColumns) is what columnarEvents made of the
 // snapshot's events, byte for byte, and coverageSnapshot still gives every

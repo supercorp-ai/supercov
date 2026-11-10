@@ -138,6 +138,17 @@ function backgroundEvidencePath(runId, processId = typeof process === "undefined
 }
 
 // dist/runtime.js
+// The collections a probe records into, called through the built-in methods
+// as they were when the runtime loaded: a test that spies on
+// Map.prototype.set counts the calls its own code makes, and Supercov's
+// first hits made three more, failing a test that passes without it.
+var builtinMapGet = Map.prototype.get;
+var builtinMapSet = Map.prototype.set;
+var builtinMapHas = Map.prototype.has;
+var builtinSetAdd = Set.prototype.add;
+var builtinSetHas = Set.prototype.has;
+var builtinWeakMapGet = WeakMap.prototype.get;
+var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
@@ -269,7 +280,7 @@ function probeV2ContextKey(context) {
   return `scope\0${attemptKey(context.scope)}\0${phase}`;
 }
 function activateProbeV2Key(key, force = false) {
-  let epoch = force ? void 0 : state.probeV2ContextEpochs.get(key);
+  let epoch = force ? void 0 : builtinMapGet.call(state.probeV2ContextEpochs, key);
   if (epoch === void 0) {
     state.probeV2NextEpoch += 1;
     if (state.probeV2NextEpoch >= 4294967295) {
@@ -290,7 +301,7 @@ function activateProbeV2Key(key, force = false) {
       }
     }
     epoch = state.probeV2NextEpoch;
-    state.probeV2ContextEpochs.set(key, epoch);
+    builtinMapSet.call(state.probeV2ContextEpochs, key, epoch);
   }
   state.probeV2Clock.e = epoch;
   return epoch;
@@ -313,13 +324,13 @@ function activateProbeV2Context(context) {
     state.probeV2ContextEpochCache = /* @__PURE__ */ new WeakMap();
     state.probeV2EpochGeneration = 0;
   }
-  const cached = state.probeV2ContextEpochCache.get(context);
+  const cached = builtinWeakMapGet.call(state.probeV2ContextEpochCache, context);
   if (cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
     state.probeV2Clock.e = cached.epoch;
     return cached.epoch;
   }
   const epoch = activateProbeV2Key(probeV2ContextKey(context));
-  state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
+  builtinWeakMapSet.call(state.probeV2ContextEpochCache, context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
 }
 // While the speed benchmark times a run: how often a server's async hook ran
@@ -2048,15 +2059,15 @@ function withRequestPhase(handler, event) {
 // and the id was built and hashed for every first hit of every test.
 function eventSeen(seen, type, id, vector, phaseId) {
   const phase = phaseId != null ? phaseId : "unscoped";
-  let keys = seen.get(phase);
+  let keys = builtinMapGet.call(seen, phase);
   if (keys === void 0) {
     keys = /* @__PURE__ */ new Set();
-    seen.set(phase, keys);
+    builtinMapSet.call(seen, phase, keys);
   }
   const key = type === "hit" ? id : `${type}\0${type === "decision" ? `${id}:${vectorKey(vector)}` : id}`;
-  if (keys.has(key))
+  if (builtinSetHas.call(keys, key))
     return true;
-  keys.add(key);
+  builtinSetAdd.call(keys, key);
   return false;
 }
 // The phase eventSeen keys an event under: an event object built without a
@@ -2071,12 +2082,12 @@ function recordEvent(into, type, id, vector, timestampMs, phaseId, environment) 
   if (eventSeen(into.eventKeys, type, id, vector, phaseEventKey(phaseId)))
     return false;
   const log = into.eventLog;
-  log.type.push(type);
-  log.id.push(id);
-  log.vector.push(vector);
-  log.timestampMs.push(timestampMs);
-  log.phaseId.push(phaseId);
-  log.environment.push(environment);
+  log.type[log.type.length] = type;
+  log.id[log.id.length] = id;
+  log.vector[log.vector.length] = vector;
+  log.timestampMs[log.timestampMs.length] = timestampMs;
+  log.phaseId[log.phaseId.length] = phaseId;
+  log.environment[log.environment.length] = environment;
   return true;
 }
 function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment) {
@@ -2091,14 +2102,14 @@ function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment)
 // repeat.
 function coverageHit(id) {
   const clock = state.probeV2Clock;
-  if (clock.fast && state.hitEpochs !== void 0 && state.hitEpochs.get(id) === clock.e)
+  if (clock.fast && state.hitEpochs !== void 0 && builtinMapGet.call(state.hitEpochs, id) === clock.e)
     return;
   recordCoverageHit(id);
 }
 // resetCoverage forces a fresh epoch, so a hit skipped above was recorded in
 // this epoch after the last reset and is in state.hits already.
 function recordCoverageHit(id) {
-  state.hits.add(id);
+  builtinSetAdd.call(state.hits, id);
   const clock = state.probeV2Clock;
   let epoch = clock.e;
   if (!clock.fast) {
@@ -2111,9 +2122,9 @@ function recordCoverageHit(id) {
   }
   if (!state.hitEpochs)
     state.hitEpochs = /* @__PURE__ */ new Map();
-  if (state.hitEpochs.get(id) === epoch)
+  if (builtinMapGet.call(state.hitEpochs, id) === epoch)
     return;
-  state.hitEpochs.set(id, epoch);
+  builtinMapSet.call(state.hitEpochs, id, epoch);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
@@ -2152,7 +2163,7 @@ function probePlaceName(names, aliases, count, kind, key, place) {
     return void 0;
   let name = names[place];
   if (name === void 0) {
-    const first = aliases.get(place);
+    const first = builtinMapGet.call(aliases, place);
     name = names[place] = first === void 0 ? `~${kind}${key}.${place}` : probePlaceName(names, aliases, count, kind, key, first);
   }
   return name;
@@ -2281,7 +2292,7 @@ function decodeProbeV2Vector(conditionCount, encoded, outcome) {
   let remaining = encoded;
   for (let index = 0; index < conditionCount; index += 1) {
     const digit = remaining % 3;
-    values.push(digit === 0 ? null : digit === 2);
+    values[index] = digit === 0 ? null : digit === 2;
     remaining = Math.floor(remaining / 3);
   }
   return remaining === 0 ? { values, outcome } : void 0;
@@ -2323,12 +2334,12 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
         return value;
       seen[vectorIndex] = epoch;
     } else {
-      if (seen.get(vectorIndex) === epoch)
+      if (builtinMapGet.call(seen, vectorIndex) === epoch)
         return value;
-      seen.set(vectorIndex, epoch);
+      builtinMapSet.call(seen, vectorIndex, epoch);
     }
-    if (!state.decisions.has(id))
-      state.decisions.set(id, { id, vectors: /* @__PURE__ */ new Map() });
+    if (!builtinMapHas.call(state.decisions, id))
+      builtinMapSet.call(state.decisions, id, { id, vectors: /* @__PURE__ */ new Map() });
     const vector = decodeProbeV2Vector(file.decisionWidths[decisionIndex], encoded, outcome);
     return vector ? mcdcEnd({ id, values: vector.values }, value) : value;
   } finally {
@@ -2387,14 +2398,14 @@ function recordSelectionOutcome(id, outcome) {
 // The outcomes of a selection by its branch id, or by the name of its point
 // that was hit, whose branch the report reads from the point's id.
 function recordLogicalOutcome(branchId, outcome) {
-  let vectors = state.logicals.get(branchId);
+  let vectors = builtinMapGet.call(state.logicals, branchId);
   if (!vectors) {
     vectors = /* @__PURE__ */ new Map();
-    state.logicals.set(branchId, vectors);
+    builtinMapSet.call(state.logicals, branchId, vectors);
   }
   const key = selectionOutcomeKeys[outcome];
-  if (!vectors.has(key)) {
-    vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
+  if (!builtinMapHas.call(vectors, key)) {
+    builtinMapSet.call(vectors, key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
     workerEvidenceChanged();
   }
 }
@@ -2635,12 +2646,12 @@ function mcdcCondition(frame, index, value) {
   return value;
 }
 function mcdcEnd(frame, value) {
-  const decision = state.decisions.get(frame.id);
+  const decision = builtinMapGet.call(state.decisions, frame.id);
   if (!decision)
     return value;
   const vector = { values: frame.values, outcome: Boolean(value) };
   const key = vectorKey(vector);
-  decision.vectors.set(key, vector);
+  builtinMapSet.call(decision.vectors, key, vector);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
