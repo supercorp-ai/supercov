@@ -331,16 +331,45 @@ statically pure, the instrumenter passes a copy of it as written, without the
 program's probes, and in that case the probe runs the copy through the other
 method over the array and records `same` or `differs`; a throw from the copy
 is `unknown`. Pure is: an arrow, not async, with plain parameters, whose
-concise body is made only of its parameters, literals, property reads by name
-or literal key (`?.` too), `!`, `typeof`, comparison and equality operators,
-`&&`, `||`, `??` and conditionals of those: no call, `new`, assignment,
-update, `delete`, spread, template, `this` or `arguments`. A getter, or a
-`valueOf` a comparison calls, can still run code; the probe accepts that, as
-it already reads the callback's result. Any other callback keeps `unknown`
-there. A real bug, `useState(items.every((item) =>
-item.enabled))` tested only with lists that agreed, was `unknown` for this
-reason and is now not infected, as it should be. `find`, `findIndex` and
-`findLast*` have no StrykerJS mutant, so nothing is decided for them.
+concise body is made only of names (its parameters, or any other but
+`arguments` and `eval`: `(item) => item.id === selectedId`), literals,
+templates of those (`` (c) => c.id === `item-${key}` ``), property reads by
+name or literal key (`?.` too), `!`, `typeof`, comparison and equality
+operators, `&&`, `||`, `??` and conditionals of those: no call, `new`,
+assignment, update, `delete`, spread, tagged template or `this`. A name read
+before its declaration throws, which the probe catches as `unknown`. A
+getter, or a `valueOf` or `toString` a comparison or template calls, can
+still run code; the probe accepts that, as it already reads the callback's
+result. Any other callback keeps `unknown` there. A real bug,
+`useState(items.every((item) => item.enabled))` tested only with lists that
+agreed, was `unknown` for this reason and is now not infected, as it should
+be. `find`, `findIndex` and `findLast*` have no StrykerJS mutant, so nothing
+is decided for them.
+
+### Where the method probe goes
+
+The probe replaces the receiver (`methodV2(site, xs, "every").every(f)`), so
+two places need care:
+
+- **A returned `every`.** `xs.every(isS)` narrows `xs` to `S[]`, and a
+  function returning it may get an inferred type predicate from that, which a
+  probe around `xs` would lose. A returned `every` on a name is left alone
+  only where its callback is, or may be, a type predicate: anything but an
+  inline arrow or function expression, one that declares `x is T`, or one
+  whose body is a check TypeScript 5.5 infers a predicate from (`typeof`,
+  `instanceof`, `in`, or a comparison with `null` or `undefined` of its
+  parameter, and `!`, `&&`, `||` of those). `return parts.every((part) =>
+  re.test(part))` is probed.
+- **An optional chain.** `state?.list.some(f)` short-circuits to
+  `undefined` when `state` is null or undefined, and a probe around the
+  receiver would end the chain. Where the call ends the chain, its one
+  optional link is on a name or `this`, and the links between are member
+  reads, the call is probed as `state === null || state === void 0 ? void 0
+  : methodV2(site, state.list, "some").some(f)`: the probe runs only where the
+  chain reaches the call, and the value is the chain's. The name is read
+  again, which changes nothing; TypeScript narrows it through the test as it
+  did through `?.`. A chain on any other base (`load()?.some(f)`), with more
+  than one optional link, or that goes on past the call is left alone.
 
 ## Values from server processes
 

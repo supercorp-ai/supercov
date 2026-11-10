@@ -4387,6 +4387,120 @@ fn unparenthesized<'r, 'a>(expression: &'r Expression<'a>) -> &'r Expression<'a>
 
 /// Whether an optional link (`?.`) short-circuits through this callee: a
 /// receiver taken out of such a chain would run where the chain stopped.
+/// The base of a method call's one optional link, where the chain is plain
+/// member reads (`base?.a.b.method` or `base?.method`) and the base is a
+/// name or `this`, which reading again changes nothing: what the probe
+/// tests for null and undefined before the call, as the chain did.
+fn optional_receiver_base<'r, 'a>(callee: &'r Expression<'a>) -> Option<&'r Expression<'a>> {
+    let Expression::StaticMemberExpression(method) = callee else {
+        return None;
+    };
+    let mut link = method;
+    loop {
+        if link.optional {
+            let base = &link.object;
+            return (matches!(
+                base,
+                Expression::Identifier(_) | Expression::ThisExpression(_)
+            ) && !has_optional_link(base))
+            .then_some(base);
+        }
+        let Expression::StaticMemberExpression(next) = &link.object else {
+            return None;
+        };
+        link = next;
+    }
+}
+
+/// Whether a callback may be a type predicate TypeScript reads through
+/// `every`: anything but an arrow or function expression, which cannot be
+/// judged here; one that declares `x is T`; or one whose body is a check
+/// TypeScript 5.5 infers a predicate from (`typeof`, `instanceof`, `in`, or
+/// a comparison with `null` or `undefined` of its parameter, and `!`, `&&`,
+/// `||` of those).
+fn may_be_type_predicate(argument: &Argument<'_>) -> bool {
+    let Some(expression) = argument.as_expression() else {
+        return false;
+    };
+    let (parameters, return_type, body) = match unparenthesized(expression) {
+        Expression::ArrowFunctionExpression(arrow) => (
+            &arrow.params,
+            &arrow.return_type,
+            match arrow.body.statements.as_slice() {
+                [Statement::ExpressionStatement(body)] if arrow.expression => {
+                    Some(&body.expression)
+                }
+                [Statement::ReturnStatement(body)] => body.argument.as_ref(),
+                _ => None,
+            },
+        ),
+        Expression::FunctionExpression(function) => (
+            &function.params,
+            &function.return_type,
+            match function
+                .body
+                .as_ref()
+                .map(|body| body.statements.as_slice())
+            {
+                Some([Statement::ReturnStatement(body)]) => body.argument.as_ref(),
+                _ => None,
+            },
+        ),
+        _ => return true,
+    };
+    if return_type.as_ref().is_some_and(|annotation| {
+        matches!(
+            annotation.type_annotation,
+            oxc_ast::ast::TSType::TSTypePredicate(_)
+        )
+    }) {
+        return true;
+    }
+    let Some(BindingPattern::BindingIdentifier(parameter)) =
+        parameters.items.first().map(|item| &item.pattern)
+    else {
+        return false;
+    };
+    body.is_some_and(|body| narrowing_check(body, parameter.name.as_str()))
+}
+
+fn narrowing_check(expression: &Expression<'_>, parameter: &str) -> bool {
+    let is_parameter = |expression: &Expression<'_>| matches!(unparenthesized(expression), Expression::Identifier(identifier) if identifier.name == parameter);
+    let nullish = |expression: &Expression<'_>| match unparenthesized(expression) {
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name == "undefined",
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
+    };
+    let type_of = |expression: &Expression<'_>| {
+        matches!(unparenthesized(expression), Expression::UnaryExpression(unary)
+            if unary.operator == UnaryOperator::Typeof && is_parameter(&unary.argument))
+    };
+    match unparenthesized(expression) {
+        Expression::BinaryExpression(binary) => match binary.operator {
+            BinaryOperator::Instanceof => is_parameter(&binary.left),
+            BinaryOperator::In => is_parameter(&binary.right),
+            BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality => {
+                (is_parameter(&binary.left) && nullish(&binary.right))
+                    || (nullish(&binary.left) && is_parameter(&binary.right))
+                    || type_of(&binary.left)
+                    || type_of(&binary.right)
+            }
+            _ => false,
+        },
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            narrowing_check(&unary.argument, parameter)
+        }
+        Expression::LogicalExpression(logical) => {
+            narrowing_check(&logical.left, parameter) || narrowing_check(&logical.right, parameter)
+        }
+        _ => false,
+    }
+}
+
 fn has_optional_link(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::StaticMemberExpression(member) => {
@@ -4503,33 +4617,35 @@ fn concise_body<'r, 'a>(arrow: &'r ArrowFunctionExpression<'a>) -> Option<&'r Ex
 /// A `some` or `every` callback that evaluating again changes nothing the
 /// program can see, so the probe may run it on the elements the call did not
 /// reach: an arrow (not async) with plain parameters whose concise body is
-/// made only of its parameters, literals, property reads by name or literal
+/// made only of names (its parameters, or any other but `arguments` and
+/// `eval`), literals, templates of those, property reads by name or literal
 /// key (`?.` too), `!`, `typeof`, comparison and equality operators, `&&`,
 /// `||`, `??` and conditionals of those. No call, `new`, assignment,
-/// update, `delete`, spread, template, `this` or `arguments`. A getter, or a
-/// `valueOf` a comparison calls, can still run code: the probe accepts that,
-/// as it already reads the callback's result.
+/// update, `delete`, spread, tagged template or `this`. A name read before
+/// its declaration throws, which the probe catches. A getter, or a `valueOf`
+/// or `toString` a comparison or template calls, can still run code: the
+/// probe accepts that, as it already reads the callback's result.
 fn pure_callback(arrow: &ArrowFunctionExpression<'_>) -> bool {
     if arrow.r#async || arrow.params.rest.is_some() {
         return false;
     }
-    let mut parameters = HashSet::new();
     for parameter in &arrow.params.items {
-        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-            return false;
-        };
-        if parameter.initializer.is_some() {
+        if !matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            || parameter.initializer.is_some()
+        {
             return false;
         }
-        parameters.insert(identifier.name.as_str());
     }
-    concise_body(arrow).is_some_and(|body| pure_expression(body, &parameters))
+    concise_body(arrow).is_some_and(pure_expression)
 }
 
-fn pure_expression(expression: &Expression<'_>, parameters: &HashSet<&str>) -> bool {
-    let pure = |expression: &Expression<'_>| pure_expression(expression, parameters);
+fn pure_expression(expression: &Expression<'_>) -> bool {
+    let pure = pure_expression;
     match expression {
-        Expression::Identifier(identifier) => parameters.contains(identifier.name.as_str()),
+        Expression::Identifier(identifier) => {
+            !matches!(identifier.name.as_str(), "arguments" | "eval")
+        }
+        Expression::TemplateLiteral(template) => template.expressions.iter().all(pure),
         Expression::StringLiteral(_)
         | Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
@@ -4593,6 +4709,12 @@ struct InfectionSites<'a> {
     allocator: Option<&'a Allocator>,
     /// call -> (method, an inline arrow passed first whose value it reads)
     methods: HashMap<SpanKey, (String, Option<Span>)>,
+    /// Calls that end an optional chain on a name or `this`
+    /// (`items?.some(f)`, `state?.list.every(f)`): probed as a conditional
+    /// that short-circuits as the chain did.
+    optional_methods: HashSet<SpanKey>,
+    /// The calls an optional chain ends with, the whole chain.
+    chain_tops: HashSet<SpanKey>,
     /// `some` and `every` calls whose callback is `pure_callback`: a copy
     /// of it as written, without the probes the other passes put in the
     /// program's, which the method probe may run on the elements the call
@@ -4630,6 +4752,13 @@ impl InfectionSites<'_> {
 }
 
 impl<'a> Visit<'a> for InfectionSites<'a> {
+    fn visit_chain_expression(&mut self, chain: &oxc_ast::ast::ChainExpression<'a>) {
+        if let ChainElement::CallExpression(call) = &chain.expression {
+            self.chain_tops.insert(span_key(call.span));
+        }
+        walk::walk_chain_expression(self, chain);
+    }
+
     fn visit_return_statement(&mut self, statement: &oxc_ast::ast::ReturnStatement<'a>) {
         if let Some(argument) = &statement.argument {
             self.returned
@@ -4652,18 +4781,27 @@ impl<'a> Visit<'a> for InfectionSites<'a> {
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         let name = Self::callee_name(&call.callee);
+        let optional = has_optional_link(&call.callee);
         if let Expression::StaticMemberExpression(member) = &call.callee
             && INFECTION_METHODS.contains(&member.property.name.as_str())
             && !call.optional
-            && !has_optional_link(&call.callee)
+            && (!optional
+                || (self.chain_tops.contains(&span_key(call.span))
+                    && optional_receiver_base(&call.callee).is_some()))
             && !matches!(member.object, Expression::Super(_))
         {
             let method = member.property.name.as_str();
-            // `x.every(isS)` narrows `x` (`this is S[]`); returned with a bare
-            // name it may become an inferred type predicate.
+            // `x.every(isS)` narrows `x` (`this is S[]`): returned with a
+            // bare name, its function may get an inferred type predicate
+            // from it, which a probe around `x` would lose. Only where the
+            // callback is, or may be, a type predicate.
             let predicate_risk = method == "every"
                 && matches!(unparenthesized(&member.object), Expression::Identifier(_))
-                && self.returned.contains(&span_key(call.span));
+                && self.returned.contains(&span_key(call.span))
+                && call.arguments.first().is_some_and(may_be_type_predicate);
+            if optional && !predicate_risk {
+                self.optional_methods.insert(span_key(call.span));
+            }
             if !predicate_risk {
                 let arrow = call
                     .arguments
@@ -4935,37 +5073,180 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 );
             }
             Expression::CallExpression(call) => {
-                let Some((method, arrow)) = self.sites.methods.get(&span_key(call.span)).cloned()
-                else {
-                    return;
-                };
-                if call.span.is_unspanned() {
+                if call.span.is_unspanned()
+                    || !self.sites.methods.contains_key(&span_key(call.span))
+                    || self.sites.optional_methods.contains(&span_key(call.span))
+                {
                     return;
                 }
-                let site = self.site(call.span, "method");
-                let arrow_site = arrow.map(|span| self.site(span, "arrow"));
-                let pure_callback = self.sites.pure_callbacks.remove(&span_key(call.span));
+                let span = call.span;
                 let Expression::StaticMemberExpression(member) = &mut call.callee else {
                     return;
                 };
-                self.placed.push(site.clone());
-                self.placed.extend(arrow_site.clone());
                 let receiver = member.object.take_in(self.ast.allocator);
-                let mut arguments = vec![
-                    self.string(&site),
-                    Argument::from(receiver),
-                    self.string(&method),
-                ];
-                if let Some(arrow_site) = arrow_site {
-                    arguments.push(self.string(&arrow_site));
-                    if let Some(callback) = pure_callback {
-                        arguments.push(Argument::from(callback));
-                    }
+                member.object = self.method_probe(span, receiver);
+            }
+            Expression::ChainExpression(chain) => {
+                let ChainElement::CallExpression(call) = &chain.expression else {
+                    return;
+                };
+                if call.span.is_unspanned()
+                    || !self.sites.optional_methods.contains(&span_key(call.span))
+                    || !rereadable_optional_base(&call.callee)
+                {
+                    return;
                 }
-                let method_v2 = self.helpers.name("methodV2");
-                member.object = self.call(Span::default(), &method_v2, arguments);
+                *expression = self.optional_method_probe(expression.take_in(self.ast.allocator));
             }
             _ => {}
+        }
+    }
+}
+
+/// Whether the base of a method call's optional link is, as the coverage
+/// passes left it, a name or `this`, or a sequence ending in one: what
+/// `InfectionProbeTransformer::again` reads again.
+fn rereadable_optional_base(callee: &Expression<'_>) -> bool {
+    fn rereadable(base: &Expression<'_>) -> bool {
+        match base {
+            Expression::Identifier(_) | Expression::ThisExpression(_) => true,
+            Expression::ParenthesizedExpression(inner) => rereadable(&inner.expression),
+            Expression::SequenceExpression(sequence) => {
+                sequence.expressions.last().is_some_and(rereadable)
+            }
+            _ => false,
+        }
+    }
+    let Expression::StaticMemberExpression(first) = callee else {
+        return false;
+    };
+    let mut link: &StaticMemberExpression<'_> = first;
+    loop {
+        if link.optional {
+            return rereadable(&link.object);
+        }
+        let Expression::StaticMemberExpression(next) = &link.object else {
+            return false;
+        };
+        link = next;
+    }
+}
+
+impl<'a> InfectionProbeTransformer<'a, '_> {
+    /// `methodV2(site, receiver, "name", arrowSite, pureCopy)`, the receiver
+    /// the method is then called on.
+    fn method_probe(&mut self, span: Span, receiver: Expression<'a>) -> Expression<'a> {
+        let (method, arrow) = self.sites.methods[&span_key(span)].clone();
+        let site = self.site(span, "method");
+        let arrow_site = arrow.map(|span| self.site(span, "arrow"));
+        let pure_callback = self.sites.pure_callbacks.remove(&span_key(span));
+        self.placed.push(site.clone());
+        self.placed.extend(arrow_site.clone());
+        let mut arguments = vec![
+            self.string(&site),
+            Argument::from(receiver),
+            self.string(&method),
+        ];
+        if let Some(arrow_site) = arrow_site {
+            arguments.push(self.string(&arrow_site));
+            if let Some(callback) = pure_callback {
+                arguments.push(Argument::from(callback));
+            }
+        }
+        let method_v2 = self.helpers.name("methodV2");
+        self.call(Span::default(), &method_v2, arguments)
+    }
+
+    /// `base?.a.method(f)` as `base === null || base === void 0 ? void 0 :
+    /// methodV2(site, base.a, "method").method(f)`: the probe runs only
+    /// where the chain reaches the call, and the value is the chain's. The
+    /// base is a name or `this` (`optional_receiver_base`), read again; its
+    /// first read keeps what the chain's coverage probe made of it, and
+    /// TypeScript narrows the name through it as it did through `?.`.
+    fn optional_method_probe(&mut self, chain: Expression<'a>) -> Expression<'a> {
+        let Expression::ChainExpression(chain) = chain else {
+            return chain;
+        };
+        let chain = chain.unbox();
+        let ChainElement::CallExpression(call) = chain.expression else {
+            unreachable!("an optional method site is a chain's call");
+        };
+        let mut call = call.unbox();
+        let span = call.span;
+        let Expression::StaticMemberExpression(method) = &mut call.callee else {
+            unreachable!("an optional method site calls a member");
+        };
+        let mut receiver = method.object.take_in(self.ast.allocator);
+        // The optional link: the method's own (`base?.method`) or one of the
+        // members of its receiver.
+        let first_read = if method.optional {
+            method.optional = false;
+            let again = self.again(&receiver);
+            std::mem::replace(&mut receiver, again)
+        } else {
+            let mut link = &mut receiver;
+            loop {
+                let Expression::StaticMemberExpression(member) = link else {
+                    unreachable!("an optional method's receiver is member reads");
+                };
+                if member.optional {
+                    member.optional = false;
+                    let again = self.again(&member.object);
+                    break std::mem::replace(&mut member.object, again);
+                }
+                link = &mut member.object;
+            }
+        };
+        let second_read = self.again(&first_read);
+        let probed = self.method_probe(span, receiver);
+        let Expression::StaticMemberExpression(method) = &mut call.callee else {
+            unreachable!("an optional method site calls a member");
+        };
+        method.object = probed;
+        let undefined = || {
+            self.ast
+                .expression_unary(Span::default(), UnaryOperator::Void, numeric(self.ast, 0))
+        };
+        let test = self.ast.expression_logical(
+            Span::default(),
+            self.ast.expression_binary(
+                Span::default(),
+                first_read,
+                BinaryOperator::StrictEquality,
+                self.ast.expression_null_literal(Span::default()),
+            ),
+            LogicalOperator::Or,
+            self.ast.expression_binary(
+                Span::default(),
+                second_read,
+                BinaryOperator::StrictEquality,
+                undefined(),
+            ),
+        );
+        self.ast.expression_conditional(
+            chain.span,
+            test,
+            undefined(),
+            Expression::CallExpression(self.ast.alloc(call)),
+        )
+    }
+
+    /// The name or `this` an optional link's base reads, read again: the
+    /// last operand of what the chain's coverage probe made of it.
+    fn again(&self, base: &Expression<'a>) -> Expression<'a> {
+        match base {
+            Expression::Identifier(identifier) => self
+                .ast
+                .expression_identifier(Span::default(), identifier.name),
+            Expression::ThisExpression(_) => self.ast.expression_this(Span::default()),
+            Expression::ParenthesizedExpression(inner) => self.again(&inner.expression),
+            Expression::SequenceExpression(sequence) => self.again(
+                sequence
+                    .expressions
+                    .last()
+                    .expect("a sequence has an operand"),
+            ),
+            _ => unreachable!("an optional method's base is a name or this"),
         }
     }
 }
@@ -14996,6 +15277,10 @@ export function shapes(n: number): unknown {
             "(c) => (c.a as boolean)",
             "(c) => c!.a",
             "(c) => c.a >= 2",
+            // names from around it, and templates of pure parts
+            "(item) => item.id === selectedId",
+            "(c) => c.id === `detected-${key}`",
+            "(c) => `${c.a}` === outer.b",
         ] {
             assert!(pure(text), "{text} is pure");
         }
@@ -15010,11 +15295,11 @@ export function shapes(n: number): unknown {
             "(c) => c.n++",
             "(c) => delete c.a",
             "(c) => [...c.a]",
-            "(c) => `${c.a}`",
+            "(c) => `${label(c)}`",
             "(c) => tag`x`",
             "(c) => this.a",
             "(c) => arguments.length",
-            "(c) => outer.a",
+            "(c) => eval",
             "(c) => c[key]",
             "(c) => -c.a",
             "(c) => c.a + 1",
@@ -15025,6 +15310,57 @@ export function shapes(n: number): unknown {
             "(c) => /a/.test",
         ] {
             assert!(!pure(text), "{text} is not pure");
+        }
+    }
+
+    /// A method call in return position is probed unless its callback is or
+    /// may be a type predicate `every` narrows its receiver by; one that ends
+    /// an optional chain on a name is probed behind the chain's test.
+    #[test]
+    fn method_probes_reach_returns_and_optional_chains() {
+        let source = concat!(
+            "export function f(parts: string[], re: RegExp, state: { list: { ok: boolean }[] } | null, sites?: string[]) {\n",
+            "  const a = state?.list.some((s) => s.ok);\n",
+            "  const b = sites?.some((site) => site === 'x');\n",
+            "  const c = state?.list.some((s) => s.ok).valueOf();\n",
+            "  const d = load()?.some((x) => x);\n",
+            "  void [a, b, c, d];\n",
+            "  return parts.every((part) => re.test(part));\n",
+            "}\n",
+            "export function strings(xs: unknown[]) { return xs.every((x) => typeof x === 'string'); }\n",
+            "export function named(xs: unknown[]) { return xs.every(isString); }\n",
+            "export function declared(xs: unknown[]) { return xs.every((x): x is Date => x instanceof Date); }\n",
+            "export function plain(xs: number[]) { return xs.every((x) => x > 1); }\n",
+            "export function any(xs: number[]) { return xs.some((x) => x > 1); }\n",
+            "declare function load(): boolean[] | undefined;\n",
+            "declare function isString(value: unknown): value is string;\n",
+        );
+        let probed = instrument_candidate(source, "src/returns.ts").unwrap().code;
+        let method_on = |line: usize| {
+            probed.split('"').any(|part| {
+                part.starts_with(&format!("src/returns.ts:{line}:")) && part.ends_with("#method")
+            })
+        };
+        for line in [2, 3, 7, 12, 13] {
+            assert!(method_on(line), "no method probe on line {line}:\n{probed}");
+        }
+        // 4: the chain goes on past the call. 5: its base is a call, which
+        // reading again would run again. 9-11: a callback that is, or may
+        // be, a type predicate.
+        for line in [4, 5, 9, 10, 11] {
+            assert!(
+                !method_on(line),
+                "line {line} must stay as written:\n{probed}"
+            );
+        }
+        for expected in [
+            "state === void 0 ? void 0 : __supercov",
+            ", state.list, \"some\"",
+            "sites === void 0 ? void 0 : __supercov",
+            ", sites, \"some\"",
+            ", parts, \"every\"",
+        ] {
+            assert!(probed.contains(expected), "missing {expected}:\n{probed}");
         }
     }
 
@@ -15073,6 +15409,8 @@ export function shapes(n: number): unknown {
             "(\"src/infection.ts:11:35-11:40#arith\", n, 1, 0)",
             // an arrow whose value is only a value; a predicate's is read by its method
             "(\"src/infection.ts:5:22-5:33#arrow\", x.id)",
+            // an optional chain's call, probed only where the chain reaches it
+            "xs === void 0 ? void 0 : __supercov",
             // a pure callback goes along as written, without the program's probes
             "(\"src/infection.ts:6:15-6:35#method\", xs, \"some\", \"src/infection.ts:6:23-6:34#arrow\", (x) => x.ok).some(",
             "(\"src/infection.ts:8:60-8:91#method\", xs, \"filter\", \"src/infection.ts:8:70-8:90#arrow\").filter(",
@@ -15107,8 +15445,6 @@ export function shapes(n: number): unknown {
             "src/infection.ts:4:",
             // a predicate's arrow, whose inferred type predicate must stay
             "(\"src/infection.ts:6:23-6:34#arrow\", x.ok)",
-            // an optional chain's call, and its arrow
-            "src/infection.ts:7:",
             // an enum member's constant initializer
             "src/infection.ts:10:",
         ] {
