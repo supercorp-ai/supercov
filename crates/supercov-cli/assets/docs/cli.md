@@ -291,6 +291,7 @@ npx supercov runs <run-id> mutants app/checkout.ts:42
 npx supercov runs <run-id> mutants --status not-infected,not-reached
 npx supercov runs <run-id> mutants --mutator EqualityOperator --json
 npx supercov runs <run-id> mutants --stryker reports/mutation/mutation.json
+npx supercov runs <run-id> mutants --format jsonl --output mutants.jsonl
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
@@ -313,13 +314,15 @@ The weak score is `infected / (infected + not-infected + not-reached)`, with
 unknown mutants left out, and beside it the same over reached mutants alone.
 They are shown beside coverage and never change it.
 
-Without a file, `mutants` shows a table of files ordered by how many mutants
-no test infects or reaches, a page of files at a time. With a file it lists the
-file's mutants by line, as `line:column  Mutator  original → replacement
-status  reason`; with `file:line`, that line's mutants each with its reason and
-id. `--status` and `--mutator` pick mutants, across files when no file is
-given. The scores are of the mutants asked about: the run, a file or a line,
-and one mutator with `--mutator`. The run summary shows one line,
+Without a file, `mutants` shows a table of files, a page at a time, ordered by
+how many mutants a test reaches and does not infect, which only this report
+shows, then by how many no test reaches, then by name. Files no test ran at all
+come last, however many mutants they hold, and a line counts them. With a file
+it lists the file's mutants by line, as `line:column  Mutator  original →
+replacement  status  reason`; with `file:line`, that line's mutants each with its
+reason and id. `--status` and `--mutator` pick mutants, across files when no
+file is given. The scores are of the mutants asked about: the run, a file or a
+line, and one mutator with `--mutator`. The run summary shows one line,
 `Mutants  15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown`,
 and `data.mutants` in its JSON.
 
@@ -333,16 +336,26 @@ In `--json` the reply is `coverage.mutants`: `mutantSet`, `levels`
 against mutants), and a page of `mutants`, each with its `id`
 (`file:line:column-line:column:Mutator:descriptor`), `span`, `original`,
 `replacement`, `status`, `weak` (`reach`, `infection`, `code`, `reason`),
-`strong` (null) and `stryker`.
+`strong` (null) and `stryker`. Mutants are listed by file path, and within a
+file by position, whatever the table's order.
 
-`--stryker <mutation.json>` joins StrykerJS's own reports by mutant id; give
-it once per report, and `--stryker-root <dir>` when a report's paths are
-relative to another directory than the project root. Each mutant then shows
-StrykerJS's status, and a `stryker` block counts the mutants matched, those
-only Supercov or only StrykerJS made (by mutator), and how many of StrykerJS's
-survivors this run says no test infects or reaches. A mutant this run says
-is not infected or not reached that StrykerJS killed is a soundness violation:
-each is listed, and the command exits `1`.
+`--format jsonl` writes every mutant asked about, one JSON object per line,
+each as `--json` lists it, with nothing paged; `--output <file>` writes them
+to a file instead of standard output. A file, `--status`, `--mutator`,
+`--stryker` and the options that narrow the tests apply as they do to the
+query.
+
+`--stryker` joins StrykerJS's own reports by mutant id. It takes several
+reports, as a glob gives them (`--stryker reports/*.json`), and directories of
+them, whose every `.json` file is read, recursively; a file to query goes
+before it. Give `--stryker-root <dir>` when a report's paths are relative to
+another directory than the project root. The commands the reply suggests repeat
+what `--stryker` was given, or `<56 reports>` for more than three. Each mutant
+then shows StrykerJS's status, and a `stryker` block counts the mutants
+matched, those only Supercov or only StrykerJS made (by mutator), and how many
+of StrykerJS's survivors this run says no test infects or reaches. A mutant
+this run says is not infected or not reached that StrykerJS killed is a
+soundness violation: each is listed, and the command exits `1`.
 
 ## Fail CI below a coverage floor
 
@@ -482,6 +495,9 @@ condition and the vectors observed. `--metric`, `--filter`, `--kind`,
 `--runner`, `--tag`, `--title` and `--test-file` narrow it as they narrow
 `gaps`, and nothing is paged, so a tool or an agent reads a run's every gap in
 one pass instead of a page at a time.
+
+`runs <id> mutants --format jsonl` exports a run's mutants the same way, one
+mutant per line (see [Mutants](#mutants)).
 
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info

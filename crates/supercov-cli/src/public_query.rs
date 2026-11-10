@@ -84,7 +84,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     Some(format!("Usage: {usage}\n"))
 }
 
-const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <mutation.json>]... [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json]
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json | --format jsonl [--output <file>]]
 
 Weak mutation: for each mutant StrykerJS would make, whether a test ran the
 mutated code (reach) and whether its value differed there (infection), read
@@ -92,20 +92,23 @@ from the run without running anything. JavaScript and TypeScript runs list
 their mutants when measured with SUPERCOV_COMPARISONS=1 or
 SUPERCOV_INFECTION_PROBES=1.
 
-Without a file, a table of files by how many mutants no test infects or
-reaches; with a file, its mutants by line; with file:line, that line's
-mutants and why.
+Without a file, a table of files by how many mutants no test infects, then
+by how many no test reaches; with a file, its mutants by line; with
+file:line, that line's mutants and why.
 
 Options:
   --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown
   --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
-  --stryker <mutation.json> join StrykerJS's results by mutant id; repeat for several reports
+  --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
+                            of them (every .json file inside, recursively); a file to query goes before it
   --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)
   --kind, --runner, --tag, --title, --test-file
                             only the verdicts of those tests: a mutant only other tests infect is not infected there
   --offset <n>
   --limit <n>               entries per page (default 20; 0 for all)
-  --json                    the coverage.mutants reply
+  --json                    the coverage.mutants reply, a page at a time
+  --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
+  --output <file>           with --format jsonl, write them there instead of to standard output
 
 Exit codes:
   0  the answer was given
@@ -499,7 +502,20 @@ fn parse_options(
                         }
                     }
                     "--mutator" => options.mutator = Some(value.clone()),
-                    "--stryker" => options.stryker.push(value.clone()),
+                    "--stryker" => {
+                        // Every report after it, as a shell's glob gives
+                        // them: the words that are a `.json` file or a
+                        // directory. A file to query goes before it.
+                        options.stryker.push(value.clone());
+                        while let Some(next) = arguments.get(index + 1).filter(|next| {
+                            !next.starts_with('-')
+                                && (next.to_ascii_lowercase().ends_with(".json")
+                                    || std::path::Path::new(next.as_str()).is_dir())
+                        }) {
+                            options.stryker.push(next.clone());
+                            index += 1;
+                        }
+                    }
                     _ => options.stryker_root = Some(value.clone()),
                 }
             }
@@ -826,16 +842,59 @@ fn read_stryker_reports(
             .collect::<Vec<_>>()
             .join("/")
     };
-    let mut reports = supercov_engine::mutants_query::StrykerReports::default();
+    let mut reports = supercov_engine::mutants_query::StrykerReports {
+        given: paths.to_vec(),
+        root: root.map(str::to_owned),
+        ..Default::default()
+    };
+    let mut files = Vec::new();
     for path in paths {
-        let text = supercov_engine::fault_fs::read_to_string(path)
+        if Path::new(path).is_dir() {
+            let found = json_files(Path::new(path))
+                .map_err(|error| format!("Could not read {path}: {error}"))?;
+            if found.is_empty() {
+                return Err(format!("{path} holds no .json report"));
+            }
+            files.extend(found);
+        } else {
+            files.push(path.clone());
+        }
+    }
+    for path in files {
+        // A report named twice, or found in two directories given, once.
+        if reports.reports.contains(&path) {
+            continue;
+        }
+        let text = supercov_engine::fault_fs::read_to_string(&path)
             .map_err(|error| format!("Could not read {path}: {error}"))?;
         let mutants = supercov_engine::mutants_query::parse_stryker_report(&text, path_of)
             .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
-        reports.reports.push(path.clone());
+        reports.reports.push(path);
         reports.mutants.extend(mutants);
     }
     Ok(reports)
+}
+
+/// Every `.json` file under `directory`, in order of path, named as
+/// `directory` was given with the rest joined by `/`.
+fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in supercov_engine::fault_fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            {
+                found.push(path.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 pub fn parse_public_query(
@@ -1156,6 +1215,32 @@ mod tests {
                 error.error.message
             );
         }
+    }
+
+    /// `--stryker` takes every report after it, as a glob gives them, and
+    /// stops at an option or a word that is no report.
+    #[test]
+    fn one_stryker_option_takes_several_reports() {
+        let options = parse_options(
+            "mutants",
+            &args(&[
+                "--stryker",
+                "r/r00.json",
+                "r/r01.JSON",
+                "src/a.ts",
+                "--stryker",
+                "x.json",
+                "--json",
+            ]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(options.stryker, ["r/r00.json", "r/r01.JSON", "x.json"]);
+        assert_eq!(options.positional, ["src/a.ts"]);
+        assert!(options.json);
+        // The first word is a report whatever it is named.
+        let options = parse_options("mutants", &args(&["--stryker", "reports"]), false).unwrap();
+        assert_eq!(options.stryker, ["reports"]);
     }
 
     #[test]

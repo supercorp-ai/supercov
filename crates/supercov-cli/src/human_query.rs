@@ -1042,14 +1042,66 @@ fn mutants_command(
         command.push_str(&format!(" --mutator {}", shell_quote(mutator)));
     }
     if let Some(stryker) = &options.stryker {
-        for report in &stryker.reports {
-            command.push_str(&format!(" --stryker {}", shell_quote(report)));
+        command.push_str(&format!(" --stryker {}", stryker_given(stryker)));
+        if let Some(root) = &stryker.root {
+            command.push_str(&format!(" --stryker-root {}", shell_quote(root)));
         }
     }
     command
 }
 
+/// The most reports or directories a command is written with in full; more
+/// are `<56 reports>`, and a hint says so once.
+const NAMED_REPORTS: usize = 3;
+
+/// What `--stryker` was given, as a command repeats it: in full, or, for
+/// more than a few, `<56 reports>`.
+fn stryker_given(stryker: &supercov_engine::mutants_query::StrykerReports) -> String {
+    if stryker.given.len() > NAMED_REPORTS {
+        format!("<{} reports>", count(stryker.reports.len()))
+    } else {
+        stryker
+            .given
+            .iter()
+            .map(|given| shell_quote(given))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// The reports joined, as the StrykerJS block's heading names them.
+fn stryker_named(stryker: &supercov_engine::mutants_query::StrykerReports) -> String {
+    let reports = stryker.reports.len();
+    if stryker.given.len() > NAMED_REPORTS {
+        format!("{} reports", count(reports))
+    } else if reports == stryker.given.len() {
+        stryker.given.join(", ")
+    } else {
+        format!("{} reports in {}", count(reports), stryker.given.join(", "))
+    }
+}
+
 fn render_mutants(
+    request: &IndexedQueryRequest,
+    data: &supercov_engine::mutants_query::CoverageMutantsData,
+    page: &AgentPagination,
+) -> String {
+    let mut text = mutants_text(request, data, page);
+    // The commands above stand for the reports without naming them.
+    if let Some(stryker) = &request.mutants.stryker
+        && stryker.given.len() > NAMED_REPORTS
+    {
+        let placeholder = stryker_given(stryker);
+        if text.contains(&placeholder) {
+            text.push_str(&format!(
+                "\n{placeholder} in these commands: the reports given to --stryker"
+            ));
+        }
+    }
+    text
+}
+
+fn mutants_text(
     request: &IndexedQueryRequest,
     data: &supercov_engine::mutants_query::CoverageMutantsData,
     page: &AgentPagination,
@@ -1119,7 +1171,14 @@ fn render_mutants(
         let survivors = &stryker.survivors_explained;
         lines.extend([
             String::new(),
-            format!("StrykerJS ({})", stryker.reports.join(", ")),
+            format!(
+                "StrykerJS ({})",
+                request
+                    .mutants
+                    .stryker
+                    .as_ref()
+                    .map_or_else(|| stryker.reports.join(", "), stryker_named)
+            ),
             format!("  Matched              {}", count(stryker.matched)),
             format!("  Only in Supercov     {}", by_mutator(&stryker.only_supercov)),
             format!("  Only in StrykerJS    {}", by_mutator(&stryker.only_stryker)),
@@ -1156,7 +1215,8 @@ fn render_mutants(
     }
     let unfiltered = request.mutants.statuses.is_empty() && request.mutants.mutator.is_none();
     if data.file.is_none() && unfiltered {
-        // The files by how many mutants a test could still be written for.
+        // The files by how many mutants their tests reach and do not infect,
+        // then by how many no test reaches (`mutants_query` orders them).
         let rows = data
             .files
             .iter()
@@ -1194,6 +1254,24 @@ fn render_mutants(
             data.files.len(),
         );
         lines.push(format!("{} files", page_label(&files)));
+        let unreached = data
+            .files
+            .iter()
+            .filter(|row| row.unreached())
+            .collect::<Vec<_>>();
+        if !unreached.is_empty() {
+            lines.push(format!(
+                "{} {} no test ran, with {} mutants, {} listed last",
+                count(unreached.len()),
+                if unreached.len() == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                count(unreached.iter().map(|row| row.status.total()).sum()),
+                if unreached.len() == 1 { "is" } else { "are" },
+            ));
+        }
         if let Some(first) = rows.first() {
             lines.push(format!(
                 "inspect a file: {}",

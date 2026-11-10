@@ -42,10 +42,14 @@ impl<'de> Deserialize<'de> for MutantStatus {
     }
 }
 
-/// The StrykerJS reports `--stryker` named, as they were given, and their
-/// mutants.
+/// The StrykerJS reports `--stryker` named, and their mutants.
 #[derive(Debug, Clone, Default)]
 pub struct StrykerReports {
+    /// What `--stryker` was given: reports and directories of them.
+    pub given: Vec<String>,
+    /// `--stryker-root`, as given.
+    pub root: Option<String>,
+    /// Every report read, a directory's in order of path.
     pub reports: Vec<String>,
     pub mutants: Vec<StrykerReportMutant>,
 }
@@ -280,6 +284,29 @@ impl MutantEntry {
 pub struct MutantFileRow {
     pub file: String,
     pub status: MutantCounts,
+}
+
+impl MutantFileRow {
+    /// No test ran any of the file's mutants.
+    pub fn unreached(&self) -> bool {
+        self.status.total() > 0 && self.status.not_reached == self.status.total()
+    }
+}
+
+/// The per-file table's order. First what only this report shows: the
+/// mutants tests reach and do not infect. Then what no test reaches, which
+/// coverage shows too; the files no test ran at all last, however many
+/// mutants they hold, and by name where counts tie.
+fn table_order(rows: &mut [MutantFileRow]) {
+    rows.sort_by(|left, right| {
+        right
+            .status
+            .not_infected
+            .cmp(&left.status.not_infected)
+            .then_with(|| left.unreached().cmp(&right.unreached()))
+            .then_with(|| right.status.not_reached.cmp(&left.status.not_reached))
+            .then_with(|| left.file.cmp(&right.file))
+    });
 }
 
 /// Mutants by mutator.
@@ -608,13 +635,7 @@ pub fn coverage_mutants_query(
             status: file.counts.clone(),
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        right
-            .status
-            .actionable()
-            .cmp(&left.status.actionable())
-            .then_with(|| left.file.cmp(&right.file))
-    });
+    table_order(&mut rows);
     if mutation.is_none() {
         note = Some(NO_LIST.into());
     } else if files.is_empty() {
@@ -690,6 +711,42 @@ mod tests {
         );
         let dropped = stryker_by_id(&[mutant("CompileError")], &HashMap::new());
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn the_table_puts_mutants_not_infected_first_and_files_no_test_ran_last() {
+        let row =
+            |file: &str, not_infected: usize, not_reached: usize, infected: usize| MutantFileRow {
+                file: file.into(),
+                status: MutantCounts {
+                    not_reached,
+                    not_infected,
+                    infected,
+                    unknown: 0,
+                },
+            };
+        let mut rows = vec![
+            row("never-loaded.tsx", 0, 1475, 0),
+            row("few-reached.ts", 0, 12, 3),
+            row("b-not-infected.ts", 4, 0, 10),
+            row("a-not-infected.ts", 4, 0, 10),
+            row("most-not-infected.ts", 9, 300, 1),
+            row("never-loaded-small.ts", 0, 3, 0),
+            row("all-infected.ts", 0, 0, 7),
+        ];
+        table_order(&mut rows);
+        assert_eq!(
+            rows.iter().map(|row| row.file.as_str()).collect::<Vec<_>>(),
+            [
+                "most-not-infected.ts",
+                "a-not-infected.ts",
+                "b-not-infected.ts",
+                "few-reached.ts",
+                "all-infected.ts",
+                "never-loaded.tsx",
+                "never-loaded-small.ts",
+            ]
+        );
     }
 
     #[test]

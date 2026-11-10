@@ -3387,6 +3387,12 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
     {
         return gaps_export::command(&arguments);
     }
+    if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.iter().any(|a| a == "--format")
+    {
+        return mutants_export::command(&arguments);
+    }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "source") {
         return source_query::command(&arguments);
     }
@@ -4004,6 +4010,9 @@ fn instrument_js() -> ExitCode {
     }
     ExitCode::SUCCESS
 }
+
+// Below the lines tests name by number (main.rs:2475).
+mod mutants_export;
 
 #[cfg(test)]
 mod docs_command_tests {

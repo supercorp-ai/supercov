@@ -4224,11 +4224,6 @@ impl MutantCounts {
         self.not_reached + self.not_infected + self.infected + self.unknown
     }
 
-    /// What a test could still be written for: not infected or not reached.
-    pub fn actionable(&self) -> usize {
-        self.not_infected + self.not_reached
-    }
-
     pub fn merge(&mut self, other: &Self) {
         MutantStatus::ALL
             .into_iter()

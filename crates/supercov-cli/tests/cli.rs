@@ -20636,6 +20636,138 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
     assert_eq!(rooted["data"]["stryker"]["matched"], 2);
     assert_eq!(rooted["data"]["stryker"]["onlyStryker"]["total"], 0);
 
+    // A report in chunks: several after one --stryker, or their directory.
+    let report: serde_json::Value =
+        serde_json::from_str(&project.read("reports/mutation.json")).unwrap();
+    let chunk_mutants = report["files"]["src/cart.js"]["mutants"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for (number, mutants) in chunk_mutants.chunks(2).enumerate() {
+        let mut chunk = report.clone();
+        chunk["files"]["src/cart.js"]["mutants"] = serde_json::Value::from(mutants.to_vec());
+        project.write(&format!("chunks/part/r0{number}.json"), &chunk.to_string());
+    }
+    project.write("chunks/notes.txt", "not a report");
+    let matched = |arguments: &[&str]| {
+        let mut command = vec!["runs", "latest", "mutants", "--json", "--limit", "0"];
+        command.extend(arguments);
+        let joined = project.supercov(&command);
+        assert_eq!(joined.code(), 1, "{arguments:?}: {}", joined.stderr());
+        let joined = joined.json();
+        (
+            joined["data"]["stryker"]["matched"].clone(),
+            joined["data"]["stryker"]["reports"].clone(),
+        )
+    };
+    let chunks = serde_json::json!([
+        "chunks/part/r00.json",
+        "chunks/part/r01.json",
+        "chunks/part/r02.json"
+    ]);
+    assert_eq!(
+        matched(&["--stryker", "chunks"]),
+        (3.into(), chunks.clone())
+    );
+    assert_eq!(
+        matched(&[
+            "--stryker",
+            "chunks/part/r00.json",
+            "chunks/part/r01.json",
+            "chunks/part/r02.json",
+            "chunks/part/r00.json",
+        ]),
+        (3.into(), chunks)
+    );
+    // More than a few reports are not repeated in every command shown.
+    project.write(
+        "chunks/part/r03.json",
+        &project.read("reports/mutation.json"),
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--stryker",
+            "chunks/part/r00.json",
+            "chunks/part/r01.json",
+            "chunks/part/r02.json",
+            "chunks/part/r03.json",
+        ])
+        .exits(1);
+    contains_all(
+        &listed,
+        &[
+            "StrykerJS (4 reports)",
+            "mutants 'src/cart.js' --stryker <4 reports>",
+            "<4 reports> in these commands: the reports given to --stryker",
+        ],
+    );
+    assert!(!listed.contains("r01.json"), "{listed}");
+    let directory = project
+        .supercov(&["runs", "latest", "mutants", "--stryker", "chunks/part"])
+        .exits(1);
+    contains_all(
+        &directory,
+        &[
+            "StrykerJS (4 reports in chunks/part)",
+            "mutants 'src/cart.js' --stryker 'chunks/part'",
+        ],
+    );
+
+    // Every mutant at once, one per line, each as --json lists it.
+    let all = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let exported = project
+        .supercov(&["runs", "latest", "mutants", "--format", "jsonl"])
+        .succeeds();
+    let lines = exported
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(serde_json::Value::from(lines), all["data"]["mutants"]);
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/cart.js",
+            "--status",
+            "not-infected",
+            "--format",
+            "jsonl",
+            "--output",
+            "not-infected.jsonl",
+        ])
+        .succeeds();
+    let written = project.read("not-infected.jsonl");
+    assert_eq!(written.lines().count(), 1, "{written}");
+    assert!(
+        written.contains("\"id\":\"src/cart.js:2:7-2:16:EqualityOperator:>\""),
+        "{written}"
+    );
+    // A soundness violation fails the export as it fails the query.
+    let violated = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "--format",
+        "jsonl",
+        "--stryker",
+        "reports/mutation.json",
+    ]);
+    assert_eq!(violated.code(), 1, "{}", violated.stderr());
+    assert!(
+        violated.stdout().contains("\"stryker\":\"Killed\""),
+        "{}",
+        violated.stdout()
+    );
+    project
+        .supercov(&["runs", "latest", "mutants", "--format", "csv"])
+        .exits(2);
+
     // A run measured without the probes has no mutants, and says how to get
     // them.
     project.supercov(&["--", "npx", "mocha"]).succeeds();

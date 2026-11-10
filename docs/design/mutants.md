@@ -109,6 +109,8 @@ npx supercov runs latest mutants --status not-infected,not-reached
 npx supercov runs latest mutants --mutator EqualityOperator
 npx supercov runs latest mutants --json
 npx supercov runs latest mutants --stryker reports/mutation/mutation.json   # join StrykerJS results
+npx supercov runs latest mutants --stryker reports/mutation                 # every report in a directory
+npx supercov runs latest mutants --format jsonl --output mutants.jsonl      # every mutant, one per line
 ```
 
 The run summary gets one line, `Mutants  2,955 · weak score 85.0% · 211 not
@@ -122,18 +124,33 @@ so a kind or a runner picks its tests the way a tag does (a filtered index).
 `--filter passed` and `--filter failed` are refused: the verdicts are of every
 attempt, and an outcome view of them is not built.
 
-Without a file, people see a table of files ordered by how many mutants no
-test infects or reaches, a page of files at a time; `--json`, a file, `--status`
-and `--mutator` page through mutants. The scores and counts are of the mutants
-asked about: the run, a file or a line, and one mutator with `--mutator`;
-`--status` picks from them without changing the scores.
+Without a file, people see a table of files, a page of files at a time, ordered
+by how many mutants a test reaches and does not infect, then by how many no
+test reaches, then by name. Not-infected mutants are what only this report
+shows; a not-reached mutant is a coverage gap `gaps` names already. A file no
+test ran at all (every mutant not reached) comes after the files a test ran,
+however many mutants it holds, and one line counts those files: listed by size,
+the files a suite never loads buried the files with mutants not infected.
+`--json`, a file, `--status` and `--mutator` page through mutants, which are
+always listed by file path and then by position, whatever the table's order.
+`--format jsonl` writes all of them, one per line in that order, each as
+`--json` lists it, as `gaps --format jsonl` does for gaps: a reply stops at 64
+KB, about 128 mutants, and a large app has 61,000. The scores and counts are of
+the mutants asked about: the run, a file or a line, and one mutator with
+`--mutator`; `--status` picks from them without changing the scores.
 
 `--stryker` reads one or more StrykerJS `mutation.json` reports and joins them
-by id. Each mutant then shows StrykerJS's status beside Supercov's (`stryker:
-Killed`), and the summary counts disagreements. A not-infected or not-reached
-mutant StrykerJS killed (or timed out) is a soundness violation, and the
-command exits 1. This is how releases are validated, and how a team that
-already runs StrykerJS gets Supercov's reasons for its survivors.
+by id. One `--stryker` takes every report after it (the words that are a
+`.json` file or a directory, as a glob gives them), and a directory stands for
+every `.json` file under it. The commands a reply suggests repeat what was
+given, up to three reports or directories, and otherwise write `<56 reports>`
+with a line saying what it stands for: users with chunked reports pass dozens,
+and every suggested command repeated them all. Each mutant then shows
+StrykerJS's status beside Supercov's (`stryker: Killed`), and the summary
+counts disagreements. A not-infected or not-reached mutant StrykerJS killed (or
+timed out) is a soundness violation, and the command exits 1. This is how
+releases are validated, and how a team that already runs StrykerJS gets
+Supercov's reasons for its survivors.
 
 A StrykerJS mutant's id is built from its file (relative to the project root,
 or to `--stryker-root`), its location, and the descriptor
