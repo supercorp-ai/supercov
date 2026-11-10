@@ -1350,13 +1350,6 @@ function environmentRequestContext() {
   decodedEnvironmentCarrier = { env, context };
   return context;
 }
-// The phase of currentRequestContext(): a context that names neither scope
-// nor phase stands for the active scope alone, which has none.
-function requestPhaseId() {
-  const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
-  const context = stored !== void 0 ? stored : environmentRequestContext();
-  return context !== void 0 && (context.scope || context.phaseId) ? context.phaseId : void 0;
-}
 function currentRequestContext() {
   const stored = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore();
   if (stored !== void 0) {
@@ -1808,13 +1801,11 @@ function currentPhaseId() {
     // Where the process knows which test is running, only that test's phases
     // are honoured; a server process, which learns its test from the request,
     // keeps the carried phase.
-    // currentRequestContext's phase, without the context it builds when
-    // none applies (an object per first hit, only for its absent phase).
-    const phaseId = requestPhaseId();
+    const context = currentRequestContext();
     const active = runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
-    if (phaseId && active && !phaseBelongsToAttempt(phaseId, active.attemptId))
+    if (context.phaseId && active && !phaseBelongsToAttempt(context.phaseId, active.attemptId))
       return void 0;
-    return phaseId;
+    return context.phaseId;
   }
   try {
     // The stored phase is per origin, so in a browser context that outlives
