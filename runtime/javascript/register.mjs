@@ -486,6 +486,13 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
         try {
             const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
             map.sources = [basename(file)];
+            // The copy's map names the project's file without its text; Vite
+            // is given the authored text with it, kept beside the copy.
+            const local = map.sourcesContent === undefined
+                ? rewrittenUnder(copies, typeof file === "string" && !isAbsolute(file) ? resolve(file) : file)
+                : undefined;
+            if (local !== undefined)
+                map.sourcesContent = [readSync(kept(".authored", local), "utf8")];
             const renamed = `${text.slice(0, found + mapComment.length)}${Buffer.from(JSON.stringify(map)).toString("base64")}\n`;
             return typeof contents === "string" ? renamed : Buffer.from(renamed, "utf8");
         }
@@ -560,12 +567,16 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
             if (map?.version !== 3 || typeof map.mappings !== "string" || !Array.isArray(map.sources))
                 return text;
             const through = map.sources.map((source, index) => {
-                if (typeof source !== "string" || rewrittenUnder(copies, source) === undefined)
+                const local = typeof source === "string" ? rewrittenUnder(copies, source) : undefined;
+                if (local === undefined)
                     return undefined;
                 const own = ownMap(source);
-                if (!own || own.sourcesContent?.[0] === undefined || map.sourcesContent?.[index] === own.sourcesContent[0])
+                // The copy's map names the project's file without its text;
+                // the authored text is kept beside the copy.
+                const authored = own && (own.sourcesContent?.[0] ?? readSync(kept(".authored", local), "utf8"));
+                if (!own || map.sourcesContent?.[index] === authored)
                     return undefined;
-                return { own, lines: decoded(own.mappings) };
+                return { own, authored, lines: decoded(own.mappings) };
             });
             if (!through.some(Boolean))
                 return text;
@@ -587,7 +598,7 @@ process.__SUPERCOV_FAILURE_OUTPUT__ ??= function supercovFailureOutput(runner) {
                 if (typeof source === "string" && isAbsolute(source))
                     map.sources[index] = source;
                 map.sourcesContent ?? (map.sourcesContent = []);
-                map.sourcesContent[index] = inner.own.sourcesContent[0];
+                map.sourcesContent[index] = inner.authored;
             });
             map.mappings = encoded(lines);
             return JSON.stringify(map);

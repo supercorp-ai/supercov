@@ -851,7 +851,6 @@ fn inline_instrumentation_map(
     code: &str,
     map: Option<&serde_json::Value>,
     original_path: &Path,
-    original_source: &str,
 ) -> Option<String> {
     let map = map?.clone();
     let mut map = map;
@@ -903,10 +902,11 @@ fn inline_instrumentation_map(
         "sources".into(),
         serde_json::json!([original_path.display().to_string()]),
     );
-    object.insert(
-        "sourcesContent".into(),
-        serde_json::json!([original_source]),
-    );
+    // The source names the project's own file, whose text is the authored
+    // text, so a tool that wants it reads it there. Carried in every copy it
+    // was half of each inline map -- a module's authored text again, base64
+    // -- for Node, Vite and every bundler to decode on every load.
+    object.remove("sourcesContent");
     let payload = serde_json::to_string(&map).expect("a JSON value serializes");
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
@@ -1977,13 +1977,9 @@ fn instrument_source(
     // stack traces show the user's real path and line numbers instead
     // of instrumented workspace positions -- Supercov stays invisible
     // in errors. Without this the map was generated and then dropped.
-    let code = inline_instrumentation_map(
-        &output.code,
-        output.map.as_ref(),
-        &project.root.join(file),
-        &source,
-    )
-    .expect("the instrumenter gives every file a whole source map");
+    let code =
+        inline_instrumentation_map(&output.code, output.map.as_ref(), &project.root.join(file))
+            .expect("the instrumenter gives every file a whole source map");
     write_authored(workspace, file, &source)?;
     atomic_write(&path, code.as_bytes())?;
     Ok(InstrumentedSource::Measured(Box::new(output)))
@@ -2659,12 +2655,12 @@ mod tests {
             Some(serde_json::json!({ "mappings": 1 })),
         ] {
             assert!(
-                inline_instrumentation_map("a;\n", map.as_ref(), file, "a;\n").is_none(),
+                inline_instrumentation_map("a;\n", map.as_ref(), file).is_none(),
                 "{map:?}"
             );
         }
         let map = serde_json::json!({ "version": 3, "mappings": "AAAA" });
-        assert!(inline_instrumentation_map("a;\n", Some(&map), file, "a;\n").is_some());
+        assert!(inline_instrumentation_map("a;\n", Some(&map), file).is_some());
     }
 
     #[test]
@@ -3358,7 +3354,6 @@ mod tests {
                 "a();\nb();\n",
                 Some(&serde_json::json!({ "version": 3, "mappings": mappings })),
                 Path::new("/p/a.js"),
-                "a();\nb();\n",
             )
             .unwrap();
             let encoded = inlined.rsplit("base64,").next().unwrap().trim_end();
@@ -3552,7 +3547,6 @@ mod tests {
                 code,
                 Some(&serde_json::json!({"version": 3, "mappings": map})),
                 Path::new("src/a.js"),
-                "original\n",
             )
             .unwrap();
             let encoded = inlined.rsplit_once("base64,").unwrap().1.trim_end();
@@ -3563,7 +3557,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(map["sources"], serde_json::json!(["src/a.js"]));
-            assert_eq!(map["sourcesContent"], serde_json::json!(["original\n"]));
+            assert_eq!(map.get("sourcesContent"), None);
             map["mappings"].as_str().unwrap().to_owned()
         };
         assert_eq!(mappings("a;\nb;\n", "AAAA;AACA"), "AAAA;AACA;;AAAA");
@@ -3582,9 +3576,9 @@ mod tests {
         assert_eq!(mappings("x\n", ""), "");
         // Already past the directive line.
         assert_eq!(mappings("x", ";;;;;;"), "AAAA,C;;;;;;");
-        assert!(inline_instrumentation_map("x", None, Path::new("a.js"), "x").is_none());
+        assert!(inline_instrumentation_map("x", None, Path::new("a.js")).is_none());
         assert!(
-            inline_instrumentation_map("x", Some(&serde_json::json!({})), Path::new("a.js"), "x")
+            inline_instrumentation_map("x", Some(&serde_json::json!({})), Path::new("a.js"))
                 .is_none()
         );
     }

@@ -23,8 +23,9 @@ function project(t) {
   cpSync(resolve(import.meta.dirname, "../../runtime/javascript"), resolve(copy, ".supercov/node_modules"), { recursive: true });
   // Two lines Supercov added, then the author's two, moved down and in.
   const own = {
+    // As Supercov writes it: the project's file named, its text not carried.
     version: 3, names: [], sources: [resolve(root, "lib/crypto.ts")],
-    sourcesContent: ["authored one\nauthored two\n"], mappings: ";;EAAA;EACA",
+    mappings: ";;EAAA;EACA",
   };
   write("lib/crypto.ts", `probe\nprobe\n  instrumented one\n  instrumented two${inline(own)}`);
   write("lib/plain.ts", "untouched\n");
