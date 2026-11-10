@@ -1955,13 +1955,17 @@ fn coverage_model_record(
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
-    coverage_index_sections_from(
+    // A run whose every result passed has the whole view as its passed view;
+    // its records are then the whole view's, written again under its id.
+    let passed_is_whole = report.filters.passed == report.view;
+    sections_from(
         [
             (CoverageViewId::All, &report.view),
             (CoverageViewId::Passed, &report.filters.passed),
             (CoverageViewId::Failed, &report.filters.failed),
         ]
         .map(Ok),
+        passed_is_whole,
     )
 }
 
@@ -1970,6 +1974,24 @@ pub fn coverage_index_sections(
 /// at once. The first view must be [`CoverageViewId::All`].
 pub fn coverage_index_sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+) -> Result<Vec<QueryIndexSection>, E>
+where
+    V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
+    E: From<CoverageIndexError>,
+{
+    sections_from(views, false)
+}
+
+/// `coverage_index_sections_from`, told whether the passed view is the whole
+/// view: its records are then the whole view's with the passed view's id,
+/// copied where they were built again -- on a large all-passing run the most
+/// of a second whole index, alone after the analysis. Each copied record
+/// points into the shared confidence, vector and condition records at the
+/// whole view's entries, which are the same; its strings and string runs
+/// are interned once already.
+fn sections_from<V, E>(
+    views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+    passed_is_whole: bool,
 ) -> Result<Vec<QueryIndexSection>, E>
 where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
@@ -2008,8 +2030,63 @@ where
     let mut decision_vector_observations = Vec::new();
     let mut decision_conditions = Vec::new();
     let mut limitations = Vec::new();
+    // Every section whose records are a view's own, each record starting
+    // with its view's id, and the size of its records.
+    macro_rules! per_view {
+        ($apply:ident $(, $ranges:ident)?) => {
+            $apply!(
+                $($ranges;)?
+                summaries: SUMMARY_RECORD_SIZE,
+                gaps: FILE_GAP_RECORD_SIZE,
+                decision_gaps: DECISION_GAP_RECORD_SIZE,
+                dimensions: DIMENSION_RECORD_SIZE,
+                projection_records: PROJECTION_RECORD_SIZE,
+                scope_entries: SCOPE_ENTRY_RECORD_SIZE,
+                line_records: LINE_RECORD_SIZE,
+                test_summaries: TEST_SUMMARY_RECORD_SIZE,
+                phase_summaries: PHASE_SUMMARY_RECORD_SIZE,
+                anchors: ANCHOR_RECORD_SIZE,
+                test_retries: TEST_RETRY_RECORD_SIZE,
+                test_attempts: TEST_ATTEMPT_RECORD_SIZE,
+                test_lines: TEST_LINE_RECORD_SIZE,
+                test_hits: TEST_HIT_RECORD_SIZE,
+                test_decisions: TEST_DECISION_RECORD_SIZE,
+                hit_metadata: HIT_METADATA_RECORD_SIZE,
+                decision_metadata: DECISION_METADATA_RECORD_SIZE,
+                decision_details: DECISION_DETAIL_RECORD_SIZE,
+                limitations: LIMITATION_RECORD_SIZE,
+            )
+        };
+    }
+    macro_rules! lengths {
+        ($($records:ident: $size:expr),* $(,)?) => {
+            [$($records.len()),*]
+        };
+    }
+    macro_rules! copy_whole_as_passed {
+        ($whole:ident; $($records:ident: $size:expr),* $(,)?) => {{
+            let mut ranges = $whole.iter();
+            $(
+                let (start, end) = *ranges.next().expect("a range per section");
+                let mut copied = $records[start..end].to_vec();
+                copied
+                    .chunks_exact_mut($size)
+                    .for_each(|record| record[0] = CoverageViewId::Passed as u8);
+                $records.extend_from_slice(&copied);
+            )*
+        }};
+    }
+    let mut whole: Option<Vec<(usize, usize)>> = None;
     for item in views {
         let (id, owned) = item?;
+        if id == CoverageViewId::Passed
+            && passed_is_whole
+            && let Some(whole) = &whole
+        {
+            per_view!(copy_whole_as_passed, whole);
+            continue;
+        }
+        let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
         let view = owned.borrow();
         check_view(view)?;
         let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
@@ -2365,6 +2442,9 @@ where
                     &mut strings,
                 ));
             }
+        }
+        if let Some(starts) = starts {
+            whole = Some(starts.into_iter().zip(per_view!(lengths)).collect());
         }
     }
     let (variant, model) =
@@ -5523,6 +5603,109 @@ mod tests {
         }
     }
     /// Everything a query can read from an index, in every view.
+    /// What every reader returns for every view, as text.
+    fn everything_read(index: &CoverageIndex<'_>) -> String {
+        let mut read = format!("{:?}\n", index.model().unwrap());
+        for view in [
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ] {
+            read += &format!("{view:?} summary {:?}\n", index.summary(view).unwrap());
+            read += &format!("gaps {:?}\n", index.file_gaps(view, None, None).unwrap());
+            for dimension in [
+                CoverageDimension::Kind,
+                CoverageDimension::Runner,
+                CoverageDimension::Tests,
+            ] {
+                read += &format!(
+                    "dimension {:?}\n",
+                    index.dimensions(view, dimension).unwrap()
+                );
+            }
+            read += &format!("scope {:?}\n", index.scope_entries(view).unwrap());
+            read += &format!(
+                "projection {:?}\n",
+                index.projection(view, None, None).unwrap()
+            );
+            let lines = index.lines(view).unwrap();
+            read += &format!("lines {lines:?}\n");
+            for line in &lines {
+                read += &format!(
+                    "anchors {:?}\n",
+                    index.anchors(view, &line.file, line.line).unwrap()
+                );
+                read += &format!(
+                    "line {:?}\n",
+                    index.line(view, &line.file, line.line).unwrap()
+                );
+            }
+            for file in lines
+                .iter()
+                .map(|line| line.file.as_str())
+                .collect::<BTreeSet<_>>()
+            {
+                read += &format!(
+                    "decision gaps {:?}\n",
+                    index.decision_gaps(view, None, None, file).unwrap()
+                );
+                read += &format!("in file {:?}\n", index.lines_in_file(view, file).unwrap());
+                read += &format!(
+                    "hits in file {:?}\n",
+                    index.hit_metadata_in_file(view, file).unwrap()
+                );
+                read += &format!(
+                    "details in file {:?}\n",
+                    index.decision_details_in_file(view, file).unwrap()
+                );
+                read += &format!(
+                    "limits in file {:?}\n",
+                    index.limitations_in_file(view, file).unwrap()
+                );
+            }
+            read += &format!("tests {:?}\n", index.test_summaries(view).unwrap());
+            read += &format!("test details {:?}\n", index.test_details(view).unwrap());
+            read += &format!("hits {:?}\n", index.hit_metadata(view).unwrap());
+            read += &format!("limits {:?}\n", index.limitations(view).unwrap());
+            read += &format!("decisions {:?}\n", index.decision_metadata(view).unwrap());
+            read += &format!("details {:?}\n", index.decision_details(view).unwrap());
+            read += &format!("phases {:?}\n", index.phase_summaries(view).unwrap());
+        }
+        read
+    }
+
+    /// A run whose passed view is its whole view has that view's records
+    /// copied under the passed view's id, and every reader answers as it did
+    /// when the passed view's records were built again.
+    #[test]
+    fn a_passed_view_that_is_the_whole_reads_as_when_built_again() {
+        for mut whole in [report(), scoped_report(), phased_report()] {
+            whole.filters.passed = whole.view.clone();
+            let copied = coverage_index_sections(&whole).unwrap();
+            let built = sections_from::<_, CoverageIndexError>(
+                [
+                    (CoverageViewId::All, &whole.view),
+                    (CoverageViewId::Passed, &whole.filters.passed),
+                    (CoverageViewId::Failed, &whole.filters.failed),
+                ]
+                .map(Ok),
+                false,
+            )
+            .unwrap();
+            let read = |sections: &[QueryIndexSection]| {
+                let root = root();
+                let path = root.join("query-index.v1.bin");
+                write_query_index(sections, &identity(), &path).unwrap();
+                let container = QueryIndex::open(&path, &identity()).unwrap();
+                // The index is closed before its directory is removed.
+                everything_read(&CoverageIndex::new(&container).unwrap())
+            };
+            let (copied_read, built_read) = (read(&copied), read(&built));
+            assert!(copied_read.contains("Passed summary"), "{copied_read}");
+            assert_eq!(copied_read, built_read);
+        }
+    }
+
     fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
         let mut read = 0;
         index.model()?;
