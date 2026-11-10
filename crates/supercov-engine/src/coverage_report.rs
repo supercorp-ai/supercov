@@ -3764,7 +3764,7 @@ fn resolve_probe_places(
             .iter()
             .filter(|(_, table)| !table.follows.is_empty())
             .map(|(key, table)| {
-                let mut followers = std::collections::HashMap::<usize, Vec<&str>>::new();
+                let mut followers = rustc_hash::FxHashMap::<usize, Vec<&str>>::default();
                 for [place, leader] in &table.follows {
                     if let Some(id) = table.points.get(*place) {
                         followers.entry(*leader).or_default().push(id);
@@ -3781,8 +3781,7 @@ fn resolve_probe_places(
             let hits = std::mem::take(&mut snapshot.hits);
             snapshot.hits.reserve(hits.len());
             for mut id in hits {
-                let followers = places.followers(&id);
-                places.point(&mut id);
+                let followers = places.resolve_point(&mut id);
                 snapshot.hits.push(id);
                 snapshot
                     .hits
@@ -3795,11 +3794,7 @@ fn resolve_probe_places(
             snapshot.events.reserve(events.len());
             for mut event in events {
                 let followers = match event.event_type.as_str() {
-                    "hit" => {
-                        let followers = places.followers(&event.id);
-                        places.point(&mut event.id);
-                        followers
-                    }
+                    "hit" => places.resolve_point(&mut event.id),
                     "decision" => {
                         places.decision(&mut event.id);
                         &[]
@@ -3825,8 +3820,7 @@ fn resolve_probe_places(
             if let Some(id) = record.id.as_mut() {
                 match record.record_type.as_str() {
                     "hit" => {
-                        let followers = places.followers(id);
-                        places.point(id);
+                        let followers = places.resolve_point(id);
                         copies.extend(followers.iter().map(|follower| ServerRecord {
                             id: Some((*follower).to_owned()),
                             ..record.clone()
@@ -3842,28 +3836,38 @@ fn resolve_probe_places(
     }
 }
 
+// Keyed by a table's 16-hex key and a place: a hasher made for short keys,
+// as every hit, event and server record of a run is looked up here.
 struct ProbePlaces<'a> {
-    tables: std::collections::HashMap<&'a str, &'a ProbeTableIds>,
+    tables: rustc_hash::FxHashMap<&'a str, &'a ProbeTableIds>,
     /// For each table with dropped probes, the ids each leader place carries.
-    followers: std::collections::HashMap<&'a str, std::collections::HashMap<usize, Vec<&'a str>>>,
+    followers: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashMap<usize, Vec<&'a str>>>,
 }
 
 impl<'a> ProbePlaces<'a> {
-    /// The ids whose probes were dropped for the point `name` labels.
-    fn followers(&self, name: &str) -> &[&'a str] {
+    /// A point's id in place of the name `~p<key>.<place>` labels it by,
+    /// with the ids whose probes were dropped beside it: the name read once
+    /// for both, where each read it again.
+    fn resolve_point(&self, name: &mut String) -> &[&'a str] {
         let Some((key, place)) = name
             .strip_prefix("~p")
             .and_then(|rest| rest.split_once('.'))
+            .and_then(|(key, place)| Some((key, place.parse::<usize>().ok()?)))
         else {
             return &[];
         };
-        let Ok(place) = place.parse::<usize>() else {
+        let Some(table) = self.tables.get(key) else {
             return &[];
         };
-        self.followers
+        let followers = self
+            .followers
             .get(key)
             .and_then(|followers| followers.get(&place))
-            .map_or(&[], Vec::as_slice)
+            .map_or(&[][..], Vec::as_slice);
+        if let Some(resolved) = table.points.get(place) {
+            name.clone_from(resolved);
+        }
+        followers
     }
 
     /// The id `~<kind><key>.<place>` names, when it is one.
@@ -3876,12 +3880,6 @@ impl<'a> ProbePlaces<'a> {
             table.points.get(place)
         } else {
             table.decisions.get(place)
-        }
-    }
-
-    fn point(&self, id: &mut String) {
-        if let Some(resolved) = self.id(id, 'p') {
-            id.clone_from(resolved);
         }
     }
 
