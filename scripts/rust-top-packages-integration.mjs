@@ -262,6 +262,51 @@ test('an awaited operand keeps the asserts signature', async () => {
   const typedCoverage = covered(typed);
   assert.ok(typedCoverage.covered > 0, typedCoverage.output);
 
+  // A type check before the tests that emits nothing because its project
+  // says so, in a config it extends, reads the files as their author wrote
+  // them: tsc counts the same lines as it does without Supercov.
+  const checked = resolve(temporary, 'checked');
+  mkdirSync(resolve(checked, 'node_modules/.bin'), { recursive: true });
+  symlinkSync(resolve(repository, 'node_modules/typescript'), resolve(checked, 'node_modules/typescript'));
+  symlinkSync(resolve(repository, 'node_modules/.bin/tsc'), resolve(checked, 'node_modules/.bin/tsc'));
+  write(checked, 'package.json', JSON.stringify({
+    name: 'checked-fixture',
+    private: true,
+    scripts: { test: 'tsc --extendedDiagnostics && node --test' },
+  }));
+  write(checked, 'tsconfig.base.json', `{
+  // Emit nothing: the tests run the sources.
+  "compilerOptions": { "noEmit": true, "allowJs": true, "checkJs": true, "strict": true, },
+}
+`);
+  write(checked, 'tsconfig.json', JSON.stringify({ extends: './tsconfig.base', include: ['lib/**/*.js'] }));
+  write(checked, 'lib/index.js', `'use strict';
+/** @param {string | undefined} value @param {string} fallback */
+exports.pick = function pick(value, fallback) {
+  if (value && value.length > 0) return value;
+  return fallback ?? 'none';
+};
+`);
+  write(checked, 'test/index.test.js', `'use strict';
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const { pick } = require('../lib/index.js');
+
+test('picks', () => {
+  assert.equal(pick('a', 'b'), 'a');
+  assert.equal(pick('', 'b'), 'b');
+});
+`);
+  const lineCounts = (output) => output.match(/Lines of (?:TypeScript|JavaScript):\s+\d+/g)?.join(', ');
+  const plainCheck = spawnSync(process.execPath, [resolve(checked, 'node_modules/typescript/bin/tsc'), '--extendedDiagnostics'], { cwd: checked, encoding: 'utf8' });
+  assert.equal(plainCheck.status, 0, plainCheck.stdout + plainCheck.stderr);
+  assert.ok(lineCounts(plainCheck.stdout), plainCheck.stdout);
+  const measuredCheck = supercov(checked, ['--', 'npm', 'test']);
+  assert.equal(measuredCheck.status, 0, measuredCheck.output);
+  assert.equal(lineCounts(measuredCheck.output), lineCounts(plainCheck.stdout), measuredCheck.output);
+  const checkedCoverage = covered(checked);
+  assert.ok(checkedCoverage.covered > 0, checkedCoverage.output);
+
   // c8 and nyc as stand-ins with the layout the preload patches: c8's report
   // takes checkCoverages from check-coverage.js when it loads and its
   // check-coverage command calls the export; nyc checks through
