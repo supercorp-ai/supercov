@@ -76,6 +76,11 @@ time.workspace = true
 # what makes the static musl builds possible.
 [target.'cfg(not(windows))'.dependencies]
 ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
+# Publication parses a run's records and builds its views and index from
+# millions of small allocations: on a large Vitest run the system allocator
+# was a quarter of Supercov's own CPU after the tests. Windows keeps its own,
+# for the same reason it keeps its own TLS: no C compiler in the build.
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3.4", default-features = false, features = ["native-tls", "json"] }

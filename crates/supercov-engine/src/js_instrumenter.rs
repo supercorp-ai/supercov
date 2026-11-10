@@ -186,7 +186,6 @@ impl ProbeTable {
 /// sets it up.
 fn adjacent_probe_merger(
     hit: &str,
-    file: &str,
     named: &PlacesNamed,
     repeated: &[usize],
 ) -> AdjacentProbeMerger {
@@ -202,25 +201,39 @@ fn adjacent_probe_merger(
     }
     AdjacentProbeMerger {
         hit: hit.to_owned(),
-        file: file.to_owned(),
         mergeable,
         follows: Vec::new(),
     }
 }
 
-/// By place, how many calls name each statement point, as `(file, place)`.
-/// Counted on the request-phase walk, after which nothing adds a probe,
-/// rather than on a walk of its own.
+/// By place, how many calls name each statement point: `(file, place)` to a
+/// runtime helper, or `place` to the file's own bound hit. Counted on the
+/// request-phase walk, after which nothing adds a probe, rather than on a
+/// walk of its own.
 struct PlacesNamed {
     file: String,
+    hit: String,
+    /// Helpers called with the file and a number that is no point: a
+    /// decision, a selection tree or a default's slot. Counted as naming the
+    /// point of that number, they kept a statement probe from merging with
+    /// the probe before it in every module with a decision.
+    others: Vec<String>,
     counts: Vec<u32>,
 }
 
 impl PlacesNamed {
     fn count(&mut self, call: &CallExpression<'_>) {
-        if let Some(count) =
-            place_argument(call, &self.file).and_then(|place| self.counts.get_mut(place))
+        if matches!(&call.callee, Expression::Identifier(callee) if self.others.iter().any(|other| callee.name == other.as_str()))
         {
+            return;
+        }
+        let bound = matches!(&call.callee, Expression::Identifier(callee) if callee.name == self.hit.as_str());
+        let place = if bound {
+            bound_place_argument(call)
+        } else {
+            place_argument(call, &self.file)
+        };
+        if let Some(count) = place.and_then(|place| self.counts.get_mut(place)) {
             *count += 1;
         }
     }
@@ -251,39 +264,50 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
-/// The place of a statement probe, `clock.fast && hits[place] === clock.epoch
-/// || hit(file, place);`.
-fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
+/// The place of a statement probe, `hit(place);` or, in a loop,
+/// `hits[place] === clock.e || hit(place);`.
+fn statement_probe_place(statement: &Statement<'_>, hit: &str) -> Option<usize> {
     let Statement::ExpressionStatement(statement) = statement else {
         return None;
     };
-    let Expression::LogicalExpression(logical) = &statement.expression else {
-        return None;
-    };
-    if logical.operator != LogicalOperator::Or {
-        return None;
-    }
-    let Expression::LogicalExpression(guard) = &logical.left else {
-        return None;
-    };
-    if guard.operator != LogicalOperator::And {
-        return None;
-    }
-    let Expression::CallExpression(call) = &logical.right else {
-        return None;
+    let call = match &statement.expression {
+        Expression::CallExpression(call) => call,
+        Expression::LogicalExpression(logical) => {
+            if logical.operator != LogicalOperator::Or {
+                return None;
+            }
+            let Expression::BinaryExpression(seen) = &logical.left else {
+                return None;
+            };
+            if seen.operator != BinaryOperator::StrictEquality {
+                return None;
+            }
+            let Expression::CallExpression(call) = &logical.right else {
+                return None;
+            };
+            call
+        }
+        _ => return None,
     };
     let Expression::Identifier(callee) = &call.callee else {
         return None;
     };
-    if callee.name != hit || call.arguments.len() != 2 {
+    if callee.name != hit {
         return None;
     }
-    place_argument(call, file)
+    bound_place_argument(call)
+}
+
+/// The place `hit(place)` names, its only argument.
+fn bound_place_argument(call: &CallExpression<'_>) -> Option<usize> {
+    let [Argument::NumericLiteral(number)] = call.arguments.as_slice() else {
+        return None;
+    };
+    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 struct AdjacentProbeMerger {
     hit: String,
-    file: String,
     /// By place: a statement point named once, by an id no other place has.
     mergeable: Vec<bool>,
     follows: Vec<[usize; 2]>,
@@ -296,7 +320,7 @@ impl AdjacentProbeMerger {
         let mut leader = None;
         let mut keep = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
-            let place = statement_probe_place(statement, &self.hit, &self.file);
+            let place = statement_probe_place(statement, &self.hit);
             match (leader, place) {
                 (Some(first), Some(place)) if mergeable(first) && mergeable(place) => {
                     if keep.is_empty() {
@@ -4156,7 +4180,6 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         source,
         file,
         decisions: Vec::new(),
-        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         value_decisions: HashMap::new(),
@@ -4406,7 +4429,6 @@ fn instrument_candidate_with_binding(
         source,
         file,
         decisions: Vec::new(),
-        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         value_decisions: HashMap::new(),
@@ -4478,12 +4500,28 @@ fn instrument_candidate_with_binding(
     // on the second, and a shared probe-file binding would credit one file's
     // statements to another. Names are made unique per file, and declared with
     // `var` so a script included twice is still legal, as it was before.
+    // A file that imports or exports is a module, never a classic script:
+    // its names are its own, and a suffix on each was a tenth of what an
+    // instrumented module held, for the browser, a bundler or Vitest to read.
+    let module_syntax = parsed.program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+        )
+    });
     let (namespace, runtime_declaration_kind) = if runtime_binding == RuntimeBinding::DirectGlobal {
         (
-            format!(
-                "_{}",
-                &stable_id("", file, "runtime", Span::default(), "")[..8]
-            ),
+            if module_syntax {
+                String::new()
+            } else {
+                format!(
+                    "_{}",
+                    &stable_id("", file, "runtime", Span::default(), "")[..8]
+                )
+            },
             VariableDeclarationKind::Var,
         )
     } else {
@@ -4503,6 +4541,8 @@ fn instrument_candidate_with_binding(
     let probe_file_v2 = names.allocate("__supercovFile");
     let probe_clock_v2 = names.allocate("__supercovClock");
     let probe_hits_v2 = names.allocate("__supercovHits");
+    // The file's own hit, bound to it: a statement probe calls it by place.
+    let probe_hit_at_v2 = names.allocate("__supercovHitAt");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -4636,20 +4676,17 @@ fn instrument_candidate_with_binding(
         .collect();
     let mut statement_transformer = StatementProbeTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         probe_clock_v2: probe_clock_v2.clone(),
         probe_hits_v2: probe_hits_v2.clone(),
         targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        loop_depth: 0,
     };
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
-        probe_clock_v2: probe_clock_v2.clone(),
-        probe_hits_v2: probe_hits_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         targets: function_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -4713,10 +4750,7 @@ fn instrument_candidate_with_binding(
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
-        probe_clock_v2: probe_clock_v2.clone(),
-        probe_hits_v2: probe_hits_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         typescript,
         try_targets,
         loop_targets,
@@ -4792,6 +4826,14 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         named: PlacesNamed {
             file: probe_file_v2.clone(),
+            hit: probe_hit_at_v2.clone(),
+            others: vec![
+                mcdc_end_v2.clone(),
+                select_end_v2.clone(),
+                select_next_v2.clone(),
+                default_selected_v2.clone(),
+                default_entered_v2.clone(),
+            ],
             counts: vec![0; point_analysis.points.len()],
         },
     };
@@ -4815,12 +4857,8 @@ fn instrument_candidate_with_binding(
         .chain(extra.ids.iter().cloned())
         .collect::<Vec<_>>();
     let point_aliases = repeated_places(&point_ids);
-    let merger = adjacent_probe_merger(
-        &coverage_hit_v2,
-        &probe_file_v2,
-        &request_transformer.named,
-        &point_aliases,
-    );
+    let merger =
+        adjacent_probe_merger(&probe_hit_at_v2, &request_transformer.named, &point_aliases);
     let decision_ids = collector
         .decisions
         .iter()
@@ -4833,7 +4871,6 @@ fn instrument_candidate_with_binding(
         "key": "",
         "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
         "selectionTrees": &logical_transformer.trees,
@@ -4893,6 +4930,7 @@ fn instrument_candidate_with_binding(
                 ),
                 probe_part(&probe_clock_v2, "clock"),
                 probe_part(&probe_hits_v2, "hitEpochs"),
+                probe_part(&probe_hit_at_v2, "hit"),
             ]),
             false,
         )),
@@ -5083,26 +5121,30 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `clock.fast && hits[index] === clock.epoch || hit(file, index);`, where
-/// `clock` and `hits` are the file's clock and hit epochs, bound once beside it.
+/// `hits[index] === clock.e || hit(index);`, the probe of a statement in a
+/// loop body, where `clock`, `hits` and `hit` are the file's clock, hit
+/// epochs and its own hit, bound once beside it: `hit(file, index)` named the
+/// file again in every probe line. Elsewhere a probe is `hit(index)` alone
+/// (`probe_v2_call`).
 ///
-/// A statement probe that already fired in this context costs three loads and
+/// A statement probe that already fired in this context costs two loads and
 /// a comparison, not a call (six, before the two were bound: each read them
-/// through the file, in every probe of every render of a page): in minimatch's backtracking matcher the call per
-/// statement was most of a tenfold slowdown, and its guard test failed. The
-/// clock is `fast` only while an async hook keeps its epoch current; without
-/// one the call decides, as before.
+/// through the file, in every probe of every render of a page): in
+/// minimatch's backtracking matcher the call per statement was most of a
+/// tenfold slowdown, and its guard test failed. It checked `clock.fast` first,
+/// a load and a branch in every probe; the runtime instead keeps the epoch
+/// NaN, which nothing equals, wherever the clock is not fast (no async hook
+/// keeps it current), so the call decides there, as before.
 fn probe_v2_hit<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
-    file: &str,
     clock: &str,
     hits: &str,
     index: usize,
 ) -> Statement<'a> {
     ast.statement_expression(
         Span::default(),
-        probe_v2_hit_expression(ast, hit, file, clock, hits, index),
+        probe_v2_hit_expression(ast, hit, clock, hits, index),
     )
 }
 
@@ -5111,13 +5153,11 @@ fn probe_v2_hit<'a>(
 fn probe_v2_hit_expression<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
-    file: &str,
     clock: &str,
     hits: &str,
     index: usize,
 ) -> Expression<'a> {
     let span = Span::default();
-    let file_expression = || ast.expression_identifier(span, ast.ident(file));
     let clock_expression = || ast.expression_identifier(span, ast.ident(clock));
     let member = |object: Expression<'a>, name: &str| -> Expression<'a> {
         Expression::from(ast.member_expression_static(
@@ -5129,7 +5169,6 @@ fn probe_v2_hit_expression<'a>(
     };
     let index_literal =
         || ast.expression_numeric_literal(span, index as f64, None, NumberBase::Decimal);
-    let fast = member(clock_expression(), "fast");
     let seen = ast.expression_binary(
         span,
         Expression::from(ast.member_expression_computed(
@@ -5139,23 +5178,37 @@ fn probe_v2_hit_expression<'a>(
             false,
         )),
         BinaryOperator::StrictEquality,
-        member(clock_expression(), "epoch"),
+        // The epoch, by a one-letter name: a minifier keeps property names.
+        member(clock_expression(), "e"),
     );
     let call = ast.expression_call(
         span,
         ast.expression_identifier(span, ast.ident(hit)),
         NONE,
-        ast.vec_from_array([
-            Argument::from(file_expression()),
-            Argument::from(index_literal()),
-        ]),
+        ast.vec1(Argument::from(index_literal())),
         false,
     );
-    ast.expression_logical(
+    ast.expression_logical(span, seen, LogicalOperator::Or, call)
+}
+
+/// `hit(index)`: the probe outside a loop. The file's bound hit checks the
+/// epoch itself and returns; a module is mostly code that runs a few times,
+/// and the inline check was most of what an instrumented line added for V8
+/// to parse and compile -- several times the call's length and tokens -- on
+/// every load of every module.
+fn probe_v2_call<'a>(ast: AstBuilder<'a>, hit: &str, index: usize) -> Expression<'a> {
+    let span = Span::default();
+    ast.expression_call(
         span,
-        ast.expression_logical(span, fast, LogicalOperator::And, seen),
-        LogicalOperator::Or,
-        call,
+        ast.expression_identifier(span, ast.ident(hit)),
+        NONE,
+        ast.vec1(Argument::from(ast.expression_numeric_literal(
+            span,
+            index as f64,
+            None,
+            NumberBase::Decimal,
+        ))),
+        false,
     )
 }
 
@@ -5240,23 +5293,38 @@ impl ExtraPoints {
 struct StatementProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
     probe_clock_v2: String,
     probe_hits_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// Loops around the statement in its own function: a statement in a loop
+    /// body repeats, and its probe keeps the inline check there.
+    loop_depth: usize,
 }
 
 impl<'a> StatementProbeTransformer<'a> {
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        probe_v2_hit(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_file_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            target.index,
-        )
+        if self.loop_depth > 0 {
+            probe_v2_hit(
+                self.ast,
+                &self.coverage_hit_v2,
+                &self.probe_clock_v2,
+                &self.probe_hits_v2,
+                target.index,
+            )
+        } else {
+            self.ast.statement_expression(
+                Span::default(),
+                probe_v2_call(self.ast, &self.coverage_hit_v2, target.index),
+            )
+        }
+    }
+
+    /// `visit` with the statements under it in (or out of) a loop.
+    fn within(&mut self, depth: usize, visit: impl FnOnce(&mut Self)) {
+        let outer = std::mem::replace(&mut self.loop_depth, depth);
+        visit(self);
+        self.loop_depth = outer;
     }
 
     fn take_statement_ids(&mut self, statement: &Statement<'a>) -> Vec<PointTarget> {
@@ -5322,7 +5390,7 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         {
             return;
         }
-        walk_mut::walk_function(self, function, flags);
+        self.within(0, |this| walk_mut::walk_function(this, function, flags));
     }
 
     fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
@@ -5332,7 +5400,9 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         {
             return;
         }
-        walk_mut::walk_arrow_function_expression(self, function);
+        self.within(0, |this| {
+            walk_mut::walk_arrow_function_expression(this, function);
+        });
     }
 
     // A with body is left uninstrumented: its object environment can
@@ -5348,28 +5418,43 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
     }
 
     fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_while_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_while_statement(this, statement);
+        });
     }
 
     fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_do_while_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_do_while_statement(this, statement);
+        });
     }
 
     fn visit_for_statement(&mut self, statement: &mut ForStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_statement(this, statement);
+        });
     }
 
     fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_in_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_in_statement(this, statement);
+        });
     }
 
     fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_of_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_of_statement(this, statement);
+        });
     }
 }
 
@@ -5440,22 +5525,16 @@ impl<'a> VisitMut<'a> for RenderedExpressionTransformer<'a> {
 struct FunctionProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
-    probe_clock_v2: String,
-    probe_hits_v2: String,
     targets: HashMap<SpanKey, PointTarget>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
 
 impl<'a> FunctionProbeTransformer<'a> {
+    /// A function's entry runs once per call, never in a loop of its own.
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        probe_v2_hit(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_file_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            target.index,
+        self.ast.statement_expression(
+            Span::default(),
+            probe_v2_call(self.ast, &self.coverage_hit_v2, target.index),
         )
     }
 }
@@ -6316,9 +6395,6 @@ enum Wrap<'a> {
 struct ExtendedTransformer<'a, 's> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
-    probe_clock_v2: String,
-    probe_hits_v2: String,
     typescript: bool,
     try_targets: HashMap<SpanKey, usize>,
     loop_targets: HashMap<SpanKey, usize>,
@@ -6367,15 +6443,9 @@ impl<'a> ExtendedTransformer<'a, '_> {
         *body = ast.statement_block(span, ast.vec_from_array([entry, original]));
     }
 
+    /// Behind a flag that records once, so never a repeat.
     fn hit(&self, index: usize) -> Expression<'a> {
-        probe_v2_hit_expression(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_file_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            index,
-        )
+        probe_v2_call(self.ast, &self.coverage_hit_v2, index)
     }
 
     /// `T = 0;`
@@ -8197,7 +8267,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         pending: Vec<(AppliedDecision, ValueShape)>,
     ) {
         let inline = pending.iter().any(|(applied, _)| applied.inline);
-        let result = self.scratch_for("_supercovMcdcResult", inline);
+        let result = self.scratch_for("_supercovR", inline);
         // The decision that left the tree pending, at least, each with a
         // condition at least.
         let mut steps = self
@@ -8459,7 +8529,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         plan: DecisionPlan,
     ) -> Option<AppliedDecision> {
         if plan.condition_count > 32 {
-            let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
+            let frame_name = self.scratch_for("_supercovF", plan.inline_frame);
             let mut next_index = 0;
             self.instrument_conditions_v1(test, &frame_name, &mut next_index);
             debug_assert_eq!(next_index, plan.condition_count);
@@ -8506,9 +8576,9 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
         let applied = AppliedDecision {
             index: plan.index,
-            frame: self.scratch_for("_supercovMcdcFrame", plan.inline_frame),
+            frame: self.scratch_for("_supercovF", plan.inline_frame),
             values: (0..plan.condition_count)
-                .map(|_| self.scratch_for("_supercovMcdcValue", plan.inline_frame))
+                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
                 .collect(),
             inline: plan.inline_frame,
         };
@@ -8762,7 +8832,6 @@ struct DecisionCollector<'s> {
     source: &'s str,
     file: &'s str,
     decisions: Vec<CandidateDecision>,
-    decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     /// The expressions recorded as decisions where they are used as values,
@@ -8809,13 +8878,6 @@ impl DecisionCollector<'_> {
                 .collect(),
             kind: kind.to_string(),
         });
-        self.decision_vector_counts.push(
-            if condition_spans.len() <= 6 && decision_conditions_are_transparent(test) {
-                reachable_vector_count(test, &condition_spans)
-            } else {
-                0
-            },
-        );
     }
 }
 
@@ -8929,116 +8991,6 @@ fn syntactic_boolean_outcome(expression: &Expression<'_>) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-#[derive(Default)]
-struct CoverageSurfaceScanner {
-    found: bool,
-}
-
-impl<'a> Visit<'a> for CoverageSurfaceScanner {
-    fn visit_logical_expression(&mut self, _expression: &LogicalExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_conditional_expression(&mut self, _expression: &ConditionalExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_chain_expression(&mut self, _expression: &ChainExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {
-        self.found = true;
-    }
-
-    fn visit_arrow_function_expression(&mut self, _function: &ArrowFunctionExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_class(&mut self, _class: &Class<'a>) {
-        self.found = true;
-    }
-
-    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        if expression.operator.is_logical() {
-            self.found = true;
-        } else {
-            walk::walk_assignment_expression(self, expression);
-        }
-    }
-}
-
-fn decision_conditions_are_transparent(expression: &Expression<'_>) -> bool {
-    fn visit_condition(expression: &Expression<'_>) -> bool {
-        let mut scanner = CoverageSurfaceScanner::default();
-        scanner.visit_expression(expression);
-        !scanner.found
-    }
-    match transparent_expression(expression) {
-        Expression::LogicalExpression(logical)
-            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
-        {
-            decision_conditions_are_transparent(&logical.left)
-                && decision_conditions_are_transparent(&logical.right)
-        }
-        Expression::UnaryExpression(unary)
-            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
-        {
-            decision_conditions_are_transparent(&unary.argument)
-        }
-        condition => visit_condition(condition),
-    }
-}
-
-fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> usize {
-    fn evaluate(
-        expression: &Expression<'_>,
-        assignment: usize,
-        encoded: &mut usize,
-        indices: &HashMap<SpanKey, usize>,
-    ) -> bool {
-        match transparent_expression(expression) {
-            // Only a decision whose conditions are transparent is evaluated,
-            // and a `??` is not: every logical expression here is `&&` or
-            // `||`.
-            Expression::LogicalExpression(logical) => {
-                let left = evaluate(&logical.left, assignment, encoded, indices);
-                if logical.operator == LogicalOperator::And {
-                    left && evaluate(&logical.right, assignment, encoded, indices)
-                } else {
-                    left || evaluate(&logical.right, assignment, encoded, indices)
-                }
-            }
-            Expression::UnaryExpression(unary)
-                if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
-            {
-                !evaluate(&unary.argument, assignment, encoded, indices)
-            }
-            condition => {
-                let index = indices
-                    .get(&span_key(condition.span()))
-                    .expect("decision condition index must remain stable");
-                let value = assignment & (1 << index) != 0;
-                *encoded += (if value { 2 } else { 1 }) * 3_usize.pow(*index as u32);
-                value
-            }
-        }
-    }
-
-    let indices = conditions
-        .iter()
-        .enumerate()
-        .map(|(index, span)| (span_key(*span), index))
-        .collect::<HashMap<_, _>>();
-    let mut vectors = HashSet::new();
-    (0..(1_usize << conditions.len())).for_each(|assignment| {
-        let mut encoded = 0;
-        let outcome = evaluate(expression, assignment, &mut encoded, &indices);
-        vectors.insert(encoded * 2 + usize::from(outcome));
-    });
-    vectors.len()
 }
 
 fn collect_decision_logical_nodes(expression: &Expression<'_>, nodes: &mut HashSet<SpanKey>) {
@@ -11099,6 +11051,32 @@ mod tests {
     }
 
     #[test]
+    fn a_module_names_its_helpers_plainly_and_a_script_per_file() {
+        // A file that imports or exports is a module, with names of its own;
+        // only a classic script, which shares the page's, needs them unique.
+        let module = instrument_direct_candidate(
+            "export function f(x) { if (x) { return 1; } return 2; }",
+            "public/m.js",
+        )
+        .unwrap();
+        assert!(
+            module.code.contains("var __supercovMcdcBegin = "),
+            "{}",
+            module.code
+        );
+        let script = instrument_direct_candidate(
+            "function f(x) { if (x) { return 1; } return 2; }",
+            "public/s.js",
+        )
+        .unwrap();
+        assert!(
+            script.code.contains("var __supercovMcdcBegin_"),
+            "{}",
+            script.code
+        );
+    }
+
+    #[test]
     fn classic_scripts_share_application_globals_but_not_probe_bindings() {
         // TodoMVC's ES5 app loads several classic scripts into one document.
         // They share the global lexical scope, so a second
@@ -11270,6 +11248,66 @@ export const r = v && w && q;
         assert_ne!(other.probe_table.unwrap().key, table.key);
     }
 
+    /// A decision's index, a selection tree's or a default's slot is no
+    /// point: a module with a decision merges its other functions' probes as
+    /// one without would.
+    #[test]
+    fn a_decision_does_not_keep_another_function_from_merging() {
+        let plain = "export function pair(p) {\n  return p[0];\n}\n";
+        let decided = format!(
+            "{plain}export function f(x) {{\n  return typeof x === \"object\" ? 1 : 2;\n}}\n"
+        );
+        for source in [plain.to_owned(), decided] {
+            let output = instrument_candidate(&source, "src/pair.js").unwrap();
+            let pair = output
+                .code
+                .split("export function pair")
+                .nth(1)
+                .and_then(|rest| rest.split("\n}").next())
+                .unwrap();
+            assert_eq!(
+                pair.lines()
+                    .filter(|line| line.trim().starts_with("__supercovHitAt"))
+                    .count(),
+                1,
+                "{}",
+                output.code
+            );
+            assert_eq!(
+                output.probe_table.as_ref().unwrap().follows.len(),
+                if source.contains("typeof") { 2 } else { 1 },
+                "{}",
+                output.code
+            );
+        }
+    }
+
+    /// A statement in a loop body repeats, and its probe keeps the inline
+    /// check; outside a loop, and in a function a loop calls, a probe is the
+    /// call alone, which checks for itself.
+    #[test]
+    fn a_probe_in_a_loop_keeps_its_check_and_one_outside_is_a_call() {
+        let source = "export function f(items) {\n  let total = 0;\n  for (const item of items) {\n    total += item;\n    items.forEach((x) => {\n      total += x;\n    });\n  }\n  while (total > 10) total -= 10;\n  return total;\n}\n";
+        let output = instrument_candidate(source, "src/f.js").unwrap();
+        let lines = output.code.lines().map(str::trim).collect::<Vec<_>>();
+        let before = |statement: &str| {
+            let at = lines
+                .iter()
+                .position(|line| *line == statement)
+                .unwrap_or_else(|| panic!("{statement}\n{}", output.code));
+            lines[at - 1]
+        };
+        let call = |line: &str| {
+            line.starts_with("__supercovHitAt") && line.ends_with(");") && !line.contains(" || ")
+        };
+        let inline = |line: &str| line.contains(".e || __supercovHitAt");
+        assert!(call(before("let total = 0;")), "{}", output.code);
+        assert!(inline(before("total += item;")), "{}", output.code);
+        assert!(call(before("total += x;")), "{}", output.code);
+        assert!(inline(before("total -= 10;")), "{}", output.code);
+        assert!(call(before("return total;")), "{}", output.code);
+    }
+
     /// A function's entry and its first statement are one probe, which the
     /// table says is both; a statement after a call keeps its own, since the
     /// call can throw before it.
@@ -11284,15 +11322,24 @@ export const r = v && w && q;
         let point = |id: &str| output.points.iter().find(|point| point.id == id).unwrap();
         assert_eq!(point(id(leader)).kind, "function", "{:?}", table);
         assert_eq!(point(id(place)).kind, "statement", "{:?}", table);
-        let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
+        // Outside a loop a probe is a call of the file's own hit by place,
+        // bound once beside it.
+        assert!(output.code.contains(".hit;"), "{}", output.code);
+        let probes = output
+            .code
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("__supercovHitAt") && line.ends_with(");"))
+            .collect::<Vec<_>>();
+        let probed = |place: usize| {
+            probes
+                .iter()
+                .any(|line| line.ends_with(&format!("({place});")))
+        };
         assert!(probed(leader) && !probed(place), "{}", output.code);
         // The statement after the call keeps its probe.
-        assert_eq!(
-            output.code.matches(".fast &&").count(),
-            2,
-            "{}",
-            output.code
-        );
+        assert_eq!(probes.len(), 2, "{}", output.code);
+        assert!(!output.code.contains(".e || "), "{}", output.code);
         // Another table than a module with every probe would name.
         assert_eq!(
             table.key,
@@ -11426,7 +11473,7 @@ export const r = v && w && q;
         for (source, export) in [
             (
                 "function handleRequest(r) { return r; }\nexport default handleRequest;\n",
-                "export default __supercovWithRequestPhase13(handleRequest);",
+                "export default __supercovWithRequestPhase14(handleRequest);",
             ),
             (
                 "export default class Entry {}\n",
@@ -13187,19 +13234,26 @@ export function shapes(n: number): unknown {
         let mut names: Vec<&str> = Vec::new();
         let mut shaped = String::new();
         let mut rest = code.as_str();
-        while let Some(at) = rest.find("_supercovMcdc") {
+        while let Some(at) = rest.find("_supercov") {
             shaped.push_str(&rest[..at]);
             let tail = &rest[at..];
-            // The runtime's own helpers are bound to `__supercovMcdc…`.
-            if shaped.ends_with('_') {
-                shaped.push_str("_supercovMcdc");
-                rest = &tail["_supercovMcdc".len()..];
-                continue;
-            }
             let length = tail
                 .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
                 .unwrap_or(tail.len());
             let name = &tail[..length];
+            // The decisions' temporaries are `_supercovF…`, `_supercovV…` and
+            // `_supercovR…`; the runtime's own helpers are bound to
+            // `__supercov…`, and other temporaries keep their names.
+            let temporary = !shaped.ends_with('_')
+                && matches!(
+                    name.as_bytes().get("_supercov".len()..="_supercovF".len()),
+                    Some([b'F' | b'V' | b'R', b'0'..=b'9'])
+                );
+            if !temporary {
+                shaped.push_str(name);
+                rest = &tail[length..];
+                continue;
+            }
             let index = names
                 .iter()
                 .position(|known| *known == name)
@@ -13355,8 +13409,8 @@ export function shapes(n: number): unknown {
         assert_eq!(output.supported_surface, "complete-js-instrumenter-v1");
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
-        assert!(output.code.contains("_supercovMcdcFrame"));
-        assert!(output.code.contains("_supercovMcdcValue"));
+        assert!(output.code.contains("_supercovF"));
+        assert!(output.code.contains("_supercovV"));
         assert_eq!(output.decisions.len(), 1);
         assert!(output.points.iter().any(|point| point.kind == "statement"));
         assert!(output.points.iter().any(|point| point.kind == "function"));
@@ -13485,7 +13539,7 @@ export function shapes(n: number): unknown {
         for (text, first) in &lines {
             // A probe maps to nothing: a coverage tool reading the copy
             // through its map counts no branch of the user's for its `||`.
-            if text.contains(&format!("{}.fast", runtime.probe_clock_v2))
+            if text.contains(&format!("{}.e ", runtime.probe_clock_v2))
                 && let Some(first) = first
             {
                 assert_eq!(*first, None, "{text}");
@@ -13813,8 +13867,8 @@ export function shapes(n: number): unknown {
             // operand is a decision too: its conditions are recorded in the
             // leaves and its outcome after the tree, from their values with
             // `&`, so the tree stays one tree and narrows as written.
-            "(s1 = 0, _supercovMcdcFrame27 = 1, _supercovMcdcValue29 = 0, _supercovMcdcValue28 = total > 0) && (s1 = 1, _supercovMcdcFrame27 += 3, _supercovMcdcValue29 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
-            "!!(+!!_supercovMcdcValue28 & +!!_supercovMcdcValue29)), _supercovMcdcResult30;",
+            "(s1 = 0, _supercovF28 = 1, _supercovV30 = 0, _supercovV29 = total > 0) && (s1 = 1, _supercovF28 += 3, _supercovV30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            "!!(+!!_supercovV29 & +!!_supercovV30)), _supercovR31;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
@@ -13873,11 +13927,11 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn allocates_runtime_and_scratch_names_away_from_user_bindings() {
-        let source = "const __supercovMcdcEndV2 = 1, _supercovMcdcFrame1 = 2;\nif (a && b) work();";
+        let source = "const __supercovMcdcEndV2 = 1, _supercovF1 = 2;\nif (a && b) work();";
         let output = instrument_candidate(source, "app/collisions.js").unwrap();
         let runtime = output.runtime.expect("candidate runtime binding");
         assert_ne!(runtime.mcdc_end_v2, "__supercovMcdcEndV2");
-        assert!(!output.code.contains("let _supercovMcdcFrame1,"));
+        assert!(!output.code.contains("let _supercovF1,"));
     }
 
     #[test]

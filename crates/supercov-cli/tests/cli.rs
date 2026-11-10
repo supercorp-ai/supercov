@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1104")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1168")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1104"),
+        seen.contains("test fault at fs (javascript_run.rs:1168"),
         "{seen}"
     );
 }
@@ -5180,8 +5180,8 @@ fn bun_sources_bootstrap_when_an_unused_package_script_names_a_browser_runner() 
             .succeeds();
         let source = kept_workspace_source(&project, "src/core/runtime/clock.ts");
         assert!(
-            source.contains("__supercovMcdcBegin_c101cf5a"),
-            "the fixture should reproduce the source path and helper name shown in #176"
+            source.contains("var __supercovMcdcBegin"),
+            "the fixture should reproduce the source path and helper shown in #176"
         );
         assert!(
             source.contains("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"),
@@ -15478,7 +15478,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2503 => main.rs:2503",
+            "fs.canonicalize#main.rs:2508 => main.rs:2508",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
         ],
@@ -17044,18 +17044,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1338",
-        "fs.create_dir_all#javascript_run.rs:686",
-        "fs.write#javascript_run.rs:981",
+        "fs.create_dir_all#javascript_run.rs:739",
+        "fs.write#javascript_run.rs:1045",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1052",
-        "fs.create_dir_all#javascript_run.rs:1223",
+        "fs.create_dir_all#javascript_run.rs:1116",
+        "fs.create_dir_all#javascript_run.rs:1287",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1493",
-        "fs.create_dir_all#javascript_run.rs:1495",
+        "fs.create_dir_all#javascript_run.rs:1562",
+        "fs.create_dir_all#javascript_run.rs:1564",
         "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1595",
-        "fs.create_dir_all#javascript_run.rs:1597",
+        "fs.create_dir_all#javascript_run.rs:1664",
+        "fs.create_dir_all#javascript_run.rs:1666",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17360,7 +17360,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1313,fs.read_from#evidence_archive.rs:675",
+            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:675",
         )],
     );
     assert!(

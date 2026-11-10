@@ -262,6 +262,59 @@ test('an awaited operand keeps the asserts signature', async () => {
   const typedCoverage = covered(typed);
   assert.ok(typedCoverage.covered > 0, typedCoverage.output);
 
+  // A type check before the tests that emits nothing because its project
+  // says so, in a config it extends, reads the files as their author wrote
+  // them; one whose project emits reads the copies it compiles. The stand-in
+  // sits where tsc does (TypeScript 7's is native and reads no file through
+  // Node) and says which it read.
+  const checked = resolve(temporary, 'checked');
+  write(checked, 'package.json', JSON.stringify({
+    name: 'checked-fixture',
+    private: true,
+    scripts: { test: 'tsc --extendedDiagnostics && tsc -p tsconfig.emit.json && node --test' },
+  }));
+  write(checked, 'node_modules/typescript/package.json', JSON.stringify({ name: 'typescript', version: '5.9.3', bin: { tsc: 'bin/tsc' } }));
+  write(checked, 'node_modules/typescript/bin/tsc', `#!/usr/bin/env node
+const fs = require('node:fs');
+const text = fs.readFileSync('lib/index.js', 'utf8');
+const read = /__supercov/.test(text) ? 'instrumented' : 'authored';
+process.stdout.write('tsc ' + process.argv.slice(2).join(' ') + ' read ' + read + ' ' + text.split('\\n').length + ' lines\\n');
+`);
+  chmodSync(resolve(checked, 'node_modules/typescript/bin/tsc'), 0o755);
+  mkdirSync(resolve(checked, 'node_modules/.bin'), { recursive: true });
+  symlinkSync('../typescript/bin/tsc', resolve(checked, 'node_modules/.bin/tsc'));
+  write(checked, 'tsconfig.base.json', `{
+  // Emit nothing: the tests run the sources.
+  "compilerOptions": { "noEmit": true, "allowJs": true, "checkJs": true, "strict": true, },
+}
+`);
+  write(checked, 'tsconfig.json', JSON.stringify({ extends: './tsconfig.base', include: ['lib/**/*.js'] }));
+  write(checked, 'tsconfig.emit.json', JSON.stringify({ extends: './tsconfig.json', compilerOptions: { noEmit: false, outDir: 'out' } }));
+  write(checked, '.gitignore', 'out/\n');
+  write(checked, 'lib/index.js', `'use strict';
+/** @param {string | undefined} value @param {string} fallback */
+exports.pick = function pick(value, fallback) {
+  if (value && value.length > 0) return value;
+  return fallback ?? 'none';
+};
+`);
+  write(checked, 'test/index.test.js', `'use strict';
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const { pick } = require('../lib/index.js');
+
+test('picks', () => {
+  assert.equal(pick('a', 'b'), 'a');
+  assert.equal(pick('', 'b'), 'b');
+});
+`);
+  const measuredCheck = supercov(checked, ['--', 'npm', 'test']);
+  assert.equal(measuredCheck.status, 0, measuredCheck.output);
+  assert.match(measuredCheck.output, /tsc --extendedDiagnostics read authored 7 lines/, measuredCheck.output);
+  assert.match(measuredCheck.output, /tsc -p tsconfig.emit.json read instrumented/, measuredCheck.output);
+  const checkedCoverage = covered(checked);
+  assert.ok(checkedCoverage.covered > 0, checkedCoverage.output);
+
   // c8 and nyc as stand-ins with the layout the preload patches: c8's report
   // takes checkCoverages from check-coverage.js when it loads and its
   // check-coverage command calls the export; nyc checks through

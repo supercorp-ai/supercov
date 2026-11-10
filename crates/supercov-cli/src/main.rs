@@ -243,6 +243,11 @@ fn hydrate_line_source_from_working_tree(
     );
 }
 
+// Results do not depend on the allocator; only how long making them takes.
+#[cfg(not(windows))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     // nextest's target runner for the owned frontend: test arguments pass

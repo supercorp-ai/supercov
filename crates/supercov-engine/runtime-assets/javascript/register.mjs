@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 import { adaptRunnerEntry, noteSkippedCoverageThresholds } from "./runnerEntry.mjs";
-import { writePlaywrightCacheWhole } from "./atomic.mjs";
+import { enableNodeCompileCache, writePlaywrightCacheWhole } from "./atomic.mjs";
 // Supercov runs Node with --enable-source-maps so a stack through an
 // instrumented copy names the project's file. The flag also reads the maps
 // every package ships, which a plain run never does: a third of the CPU a
@@ -23,7 +23,13 @@ import { writePlaywrightCacheWhole } from "./atomic.mjs";
 if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === "--enable-source-maps").length === 1 &&
     !process.execArgv.includes("--enable-source-maps") &&
     typeof Module.setSourceMapsSupport === "function")
-    Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
+    // Vitest maps every stack it prints through Vite's own maps, which
+    // carry the copies' maps into them; Node's reading them again, in every
+    // worker, was work no printed frame used.
+    Module.setSourceMapsSupport(!/[\\/]node_modules[\\/](?:\.bin[\\/]vitest$|vitest[\\/])/.test(process.argv[1] ?? ""), { nodeModules: false, generatedCode: true });
+// Before anything else loads: every module after this compiles from the
+// code the run's earlier processes left (atomic.mjs says why).
+enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
 writePlaywrightCacheWhole();
@@ -215,6 +221,133 @@ if (generatedPlaywrightConfig && isPlaywrightEntrypoint) {
     // entry as workers, so only those load the wrapper.
     process.env.SUPERCOV_PLAYWRIGHT_WORKER = "0";
 }
+// A type check with no `--noEmit` of its own is one when its project says so:
+// a suite's `tsc` before its tests, `noEmit` in a tsconfig it extends. It read
+// the rewritten copies, and their probes, assignments inside conditions, cost
+// TypeScript's flow analysis half again its time. The project is read as tsc
+// reads it -- the one `-p` names, or the nearest tsconfig.json above the
+// working directory, through each config it extends -- and anything else on
+// the command line, a config that does not parse, or a base not found leaves
+// the copies to it: a compile that emits must emit what runs measured.
+function configEmitsNothing(args) {
+    let project;
+    for (let index = 0; index < args.length; index += 1) {
+        const argument = args[index];
+        if (/^(?:-p|--project)$/i.test(argument) && project === undefined && index + 1 < args.length) {
+            project = args[index + 1];
+            index += 1;
+        }
+        else if (!/^--(?:extendedDiagnostics|diagnostics|listFiles|pretty|incremental|skipLibCheck)$/i.test(argument))
+            return false;
+    }
+    let config;
+    if (project === undefined) {
+        for (let directory = process.cwd();; directory = dirname(directory)) {
+            if (isFile(resolve(directory, "tsconfig.json"))) {
+                config = resolve(directory, "tsconfig.json");
+                break;
+            }
+            if (dirname(directory) === directory)
+                return false;
+        }
+    }
+    else {
+        const named = resolve(project);
+        config = isFile(named) ? named : resolve(named, "tsconfig.json");
+    }
+    try {
+        return noEmitOf(config, 0) === true;
+    }
+    catch {
+        return false;
+    }
+}
+// `noEmit` as `file` sets it, its own or its last base's: true, false, or
+// undefined where none says. Throws where tsc would read it differently.
+function noEmitOf(file, depth) {
+    if (depth > 16)
+        throw new Error("extends too deep");
+    const config = parseConfigText(readFileSync(file, "utf8"));
+    if (config === null || typeof config !== "object" || Array.isArray(config))
+        throw new Error("not a config");
+    const own = config.compilerOptions?.noEmit;
+    if (own !== undefined) {
+        if (typeof own !== "boolean")
+            throw new Error("noEmit not a boolean");
+        return own;
+    }
+    const bases = config.extends === undefined ? [] : Array.isArray(config.extends) ? config.extends : [config.extends];
+    let inherited;
+    for (const base of bases) {
+        if (typeof base !== "string")
+            throw new Error("extends not a path");
+        const value = noEmitOf(baseConfig(base, dirname(file)), depth + 1);
+        if (value !== undefined)
+            inherited = value;
+    }
+    return inherited;
+}
+function isFile(file) {
+    try {
+        return fs.statSync(file).isFile();
+    }
+    catch {
+        return false;
+    }
+}
+function baseConfig(base, directory) {
+    if (/^\.\.?(?:[\\/]|$)/.test(base) || isAbsolute(base)) {
+        const named = resolve(directory, base);
+        for (const candidate of [named, `${named}.json`])
+            if (isFile(candidate))
+                return candidate;
+        throw new Error("base not found");
+    }
+    const require = Module.createRequire(resolve(directory, "tsconfig.json"));
+    for (const candidate of [base, `${base}/tsconfig.json`, `${base}.json`]) {
+        try {
+            return require.resolve(candidate);
+        }
+        catch { }
+    }
+    throw new Error("base not found");
+}
+// A tsconfig is JSON with comments and trailing commas.
+function parseConfigText(text) {
+    let plain = "";
+    for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (character === "\"") {
+            let end = index + 1;
+            while (end < text.length && text[end] !== "\"")
+                end += text[end] === "\\" ? 2 : 1;
+            plain += text.slice(index, end + 1);
+            index = end;
+        }
+        else if (character === "/" && text[index + 1] === "/") {
+            while (index < text.length && text[index] !== "\n")
+                index += 1;
+            plain += "\n";
+        }
+        else if (character === "/" && text[index + 1] === "*") {
+            const end = text.indexOf("*/", index + 2);
+            if (end < 0)
+                throw new Error("unterminated comment");
+            plain += " ";
+            index = end + 1;
+        }
+        else if (character === ",") {
+            let next = index + 1;
+            while (next < text.length && /\s/.test(text[next]))
+                next += 1;
+            if (text[next] !== "}" && text[next] !== "]")
+                plain += character;
+        }
+        else
+            plain += character;
+    }
+    return JSON.parse(plain.replace(/^\uFEFF/, ""));
+}
 // Linters, formatters and type checks read the project to judge it, not to
 // run it. The workspace holds rewritten copies, and ESLint failed semver,
 // js-yaml and picomatch on code nobody wrote ("Strings must use singlequote",
@@ -224,7 +357,7 @@ if (generatedPlaywrightConfig && isPlaywrightEntrypoint) {
 const analysisTools = "eslint|eslint_d|prettier|standard|semistandard|ts-standard|xo|jshint|tslint";
 const isAnalysisEntrypoint = new RegExp(`/node_modules/(?:\\.bin/(?:${analysisTools})$|(?:${analysisTools})/)`).test(entrypoint) ||
     (/\/node_modules\/(?:\.bin\/(?:tsc|vue-tsc)$|(?:typescript|vue-tsc)\/bin\/)/.test(entrypoint) &&
-        process.argv.includes("--noEmit"));
+        (process.argv.includes("--noEmit") || configEmitsNothing(process.argv.slice(2))));
 if (isAnalysisEntrypoint)
     installAuthoredSourceView();
 // `next build` type-checks in a worker of its own instead of running tsc. A

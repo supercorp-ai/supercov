@@ -1247,3 +1247,259 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   // whole point: the enclosing JSX statement alone used to imply both.
   assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
 });
+
+// A statement probe is `hits[place] === clock.e || hit(file, place)`: it
+// no longer checks `clock.fast` first. Where no async hook keeps the epoch
+// current (no `createHook`), the clock is not fast, and its epoch stays NaN
+// wherever instrumented code can run -- after registration, after a reset,
+// inside a request's carrier -- so every probe still takes the slow path and
+// works out its own context, and each request's scope still gets its hit.
+test("without an async hook a probe's epoch is NaN, so each request works out its own context", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const real = process.getBuiltinModule;
+    process.getBuiltinModule = (name) => name === "node:async_hooks"
+      ? { AsyncLocalStorage: real("node:async_hooks").AsyncLocalStorage }
+      : real(name);
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const file = runtime.registerProbeV2({
+      file: "src/served.js", key: "served", points: 1, decisionWidths: [], pointAliases: [], decisionAliases: [],
+    });
+    const seen = [];
+    const look = (where) => seen.push([where, file.clock.fast, Number.isNaN(file.clock.e)]);
+    look("registered");
+    runtime.resetCoverage("no-hook");
+    look("reset");
+    const probe = () => file.hitEpochs[0] === file.clock.e || runtime.coverageHitV2(file, 0);
+    const scope = (testId) => ({ version: 1, runId: "run", workerId: "w", testId, testKey: testId, retry: 0, attemptId: testId + "-0" });
+    let slowPaths = 0;
+    const counted = () => { slowPaths += 1; };
+    for (const testId of ["first", "second"]) {
+      runtime.withCoverageCarrier({ scope: scope(testId), phaseId: testId + "-phase" }, () => {
+        look("carrier " + testId);
+        if (!(file.hitEpochs[0] === file.clock.e)) counted();
+        probe();
+        if (!(file.hitEpochs[0] === file.clock.e)) counted();
+        probe();
+      });
+    }
+    look("after");
+    console.log(JSON.stringify({ seen, slowPaths, hits: runtime.coverageSnapshot().hits.length }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { seen, slowPaths, hits } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  for (const [where, fast, isNaN] of seen) {
+    assert.equal(fast, false, where);
+    assert.equal(isNaN, true, where);
+  }
+  // Every probe went to the runtime, as with the `fast` check: none was
+  // taken for already seen in another request's context.
+  assert.equal(slowPaths, 4);
+  assert.equal(hits, 1);
+});
+
+// Vitest evaluates a module again for every test file, and each evaluation
+// registers its file anew. The runtime keeps no evaluation alive once no
+// module holds its file, and the epochs' wrap still clears every live file.
+test("a registered file no module holds is collected, and the epochs' wrap clears the live ones", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const definition = (key) => ({ file: "src/" + key + ".js", key, points: 2, decisionWidths: [2], pointAliases: [], decisionAliases: [] });
+    const collected = new Set();
+    const registry = new FinalizationRegistry((key) => collected.add(key));
+    const evaluations = 5000;
+    for (let index = 0; index < evaluations; index += 1)
+      registry.register(runtime.registerProbeV2(definition("dropped")), index);
+    const live = runtime.registerProbeV2(definition("live"));
+    runtime.resetCoverage("wrap");
+    live.hitEpochs[0] === live.clock.e || live.hit(0);
+    const before = live.hitEpochs[0];
+    for (let round = 0; round < 20 && collected.size < evaluations; round += 1) {
+      globalThis.gc();
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    const state = globalThis.__SUPERCOV_MCDC_STATES__.values().next().value;
+    // The next registration sweeps.
+    state.probeV2FilesSweepAt = 0;
+    const later = runtime.registerProbeV2(definition("later"));
+    const held = [...state.probeV2Files].map((entry) => entry.deref()?.key);
+    state.probeV2NextEpoch = 4294967294;
+    runtime.resetCoverage("past the wrap");
+    console.log(JSON.stringify({ collected: collected.size, held, before, after: live.hitEpochs[0], epoch: live.clock.e, later: later.key }));
+  `;
+  const ran = spawnSync(process.execPath, ["--expose-gc", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 30000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { collected, held, before, after, epoch } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  assert.equal(collected, 5000);
+  // A sweep keeps the files modules still hold, and no other.
+  assert.deepEqual(held.sort(), ["later", "live"]);
+  assert.ok(before > 0);
+  // The wrap cleared the live file's epochs, and the next context is the
+  // first epoch again.
+  assert.equal(after, 0);
+  assert.equal(epoch, 1);
+});
+
+// Vitest compiles every instrumented module again in each test file's
+// worker. The first worker leaves what V8 compiled, the next starts from it
+// and gets the same results; text that is not instrumented, and the
+// filename-only form, go to vm as they came.
+test("a worker compiles instrumented modules from the code the worker before it left", () => {
+  const cacheUrl = new URL("../../runtime/javascript/atomic.mjs", import.meta.url).href;
+  const directory = mkdtempSync(resolve(tmpdir(), "supercov-compile-cache-"));
+  const script = `
+    const vm = (await import("node:vm")).default;
+    const { readdirSync } = await import("node:fs");
+    const { installCompileCache, saveCompileCache } = await import(${JSON.stringify(cacheUrl)});
+    installCompileCache(${JSON.stringify(directory)});
+    installCompileCache(${JSON.stringify(directory)});
+    const state = vm.runInThisContext[Symbol.for("supercov.compileCache")];
+    const module = "(function () { const __supercovHits = new Uint32Array(2); return function sum(n) { let t = 0; for (let i = 0; i < n; i += 1) t += i; __supercovHits[0] += 1; return [t, __supercovHits[0]]; }; })";
+    const sum = vm.runInThisContext(module, { filename: "/project/src/sum.ts", lineOffset: 0, columnOffset: -12 })();
+    const results = [sum(10), sum(100)];
+    const compiled = state.unsaved.length;
+    const plain = vm.runInThisContext("6 * 7", { filename: "plain.js" });
+    const named = vm.runInThisContext("'__supercov' + 1", "named.js");
+    const unsavedAfterPlain = state.unsaved.length;
+    saveCompileCache();
+    let thrown;
+    try { vm.runInThisContext("__supercovMissing()", { filename: "/project/src/throws.ts" }); } catch (error) { thrown = error.constructor.name; }
+    console.log(JSON.stringify({ results, compiled, plain, named, unsavedAfterPlain, files: readdirSync(${JSON.stringify(directory)}).length, thrown }));
+  `;
+  const run = () => {
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    return JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  };
+  try {
+    const first = run();
+    const second = run();
+    for (const each of [first, second]) {
+      assert.deepEqual(each.results, [[45, 1], [4950, 2]]);
+      assert.equal(each.plain, 42);
+      assert.equal(each.named, "__supercov1");
+      // Only the instrumented module is kept: one file.
+      assert.equal(each.files, 1);
+      assert.equal(each.unsavedAfterPlain, each.compiled);
+      assert.equal(each.thrown, "ReferenceError");
+    }
+    // The first compiled it; the second started from what the first left.
+    assert.equal(first.compiled, 1);
+    assert.equal(second.compiled, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// Node's compile cache goes where the run keeps compiled code, and a
+// command's own NODE_COMPILE_CACHE is left alone.
+test("a process compiles into the run's cache unless the command named its own", () => {
+  const atomicUrl = new URL("../../runtime/javascript/atomic.mjs", import.meta.url).href;
+  const directory = mkdtempSync(resolve(tmpdir(), "supercov-node-cache-"));
+  const script = `
+    const { enableNodeCompileCache } = await import(${JSON.stringify(atomicUrl)});
+    const module = await import("node:module");
+    enableNodeCompileCache(process.env.CACHE);
+    console.log(JSON.stringify({ dir: module.getCompileCacheDir?.() ?? null, supported: typeof module.enableCompileCache === "function" }));
+  `;
+  const run = (env) => {
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000, env: { ...process.env, NODE_COMPILE_CACHE: undefined, ...env } });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    return JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  };
+  try {
+    const ours = run({ CACHE: directory });
+    if (ours.supported)
+      assert.ok(ours.dir.startsWith(resolve(directory, "node")), ours.dir);
+    const theirs = resolve(directory, "theirs");
+    const kept = run({ CACHE: directory, NODE_COMPILE_CACHE: theirs });
+    if (kept.supported)
+      assert.ok(kept.dir.startsWith(theirs), kept.dir);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A test that spies on a built-in collection method counts its own code's
+// calls: a probe's first hit, a decision's end and a selection record through
+// the built-ins as the runtime found them, so the count is what it is without
+// Supercov.
+test("a test's spy on Map, Set or Array methods sees none of the runtime's calls", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    runtime.enableRuntimeSnapshotEvidence();
+    const file = runtime.registerProbeV2({ key: "spied", points: 8, decisionWidths: [2], selectionPoints: [4, 1] });
+    runtime.resetCoverage("spied");
+    const counts = { mapSet: 0, mapGet: 0, mapHas: 0, setAdd: 0, setHas: 0, push: 0 };
+    const spy = (proto, name, count) => {
+      const original = proto[name];
+      proto[name] = function (...args) { counts[count] += 1; return original.apply(this, args); };
+      return () => { proto[name] = original; };
+    };
+    const restore = [spy(Map.prototype, "set", "mapSet"), spy(Map.prototype, "get", "mapGet"), spy(Map.prototype, "has", "mapHas"),
+      spy(Set.prototype, "add", "setAdd"), spy(Set.prototype, "has", "setHas"), spy(Array.prototype, "push", "push")];
+    for (let index = 0; index < 4; index += 1) file.hit(index);
+    runtime.mcdcEndV2(file, 0, 1 + 3, true);
+    runtime.selectShortV2(file, 4, 0, "or");
+    restore.forEach((undo) => undo());
+    const snapshot = runtime.coverageSnapshot();
+    console.log(JSON.stringify({ counts, hits: snapshot.hits.length, decisions: snapshot.decisions.length }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { counts, hits, decisions } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  assert.deepEqual(counts, { mapSet: 0, mapGet: 0, mapHas: 0, setAdd: 0, setHas: 0, push: 0 });
+  assert.ok(hits >= 4, `${hits}`);
+  assert.equal(decisions, 1);
+});
+
+// Events are kept as columns, not an object each. What a snapshot-kept run
+// writes (coverageSnapshotColumns) is what columnarEvents made of the
+// snapshot's events, byte for byte, and coverageSnapshot still gives every
+// event as the object it was: hits and decisions, with and without a phase,
+// an empty phase, in and out of a request's carrier.
+test("a snapshot's events kept as columns are what columnarEvents made of them", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const snapshotsUrl = new URL("../../runtime/javascript/snapshots.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const { columnarEvents } = await import(${JSON.stringify(snapshotsUrl)});
+    runtime.enableRuntimeSnapshotEvidence();
+    runtime.resetCoverage("columns");
+    const compare = () => [JSON.stringify(runtime.coverageSnapshotColumns()), JSON.stringify(columnarEvents(runtime.coverageSnapshot()))];
+    const results = [compare()];
+    const file = runtime.registerProbeV2({
+      file: "src/columns.js", key: "columns", points: 4, decisionWidths: [1], pointAliases: [], decisionAliases: [],
+    });
+    const scope = { version: 1, runId: "run", workerId: "w", testId: "t", testKey: "t", retry: 0, attemptId: "t-0" };
+    runtime.coverageHitV2(file, 0);
+    runtime.withCoverageCarrier({ scope, phaseId: "first" }, () => {
+      runtime.coverageHitV2(file, 1);
+      runtime.mcdcEndV2(file, 0, 2, true);
+    });
+    runtime.withCoverageCarrier({ scope, phaseId: "" }, () => runtime.coverageHitV2(file, 2));
+    runtime.withCoverageCarrier({ scope, phaseId: "second" }, () => {
+      runtime.coverageHitV2(file, 1);
+      runtime.coverageHitV2(file, 3);
+      runtime.mcdcEndV2(file, 0, 1, false);
+    });
+    results.push(compare());
+    const events = runtime.coverageSnapshot().events;
+    console.log(JSON.stringify({ results, events }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { results, events } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  for (const [columns, converted] of results) assert.equal(columns, converted);
+  // The second comparison had events to put in columns, of both kinds.
+  assert.match(results[1][0], /"eventColumns"/u);
+  assert.deepEqual([...new Set(events.map((event) => event.type))].sort(), ["decision", "hit"]);
+  for (const event of events) {
+    assert.deepEqual(Object.keys(event), event.type === "hit"
+      ? ["type", "id", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]
+      : ["type", "id", "vector", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]);
+  }
+});

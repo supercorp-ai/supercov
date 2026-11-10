@@ -65,22 +65,17 @@ function installRuntime(target) {
     registerProbeV2(definition) {
       // The module names its table by key, with how many points and
       // decisions it numbers, as the runtime takes it.
-      const decisions = definition.decisionWidths.length;
       return {
         ...definition,
-        clock: { epoch: 1, fast: true },
+        clock: { e: 1, fast: true },
         hitEpochs: new Uint32Array(definition.points),
+        // What a statement probe calls, by place, when its point is new.
+        hit() {},
         decisionEpochs: definition.decisionWidths.map((width) =>
           width <= 6
             ? new Uint32Array(2 * 3 ** width)
             : new Map(),
         ),
-        decisionVectorCounts: definition.decisionWidths.map(
-          (_width, index) => definition.decisionVectorCounts?.[index] ?? 0,
-        ),
-        decisionObservationEpochs: new Uint32Array(decisions),
-        decisionObservationCounts: new Uint16Array(decisions),
-        decisionCompleteEpochs: new Uint32Array(decisions),
         pendingDefaults: new Uint32Array(definition.defaultCount ?? 0),
         none: { [Symbol.iterator]: () => ({ next: () => ({ done: true }) }) },
       };
@@ -352,7 +347,7 @@ async function runBrowser(name) {
               mcdcBegin(id, width) { return { id, values: Array(width).fill(null) }; },
               mcdcCondition(frame, conditionIndex, value) { frame.values[conditionIndex] = Boolean(value); return value; },
               mcdcEnd(_frame, value) { return value; },
-              registerProbeV2(definition) { const decisions = definition.decisionWidths.length; return { ...definition, clock: { epoch: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), decisionVectorCounts: definition.decisionWidths.map((_width, definitionIndex) => definition.decisionVectorCounts?.[definitionIndex] ?? 0), decisionObservationEpochs: new Uint32Array(decisions), decisionObservationCounts: new Uint16Array(decisions), decisionCompleteEpochs: new Uint32Array(decisions), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
+              registerProbeV2(definition) { return { ...definition, clock: { e: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), hit() {}, decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
               coverageHitV2() {},
               renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },

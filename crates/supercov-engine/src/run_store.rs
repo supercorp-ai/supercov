@@ -1154,17 +1154,23 @@ fn index_sections(
             test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
             test_filter: filter.cloned(),
         })?;
-    let sections = crate::coverage_index::coverage_index_sections_from(
-        crate::coverage_report::coverage_views(
-            &normalized,
-            &[
-                CoverageViewId::All,
-                CoverageViewId::Passed,
-                CoverageViewId::Failed,
-            ],
-            Some(transport),
-        )?
-        .map(|view| view.map_err(RunIndexError::Report)),
+    // The passed view of a run whose every result passed is the whole view:
+    // its records are the whole view's, as publication writes them, and it
+    // is not built.
+    let passed_is_whole = crate::coverage_report::passing_is_every_result(&normalized.raw_results);
+    let views: &[CoverageViewId] = if passed_is_whole {
+        &[CoverageViewId::All, CoverageViewId::Failed]
+    } else {
+        &[
+            CoverageViewId::All,
+            CoverageViewId::Passed,
+            CoverageViewId::Failed,
+        ]
+    };
+    let sections = crate::coverage_index::coverage_index_sections_with_whole_passed(
+        crate::coverage_report::coverage_views(&normalized, views, Some(transport))?
+            .map(|view| view.map_err(RunIndexError::Report)),
+        passed_is_whole,
     )?;
     // Every test's records, freed by nobody's wait.
     std::thread::spawn(move || drop(normalized));
@@ -1673,7 +1679,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1259", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1265", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());
