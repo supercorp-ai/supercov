@@ -105,17 +105,24 @@ behind it:
 | `not-infected` | reached, but every evaluation gave the mutant the original's value | weak |
 | `infected` | some evaluation gave the mutant another value | weak |
 | `unknown` | reached, but the run cannot tell (no probe at that site, values it cannot compare, code that ran in a server process whose records carry no values) | weak |
+| `equivalent` | no input can make it differ; shown by a static rule (see Equivalent mutants) | static, before weak |
 | `killed` | a test failed with the mutant in place | strong (reserved) |
 | `survived` | every test that reached it passed with it in place | strong (reserved) |
 | `timeout` | a test ran past its time with the mutant in place | strong (reserved) |
 
 Strong statuses replace a weak one only when a strong pass ran for that mutant.
-A weak status is never shown as `killed` or `survived`.
+A weak status is never shown as `killed` or `survived`. `equivalent` is decided
+when the mutants are listed, from the program alone, before reach and
+infection, and wins over them: whatever the tests did, they could not have
+made it differ. A strong pass has no need to run it.
 
 ## Scores
 
 - **Weak mutation score:** `infected / (infected + not-infected + not-reached)`.
-  Unknown mutants are left out and counted beside it. Also shown over reached
+  Unknown and equivalent mutants are left out and counted beside it: an
+  equivalent mutant is out of the denominator, as the mutation score has
+  always left equivalent mutants out (DeMillo, Lipton and Sayward 1978;
+  Offutt and Untch 2001). Also shown over reached
   mutants only: `infected / (infected + not-infected)`, as StrykerJS shows a
   score over covered code.
 - **Mutation score** (reserved for strong): `killed / (killed + survived + not-reached)`,
@@ -141,8 +148,9 @@ npx supercov runs latest mutants --format jsonl --output mutants.jsonl      # ev
 ```
 
 The run summary gets one line, `Mutants  2,955 · weak score 85.0% · 211 not
-infected · 240 not reached · 206 unknown`, and its JSON `data.mutants` (the
-`summary` below with `mutantSet`). A later step has `gaps` point to `mutants
+infected (12 at a clock or random boundary) · 240 not reached · 206 unknown ·
+3 equivalent`, and its JSON `data.mutants` (the `summary` below with
+`mutantSet`). The part in parentheses is there only when some are. A later step has `gaps` point to `mutants
 --status not-infected` when a file has some. Narrowing options (`--tag`,
 `--test-file`, `--title`, `--kind`, `--runner`) narrow mutants as they narrow
 every query: a mutant only other tests infect is not infected there. The
@@ -158,8 +166,24 @@ shows; a not-reached mutant is a coverage gap `gaps` names already. A file no
 test ran at all (every mutant not reached) comes after the files a test ran,
 however many mutants it holds, and one line counts those files: listed by size,
 the files a suite never loads buried the files with mutants not infected.
+The table has a column of equivalent mutants after the unknown ones.
 `--json`, a file, `--status` and `--mutator` page through mutants, which are
 always listed by file path and then by position, whatever the table's order.
+
+A listed mutant shows its code as `original → replacement`. Where the
+original is on several lines, or the two together pass 60 characters, the
+start of the original says little: a MethodExpression mutant of
+`candidates.filter(…).slice(0, maxUsers)` that removes the `slice` and one
+that removes the `filter` both start `candidates .filter((c) =>…`. Such a
+mutant is shown by the part it changes instead: the original and the
+replacement without their longest shared start and end, each cut back to where
+no word or operator is split, with `…` where the shared part is left out:
+`….slice(0, maxUsers) → …` and `….filter((c) => c.ready) → …`. Only mutants
+whose replacement is the original with one part changed have one (operators,
+method names and removed calls, `!` and unary operators); an optional link's
+part would be its `?` alone, and a block's or a literal's replacement is
+written whole. A one-line listing (`file:line`) shows the original after it
+(`in:`).
 `--format jsonl` writes all of them, one per line in that order, each as
 `--json` lists it, as `gaps --format jsonl` does for gaps: a reply stops at 64
 KB, about 128 mutants, and a large app has 61,000. The scores and counts are of
@@ -215,7 +239,8 @@ because the weak pass already knows:
   "levels": { "weak": true, "strong": false },
   "summary": {
     "mutants": 2955,
-    "status": { "not-reached": 240, "not-infected": 211, "infected": 2297, "unknown": 207 },
+    "status": { "not-reached": 240, "not-infected": 211, "infected": 2297, "unknown": 204, "equivalent": 3 },
+    "untestable": 12,
     "weakScore": 0.835,
     "weakScoreReached": 0.916,
     "mutationScore": null
@@ -232,6 +257,21 @@ because the weak pass already knows:
       "weak": { "reach": "reached", "infection": "not-infected", "code": "operands-never-equal", "reason": "a never equal to b" },
       "strong": null,
       "stryker": null
+    },
+    {
+      "id": "app/route.ts:687:7-689:25:MethodExpression:removed",
+      "original": "candidates .filter((c) => c.ready) .slice(0, maxUsers)",
+      "replacement": "candidates .filter((c) => c.ready)",
+      "changed": { "from": "….slice(0, maxUsers)", "to": "…" },
+      "status": "not-infected",
+      "weak": { "reach": "reached", "infection": "not-infected", "code": "replacement-same", "reason": "…" }
+    },
+    {
+      "id": "lib/quota.ts:12:21-12:26:EqualityOperator:>=",
+      "original": "n > 0",
+      "replacement": "n >= 0",
+      "status": "equivalent",
+      "weak": { "reach": "unknown", "infection": null, "code": "zero-guarded", "reason": "`>` and `>=` differ only where `n` is 0, …", "rule": "zero-guarded" }
     }
   ],
   "stryker": null
@@ -243,8 +283,14 @@ and `note` when there are no mutants, saying why and how to get them (the run
 did not list them: measure it again without `SUPERCOV_MUTANTS=0`). `weak.code` is a
 stable code for the reason, and `weak.proxy` is `true` for an infection that is
 only that the code around it ran (a block or a call removed). `reach` is
-`unknown` where no statement or function point contains the mutant;
-`infection` is null for a mutant not reached. `original` and `replacement` are
+`unknown` where no statement or function point contains the mutant, and for
+an equivalent mutant, which is decided before reach; `infection` is null for a
+mutant not reached or equivalent. An equivalent mutant's `weak.rule` is the
+rule's code, which is also its `weak.code`. `weak.untestable` (`clock` or
+`random`) and `weak.untestableReason` are a hint beside the status (see
+Equivalent mutants). `summary.untestable` counts the not-infected mutants with
+that hint. `changed` is there only where it is what a reader is shown
+(above). `original` and `replacement` are
 on one line, cut at 120 characters; `replacement` is the code with the mutant
 in place where it is simply written from the original and the descriptor
 (operators, literals, method names, optional links), and the descriptor
@@ -264,7 +310,8 @@ With `--stryker`, the top-level `stryker` is the join:
 ```
 
 `soundnessViolations.mutants` lists up to 50, each with `id`, `status`,
-`stryker` and `reason`. `survivorsExplained` counts StrykerJS's matched
+`stryker` and `reason`. An equivalent mutant StrykerJS killed is one too: the
+rule that called it equivalent is wrong. `survivorsExplained` counts StrykerJS's matched
 survivors (Survived, NoCoverage) and those this run says no test infects or
 reaches.
 
@@ -336,6 +383,93 @@ mutant, of 379. At that ratio a large app's 61,000 mutants, 414 bytes each in
 version 1, come to about 16 MB (1.8 MB compressed), and less where its longer
 originals (JSX under `&&`) are cut.
 
+Version 3 adds to a mutant what the program as written says of it:
+`equivalent` (`{ rule, reason }`) where a static rule shows it equivalent, and
+`untestable` (`{ rule: "clock" | "random", reason }`). A version 2 file has
+neither, and its mutants are read as having none.
+
+## Equivalent mutants
+
+A mutant no input can tell from the original is equivalent (DeMillo, Lipton
+and Sayward 1978); no test can kill it, and the mutation score leaves it out.
+Deciding equivalence is undecidable in general, but some cases are shown
+cheaply from the code: Offutt and Pan (1997) by constraints, Papadakis et al.
+("Trivial Compiler Equivalence", ICSE 2015) by comparing compiled code.
+Supercov calls a mutant `equivalent` only by a rule that holds for **every**
+input under JavaScript's semantics. A rule that holds for the inputs a program
+usually sees, or that relies on TypeScript's types (which nothing checks at
+run time: JSON, `any`, a cast), is not one. Each rule has a stable code, set
+when the mutants are listed and saved in `mutants.json`.
+
+### `zero-guarded`
+
+An EqualityOperator mutant that moves a boundary at 0 (`n > 0` to `n >= 0`,
+`n <= 0` to `n < 0`, and `0 < n` to `0 <= n` and the like) where an earlier
+operand of the same `&&` chain is `n` itself (`n && … n > 0`), or of an `||`
+chain is `!n` (`!n || … n > 0`), and `n` is a `const` whose initializer is
+always a number or a bigint.
+
+Why it is sound: the two comparisons differ only where `n` compares as 0. The
+earlier operand ran first and found `n` truthy, and a `const` has the same
+value whenever it is read. A number is truthy exactly where it is neither 0,
+-0 nor NaN, and a bigint where it is not 0n, so `n` is not 0 there. The chain
+may hold only `&&`, `||`, parentheses and type-only wrappers between the
+operand and the comparison; anything else (a call, an arrow) ends it.
+
+Why it is narrower than "`x && x > 0`": a truthy value can compare as 0. The
+strings `"0"`, `" "` and `"0x0"`, an empty array, `new Date(0)` and an object
+whose `valueOf` returns 0 are all truthy, and `"0" > 0` is false while
+`"0" >= 0` is true. So the guarded identifier must hold a number or a bigint
+for every input, which the code shows only for a `const` initialized by a
+numeric literal, unary `-`, `+` or `~`, an arithmetic or bitwise operator, a
+`+` of two such, or a conditional or sequence of them. A parameter, a `let`, a
+member path (whose getter may answer differently on each read, and whose value
+nothing types at run time), a call (`Number(s)` can be shadowed) or a `+` with
+a string are not. And the `const` must be the file's only binding of its name,
+the comparison inside the block (or function body: a parameter's default does
+not see it) that declares it, and the file must hold no `with` and no
+reference to `eval`, which can bind a name no declaration shows. On the validation app,
+the guards the triage found (`data?.count && data.count > 0`)
+read a member path of data loaded from the database: equivalent in practice,
+not by this rule.
+
+### Considered and left out: `email-input-trim`
+
+The idea: a MethodExpression mutant that removes `.trim()` from the value of a
+controlled `<input type="email">`, whose state only `e.target.value` sets. The
+HTML Living Standard's value sanitization algorithm for the E-mail state strips
+newlines and leading and trailing **ASCII whitespace** (tab, line feed, form
+feed, carriage return, space). `String.prototype.trim` strips every
+ECMAScript WhiteSpace and LineTerminator: also U+00A0 (no-break space), U+FEFF,
+U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and U+000B.
+The sanitizer keeps those, and a user can type or paste them (Option-Space
+types U+00A0 on a Mac; text copied from a web page often carries one): the
+input's value is then `"a@b.co\u00a0"`, which `trim` changes and the mutant
+does not. The rule is not sound for every input, and there is no narrower
+claim of the same rule that is, so it is not implemented. Of the validation app's 61
+equivalent mutants triaged by hand, the six `type="email"` ones are practically
+equivalent, not equivalent.
+
+### Untestable boundaries: a hint
+
+Some mutants are not equivalent but no test can practically tell them apart. A
+boundary mutant (`<` and `<=`, `>` and `>=`) differs from the original only
+where its operands are equal; where an operand reads the clock or a random
+number, that is one exact reading. Such a mutant carries `untestable`:
+
+- `clock`: an operand's expression, the initializer of a `const` of the same
+  function it names (followed up to two hops: an operand names `a`, whose
+  initializer names `b`, whose initializer reads the clock), or the body of a
+  function the file declares that the expression calls, contains
+  `Date.now()`, `new Date()` with no arguments, or `performance.now()`.
+- `random`: the same with `Math.random()`.
+
+It is a hint, not a status: the mutant keeps its status and counts in both
+scores, since a test that fakes the clock (or random) can reach the boundary.
+The listing shows `(clock boundary)` or `(random boundary)` after a
+not-infected mutant's reason, and the summary counts them in its not-infected
+part.
+
 ## Merged runs
 
 A run's mutants are archived as one `mutants.json`. `supercov merge` writes
@@ -376,5 +510,6 @@ the reader requires every copy to be the same, which runs of one source are.
   turn's records, values among them, as it loses its hits. A statement whose
   hit was written in an earlier turn and whose comparison ran in the lost one
   reads as if the comparison never ran there.
-- Equivalent mutants are not detected. They show up as `not-infected` with
-  their reason, which is often what makes them recognisable.
+- Equivalent mutants beyond the static rules above are not detected. They show
+  up as `not-infected` with their reason, which is often what makes them
+  recognisable.

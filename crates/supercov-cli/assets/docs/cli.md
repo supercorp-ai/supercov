@@ -309,10 +309,18 @@ Each mutant has one status:
 | `not-infected` | A test ran it, and every evaluation gave the mutant the original's value: these tests cannot kill it |
 | `infected` | Some evaluation gave the mutant another value: a candidate kill, not a kill |
 | `unknown` | The run cannot tell, such as code that ran where values are not recorded |
+| `equivalent` | No input can make it differ, shown by a static rule from the code alone, whatever the tests did |
 
 The weak score is `infected / (infected + not-infected + not-reached)`, with
-unknown mutants left out, and beside it the same over reached mutants alone.
-They are shown beside coverage and never change it.
+unknown and equivalent mutants left out, and beside it the same over reached
+mutants alone. They are shown beside coverage and never change it.
+
+A not-infected boundary comparison (`<` and `<=`, `>` and `>=`) of what reads
+the clock (`Date.now()`, `new Date()`, `performance.now()`) or `Math.random()`
+is listed with `(clock boundary)` or `(random boundary)`: only one exact
+reading would make it differ, so a test can hardly reach it. It stays not
+infected, and the summary counts these beside the not-infected ones
+(`211 not infected (12 at a clock or random boundary)`).
 
 Without a file, `mutants` shows a table of files, a page at a time, ordered by
 how many mutants a test reaches and does not infect, which only this report
@@ -320,11 +328,13 @@ shows, then by how many no test reaches, then by name. Files no test ran at all
 come last, however many mutants they hold, and a line counts them. With a file
 it lists the file's mutants by line, as `line:column  Mutator  original →
 replacement  status  reason`; with `file:line`, that line's mutants each with its
-reason and id. `--status` and `--mutator` pick mutants, across files when no
+reason and id. A mutant whose code is on several lines or too long to show is
+shown by the part it changes, with `…` for what it shares with the original:
+`….slice(0, maxUsers) → …` for a chain without its last call. `--status` and `--mutator` pick mutants, across files when no
 file is given. The scores are of the mutants asked about: the run, a file or a
 line, and one mutator with `--mutator`. The run summary shows one line,
-`Mutants  15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown`,
-and `data.mutants` in its JSON.
+`Mutants  15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown ·
+0 equivalent`, and `data.mutants` in its JSON.
 
 `--kind`, `--runner`, `--tag`, `--title` and `--test-file` read the verdicts of
 those tests alone: a mutant only other tests infect is not infected there.
@@ -332,11 +342,14 @@ those tests alone: a mutant only other tests infect is not infected there.
 
 In `--json` the reply is `coverage.mutants`: `mutantSet`, `levels`
 (`weak: true`, `strong: false`), `summary` with the counts by status,
+`untestable` (the not-infected mutants at a clock or random boundary),
 `weakScore`, `weakScoreReached` and `mutationScore` (null until tests run
 against mutants), and a page of `mutants`, each with its `id`
 (`file:line:column-line:column:Mutator:descriptor`), `span`, `original`,
-`replacement`, `status`, `weak` (`reach`, `infection`, `code`, `reason`),
-`strong` (null) and `stryker`. Mutants are listed by file path, and within a
+`replacement`, `changed` (`from`, `to`: the part shown, where it is shown
+instead), `status`, `weak` (`reach`, `infection`, `code`, `reason`; `rule` for
+an equivalent mutant; `untestable` and `untestableReason` for a clock or
+random boundary), `strong` (null) and `stryker`. Mutants are listed by file path, and within a
 file by position, whatever the table's order.
 
 `--format jsonl` writes every mutant asked about, one JSON object per line,
@@ -354,8 +367,8 @@ what `--stryker` was given, or `<56 reports>` for more than three. Each mutant
 then shows StrykerJS's status, and a `stryker` block counts the mutants
 matched, those only Supercov or only StrykerJS made (by mutator), and how many
 of StrykerJS's survivors this run says no test infects or reaches. A mutant
-this run says is not infected or not reached that StrykerJS killed is a
-soundness violation: each is listed, and the command exits `1`.
+this run says is not infected, not reached or equivalent that StrykerJS killed
+is a soundness violation: each is listed, and the command exits `1`.
 
 ## Fail CI below a coverage floor
 
