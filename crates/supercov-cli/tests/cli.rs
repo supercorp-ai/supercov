@@ -15480,7 +15480,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2508 => main.rs:2508",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
+            "fs.read_to_string#javascript_frontend.rs:2025 => javascript_frontend.rs:2025",
         ],
     );
 }
