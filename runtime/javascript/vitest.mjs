@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
 import { afterEach, beforeEach } from "vitest";
-import { coverageSnapshot as localCoverageSnapshot, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
+import { coverageSnapshot as localCoverageSnapshot, coverageSnapshotColumns as localCoverageSnapshotColumns, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
-import { columnarEvents } from "./snapshots.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
@@ -13,6 +12,7 @@ const runtimeGlobal = globalThis;
 const runtime = runtimeGlobal.__SUPERCOV_DIRECT_RUNTIME__ ?? {
     activateCoverageScope: localActivateCoverageScope,
     coverageSnapshot: localCoverageSnapshot,
+    coverageSnapshotColumns: localCoverageSnapshotColumns,
     enableRuntimeSnapshotEvidence: localEnableRuntimeSnapshotEvidence,
     resetCoverage: localResetCoverage,
     takeNodeAssertionPhases: localTakeNodeAssertionPhases,
@@ -51,7 +51,8 @@ beforeEach((context) => {
         .join("/");
     if (!emittedSetupFiles.has(testFile)) {
         emittedSetupFiles.add(testFile);
-        const setupSnapshot = runtime.coverageSnapshot();
+        // The snapshot as its evidence carries it, its events as columns.
+        const setupSnapshot = runtime.coverageSnapshotColumns();
         if (setupSnapshot.hits.length || setupSnapshot.decisions.length) {
             writeEvidence({
                 testId: `vitest:${task.file.id}:setup`,
@@ -67,7 +68,7 @@ beforeEach((context) => {
                     explicitKind: process.env["SUPERCOV_TEST_KIND"],
                 }),
                 role: "setup",
-                runtime: [columnarEvents(setupSnapshot)],
+                runtime: [setupSnapshot],
                 browser: [],
                 server: [],
             });
@@ -116,7 +117,7 @@ afterEach((context) => {
         // Its events as columns, as Playwright's are written: a test's first
         // hits written as objects repeated every key and phase for each, and
         // serializing them was most of what a test's teardown cost.
-        runtime: [columnarEvents(runtime.coverageSnapshot())],
+        runtime: [runtime.coverageSnapshotColumns()],
         browser: [],
         server: [],
     };

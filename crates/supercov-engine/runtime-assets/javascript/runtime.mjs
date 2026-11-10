@@ -161,12 +161,28 @@ function getFs() {
     return void 0;
   }
 }
+function emptyEventLog() {
+  return { type: [], id: [], vector: [], timestampMs: [], phaseId: [], environment: [] };
+}
+// The events as they were recorded, each the object hitEvent or
+// decisionEvent built, in their key order.
+function eventObjects(log) {
+  const events = new Array(log.id.length);
+  for (let position = 0; position < events.length; position += 1) {
+    const phaseId = log.phaseId[position];
+    events[position] = log.type[position] === "hit" ? hitEvent(log.id[position], log.timestampMs[position], phaseId, log.environment[position]) : decisionEvent(log.id[position], log.vector[position], log.timestampMs[position], phaseId, log.environment[position]);
+  }
+  return events;
+}
 function createState() {
   var _a8, _b, _c, _d;
   const state2 = {
     decisions: /* @__PURE__ */ new Map(),
     hits: /* @__PURE__ */ new Set(),
-    events: [],
+    // The events as columns, one entry per event: a first hit of every point
+    // of every test was an object of its own, millions on a large suite,
+    // turned into columns again for the evidence (eventColumns).
+    eventLog: emptyEventLog(),
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
@@ -209,10 +225,8 @@ function createState() {
     }
     for (const id of (_c = stored.hits) != null ? _c : [])
       state2.hits.add(id);
-    for (const event of (_d = stored.events) != null ? _d : []) {
-      state2.events.push(event);
-      eventSeen(state2.eventKeys, event);
-    }
+    for (const event of (_d = stored.events) != null ? _d : [])
+      recordEvent(state2, event.type, event.id, event.vector, event.timestampMs, event.phaseId, event.environment);
   } catch (e) {
   }
   return state2;
@@ -395,14 +409,57 @@ function coverageSnapshot() {
   return {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
-    events: state.events,
+    events: eventObjects(state.eventLog),
     logicals: logicalSnapshot()
+  };
+}
+// coverageSnapshot as snapshots.mjs's columnarEvents gives it, built from the
+// columns the events are kept in rather than from an object per event.
+function coverageSnapshotColumns() {
+  const log = state.eventLog;
+  const decisions = decisionSnapshot();
+  const hits = [...state.hits];
+  const logicals = logicalSnapshot();
+  if (log.id.length === 0)
+    return { decisions, hits, events: [], logicals };
+  const tables = { types: /* @__PURE__ */ new Map(), phases: /* @__PURE__ */ new Map(), environments: /* @__PURE__ */ new Map() };
+  const index = (table, value) => {
+    let found = table.get(value);
+    if (found === void 0) {
+      found = table.size;
+      table.set(value, found);
+    }
+    return found;
+  };
+  const columns = { id: log.id.slice(), type: [], phase: [], environment: [], t: [], vector: {} };
+  let previous = 0;
+  for (let position = 0; position < log.id.length; position += 1) {
+    const phaseId = log.phaseId[position];
+    columns.type.push(index(tables.types, log.type[position]));
+    // An event built without a phase -- phaseId falsy -- has none.
+    columns.phase.push(phaseId ? index(tables.phases, phaseId) : -1);
+    columns.environment.push(index(tables.environments, log.environment[position]));
+    columns.t.push(log.timestampMs[position] - previous);
+    previous = log.timestampMs[position];
+    if (log.type[position] !== "hit")
+      columns.vector[position] = log.vector[position];
+  }
+  return {
+    decisions,
+    hits,
+    logicals,
+    eventColumns: {
+      types: [...tables.types.keys()],
+      phases: [...tables.phases.keys()],
+      environments: [...tables.environments.keys()],
+      ...columns
+    }
   };
 }
 function resetCoverage(testId2) {
   state.decisions.clear();
   state.hits.clear();
-  state.events.length = 0;
+  state.eventLog = emptyEventLog();
   state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
@@ -572,7 +629,7 @@ var persistBrowserListenersInstalled = false;
 // How much evidence the document holds. Every part of it only grows until a
 // reset, so the same size twice is the same evidence.
 function evidenceSize() {
-  let size = state.hits.size + state.events.length;
+  let size = state.hits.size + state.eventLog.id.length;
   for (const decision of state.decisions.values())
     size += decision.vectors.size;
   for (const vectors of state.logicals.values())
@@ -1203,9 +1260,9 @@ function appendServer(record) {
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision")
-      recordBrowserEvent(decisionEvent(record.id, record.vector, timestampMs, record.phaseId, "server"));
+      recordBrowserEvent("decision", record.id, record.vector, timestampMs, record.phaseId, "server");
     else
-      recordBrowserEvent(hitEvent(record.id, timestampMs, record.phaseId, "server"));
+      recordBrowserEvent("hit", record.id, void 0, timestampMs, record.phaseId, "server");
     return;
   }
   const fs = getFs();
@@ -1969,23 +2026,42 @@ function withRequestPhase(handler, event) {
 // Whether `event` was already recorded, recording it if not. Kept per phase,
 // so a first hit looks up its id alone: one key joining the phase, the type
 // and the id was built and hashed for every first hit of every test.
-function eventSeen(seen, event) {
-  const phase = event.phaseId != null ? event.phaseId : "unscoped";
+function eventSeen(seen, type, id, vector, phaseId) {
+  const phase = phaseId != null ? phaseId : "unscoped";
   let keys = seen.get(phase);
   if (keys === void 0) {
     keys = /* @__PURE__ */ new Set();
     seen.set(phase, keys);
   }
-  const key = event.type === "hit" ? event.id : `${event.type}\0${event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id}`;
+  const key = type === "hit" ? id : `${type}\0${type === "decision" ? `${id}:${vectorKey(vector)}` : id}`;
   if (keys.has(key))
     return true;
   keys.add(key);
   return false;
 }
-function recordBrowserEvent(event) {
-  if (eventSeen(state.eventKeys, event))
+// The phase eventSeen keys an event under: an event object built without a
+// falsy phase (hitEvent, decisionEvent) had none, which is "unscoped".
+function phaseEventKey(phaseId) {
+  return phaseId ? phaseId : void 0;
+}
+// An event's fields into the columns, unless it was recorded already; what
+// hitEvent or decisionEvent would build of them is what coverageSnapshot
+// gives back.
+function recordEvent(into, type, id, vector, timestampMs, phaseId, environment) {
+  if (eventSeen(into.eventKeys, type, id, vector, phaseEventKey(phaseId)))
     return false;
-  state.events.push(event);
+  const log = into.eventLog;
+  log.type.push(type);
+  log.id.push(id);
+  log.vector.push(vector);
+  log.timestampMs.push(timestampMs);
+  log.phaseId.push(phaseId);
+  log.environment.push(environment);
+  return true;
+}
+function recordBrowserEvent(type, id, vector, timestampMs, phaseId, environment) {
+  if (!recordEvent(state, type, id, vector, timestampMs, phaseId, environment))
+    return false;
   workerEvidenceChanged();
   return true;
 }
@@ -2021,12 +2097,12 @@ function recordCoverageHit(id) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "browser")))
+    if (recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "browser"))
       persistBrowser();
   } else if (state.runtimeSnapshots) {
     // What appendServer does with a snapshot-kept run's record, without the
     // record: an object built per first hit only to be read once.
-    recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "server"));
+    recordBrowserEvent("hit", id, void 0, timestampMs, phaseId, "server");
   } else {
     appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
   }
@@ -2538,10 +2614,10 @@ function mcdcEnd(frame, value) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "browser")))
+    if (recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "browser"))
       persistBrowser();
   } else if (state.runtimeSnapshots) {
-    recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "server"));
+    recordBrowserEvent("decision", decision.id, vector, timestampMs, phaseId, "server");
   } else {
     appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
@@ -2559,6 +2635,7 @@ const directRuntimeApi = {
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
+  coverageSnapshotColumns,
   decodeProbeV2Vector,
   defaultEntered,
   defaultEnteredV2,
@@ -2627,6 +2704,7 @@ export {
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
+  coverageSnapshotColumns,
   decodeProbeV2Vector,
   defaultEntered,
   defaultEnteredV2,

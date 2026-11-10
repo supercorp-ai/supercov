@@ -1298,3 +1298,51 @@ test("without an async hook a probe's epoch is NaN, so each request works out it
   assert.equal(slowPaths, 4);
   assert.equal(hits, 1);
 });
+
+// Events are kept as columns, not an object each. What a snapshot-kept run
+// writes (coverageSnapshotColumns) is what columnarEvents made of the
+// snapshot's events, byte for byte, and coverageSnapshot still gives every
+// event as the object it was: hits and decisions, with and without a phase,
+// an empty phase, in and out of a request's carrier.
+test("a snapshot's events kept as columns are what columnarEvents made of them", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const snapshotsUrl = new URL("../../runtime/javascript/snapshots.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const { columnarEvents } = await import(${JSON.stringify(snapshotsUrl)});
+    runtime.enableRuntimeSnapshotEvidence();
+    runtime.resetCoverage("columns");
+    const compare = () => [JSON.stringify(runtime.coverageSnapshotColumns()), JSON.stringify(columnarEvents(runtime.coverageSnapshot()))];
+    const results = [compare()];
+    const file = runtime.registerProbeV2({
+      file: "src/columns.js", key: "columns", points: 4, decisionWidths: [1], pointAliases: [], decisionAliases: [],
+    });
+    const scope = { version: 1, runId: "run", workerId: "w", testId: "t", testKey: "t", retry: 0, attemptId: "t-0" };
+    runtime.coverageHitV2(file, 0);
+    runtime.withCoverageCarrier({ scope, phaseId: "first" }, () => {
+      runtime.coverageHitV2(file, 1);
+      runtime.mcdcEndV2(file, 0, 2, true);
+    });
+    runtime.withCoverageCarrier({ scope, phaseId: "" }, () => runtime.coverageHitV2(file, 2));
+    runtime.withCoverageCarrier({ scope, phaseId: "second" }, () => {
+      runtime.coverageHitV2(file, 1);
+      runtime.coverageHitV2(file, 3);
+      runtime.mcdcEndV2(file, 0, 1, false);
+    });
+    results.push(compare());
+    const events = runtime.coverageSnapshot().events;
+    console.log(JSON.stringify({ results, events }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { results, events } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  for (const [columns, converted] of results) assert.equal(columns, converted);
+  // The second comparison had events to put in columns, of both kinds.
+  assert.match(results[1][0], /"eventColumns"/u);
+  assert.deepEqual([...new Set(events.map((event) => event.type))].sort(), ["decision", "hit"]);
+  for (const event of events) {
+    assert.deepEqual(Object.keys(event), event.type === "hit"
+      ? ["type", "id", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]
+      : ["type", "id", "vector", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]);
+  }
+});
