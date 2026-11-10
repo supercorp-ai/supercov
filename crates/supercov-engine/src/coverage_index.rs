@@ -1740,7 +1740,7 @@ fn test_line_record(
     let mut record = [0_u8; TEST_LINE_RECORD_SIZE];
     record[0] = view_id as u8;
     put_u32(&mut record, 4, test_string);
-    put_u32(&mut record, 8, strings.intern(&line.file));
+    put_u32(&mut record, 8, strings.intern_shared(&line.file));
     put_u64(&mut record, 16, usize_u64(line.line));
     record
 }
@@ -1748,13 +1748,13 @@ fn test_line_record(
 fn test_hit_record(
     view_id: CoverageViewId,
     test_string: u32,
-    hit: &str,
+    hit: &Id,
     strings: &mut StringTable,
 ) -> [u8; TEST_HIT_RECORD_SIZE] {
     let mut record = [0_u8; TEST_HIT_RECORD_SIZE];
     record[0] = view_id as u8;
     put_u32(&mut record, 4, test_string);
-    put_u32(&mut record, 8, strings.intern(hit));
+    put_u32(&mut record, 8, strings.intern_shared(hit));
     record
 }
 
