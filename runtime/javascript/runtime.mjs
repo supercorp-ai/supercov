@@ -185,7 +185,9 @@ function createState() {
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
     probeV2Files: /* @__PURE__ */ new Set(),
-    probeV2Clock: { epoch: Number.NaN, fast: false },
+    // `e` is the epoch: every statement probe reads it by name, and a
+    // minifier keeps a property's name, so it is one letter in every bundle.
+    probeV2Clock: { e: Number.NaN, fast: false },
     probeV2ContextEpochs: /* @__PURE__ */ new Map(),
     probeV2NextEpoch: 1,
     probeV2HookInstalled: false,
@@ -273,7 +275,7 @@ function activateProbeV2Key(key, force = false) {
     epoch = state.probeV2NextEpoch;
     state.probeV2ContextEpochs.set(key, epoch);
   }
-  state.probeV2Clock.epoch = epoch;
+  state.probeV2Clock.e = epoch;
   return epoch;
 }
 // The async hook activates the current request's context before every
@@ -296,7 +298,7 @@ function activateProbeV2Context(context) {
   }
   const cached = state.probeV2ContextEpochCache.get(context);
   if (cached !== void 0 && cached.generation === state.probeV2EpochGeneration) {
-    state.probeV2Clock.epoch = cached.epoch;
+    state.probeV2Clock.e = cached.epoch;
     return cached.epoch;
   }
   const epoch = activateProbeV2Key(probeV2ContextKey(context));
@@ -333,12 +335,12 @@ function resolveProbeV2Epoch() {
 function withProbeV2Context(context, callback) {
   if (!state.probeV2Clock.fast)
     return callback();
-  const previous = state.probeV2Clock.epoch;
+  const previous = state.probeV2Clock.e;
   activateProbeV2Context(context);
   try {
     return callback();
   } finally {
-    state.probeV2Clock.epoch = previous;
+    state.probeV2Clock.e = previous;
   }
 }
 function installProbeV2AsyncHook() {
@@ -360,12 +362,12 @@ function installProbeV2AsyncHook() {
       before() {
         if (serverTiming)
           serverTiming.asyncHookCallbacks += 1;
-        epochs.push(state.probeV2Clock.epoch);
-        state.probeV2Clock.epoch = NaN;
+        epochs.push(state.probeV2Clock.e);
+        state.probeV2Clock.e = NaN;
       },
       after() {
         var _a9;
-        state.probeV2Clock.epoch = (_a9 = epochs.pop()) != null ? _a9 : state.probeV2Clock.epoch;
+        state.probeV2Clock.e = (_a9 = epochs.pop()) != null ? _a9 : state.probeV2Clock.e;
       }
     }).enable();
     state.probeV2HookInstalled = true;
@@ -407,7 +409,7 @@ function resetCoverage(testId2) {
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
   if (!state.probeV2Clock.fast)
-    state.probeV2Clock.epoch = NaN;
+    state.probeV2Clock.e = NaN;
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
   if (isBrowser) {
@@ -1497,7 +1499,7 @@ function enterCoverageCarrier(carrier) {
     return () => {
     };
   const previousStore = serverPhaseStorage.getStore();
-  const previousEpoch = state.probeV2Clock.epoch;
+  const previousEpoch = state.probeV2Clock.e;
   const fast = state.probeV2Clock.fast;
   const context = __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {});
   serverPhaseStorage.enterWith(context);
@@ -1506,7 +1508,7 @@ function enterCoverageCarrier(carrier) {
   return () => {
     serverPhaseStorage.enterWith(previousStore);
     if (fast)
-      state.probeV2Clock.epoch = previousEpoch;
+      state.probeV2Clock.e = previousEpoch;
   };
 }
 var inertAssertionPhase = { close: (value) => value, fail: (error) => error };
@@ -1993,7 +1995,7 @@ function recordBrowserEvent(event) {
 // repeat.
 function coverageHit(id) {
   const clock = state.probeV2Clock;
-  if (clock.fast && state.hitEpochs !== void 0 && state.hitEpochs.get(id) === clock.epoch)
+  if (clock.fast && state.hitEpochs !== void 0 && state.hitEpochs.get(id) === clock.e)
     return;
   recordCoverageHit(id);
 }
@@ -2002,12 +2004,12 @@ function coverageHit(id) {
 function recordCoverageHit(id) {
   state.hits.add(id);
   const clock = state.probeV2Clock;
-  let epoch = clock.epoch;
+  let epoch = clock.e;
   if (!clock.fast) {
-    const previousEpoch = clock.epoch;
+    const previousEpoch = clock.e;
     activateProbeV2Context(currentRequestContext());
-    epoch = clock.epoch;
-    clock.epoch = previousEpoch;
+    epoch = clock.e;
+    clock.e = previousEpoch;
   } else if (epoch !== epoch) {
     epoch = resolveProbeV2Epoch();
   }
@@ -2107,7 +2109,7 @@ function registerProbeV2(definition) {
     // before any did -- a script's own top level -- found it NaN, which no
     // epoch equals, so every probe there took the slow path every time: a
     // million-iteration loop ran 1,700 times slower than without Supercov.
-    if (state.probeV2Clock.fast && Number.isNaN(state.probeV2Clock.epoch))
+    if (state.probeV2Clock.fast && Number.isNaN(state.probeV2Clock.e))
       activateProbeV2Context(currentRequestContext());
   }
   return file;
@@ -2119,7 +2121,7 @@ function registerProbeV2(definition) {
 // at ten times the uninstrumented time.
 function coverageHitV2(file, index) {
   const clock = file.clock;
-  if (clock.fast && file.hitEpochs[index] === clock.epoch)
+  if (clock.fast && file.hitEpochs[index] === clock.e)
     return;
   recordCoverageHitV2(file, index);
 }
@@ -2128,13 +2130,13 @@ function recordCoverageHitV2(file, index) {
   if (!id)
     return;
   const fallbackEpoch = !file.clock.fast;
-  const previousEpoch = file.clock.epoch;
+  const previousEpoch = file.clock.e;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
   else if (previousEpoch !== previousEpoch)
     resolveProbeV2Epoch();
   try {
-    const epoch = file.clock.epoch;
+    const epoch = file.clock.e;
     if (file.hitEpochs[index] === epoch)
       return;
     file.hitEpochs[index] = epoch;
@@ -2144,7 +2146,7 @@ function recordCoverageHitV2(file, index) {
       recordLogicalOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
-      file.clock.epoch = previousEpoch;
+      file.clock.e = previousEpoch;
   }
 }
 function decodeProbeV2Vector(conditionCount, encoded, outcome) {
@@ -2167,7 +2169,7 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
   const clock = file.clock;
   if (clock.fast) {
     const seen = file.decisionEpochs[decisionIndex];
-    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
+    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.e)
       return value;
   }
   return recordMcdcEndV2(file, decisionIndex, encoded, value);
@@ -2182,13 +2184,13 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   if (!Number.isSafeInteger(vectorIndex))
     return value;
   const fallbackEpoch = !file.clock.fast;
-  const previousEpoch = file.clock.epoch;
+  const previousEpoch = file.clock.e;
   if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
   else if (previousEpoch !== previousEpoch)
     resolveProbeV2Epoch();
   try {
-    const epoch = file.clock.epoch;
+    const epoch = file.clock.e;
     const seen = file.decisionEpochs[decisionIndex];
     if (!seen)
       return value;
@@ -2218,7 +2220,7 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
     return vector ? mcdcEnd({ id, values: vector.values }, value) : value;
   } finally {
     if (fallbackEpoch)
-      file.clock.epoch = previousEpoch;
+      file.clock.e = previousEpoch;
   }
 }
 function selectionBegin(shortId, rightId) {

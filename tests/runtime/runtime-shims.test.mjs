@@ -1248,7 +1248,7 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
 });
 
-// A statement probe is `hits[place] === clock.epoch || hit(file, place)`: it
+// A statement probe is `hits[place] === clock.e || hit(file, place)`: it
 // no longer checks `clock.fast` first. Where no async hook keeps the epoch
 // current (no `createHook`), the clock is not fast, and its epoch stays NaN
 // wherever instrumented code can run -- after registration, after a reset,
@@ -1266,20 +1266,20 @@ test("without an async hook a probe's epoch is NaN, so each request works out it
       file: "src/served.js", key: "served", points: 1, decisionWidths: [], pointAliases: [], decisionAliases: [],
     });
     const seen = [];
-    const look = (where) => seen.push([where, file.clock.fast, Number.isNaN(file.clock.epoch)]);
+    const look = (where) => seen.push([where, file.clock.fast, Number.isNaN(file.clock.e)]);
     look("registered");
     runtime.resetCoverage("no-hook");
     look("reset");
-    const probe = () => file.hitEpochs[0] === file.clock.epoch || runtime.coverageHitV2(file, 0);
+    const probe = () => file.hitEpochs[0] === file.clock.e || runtime.coverageHitV2(file, 0);
     const scope = (testId) => ({ version: 1, runId: "run", workerId: "w", testId, testKey: testId, retry: 0, attemptId: testId + "-0" });
     let slowPaths = 0;
     const counted = () => { slowPaths += 1; };
     for (const testId of ["first", "second"]) {
       runtime.withCoverageCarrier({ scope: scope(testId), phaseId: testId + "-phase" }, () => {
         look("carrier " + testId);
-        if (!(file.hitEpochs[0] === file.clock.epoch)) counted();
+        if (!(file.hitEpochs[0] === file.clock.e)) counted();
         probe();
-        if (!(file.hitEpochs[0] === file.clock.epoch)) counted();
+        if (!(file.hitEpochs[0] === file.clock.e)) counted();
         probe();
       });
     }

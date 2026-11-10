@@ -251,7 +251,7 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
-/// The place of a statement probe, `hits[place] === clock.epoch ||
+/// The place of a statement probe, `hits[place] === clock.e ||
 /// hit(file, place);`.
 fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
     let Statement::ExpressionStatement(statement) = statement else {
@@ -5083,7 +5083,7 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `hits[index] === clock.epoch || hit(file, index);`, where `clock` and
+/// `hits[index] === clock.e || hit(file, index);`, where `clock` and
 /// `hits` are the file's clock and hit epochs, bound once beside it.
 ///
 /// A statement probe that already fired in this context costs two loads and
@@ -5140,7 +5140,8 @@ fn probe_v2_hit_expression<'a>(
             false,
         )),
         BinaryOperator::StrictEquality,
-        member(clock_expression(), "epoch"),
+        // The epoch, by a one-letter name: a minifier keeps property names.
+        member(clock_expression(), "e"),
     );
     let call = ast.expression_call(
         span,
@@ -11283,12 +11284,7 @@ export const r = v && w && q;
         let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
         assert!(probed(leader) && !probed(place), "{}", output.code);
         // The statement after the call keeps its probe.
-        assert_eq!(
-            output.code.matches(".epoch || ").count(),
-            2,
-            "{}",
-            output.code
-        );
+        assert_eq!(output.code.matches(".e || ").count(), 2, "{}", output.code);
         // Another table than a module with every probe would name.
         assert_eq!(
             table.key,
@@ -13481,7 +13477,7 @@ export function shapes(n: number): unknown {
         for (text, first) in &lines {
             // A probe maps to nothing: a coverage tool reading the copy
             // through its map counts no branch of the user's for its `||`.
-            if text.contains(&format!("{}.epoch", runtime.probe_clock_v2))
+            if text.contains(&format!("{}.e ", runtime.probe_clock_v2))
                 && let Some(first) = first
             {
                 assert_eq!(*first, None, "{text}");
