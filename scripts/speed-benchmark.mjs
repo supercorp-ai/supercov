@@ -628,7 +628,15 @@ function profileSelfTime(directory) {
     return 'app';
   };
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.cpuprofile'))) {
-    const profile = JSON.parse(readFileSync(join(directory, file), 'utf8'));
+    // A process killed while it wrote its profile leaves it cut short: it is
+    // left out and named, rather than ending the benchmark after its rounds.
+    let profile;
+    try {
+      profile = JSON.parse(readFileSync(join(directory, file), 'utf8'));
+    } catch {
+      console.log(`[speed] ${file} is not a whole CPU profile; left out`);
+      continue;
+    }
     const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
     const parents = new Map();
     for (const node of profile.nodes)
