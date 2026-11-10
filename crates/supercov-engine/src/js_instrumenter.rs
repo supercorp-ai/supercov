@@ -213,11 +213,20 @@ fn adjacent_probe_merger(
 struct PlacesNamed {
     file: String,
     hit: String,
+    /// Helpers called with the file and a number that is no point: a
+    /// decision, a selection tree or a default's slot. Counted as naming the
+    /// point of that number, they kept a statement probe from merging with
+    /// the probe before it in every module with a decision.
+    others: Vec<String>,
     counts: Vec<u32>,
 }
 
 impl PlacesNamed {
     fn count(&mut self, call: &CallExpression<'_>) {
+        if matches!(&call.callee, Expression::Identifier(callee) if self.others.iter().any(|other| callee.name == other.as_str()))
+        {
+            return;
+        }
         let bound = matches!(&call.callee, Expression::Identifier(callee) if callee.name == self.hit.as_str());
         let place = if bound {
             bound_place_argument(call)
@@ -4802,6 +4811,13 @@ fn instrument_candidate_with_binding(
         named: PlacesNamed {
             file: probe_file_v2.clone(),
             hit: probe_hit_at_v2.clone(),
+            others: vec![
+                mcdc_end_v2.clone(),
+                select_end_v2.clone(),
+                select_next_v2.clone(),
+                default_selected_v2.clone(),
+                default_entered_v2.clone(),
+            ],
             counts: vec![0; point_analysis.points.len()],
         },
     };
@@ -11188,6 +11204,40 @@ export const r = v && w && q;
         assert_eq!(again.probe_table.as_ref(), Some(table));
         let other = instrument_candidate(source, "src/other.js").unwrap();
         assert_ne!(other.probe_table.unwrap().key, table.key);
+    }
+
+    /// A decision's index, a selection tree's or a default's slot is no
+    /// point: a module with a decision merges its other functions' probes as
+    /// one without would.
+    #[test]
+    fn a_decision_does_not_keep_another_function_from_merging() {
+        let plain = "export function pair(p) {\n  return p[0];\n}\n";
+        let decided = format!(
+            "{plain}export function f(x) {{\n  return typeof x === \"object\" ? 1 : 2;\n}}\n"
+        );
+        for source in [plain.to_owned(), decided] {
+            let output = instrument_candidate(&source, "src/pair.js").unwrap();
+            let pair = output
+                .code
+                .split("export function pair")
+                .nth(1)
+                .and_then(|rest| rest.split("\n}").next())
+                .unwrap();
+            assert_eq!(
+                pair.lines()
+                    .filter(|line| line.trim().starts_with("__supercovHitAt"))
+                    .count(),
+                1,
+                "{}",
+                output.code
+            );
+            assert_eq!(
+                output.probe_table.as_ref().unwrap().follows.len(),
+                if source.contains("typeof") { 2 } else { 1 },
+                "{}",
+                output.code
+            );
+        }
     }
 
     /// A statement in a loop body repeats, and its probe keeps the inline
