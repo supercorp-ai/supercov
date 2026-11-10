@@ -187,19 +187,58 @@ fn javascript_runner_declaration(
     }
 }
 
+/// `parse` of each record, on every core, in the records' order; the error of
+/// the first record in that order that fails. Workers take the next record
+/// when done with one: records run from bytes to megabytes.
+fn parse_records_in_order<R: Sync, T: Send>(
+    records: &[R],
+    parse: impl Fn(&R) -> Result<T, String> + Sync,
+) -> Result<Vec<T>, String> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(records.len().max(1));
+    if threads <= 1 {
+        return records.iter().map(&parse).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut parsed = std::thread::scope(|scope| {
+        let workers = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(record) = records.get(index) else {
+                            return done;
+                        };
+                        done.push((index, parse(record)));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_else(crate::threads::rethrow))
+            .collect::<Vec<_>>()
+    });
+    parsed.sort_unstable_by_key(|(index, _)| *index);
+    parsed.into_iter().map(|(_, result)| result).collect()
+}
+
 fn javascript_archive_entries(
     mut entries: Vec<EvidenceArchiveEntry>,
     manifest: &crate::javascript_frontend::JavascriptManifest,
     run_id: &str,
     exit_code: i32,
 ) -> Result<Vec<EvidenceArchiveEntry>, String> {
-    let mut results = Vec::new();
+    // Every record in archive order, then parsed on every core: one after
+    // another on the run's own thread, a large Vitest run's records were
+    // most of its evidence step. The first record in order that fails is
+    // the error, as when they were read in turn.
+    let mut records = Vec::<(&[u8], &str, Option<usize>)>::new();
     for entry in &entries {
         if entry.path == "mcdc.json" || entry.path.ends_with("/mcdc.json") {
-            results.push(
-                serde_json::from_slice::<RawTestResult>(&entry.contents)
-                    .map_err(|error| format!("invalid {}: {error}", entry.path))?,
-            );
+            records.push((&entry.contents, &entry.path, None));
         } else if entry.path == "mcdc.jsonl" || entry.path.ends_with(".mcdc.jsonl") {
             let contents = entry
                 .contents
@@ -213,18 +252,16 @@ fn javascript_archive_entries(
                         index + 1
                     ));
                 }
-                results.push(
-                    serde_json::from_slice::<RawTestResult>(line).map_err(|error| {
-                        format!(
-                            "invalid {} record at line {}: {error}",
-                            entry.path,
-                            index + 1
-                        )
-                    })?,
-                );
+                records.push((line, &entry.path, Some(index + 1)));
             }
         }
     }
+    let mut results = parse_records_in_order(&records, |(bytes, path, line)| {
+        serde_json::from_slice::<RawTestResult>(bytes).map_err(|error| match line {
+            None => format!("invalid {path}: {error}"),
+            Some(line) => format!("invalid {path} record at line {line}: {error}"),
+        })
+    })?;
     if results.is_empty() {
         let status = match exit_code {
             0 => "passed",
@@ -2396,6 +2433,34 @@ mod tests {
     /// are named, a run that recorded nothing gets the command's own result,
     /// background server records get a runner of their own, and the
     /// declaration and model are added.
+    #[test]
+    fn records_are_parsed_on_every_core_in_their_order() {
+        let records = (0..500).collect::<Vec<usize>>();
+        // Later records take longer, so workers finish out of order.
+        let parsed = parse_records_in_order(&records, |record| {
+            std::thread::sleep(std::time::Duration::from_micros((*record % 7) as u64 * 50));
+            Ok(*record * 2)
+        })
+        .unwrap();
+        assert_eq!(
+            parsed,
+            (0..500).map(|record| record * 2).collect::<Vec<_>>()
+        );
+        // Of several that fail, the first in order is the error.
+        let failed = parse_records_in_order(&records, |record| {
+            if *record == 499 || *record == 37 || *record == 401 {
+                Err(format!("record {record}"))
+            } else {
+                Ok(*record)
+            }
+        });
+        assert_eq!(failed, Err("record 37".to_owned()));
+        assert_eq!(
+            parse_records_in_order(&Vec::<usize>::new(), |record| Ok(*record)),
+            Ok(Vec::new())
+        );
+    }
+
     #[test]
     fn javascript_archive_entries_are_read_or_refused_by_name() {
         let manifest: crate::javascript_frontend::JavascriptManifest =
