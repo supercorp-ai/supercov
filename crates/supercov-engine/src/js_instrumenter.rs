@@ -8267,7 +8267,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         pending: Vec<(AppliedDecision, ValueShape)>,
     ) {
         let inline = pending.iter().any(|(applied, _)| applied.inline);
-        let result = self.scratch_for("_supercovMcdcResult", inline);
+        let result = self.scratch_for("_supercovR", inline);
         // The decision that left the tree pending, at least, each with a
         // condition at least.
         let mut steps = self
@@ -8529,7 +8529,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         plan: DecisionPlan,
     ) -> Option<AppliedDecision> {
         if plan.condition_count > 32 {
-            let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
+            let frame_name = self.scratch_for("_supercovF", plan.inline_frame);
             let mut next_index = 0;
             self.instrument_conditions_v1(test, &frame_name, &mut next_index);
             debug_assert_eq!(next_index, plan.condition_count);
@@ -8576,9 +8576,9 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
         let applied = AppliedDecision {
             index: plan.index,
-            frame: self.scratch_for("_supercovMcdcFrame", plan.inline_frame),
+            frame: self.scratch_for("_supercovF", plan.inline_frame),
             values: (0..plan.condition_count)
-                .map(|_| self.scratch_for("_supercovMcdcValue", plan.inline_frame))
+                .map(|_| self.scratch_for("_supercovV", plan.inline_frame))
                 .collect(),
             inline: plan.inline_frame,
         };
@@ -13234,19 +13234,26 @@ export function shapes(n: number): unknown {
         let mut names: Vec<&str> = Vec::new();
         let mut shaped = String::new();
         let mut rest = code.as_str();
-        while let Some(at) = rest.find("_supercovMcdc") {
+        while let Some(at) = rest.find("_supercov") {
             shaped.push_str(&rest[..at]);
             let tail = &rest[at..];
-            // The runtime's own helpers are bound to `__supercovMcdc…`.
-            if shaped.ends_with('_') {
-                shaped.push_str("_supercovMcdc");
-                rest = &tail["_supercovMcdc".len()..];
-                continue;
-            }
             let length = tail
                 .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
                 .unwrap_or(tail.len());
             let name = &tail[..length];
+            // The decisions' temporaries are `_supercovF…`, `_supercovV…` and
+            // `_supercovR…`; the runtime's own helpers are bound to
+            // `__supercov…`, and other temporaries keep their names.
+            let temporary = !shaped.ends_with('_')
+                && matches!(
+                    name.as_bytes().get("_supercov".len()..="_supercovF".len()),
+                    Some([b'F' | b'V' | b'R', b'0'..=b'9'])
+                );
+            if !temporary {
+                shaped.push_str(name);
+                rest = &tail[length..];
+                continue;
+            }
             let index = names
                 .iter()
                 .position(|known| *known == name)
@@ -13402,8 +13409,8 @@ export function shapes(n: number): unknown {
         assert_eq!(output.supported_surface, "complete-js-instrumenter-v1");
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
-        assert!(output.code.contains("_supercovMcdcFrame"));
-        assert!(output.code.contains("_supercovMcdcValue"));
+        assert!(output.code.contains("_supercovF"));
+        assert!(output.code.contains("_supercovV"));
         assert_eq!(output.decisions.len(), 1);
         assert!(output.points.iter().any(|point| point.kind == "statement"));
         assert!(output.points.iter().any(|point| point.kind == "function"));
@@ -13860,8 +13867,8 @@ export function shapes(n: number): unknown {
             // operand is a decision too: its conditions are recorded in the
             // leaves and its outcome after the tree, from their values with
             // `&`, so the tree stays one tree and narrows as written.
-            "(s1 = 0, _supercovMcdcFrame28 = 1, _supercovMcdcValue30 = 0, _supercovMcdcValue29 = total > 0) && (s1 = 1, _supercovMcdcFrame28 += 3, _supercovMcdcValue30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
-            "!!(+!!_supercovMcdcValue29 & +!!_supercovMcdcValue30)), _supercovMcdcResult31;",
+            "(s1 = 0, _supercovF28 = 1, _supercovV30 = 0, _supercovV29 = total > 0) && (s1 = 1, _supercovF28 += 3, _supercovV30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            "!!(+!!_supercovV29 & +!!_supercovV30)), _supercovR31;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.
@@ -13920,11 +13927,11 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn allocates_runtime_and_scratch_names_away_from_user_bindings() {
-        let source = "const __supercovMcdcEndV2 = 1, _supercovMcdcFrame1 = 2;\nif (a && b) work();";
+        let source = "const __supercovMcdcEndV2 = 1, _supercovF1 = 2;\nif (a && b) work();";
         let output = instrument_candidate(source, "app/collisions.js").unwrap();
         let runtime = output.runtime.expect("candidate runtime binding");
         assert_ne!(runtime.mcdc_end_v2, "__supercovMcdcEndV2");
-        assert!(!output.code.contains("let _supercovMcdcFrame1,"));
+        assert!(!output.code.contains("let _supercovF1,"));
     }
 
     #[test]
