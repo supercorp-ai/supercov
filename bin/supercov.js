@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { argumentsAsTyped } from "./arguments.js";
 import { resolveNativeBinary } from "./native.js";
 
 let rustBinary;
@@ -14,7 +15,7 @@ try {
 }
 const child = spawn(
   rustBinary,
-  process.argv.slice(2),
+  argumentsAsTyped(process.argv.slice(2), process.env),
   {
     stdio: "inherit",
     env: {

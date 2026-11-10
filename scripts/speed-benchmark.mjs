@@ -1,6 +1,7 @@
-// How much longer a real Next.js application's tests take under Supercov
-// than without it: the application SPEED_APP names (see `applications`),
-// its Vitest suite and its Playwright suite against a production build. Each
+// How much longer a real application's tests and builds take under Supercov
+// than without it: the application SPEED_APP names (see `applications`) and
+// its suites, such as a Vitest suite and a Playwright suite against a
+// production build, or the production build alone. Each
 // round runs the plain suites, then every binary named in
 // SUPERCOV_BINARIES (`name=path,...`) in an order that turns each round, so
 // no binary always runs on a warmer machine. A Supercov run starts with no
@@ -180,6 +181,10 @@ export default {
   workers: 1,
   retries: 0,
   reporter: [['list'], ['json']],
+  // The profiled pass reads the pages' JavaScript through a port of its own.
+  ...(process.env.SPEED_DEVTOOLS_PORT
+    ? { use: { ...base.use, launchOptions: { args: [\`--remote-debugging-port=\${process.env.SPEED_DEVTOOLS_PORT}\`] } } }
+    : {}),
   webServer: {
     ...base.webServer,
     command: 'NODE_ENV=test npx next build && npx next start --port 3002',
@@ -195,6 +200,7 @@ export default {
     return {
       project,
       description: 'the e2e suite once',
+      browserProfile: true,
       suites: [
         { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
         // A slow runner times a test out now and then: counted, and the
@@ -216,10 +222,36 @@ export default {
       },
     };
   },
+  // Excalidraw, a large Vite app: its Vitest suite, and its Vite production
+  // build alone, the build a measured end-to-end run serves its app from.
+  excalidraw() {
+    const project = join(output, 'excalidraw');
+    checkout(project, 'https://github.com/excalidraw/excalidraw.git', '701b901a0f1ba3d0b390d9cdf63d112e25abac4b');
+    run(project, 'npx', ['-y', 'yarn@1.22.22', 'install', '--frozen-lockfile', '--non-interactive'], 'install');
+    // Its service worker refuses to precache a file over 2.3 MB, and the
+    // plain main chunk is 1.9 MB: a build of instrumented code, any tool's,
+    // fails there. The limit is raised for every variant alike, so the build
+    // is timed to its end.
+    const config = join(project, 'excalidraw-app/vite.config.mts');
+    const text = readFileSync(config, 'utf8');
+    assert.ok(text.includes('maximumFileSizeToCacheInBytes: 2.3 * 1024 ** 2'), 'Excalidraw no longer limits its precache as expected');
+    writeFileSync(config, text.replace('maximumFileSizeToCacheInBytes: 2.3 * 1024 ** 2', 'maximumFileSizeToCacheInBytes: 64 * 1024 ** 2'));
+    return {
+      project,
+      description: 'the Vite build once',
+      outputs: ['excalidraw-app/build'],
+      suites: [
+        { name: 'unit', command: ['npx', 'vitest', 'run'], mayFail: true },
+        // A build runs no test: Supercov publishes no run of its own for it.
+        { name: 'build', command: ['npx', '-y', 'yarn@1.22.22', '--cwd', 'excalidraw-app', 'build:app:docker'], build: true },
+      ],
+      reset() {},
+    };
+  },
 };
 const application = process.env.SPEED_APP ?? 'bulletproof';
 assert.ok(applications[application], `SPEED_APP names no application: ${application}`);
-const { project, description, suites, reset } = applications[application]();
+const { project, description, suites, reset, outputs = ['.next'], browserProfile = false } = applications[application]();
 
 // The flow's own time from Playwright's report, its mean over the
 // repetitions that passed: the server's build and start are left out, so
@@ -281,7 +313,7 @@ function suiteRun(round, variant, suite, binary) {
   // Every run builds from nothing, as on a fresh CI checkout: Supercov's copy
   // never has the project's build, and a plain run after the first found the
   // one the run before it left and built warm.
-  rmSync(join(project, '.next'), { recursive: true, force: true });
+  for (const built of outputs) rmSync(join(project, built), { recursive: true, force: true });
   const report = join(output, `report-${round}-${variant}-${suite.name}.json`);
   // Supercov's copy is kept, for the traces of the tests that failed in it.
   const env = { PLAYWRIGHT_JSON_OUTPUT_NAME: report, SUPERCOV_KEEP_WORKSPACE: '1' };
@@ -305,7 +337,7 @@ function suiteRun(round, variant, suite, binary) {
   const extra = existsSync(report) ? flowTimes(report) : {};
   sample(round, variant, suite.name, seconds, extra);
   keepTraces(`${round}-${variant}-${suite.name}`);
-  if (!binary) return;
+  if (!binary || suite.build) return;
   const latest = JSON.parse(
     run(project, binary, ['runs', 'latest', '--json'], `${round}-${variant}-${suite.name}-latest`)
       .stdout,
@@ -396,8 +428,22 @@ if (process.env.SPEED_DIAGNOSE === '1') {
       mkdirSync(directory, { recursive: true });
       const options = `${process.env.NODE_OPTIONS ?? ''} --require=${exitOnSignal} --cpu-prof --cpu-prof-dir=${directory}`.trim();
       const [command, ...args] = binary ? [binary, '--', ...suite.command] : suite.command;
-      run(project, command, args, `profile-${variant}-${suite.name}`, { NODE_OPTIONS: options, SUPERCOV_KEEP_WORKSPACE: '1' }, true);
-      const { totals, functions, processes } = profileSelfTime(directory);
+      // The browser's pages too, for a suite that drives one.
+      const pages = browserProfile && suite.name === 'e2e' ? join(output, `browser-profile-${variant}.json`) : undefined;
+      const pageProfiler = pages
+        ? spawn(process.execPath, [new URL('./speed/renderer-profile.mjs', import.meta.url).pathname, '9333', pages], { stdio: 'inherit' })
+        : undefined;
+      try {
+        run(project, command, args, `profile-${variant}-${suite.name}`, {
+          NODE_OPTIONS: options,
+          SUPERCOV_KEEP_WORKSPACE: '1',
+          ...(pages ? { SPEED_DEVTOOLS_PORT: '9333' } : {}),
+        }, true);
+      } finally {
+        pageProfiler?.kill('SIGTERM');
+      }
+      if (pages) writeFileSync(join(output, `browser-profile-${variant}.txt`), browserProfileText(pages));
+      const { totals, functions, processes, callers } = profileSelfTime(directory);
       // Each process that kept a CPU busy for a second or more: which one
       // the time went to, by whose code.
       writeFileSync(
@@ -414,6 +460,21 @@ if (process.env.SPEED_DIAGNOSE === '1') {
         .slice(0, 25)
         .map(([what, seconds]) => `${seconds.toFixed(3)}s  ${what}`);
       writeFileSync(join(output, `profile-top-${variant}-${suite.name}.txt`), `${heaviest.join('\n')}\n`);
+      // Who called each of the heaviest: the two frames above it, by time.
+      writeFileSync(
+        join(output, `profile-callers-${variant}-${suite.name}.txt`),
+        Object.entries(functions)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 15)
+          .map(([what]) => [
+            `== ${what}`,
+            ...Object.entries(callers[what] ?? {})
+              .sort(([, a], [, b]) => b - a)
+              .slice(0, 8)
+              .map(([chain, seconds]) => `${seconds.toFixed(3)}s  <- ${chain}`),
+          ].join('\n'))
+          .join('\n\n') + '\n',
+      );
     }
   }
   const kinds = [...new Set(Object.values(profiled).flatMap((totals) => Object.keys(totals)))].sort();
@@ -485,9 +546,60 @@ if copy:
     {},
     true,
   ).stdout;
-  writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}`);
+  // What the shipped JavaScript is made of: plain's against the measured
+  // copy's, and in the measured one the bytes of probe ids, which minifiers
+  // leave as written, and of the loader each module begins with.
+  const shipped = run(
+    project,
+    'python3',
+    ['-c', `
+import os, re
+ids = re.compile(rb'"[0-9a-f]{16}[^" ]*(?: [0-9a-f]{16}[^" ]*)*"')
+loader = re.compile(rb'new Function\\("stack".{0,1200}?\\}\\s*catch\\s*(?:\\(\\w*\\))?\\s*\\{\\s*\\}', re.S)
+direct = re.compile(rb'globalThis\\.__SUPERCOV_DIRECT_RUNTIME__\\.\\w+')
+totals = {}
+for base, dirs, names in os.walk('.'):
+    dirs[:] = [d for d in dirs if d not in ('node_modules', '.git')]
+    if not (base.endswith(os.path.join('.next', 'static', 'chunks')) or base.endswith(os.path.join('build', 'assets'))):
+        continue
+    label = 'measured' if '.supercov' in base else 'plain'
+    row = totals.setdefault(label, {'files': 0, 'bytes': 0, 'ids': 0, 'idCount': 0, 'loaders': 0, 'loaderBytes': 0, 'direct': 0})
+    for name in names:
+        if not name.endswith('.js'):
+            continue
+        text = open(os.path.join(base, name), 'rb').read()
+        row['files'] += 1
+        row['bytes'] += len(text)
+        for match in ids.finditer(text):
+            row['ids'] += len(match.group(0))
+            row['idCount'] += match.group(0).count(b' ') + 1
+        for match in loader.finditer(text):
+            row['loaders'] += 1
+            row['loaderBytes'] += len(match.group(0))
+        row['direct'] += sum(len(match.group(0)) for match in direct.finditer(text))
+for label, row in sorted(totals.items()):
+    print(label, ' '.join(f'{key}={value}' for key, value in row.items()))
+`],
+    'shipped',
+    {},
+    true,
+  ).stdout;
+  writeFileSync(join(output, 'bundles.txt'), `${bundles}\n${sources}\n${shipped}`);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${table}\n`);
   console.log(table);
+}
+
+// The pages' profile as text: how long their JavaScript ran, and the
+// functions that ran longest, by script and line.
+function browserProfileText(file) {
+  if (!existsSync(file)) return 'no profile\n';
+  const { chunks, busyMs, idleMs, functions, v8 = [] } = JSON.parse(readFileSync(file, 'utf8'));
+  return [
+    `chunks ${chunks}, busy ${(busyMs / 1000).toFixed(2)}s, idle ${(idleMs / 1000).toFixed(2)}s`,
+    ...functions.slice(0, 80).map(([what, ms]) => `${(ms / 1000).toFixed(3)}s  ${what}`),
+    '-- V8 trace events (nested ones overlap their parents)',
+    ...v8.map(([name, ms, count]) => `${(ms / 1000).toFixed(3)}s  ${count}x  ${name}`),
+  ].join('\n') + '\n';
 }
 
 // A directory of `.cpuprofile` files as seconds of self-time by whose code
@@ -496,6 +608,7 @@ if copy:
 function profileSelfTime(directory) {
   const totals = {};
   const functions = {};
+  const callers = {};
   const processes = [];
   const kindOf = (url, functionName) => {
     if (!url) return functionName.startsWith('(') ? functionName : '(native)';
@@ -510,6 +623,15 @@ function profileSelfTime(directory) {
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.cpuprofile'))) {
     const profile = JSON.parse(readFileSync(join(directory, file), 'utf8'));
     const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
+    const parents = new Map();
+    for (const node of profile.nodes)
+      for (const child of node.children ?? []) parents.set(child, node.id);
+    const frame = (id) => {
+      const node = id === undefined ? undefined : nodes.get(id);
+      if (!node) return '(root)';
+      const { url, functionName, lineNumber } = node.callFrame;
+      return `${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
+    };
     const self = new Map();
     profile.samples.forEach((id, index) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[index] ?? 0)));
     const own = {};
@@ -526,6 +648,10 @@ function profileSelfTime(directory) {
       if (!functionName.startsWith('(')) {
         const what = `${kind}: ${functionName || '(anonymous)'} ${url.split('/').slice(-2).join('/')}:${lineNumber + 1}`;
         functions[what] = (functions[what] ?? 0) + micros / 1e6;
+        const parent = parents.get(id);
+        const chain = `${frame(parent)} <- ${frame(parents.get(parent))}`;
+        callers[what] ??= {};
+        callers[what][chain] = (callers[what][chain] ?? 0) + micros / 1e6;
       }
     }
     const busy = Object.values(own).reduce((sum, seconds) => sum + seconds, 0);
@@ -536,7 +662,7 @@ function profileSelfTime(directory) {
         .map(([what, seconds]) => `${seconds.toFixed(2)}s ${what}`);
     processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 30) });
   }
-  return { totals, functions, processes };
+  return { totals, functions, processes, callers };
 }
 
 const median = (values) => {
@@ -552,21 +678,22 @@ const of = (variant, suite, field = 'seconds') =>
       .filter((value) => value !== undefined),
   );
 const rows = [];
-const plainTotal = of('plain', 'unit') + of('plain', 'e2e');
+const plainTotal = suites.reduce((sum, suite) => sum + of('plain', suite.name), 0);
 const failures = (variant) =>
   samples
     .filter((entry) => entry.variant === variant)
     .reduce((sum, entry) => sum + (entry.failed ?? 0), 0);
-rows.push('| Variant | Unit s | E2e s | E2e mean test s | E2e failed | Merge s | Total s | Total × plain | E2e test × plain |');
-rows.push('|---|---|---|---|---|---|---|---|---|');
-rows.push(
-  `| plain | ${of('plain', 'unit').toFixed(2)} | ${of('plain', 'e2e').toFixed(2)} | ${of('plain', 'e2e', 'testSeconds').toFixed(2)} | ${failures('plain')} | | ${plainTotal.toFixed(2)} | 1.000 | 1.000 |`,
-);
-for (const { name } of binaries) {
-  const total = of(name, 'unit') + of(name, 'e2e') + of(name, 'merge');
-  rows.push(
-    `| ${name} | ${of(name, 'unit').toFixed(2)} | ${of(name, 'e2e').toFixed(2)} | ${of(name, 'e2e', 'testSeconds').toFixed(2)} | ${failures(name)} | ${of(name, 'merge').toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} | ${(of(name, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |`,
-  );
+const flowSuite = suites.find((suite) => suite.name === 'e2e');
+const label = (name) => `${name[0].toUpperCase()}${name.slice(1)}`;
+rows.push(`| Variant | ${suites.map((suite) => `${label(suite.name)} s | ${label(suite.name)} × plain`).join(' | ')} |${flowSuite ? ' E2e mean test s | E2e failed |' : ''} Merge s | Total s | Total × plain |${flowSuite ? ' E2e test × plain |' : ''}`);
+rows.push(`|---|${suites.map(() => '---|---').join('|')}|${flowSuite ? '---|---|' : ''}---|---|---|${flowSuite ? '---|' : ''}`);
+for (const variant of ['plain', ...binaries.map(({ name }) => name)]) {
+  const merge = variant === 'plain' ? 0 : of(variant, 'merge');
+  const total = suites.reduce((sum, suite) => sum + of(variant, suite.name), 0) + merge;
+  const cells = suites.map((suite) => `${of(variant, suite.name).toFixed(2)} | ${(of(variant, suite.name) / of('plain', suite.name)).toFixed(3)}`);
+  const flow = flowSuite ? ` ${of(variant, 'e2e', 'testSeconds').toFixed(2)} | ${failures(variant)} |` : '';
+  const flowRatio = flowSuite ? ` ${(of(variant, 'e2e', 'testSeconds') / of('plain', 'e2e', 'testSeconds')).toFixed(3)} |` : '';
+  rows.push(`| ${variant} | ${cells.join(' | ')} |${flow} ${variant === 'plain' ? '' : merge.toFixed(2)} | ${total.toFixed(2)} | ${(total / plainTotal).toFixed(3)} |${flowRatio}`);
 }
 // CPU seconds by kind of process, for the first round's runs.
 const cpu = Object.fromEntries(

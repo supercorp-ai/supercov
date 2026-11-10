@@ -670,6 +670,18 @@ pub fn run_direct_javascript(
         "[supercov] instrumenting isolated workspace {}",
         workspace.display()
     );
+    // Build output this checkout holds and the copy starts without, where the
+    // command does not build: said before the suite runs. Said only after a
+    // failed run, it came at the end of a nine-minute suite that never had a
+    // chance.
+    let missing = missing_build_output(&root, &workspace);
+    if !project.unrun_build.is_empty() && !missing.is_empty() {
+        let _ = writeln!(
+            diagnostics,
+            "{}",
+            missing_build_output_note(&missing, &project.unrun_build, &request.command)
+        );
+    }
     cleanup.mark_state_written();
     write_run_state(
         &root,
@@ -1600,6 +1612,40 @@ pub fn run_direct_javascript(
             project.unrun_build.clone()
         },
     })
+}
+
+/// Where JavaScript builds write their output: none is source, and the copy
+/// a command runs in starts without them.
+const BUILD_OUTPUTS: &[&str] = &[
+    ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    "build",
+    "dist",
+    "out",
+];
+
+/// The build output folders this checkout holds that the copy does not.
+fn missing_build_output(root: &Path, workspace: &Path) -> Vec<&'static str> {
+    BUILD_OUTPUTS
+        .iter()
+        .copied()
+        .filter(|folder| root.join(folder).is_dir() && !workspace.join(folder).exists())
+        .collect()
+}
+
+fn missing_build_output_note(missing: &[&str], build: &[String], command: &[String]) -> String {
+    let folders = missing
+        .iter()
+        .map(|folder| format!("`{folder}/`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let build = build.join(" ");
+    let command = command.join(" ");
+    format!(
+        "[supercov] the copy the command runs in starts without {folders}, which this checkout has, and the command does not run `{build}`: if the tests need that output, stop and measure `supercov -- sh -c \"{build} && {command}\"` instead"
+    )
 }
 
 /// The id of the `nth` run published beside `run_id` from the same command:

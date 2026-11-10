@@ -388,6 +388,7 @@ impl<'a> PythonObligationCollector<'a> {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             plan: PythonFilePlan::default(),
             point_ids: BTreeSet::new(),
@@ -1173,14 +1174,14 @@ mod tests {
         let tried = "try:\n    g()\nexcept ValueError:\n    pass\nfinally:\n    h()\n";
         let matched = "match a:\n    case 1:\n        pass\n";
         for (source, place) in [
-            (decided, "577"),
-            (decided, "592"),
-            (decided, "618"),
-            (decided, "831"),
-            (tried, "786"),
-            (tried, "792"),
-            (tried, "733@2"),
-            (matched, "914"),
+            (decided, "578"),
+            (decided, "593"),
+            (decided, "619"),
+            (decided, "832"),
+            (tried, "787"),
+            (tried, "793"),
+            (tried, "734@2"),
+            (matched, "915"),
         ] {
             assert!(build_python_obligations("a.py", source).is_ok(), "{place}");
             let fault = format!("python-range#python_instrumenter.rs:{place}");

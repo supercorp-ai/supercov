@@ -179,7 +179,9 @@ function createState() {
     // Per logical selection, outside a snapshot: each outcome's epoch, as
     // for comparisons.
     logicalEpochs: /* @__PURE__ */ new Map(),
-    eventKeys: /* @__PURE__ */ new Set(),
+    // The events already recorded, by phase: a hit by its id, anything else
+    // by its type and what tells it apart (eventSeen).
+    eventKeys: /* @__PURE__ */ new Map(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
     persistedServerRecords: /* @__PURE__ */ new Set(),
@@ -216,7 +218,7 @@ function createState() {
       state2.hits.add(id);
     for (const event of (_d = stored.events) != null ? _d : []) {
       state2.events.push(event);
-      state2.eventKeys.add(eventKey(event));
+      eventSeen(state2.eventKeys, event);
     }
   } catch (e) {
   }
@@ -270,7 +272,7 @@ function activateProbeV2Key(key, force = false) {
         file.decisionObservationCounts.fill(0);
         file.decisionCompleteEpochs.fill(0);
         for (const vectors of file.decisionEpochs) {
-          if (vectors instanceof Uint32Array)
+          if (vectors.size === void 0)
             vectors.fill(0);
           else
             vectors.clear();
@@ -1210,24 +1212,10 @@ function appendServer(record) {
     if (record.type !== "hit" && record.type !== "decision")
       return;
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
-    if (record.type === "decision") {
-      recordBrowserEvent(__spreadProps(__spreadValues({
-        type: "decision",
-        id: record.id,
-        vector: record.vector,
-        timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
-        environment: "server"
-      }));
-    } else {
-      recordBrowserEvent(__spreadProps(__spreadValues({
-        type: "hit",
-        id: record.id,
-        timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
-        environment: "server"
-      }));
-    }
+    if (record.type === "decision")
+      recordBrowserEvent(decisionEvent(record.id, record.vector, timestampMs, record.phaseId, "server"));
+    else
+      recordBrowserEvent(hitEvent(record.id, timestampMs, record.phaseId, "server"));
     return;
   }
   const fs = getFs();
@@ -1275,18 +1263,22 @@ function appendServer(record) {
     throw serverTransportError(runId, cause);
   }
 }
-// Read on every probe outside a test, and the variable rarely changes: decode
-// it once per value.
-var decodedEnvironmentCarrier = { raw: void 0, context: void 0 };
+// The context a parent process gave this one, in SUPERCOV_CONTEXT: read on
+// every first hit, and fixed for the process's life. Supercov only ever gives
+// it to a child, at spawn, so it is read once per environment object: a
+// read of process.env, an interceptor, on every first hit of a large suite's
+// tests was the runtime's largest cost. A suite that swaps process.env for
+// another object is read again.
+var decodedEnvironmentCarrier = { env: void 0, context: void 0 };
 function environmentRequestContext() {
   if (isBrowser || typeof process === "undefined")
     return void 0;
-  const raw = process.env[COVERAGE_CARRIER_ENV];
-  if (raw === decodedEnvironmentCarrier.raw)
+  const env = process.env;
+  if (env === decodedEnvironmentCarrier.env)
     return decodedEnvironmentCarrier.context;
-  const carrier = decodeCoverageCarrier(raw);
+  const carrier = decodeCoverageCarrier(env[COVERAGE_CARRIER_ENV]);
   const context = carrier ? __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {}) : void 0;
-  decodedEnvironmentCarrier = { raw, context };
+  decodedEnvironmentCarrier = { env, context };
   return context;
 }
 function currentRequestContext() {
@@ -1981,16 +1973,25 @@ function withRequestPhase(handler, event) {
     return requestContext !== void 0 || context.scope || context.phaseId ? serverPhaseStorage.run(context, () => withProbeV2Context(context, invoke)) : invoke();
   };
 }
-function eventKey(event) {
-  var _a8;
-  const suffix = event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id;
-  return `${(_a8 = event.phaseId) != null ? _a8 : "unscoped"}:${event.type}:${suffix}`;
+// Whether `event` was already recorded, recording it if not. Kept per phase,
+// so a first hit looks up its id alone: one key joining the phase, the type
+// and the id was built and hashed for every first hit of every test.
+function eventSeen(seen, event) {
+  const phase = event.phaseId != null ? event.phaseId : "unscoped";
+  let keys = seen.get(phase);
+  if (keys === void 0) {
+    keys = /* @__PURE__ */ new Set();
+    seen.set(phase, keys);
+  }
+  const key = event.type === "hit" ? event.id : `${event.type}\0${event.type === "decision" ? `${event.id}:${vectorKey(event.vector)}` : event.id}`;
+  if (keys.has(key))
+    return true;
+  keys.add(key);
+  return false;
 }
 function recordBrowserEvent(event) {
-  const key = eventKey(event);
-  if (state.eventKeys.has(key))
+  if (eventSeen(state.eventKeys, event))
     return false;
-  state.eventKeys.add(key);
   state.events.push(event);
   workerEvidenceChanged();
   return true;
@@ -2027,47 +2028,74 @@ function recordCoverageHit(id) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
-      type: "hit",
-      id,
-      timestampMs
-    }, phaseId ? { phaseId } : {}), {
-      environment: "browser"
-    })))
+    if (recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "browser")))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
-      type: "hit",
-      id,
-      timestampMs
-    }, phaseId ? { phaseId } : {}));
+    appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
   }
 }
-// A file's ids, as the instrumenter writes them: one string of ids separated
-// by spaces, or a list where an id holds one.
-function listedIds(ids) {
-  return typeof ids === "string" ? ids === "" ? [] : ids.split(" ") : ids;
+// A first hit's event, built as one literal in the order the spread helpers
+// gave its keys: they walked every key of three objects for each first hit
+// of every statement in every test.
+function hitEvent(id, timestampMs, phaseId, environment) {
+  return phaseId ? { type: "hit", id, timestampMs, phaseId, environment } : { type: "hit", id, timestampMs, environment };
+}
+function decisionEvent(id, vector, timestampMs, phaseId, environment) {
+  return phaseId ? { type: "decision", id, vector, timestampMs, phaseId, environment } : { type: "decision", id, vector, timestampMs, environment };
+}
+// A module carries the key of its table of ids, which the manifest holds, and
+// how many points and decisions it numbers: evidence names a probe by the key
+// and its place, `~p<key>.<place>` or `~d<key>.<place>`, and the report reads
+// the id there. A place whose id an earlier place has is named as that one,
+// as it was one id: a selection's two short outcomes are one point.
+function probeAliases(flat) {
+  const aliases = /* @__PURE__ */ new Map();
+  for (let index = 0; flat && index + 1 < flat.length; index += 2)
+    aliases.set(flat[index], flat[index + 1]);
+  return aliases;
+}
+function probePlaceName(names, aliases, count, kind, key, place) {
+  if (!(place >= 0 && place < count))
+    return void 0;
+  let name = names[place];
+  if (name === void 0) {
+    const first = aliases.get(place);
+    name = names[place] = first === void 0 ? `~${kind}${key}.${place}` : probePlaceName(names, aliases, count, kind, key, first);
+  }
+  return name;
+}
+function probePointName(file, place) {
+  return probePlaceName(file.pointNames, file.pointAliases, file.pointCount, "p", file.key, place);
+}
+function probeDecisionName(file, place) {
+  return probePlaceName(file.decisionNames, file.decisionAliases, file.decisionWidths.length, "d", file.key, place);
 }
 function registerProbeV2(definition) {
   var _a8, _b;
-  const decisions = listedIds(definition.decisions);
-  const pointIds = listedIds(definition.pointIds);
+  const pointCount = definition.points;
+  const decisionCount = definition.decisionWidths.length;
   const file = {
-    // Each decision's id and its number of conditions: the module carries
-    // no source text, which the manifest holds.
-    decisions,
+    key: definition.key,
+    pointCount,
+    pointNames: [],
+    pointAliases: probeAliases(definition.pointAliases),
+    decisionNames: [],
+    decisionAliases: probeAliases(definition.decisionAliases),
     decisionWidths: definition.decisionWidths,
-    pointIds,
     clock: state.probeV2Clock,
-    hitEpochs: new Uint32Array(pointIds.length),
+    hitEpochs: new Uint32Array(pointCount),
+    // A narrow decision's vectors in an array, a wide one's in a Map, told
+    // apart by `size`, which only the Map has: `instanceof Uint32Array` read
+    // the global on every evaluation, and under Vitest's jsdom environment
+    // each read is a getter call, most of a canvas app's measured unit time.
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
-    decisionVectorCounts: decisions.map((_, index) => {
+    decisionVectorCounts: definition.decisionWidths.map((_, index) => {
       var _a9, _b2;
       return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
     }),
-    decisionObservationEpochs: new Uint32Array(decisions.length),
-    decisionObservationCounts: new Uint16Array(decisions.length),
-    decisionCompleteEpochs: new Uint32Array(decisions.length),
+    decisionObservationEpochs: new Uint32Array(decisionCount),
+    decisionObservationCounts: new Uint16Array(decisionCount),
+    decisionCompleteEpochs: new Uint32Array(decisionCount),
     pendingDefaults: new Uint32Array(definition.defaultCount || 0),
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.
@@ -2105,7 +2133,7 @@ function coverageHitV2(file, index) {
   recordCoverageHitV2(file, index);
 }
 function recordCoverageHitV2(file, index) {
-  const id = file.pointIds[index];
+  const id = probePointName(file, index);
   if (!id)
     return;
   const fallbackEpoch = !file.clock.fast;
@@ -2122,7 +2150,7 @@ function recordCoverageHitV2(file, index) {
     coverageHit(id);
     const selections = file.selectionPoints;
     if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
-      recordSelectionOutcome(id, index - selections[0] & 3);
+      recordLogicalOutcome(id, index - selections[0] & 3);
   } finally {
     if (fallbackEpoch)
       file.clock.epoch = previousEpoch;
@@ -2148,14 +2176,14 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
   const clock = file.clock;
   if (clock.fast) {
     const seen = file.decisionEpochs[decisionIndex];
-    if (seen instanceof Uint32Array && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
+    if (seen !== void 0 && seen.size === void 0 && seen[encoded * 2 + (value ? 1 : 0)] === clock.epoch)
       return value;
   }
   return recordMcdcEndV2(file, decisionIndex, encoded, value);
 }
 function recordMcdcEndV2(file, decisionIndex, encoded, value) {
   var _a8, _b;
-  const id = file.decisions[decisionIndex];
+  const id = probeDecisionName(file, decisionIndex);
   if (!id || !Number.isSafeInteger(encoded) || encoded < 0)
     return value;
   const outcome = Boolean(value);
@@ -2173,7 +2201,7 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
     const seen = file.decisionEpochs[decisionIndex];
     if (!seen)
       return value;
-    if (seen instanceof Uint32Array) {
+    if (seen.size === void 0) {
       if (seen[vectorIndex] === epoch)
         return value;
       seen[vectorIndex] = epoch;
@@ -2247,8 +2275,12 @@ function recordSelectionOutcome(id, outcome) {
     branchId = separator > 0 ? id.slice(0, separator) : null;
     selectionBranchIds.set(id, branchId);
   }
-  if (branchId === null)
-    return;
+  if (branchId !== null)
+    recordLogicalOutcome(branchId, outcome);
+}
+// The outcomes of a selection by its branch id, or by the name of its point
+// that was hit, whose branch the report reads from the point's id.
+function recordLogicalOutcome(branchId, outcome) {
   let vectors = state.logicals.get(branchId);
   if (!vectors) {
     vectors = /* @__PURE__ */ new Map();
@@ -2877,22 +2909,10 @@ function mcdcEnd(frame, value) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
-      type: "decision",
-      id: decision.id,
-      vector,
-      timestampMs
-    }, phaseId ? { phaseId } : {}), {
-      environment: "browser"
-    })))
+    if (recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "browser")))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
-      type: "decision",
-      id: decision.id,
-      vector,
-      timestampMs
-    }, phaseId ? { phaseId } : {}));
+    appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
   return value;
 }

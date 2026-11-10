@@ -60,6 +60,7 @@ impl PreparedRustProject {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             probes: Default::default(),
             preparation: Default::default(),
@@ -966,6 +967,7 @@ pub fn prepare_rust_project_for(
         limitations: Vec::new(),
         scope: None,
         assertion_sites: Vec::new(),
+        probe_tables: Default::default(),
     };
     // One numbering spans the workspace: a file may be compiled into several
     // crates, and every crate's runtime maps the same region.

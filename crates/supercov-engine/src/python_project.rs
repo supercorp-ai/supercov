@@ -260,6 +260,7 @@ fn prepare(
         limitations: Vec::new(),
         scope: None,
         assertion_sites: Vec::new(),
+        probe_tables: Default::default(),
     };
     let mut plan_files = BTreeMap::<String, PythonFilePlan>::new();
     let mut unparseable = Vec::new();

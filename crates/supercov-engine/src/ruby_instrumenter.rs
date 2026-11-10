@@ -765,6 +765,7 @@ impl<'a> Collector<'a> {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             lines: BTreeMap::new(),
             statement_offsets: BTreeMap::new(),

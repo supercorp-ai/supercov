@@ -990,28 +990,83 @@ test("assertion callee binding preserves receivers, await order and synchronous 
   assert.deepEqual(phases.map(p => [p.source, p.status]), [['test.js:1:1', 'passed'], ['test.js:2:1', 'failed']], 'rejected arguments do not create an assertion occurrence');
 });
 
+// A module as the instrumenter registers it: the key of its table of ids, how
+// many points it numbers, and the places that repeat an earlier id. The table
+// stays here, as the manifest keeps it, and a snapshot's names are read back
+// through it as the report reads them.
+const probeTables = new Map();
+function probeDefinition({ pointIds, decisions = [], ...rest }) {
+  const text = JSON.stringify([pointIds, decisions]);
+  let key = [...probeTables].find(([, table]) => table.text === text)?.[0];
+  if (key === undefined) {
+    key = `t${probeTables.size}`;
+    probeTables.set(key, { text, pointIds, decisions });
+  }
+  const aliases = (ids) => {
+    const first = new Map();
+    const flat = [];
+    ids.forEach((id, place) => {
+      if (first.has(id)) flat.push(place, first.get(id));
+      else first.set(id, place);
+    });
+    return flat;
+  };
+  return {
+    ...rest,
+    key,
+    points: pointIds.length,
+    decisionWidths: rest.decisionWidths ?? [],
+    pointAliases: aliases(pointIds),
+    decisionAliases: aliases(decisions),
+  };
+}
+function resolvedName(name) {
+  const match = /^~([pd])(.+)\.(\d+)$/.exec(name);
+  if (!match) return name;
+  const table = probeTables.get(match[2]);
+  return (match[1] === "p" ? table.pointIds : table.decisions)[Number(match[3])];
+}
+function resolvedSnapshot(snapshot) {
+  const logicals = new Map();
+  for (const logical of snapshot.logicals) {
+    let id = logical.id;
+    const resolved = resolvedName(id);
+    if (resolved !== id) {
+      const separator = resolved.lastIndexOf(":");
+      if (separator <= 0) continue;
+      id = resolved.slice(0, separator);
+    }
+    const vectors = logicals.get(id) ?? [];
+    for (const vector of logical.vectors) {
+      if (!vectors.some((seen) => seen.right === vector.right && seen.truthy === vector.truthy)) vectors.push(vector);
+    }
+    logicals.set(id, vectors);
+  }
+  return { ...snapshot, hits: snapshot.hits.map(resolvedName), logicals: [...logicals].map(([id, vectors]) => ({ id, vectors })) };
+}
+
 test("a default records whether it was taken or a value was provided, per slot", async () => {
   const { registerProbeV2, defaultSelectedV2, defaultEnteredV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
   );
-  const file = registerProbeV2({
+  const file = registerProbeV2(probeDefinition({
     file: "src/cache.js",
     pointIds: ["statement", "ttl:default", "ttl:provided", "cb:default", "cb:provided"],
     decisions: [],
     decisionWidths: [],
     defaultCount: 2,
-  });
+  }));
   resetCoverage("default-taken");
   // `ttl = 10` taken: the default counts itself when its value evaluates, and
   // the entry after the parameters are bound spends the count.
   assert.equal(defaultSelectedV2(file, 0, 10), 10);
   defaultEnteredV2(file, 0, 1, 2);
-  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:default"]);
+  assert.deepEqual(resolvedSnapshot(coverageSnapshot()).hits.filter((id) => id.startsWith("ttl")), ["ttl:default"]);
   resetCoverage("default-provided");
   // The count is spent, so the next entry without a taken default is a value
   // the caller provided.
   defaultEnteredV2(file, 0, 1, 2);
-  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("ttl")), ["ttl:provided"]);
+  assert.deepEqual(resolvedSnapshot(coverageSnapshot()).hits.filter((id) => id.startsWith("ttl")), ["ttl:provided"]);
   // A function default keeps the name the binding gives it, and each slot
   // counts on its own: a nested call taking the same default spends its own.
   resetCoverage("default-nested");
@@ -1021,7 +1076,7 @@ test("a default records whether it was taken or a value was provided, per slot",
   defaultEnteredV2(file, 1, 3, 4);
   defaultEnteredV2(file, 1, 3, 4);
   defaultEnteredV2(file, 1, 3, 4);
-  assert.deepEqual(coverageSnapshot().hits.filter((id) => id.startsWith("cb")).sort(), ["cb:default", "cb:provided"]);
+  assert.deepEqual(resolvedSnapshot(coverageSnapshot()).hits.filter((id) => id.startsWith("cb")).sort(), ["cb:default", "cb:provided"]);
   assert.equal(file.pendingDefaults[1], 0);
 });
 
@@ -1031,19 +1086,19 @@ test("V2 selections and optional chains record what their frame-based forms reco
   );
   // One selection (points 0-3: short falsy, short truthy, right falsy, right
   // truthy), one optional member (4-5) and one optional call (6-7).
-  const file = registerProbeV2({
+  const file = registerProbeV2(probeDefinition({
     file: "src/pick.js",
     pointIds: ["pick:short", "pick:short", "pick:right", "pick:right", "member:short", "member:continued", "call:short", "call:continued"],
     decisions: [],
     decisionWidths: [],
     selectionPoints: [0, 1],
-  });
+  }));
   resetCoverage("v2-selection");
   // `"a" || x`: the left operand decides, short and truthy. `"" || 0`: the
   // right operand decides, and comes out falsy.
   assert.equal(selectShortV2(file, 0, "a", 0), "a");
   assert.equal(selectShortV2(file, 0, "", 0) || selectRightV2(file, 0, 0), 0);
-  const snapshot = coverageSnapshot();
+  const snapshot = resolvedSnapshot(coverageSnapshot());
   assert.deepEqual(snapshot.hits.filter((id) => id.startsWith("pick")).sort(), ["pick:right", "pick:short"]);
   const pick = snapshot.logicals.find((logical) => logical.id === "pick");
   assert.deepEqual(
@@ -1056,7 +1111,7 @@ test("V2 selections and optional chains record what their frame-based forms reco
   // State 0: the chain stopped before the call site, which records nothing.
   assert.equal(optionalCallEndV2(file, 6, undefined, 0), undefined);
   assert.deepEqual(
-    coverageSnapshot().hits.filter((id) => /^(member|call):/.test(id)).sort(),
+    resolvedSnapshot(coverageSnapshot()).hits.filter((id) => /^(member|call):/.test(id)).sort(),
     ["call:continued", "member:short"],
   );
   assert.equal([...file.none].length, 0);
@@ -1068,19 +1123,19 @@ test("a nested selection's leaves record every selection their value decides", a
   );
   // `(a && b) || c`: the `||` is points 0-3, the `&&` points 4-7. A step is
   // `first * 4 + code`: 3 on a right side, the operator's kind on a left one.
-  const file = registerProbeV2({
+  const file = registerProbeV2(probeDefinition({
     file: "src/ok.js",
     pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right"],
     decisions: [],
     decisionWidths: [],
     selectionPoints: [0, 2],
-  });
+  }));
   const ok = (a, b, c) =>
     (selectPathV2(file, a, 4 * 4 + 1, 0 * 4 + 0) && selectPathV2(file, b, 4 * 4 + 3, 0 * 4 + 0)) || selectRightV2(file, 0, c);
   resetCoverage("v2-path");
   // a falsy: the `&&` short-circuits, and the `||` goes on to c.
   assert.equal(ok(0, 1, "c"), "c");
-  let snapshot = coverageSnapshot();
+  let snapshot = resolvedSnapshot(coverageSnapshot());
   assert.deepEqual(
     snapshot.logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort(),
     [["and", [[false, false]]], ["or", [[true, true]]]],
@@ -1088,7 +1143,7 @@ test("a nested selection's leaves record every selection their value decides", a
   resetCoverage("v2-path-truthy");
   // a and b truthy: b is the `&&`'s right side, and decides the `||` short.
   assert.equal(ok(1, "b", "c"), "b");
-  snapshot = coverageSnapshot();
+  snapshot = resolvedSnapshot(coverageSnapshot());
   assert.deepEqual(
     snapshot.logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort(),
     [["and", [[true, true]]], ["or", [[false, true]]]],
@@ -1103,7 +1158,7 @@ test("a tree recorded around itself records what a call around each leaf did", a
   // program's own expressions in a comma that names them in a frame; the
   // call around the tree records for the leaf that produced its value, and
   // what `a` or `b` decided before `c` is recorded where `c` starts.
-  const definition = {
+  const definition = probeDefinition({
     file: "src/ok.js",
     pointIds: ["or:short", "or:short", "or:right", "or:right", "and:short", "and:short", "and:right", "and:right", "nn:short", "nn:short", "nn:right", "nn:right"],
     decisions: [],
@@ -1113,7 +1168,7 @@ test("a tree recorded around itself records what a call around each leaf did", a
     // by the time `c` (leaf 2) starts: the `&&` short and falsy, or right
     // and falsy.
     selectionTrees: [[[[4 * 4 + 1, 0 * 4 + 0], [4 * 4 + 3, 0 * 4 + 0], [0 * 4 + 3]], [[], [], [[4], [6]]]]],
-  };
+  });
   const each = registerProbeV2(definition);
   const whole = registerProbeV2(definition);
   let frame;
@@ -1132,7 +1187,7 @@ test("a tree recorded around itself records what a call around each leaf did", a
   const recorded = (form, name, args) => {
     resetCoverage(`tree-${name}-${JSON.stringify(args)}`);
     const value = forms[form][name](...args);
-    return [value, coverageSnapshot().logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort()];
+    return [value, resolvedSnapshot(coverageSnapshot()).logicals.map((logical) => [logical.id, logical.vectors.map((vector) => [vector.right, vector.truthy])]).sort()];
   };
   let compared = 0;
   for (const a of values) for (const b of values) {
@@ -1150,13 +1205,13 @@ test("V2 logical assignments record the outcomes their frame-based form recorded
   const { registerProbeV2, selectRightV2, selectNamedRightV2, selectAssignEndV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
   );
-  const file = registerProbeV2({
+  const file = registerProbeV2(probeDefinition({
     file: "src/fill.js",
     pointIds: ["fill:short", "fill:short", "fill:right", "fill:right"],
     decisions: [],
     decisionWidths: [],
     selectionPoints: [0, 1],
-  });
+  }));
   resetCoverage("v2-assignment");
   // What the instrumenter emits for `options.name ||= "anon"`: the right side
   // marks the site temporary after it evaluates, the end reads it.
@@ -1165,7 +1220,7 @@ test("V2 logical assignments record the outcomes their frame-based form recorded
   assert.equal((right = 0, selectAssignEndV2(file, 0, options.name ||= selectRightV2(file, 0, "anon", right = 1), right)), "anon");
   assert.equal((right = 0, selectAssignEndV2(file, 0, options.kept ||= selectRightV2(file, 0, "never", right = 1), right)), "set");
   assert.equal(options.name, "anon");
-  const snapshot = coverageSnapshot();
+  const snapshot = resolvedSnapshot(coverageSnapshot());
   assert.deepEqual(snapshot.hits.filter((id) => id.startsWith("fill")).sort(), ["fill:right", "fill:short"]);
   const fill = snapshot.logicals.find((logical) => logical.id === "fill");
   assert.deepEqual(
@@ -1182,18 +1237,18 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   const { registerProbeV2, renderedValueV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
   );
-  const file = registerProbeV2({
+  const file = registerProbeV2(probeDefinition({
     file: "src/button.tsx",
     pointIds: ["attribute", "child"],
     decisions: [],
     decisionWidths: [],
     points: [],
-  });
+  }));
   resetCoverage("rendered-value");
   // The probe has to carry the value through unchanged: it sits inside JSX,
   // where the expression's result is what gets rendered.
   assert.equal(renderedValueV2(file, 0, "Copied!"), "Copied!");
-  const covered = new Set(coverageSnapshot().hits);
+  const covered = new Set(resolvedSnapshot(coverageSnapshot()).hits);
   assert.ok(covered.has("attribute"), "the evaluated attribute is recorded");
   // A rendered expression that never evaluates is not recorded, which is the
   // whole point: the enclosing JSX statement alone used to imply both.

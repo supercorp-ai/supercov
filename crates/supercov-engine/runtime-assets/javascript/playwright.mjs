@@ -18,7 +18,7 @@ import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
-import { expandSnapshot, mergeSnapshots } from "./snapshots.mjs";
+import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -123,6 +123,17 @@ function timingCount(bucket, milliseconds = 0) {
     entry.calls += 1;
     entry.ms += milliseconds;
     timingBuckets.set(bucket, entry);
+}
+// How late the test process's event loop runs, while timing: an awaited
+// round trip waits for its reply on this loop as well as on the browser.
+if (timingBuckets) {
+    let expected = performance.now() + 5;
+    setInterval(() => {
+        const now = performance.now();
+        if (now - expected > 1)
+            timingCount("probe.loopLag", now - expected);
+        expected = now + 5;
+    }, 5).unref?.();
 }
 async function timed(bucket, work) {
     if (!timingBuckets)
@@ -240,6 +251,9 @@ class CoveragePhaseController {
     // dispose so a worker-scoped context does not keep registering pages with
     // controllers of tests that already finished.
     contextListeners = new Map();
+    // Contexts that closed during the test: a phase sent to one failed, and
+    // its cookies were then tried again host by host.
+    closedContexts = new WeakSet();
     // Snapshots read from pages the suite closed before teardown. A `page`
     // fixture override tears down before the collector's own fixture, and a
     // closed page cannot be evaluated, so the evidence is taken on the way out.
@@ -556,6 +570,11 @@ class CoveragePhaseController {
         return internally(context, () => this.registerContextNow(context, adopted));
     }
     async registerContextNow(context, adopted) {
+        if (timingBuckets) {
+            const copies = (contextScriptCopies.get(context) ?? 0) + 1;
+            contextScriptCopies.set(context, copies);
+            timingCount(copies > 1 ? "registerContext.again" : "registerContext.first", copies);
+        }
         // The context's own scripts first: sent when it was made, so they
         // are in place, or sent now for a context made some other way.
         await prepareContext(context);
@@ -598,9 +617,11 @@ class CoveragePhaseController {
         const registerServiceWorker = (worker) => {
             void this.registerWorker(worker);
         };
+        const closed = () => this.closedContexts.add(context);
         context.on("page", register);
         context.on("serviceworker", registerServiceWorker);
-        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker]]);
+        context.on("close", closed);
+        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker], ["close", closed]]);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
         for (const page of context.pages())
@@ -894,7 +915,7 @@ class CoveragePhaseController {
     async activateInBrowserNow(phaseId, documentPhaseId) {
         await Promise.all([
             timed("activate.contextHeaders", () => Promise.all([...this.contexts]
-                .filter((context) => !this.adoptedContexts.has(context))
+                .filter((context) => !this.adoptedContexts.has(context) && !this.closedContexts.has(context))
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
             this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
@@ -903,6 +924,31 @@ class CoveragePhaseController {
             timed("activate.pageScript", () => Promise.all([...this.pages]
                 .filter((page) => this.adoptedContexts.has(page.context()))
                 .map((page) => this.activatePage(page, phaseId)))),
+            timingBuckets ? this.probeRoundTrips() : undefined,
+        ]);
+    }
+    /**
+     * While timing, beside each activation: how long a call that does nothing
+     * takes to reach a page and come back, and a cookie read of the browser,
+     * so an activation's time can be told apart from the round trip's.
+     */
+    async probeRoundTrips() {
+        const page = [...this.pages].find((candidate) => !candidate.isClosed?.());
+        if (!page)
+            return;
+        const clock = () => performance.timeOrigin + performance.now();
+        await Promise.all([
+            (async () => {
+                const sent = clock();
+                const inPage = await page.mainFrame().evaluate(() => performance.timeOrigin + performance.now()).catch(() => undefined);
+                const back = clock();
+                timingCount("probe.noopEvaluate", back - sent);
+                if (typeof inPage === "number") {
+                    timingCount("probe.toPage", inPage - sent);
+                    timingCount("probe.fromPage", back - inPage);
+                }
+            })(),
+            timed("probe.noopCookies", () => page.context().cookies("http://supercov.invalid/").catch(() => undefined)),
         ]);
     }
     async activateFrames(phaseId, pages = this.pages) {
@@ -913,7 +959,7 @@ class CoveragePhaseController {
         const covered = (page) => this.adoptedContexts.has(page.context())
             ? []
             : this.appHosts.map((url) => new URL(url).hostname);
-        await timed("activate.frameEvaluate", () => Promise.all([...pages].flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
+        await timed("activate.frameEvaluate", () => Promise.all([...pages].filter((page) => !page.isClosed?.()).flatMap((page) => page.frames().map((frame) => [frame, covered(page)])).map(([frame, coveredHosts]) => frame
             .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie, scopeSiteCookie, phaseSiteCookie, coveredHosts }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
@@ -1017,8 +1063,8 @@ class CoveragePhaseController {
             if (!distinct.has(key))
                 distinct.set(key, cookie);
         }
-        await context.addCookies([...distinct.values()]).catch(() => {
-            timingCount("activate.cookiesRefused");
+        await context.addCookies([...distinct.values()]).catch((error) => {
+            timingCount(timingBuckets ? `activate.cookiesRefused: ${String(error?.message ?? error).split("\n")[0].slice(0, 120)}` : "activate.cookiesRefused");
             return Promise.all(byHost.map((cookies) => context.addCookies(cookies).catch(() => timingCount("activate.hostCookiesRefused"))));
         });
     }
@@ -1099,6 +1145,9 @@ function announceAttempt({ attemptId, scopeHeader, scopeValue, scopeCookie, scop
         // Browser instrumentation must not change application behavior.
     }
 }
+// While timing: how many tests' scripts each context has run (a context
+// that outlives its test is registered by every later test).
+const contextScriptCopies = new WeakMap();
 const LEAVING_BINDING = "__supercovLeaving";
 /** Scripts as one, each part run on its own as separate scripts were. */
 function separately(parts) {
@@ -1716,42 +1765,6 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
  * thousands of them were most of a test's record. The engine decodes the
  * columns into exactly these events, in this order.
  */
-function columnarEvents(snapshot) {
-    const events = snapshot?.events;
-    if (!Array.isArray(events) || events.length === 0)
-        return snapshot;
-    const tables = { types: new Map(), phases: new Map(), environments: new Map() };
-    const index = (table, value) => {
-        let found = table.get(value);
-        if (found === undefined) {
-            found = table.size;
-            table.set(value, found);
-        }
-        return found;
-    };
-    const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
-    let previous = 0;
-    events.forEach((event, position) => {
-        columns.id.push(event.id);
-        columns.type.push(index(tables.types, event.type));
-        columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
-        columns.environment.push(index(tables.environments, event.environment));
-        columns.t.push(event.timestampMs - previous);
-        previous = event.timestampMs;
-        if (event.vector !== undefined)
-            columns.vector[position] = event.vector;
-    });
-    const { events: _events, ...rest } = snapshot;
-    return {
-        ...rest,
-        eventColumns: {
-            types: [...tables.types.keys()],
-            phases: [...tables.phases.keys()],
-            environments: [...tables.environments.keys()],
-            ...columns,
-        },
-    };
-}
 function appendEvidenceLine(serialized) {
     const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
         (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")

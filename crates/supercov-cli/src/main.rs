@@ -355,9 +355,16 @@ fn main() -> ExitCode {
         // suite differently. Written once here rather than as a flag per
         // language, because what someone wants is the same thing in all of
         // them.
-        Some("--exact-attribution") => match arguments.next().as_deref() {
-            Some("--") => public_coverage_run(
+        Some("--exact-attribution") => match arguments.next() {
+            Some(separator) if separator == "--" => public_coverage_run(
                 arguments.collect(),
+                RunOptions {
+                    exact_attribution: true,
+                },
+            ),
+            // As below: the `--` after the option was lost on the way here.
+            Some(command) if starts_a_program(&command) => public_coverage_run(
+                std::iter::once(command).chain(arguments).collect(),
                 RunOptions {
                     exact_attribution: true,
                 },
@@ -394,6 +401,20 @@ fn main() -> ExitCode {
         Some("report") => html_report::report_command(arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some("import") => import_command(arguments.collect()),
+        // The `--` before a test command does not always arrive: Bun drops a
+        // leading one on its way to a package's executable
+        // (oven-sh/bun#13984), Yarn 1 drops the one in `yarn supercov --
+        // ...`, and PowerShell drops the first on its way into a package
+        // manager's `.ps1` shim. `supercov -- bun test` arrived as
+        // `supercov bun test` (#209). A first word that is no command of
+        // Supercov's but a program this host can start is the test command
+        // the `--` would have introduced; anything else is a mistake.
+        Some(command) if starts_a_program(command) => public_coverage_run(
+            std::iter::once(command.to_owned())
+                .chain(arguments)
+                .collect(),
+            RunOptions::default(),
+        ),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
             ExitCode::from(2)
@@ -938,7 +959,14 @@ fn runs_on_this_source(root: &Path, allow_changed: bool) -> Result<Vec<Vec<Strin
                 return false;
             }
             if recorded.fingerprint.dependencies != current.fingerprint.dependencies {
-                outdated.push((*run, "the dependencies have changed".to_owned(), true));
+                // Jobs that each resolve their dependencies -- no lockfile
+                // committed -- record different ones, and their runs never
+                // merge; what to do about it is said here.
+                outdated.push((
+                    *run,
+                    "the dependencies have changed (runs merge only when every job installs the same lockfile: commit one, or resolve it once and install it with `npm ci` in each job)".to_owned(),
+                    true,
+                ));
                 return false;
             }
             // Only test-side files differ: each is judged by what the
@@ -3942,6 +3970,13 @@ fn benchmark_js_transform() -> ExitCode {
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+/// Whether `command` is something a test command could start: a program on
+/// PATH or at a path from here.
+fn starts_a_program(command: &str) -> bool {
+    std::env::current_dir()
+        .is_ok_and(|cwd| supercov_engine::process_supervision::is_program(command, &cwd))
 }
 
 /// Writes and flushes: an error the buffer would only meet at exit is lost.

@@ -230,6 +230,10 @@ pub struct JavascriptManifest {
     pub branches: Vec<CandidateBranch>,
     pub limitations: Vec<CandidateLimitation>,
     pub scope: SourceScope,
+    /// What each instrumented module's probes number, by the key the module
+    /// carries in place of its ids.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probe_tables: BTreeMap<String, crate::coverage_report::ProbeTableIds>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2015,6 +2019,7 @@ pub fn prepare_javascript_frontend(
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
     let mut limitations = BTreeMap::new();
+    let mut probe_tables = BTreeMap::new();
     for limitation in &project.source_limitations {
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
@@ -2088,6 +2093,16 @@ pub fn prepare_javascript_frontend(
         for value in output.coverage_limitations {
             limitations.insert(value.id.clone(), value);
         }
+        if let Some(table) = output.probe_table {
+            probe_tables.insert(
+                table.key,
+                crate::coverage_report::ProbeTableIds {
+                    points: table.points,
+                    decisions: table.decisions,
+                    follows: table.follows,
+                },
+            );
+        }
     }
     account(&SETUP.sources_ns, sources_started);
     write_vitest_commands(&generated)?;
@@ -2115,6 +2130,7 @@ pub fn prepare_javascript_frontend(
         branches: branches.into_values().collect(),
         limitations: limitations.into_values().collect(),
         scope: project.source_scope.clone(),
+        probe_tables,
     };
     manifest.decisions.sort_by_key(|value| {
         (
@@ -2280,9 +2296,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:468",
-            "javascript-source-path#javascript_frontend.rs:1882",
-            "javascript-source-path#javascript_frontend.rs:1812",
+            "javascript-source-path#javascript_frontend.rs:472",
+            "javascript-source-path#javascript_frontend.rs:1886",
+            "javascript-source-path#javascript_frontend.rs:1816",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2393,8 +2409,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:525",
-            "javascript-source-path#javascript_frontend.rs:468",
+            "fs.read_to_string#javascript_frontend.rs:529",
+            "javascript-source-path#javascript_frontend.rs:472",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

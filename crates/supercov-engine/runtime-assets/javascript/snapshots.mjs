@@ -121,3 +121,44 @@ export function expandSnapshot(value) {
         snapshot[key] = key === "events" ? events : key === "hits" ? hits.map((index) => strings[index]) : rest[key];
     return snapshot;
 }
+/**
+ * A snapshot's events as columns: each event's type, phase and environment
+ * as an index into a table of the distinct ones, its time as the difference
+ * from the event before it. The reader gives back the same events.
+ */
+export function columnarEvents(snapshot) {
+    const events = snapshot?.events;
+    if (!Array.isArray(events) || events.length === 0)
+        return snapshot;
+    const tables = { types: new Map(), phases: new Map(), environments: new Map() };
+    const index = (table, value) => {
+        let found = table.get(value);
+        if (found === undefined) {
+            found = table.size;
+            table.set(value, found);
+        }
+        return found;
+    };
+    const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
+    let previous = 0;
+    events.forEach((event, position) => {
+        columns.id.push(event.id);
+        columns.type.push(index(tables.types, event.type));
+        columns.phase.push(event.phaseId == null ? -1 : index(tables.phases, event.phaseId));
+        columns.environment.push(index(tables.environments, event.environment));
+        columns.t.push(event.timestampMs - previous);
+        previous = event.timestampMs;
+        if (event.vector !== undefined)
+            columns.vector[position] = event.vector;
+    });
+    const { events: _events, ...rest } = snapshot;
+    return {
+        ...rest,
+        eventColumns: {
+            types: [...tables.types.keys()],
+            phases: [...tables.phases.keys()],
+            environments: [...tables.environments.keys()],
+            ...columns,
+        },
+    };
+}

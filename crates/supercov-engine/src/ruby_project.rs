@@ -213,6 +213,7 @@ fn prepare(
         limitations: Vec::new(),
         scope: None,
         assertion_sites: Vec::new(),
+        probe_tables: Default::default(),
     };
     let mut plan_files = BTreeMap::<String, RubyFilePlan>::new();
     let mut probes = BTreeMap::new();

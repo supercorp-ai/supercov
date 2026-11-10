@@ -666,6 +666,7 @@ pub fn build_jvm_obligations(
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         },
         probes: collector.probes,
         edits: collector.edits,

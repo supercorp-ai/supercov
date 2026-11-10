@@ -441,6 +441,7 @@ mod tests {
             limitations: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let written = write_rust_build_cache(
             &root,

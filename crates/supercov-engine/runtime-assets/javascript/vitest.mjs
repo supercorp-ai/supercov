@@ -4,6 +4,7 @@ import { afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendEvidenceRecord } from "./atomic.mjs";
+import { columnarEvents } from "./snapshots.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
@@ -66,7 +67,7 @@ beforeEach((context) => {
                     explicitKind: process.env["SUPERCOV_TEST_KIND"],
                 }),
                 role: "setup",
-                runtime: [setupSnapshot],
+                runtime: [columnarEvents(setupSnapshot)],
                 browser: [],
                 server: [],
             });
@@ -112,7 +113,10 @@ afterEach((context) => {
             tags: testTags(task.tags, [...titlePath(task)]),
         }),
         ...(scope ? { phases: runtime.takeNodeAssertionPhases(scope) } : {}),
-        runtime: [runtime.coverageSnapshot()],
+        // Its events as columns, as Playwright's are written: a test's first
+        // hits written as objects repeated every key and phase for each, and
+        // serializing them was most of what a test's teardown cost.
+        runtime: [columnarEvents(runtime.coverageSnapshot())],
         browser: [],
         server: [],
     };

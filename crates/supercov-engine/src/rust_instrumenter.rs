@@ -742,6 +742,7 @@ impl<'a> RustObligationCollector<'a> {
                 limitations: Vec::new(),
                 scope: None,
                 assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
             },
             point_ids: BTreeSet::new(),
             decision_ids: BTreeSet::new(),

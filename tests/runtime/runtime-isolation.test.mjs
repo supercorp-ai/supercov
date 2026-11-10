@@ -157,7 +157,7 @@ test("a probe hit again in the same context is not recorded again", () => {
   // 177 s under Supercov and 0.1 s without it. Date.now is read only for a
   // record about to be written.
   const recorded = run(`
-    const file = runtime.registerProbeV2({ pointIds: ["statement"], decisions: [], decisionWidths: [] });
+    const file = runtime.registerProbeV2({ key: "k", points: 1, decisionWidths: [] });
     const realNow = Date.now;
     let reads = 0;
     Date.now = () => { reads += 1; return realNow(); };
@@ -176,7 +176,7 @@ test("interleaved requests each keep their own phase, before and after a reset",
   // reset clears the epochs, and a context made before it must not keep one
   // that now belongs to another context.
   const recorded = run(`
-    const file = runtime.registerProbeV2({ pointIds: ["first", "second"], decisions: [], decisionWidths: [] });
+    const file = runtime.registerProbeV2({ key: "k", points: 2, decisionWidths: [] });
     runtime.activateCoverageScope(scope("a"));
     runtime.resetCoverage("a");
     const tick = () => new Promise((done) => setTimeout(done, 1));
@@ -188,7 +188,7 @@ test("interleaved requests each keep their own phase, before and after a reset",
     });
     const phasesOf = (id) => runtime.coverageSnapshot().events.filter((event) => event.id === id).map((event) => event.phaseId).sort();
     await Promise.all([request("a-0:phase:1", 0, 3), request("a-0:phase:2", 0, 3), request("a-0:phase:2", 1, 2)]);
-    const before = { first: phasesOf("first"), second: phasesOf("second") };
+    const before = { first: phasesOf("~pk.0"), second: phasesOf("~pk.1") };
     let resume;
     const paused = new Promise((done) => { resume = done; });
     const crossing = runtime.withCoverageCarrier({ version: 1, scope: scope("a"), phaseId: "a-0:phase:3" }, async () => {
@@ -201,7 +201,7 @@ test("interleaved requests each keep their own phase, before and after a reset",
     runtime.resetCoverage("a");
     resume();
     await crossing;
-    console.log(JSON.stringify({ before, after: phasesOf("second") }));
+    console.log(JSON.stringify({ before, after: phasesOf("~pk.1") }));
   `);
   assert.deepEqual(recorded.before.first, ["a-0:phase:1", "a-0:phase:2"]);
   assert.deepEqual(recorded.before.second, ["a-0:phase:2"]);
@@ -214,9 +214,9 @@ test("a reset from another copy of the runtime reaches the async hook's epochs",
   // has to clear the epochs that hook keeps for each request.
   const recorded = run(`
     // The first copy records first, and so installs the hook.
-    runtime.coverageHitV2(runtime.registerProbeV2({ pointIds: ["first"], decisions: [], decisionWidths: [] }), 0);
+    runtime.coverageHitV2(runtime.registerProbeV2({ key: "a", points: 1, decisionWidths: [] }), 0);
     const other = await import(${JSON.stringify(runtimeUrl + "?copy")});
-    const file = other.registerProbeV2({ pointIds: ["point"], decisions: [], decisionWidths: [] });
+    const file = other.registerProbeV2({ key: "b", points: 1, decisionWidths: [] });
     other.activateCoverageScope(scope("a"));
     other.resetCoverage("a");
     const tick = () => new Promise((done) => setTimeout(done, 1));
@@ -232,7 +232,7 @@ test("a reset from another copy of the runtime reaches the async hook's epochs",
     other.resetCoverage("a");
     resume();
     await crossing;
-    console.log(JSON.stringify(other.coverageSnapshot().events.filter((event) => event.id === "point").map((event) => event.phaseId)));
+    console.log(JSON.stringify(other.coverageSnapshot().events.filter((event) => event.id === "~pb.0").map((event) => event.phaseId)));
   `);
   assert.deepEqual(recorded, ["a-0:phase:1"], "a hit after the other copy's reset is recorded again");
 });
@@ -242,7 +242,7 @@ test("work outside any request is recorded again for each test", () => {
   // the server set records again, at a new epoch, for each new test.
   const recorded = run(`
     delete process.env.SUPERCOV_RUN_ID;
-    const file = runtime.registerProbeV2({ pointIds: ["background"], decisions: [], decisionWidths: [] });
+    const file = runtime.registerProbeV2({ key: "k", points: 1, decisionWidths: [] });
     const tick = () => new Promise((done) => setTimeout(done, 1));
     const epochs = [];
     globalThis.__SUPERCOV_MCDC_TEST_ID__ = "first";

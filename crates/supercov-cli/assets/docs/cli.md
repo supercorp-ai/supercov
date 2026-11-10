@@ -123,6 +123,15 @@ npx supercov -- cargo nextest run
 Use the complete command you rely on before merging or deploying. A coverage run
 preserves the wrapped command's exit status, so it can remain a CI gate.
 
+Some launchers drop the `--` before Supercov sees it: Bun when it runs the
+script (`[run] bun = true`, `bun --bun run`, `bun run supercov`), Yarn 1's
+`yarn supercov -- ...`, and PowerShell on its way into a package manager's
+`.ps1` shim. A first word that is no Supercov command but a program on `PATH`,
+or a path to one, is then still measured as the test command, and Yarn 1's
+`--exact-attribution` is restored from what Yarn recorded. Under Yarn 1 in
+PowerShell, a `--` of the test command's own is lost before Supercov runs:
+put that command in a package script.
+
 A script that queries the run it just recorded can have Supercov write the
 run's id to a file. `latest` is the newest run, which is another one when two
 commands record runs side by side:
@@ -932,6 +941,13 @@ own:
   with: { pattern: "supercov-*", path: .supercov/runs, merge-multiple: true }
 - run: npx supercov merge
 ```
+
+Every machine must install the same dependencies. With a lockfile committed,
+install it as it is in each job (`npm ci`, `pnpm install --frozen-lockfile`,
+`yarn install --immutable`, `bun install --frozen-lockfile`). A repository
+without one resolves its dependencies anew in each job, and `merge` leaves
+every run out as `the dependencies have changed`: resolve the lockfile once in
+a first job, pass it to the others as an artifact, and `npm ci` it there.
 
 A merged run lists the mutants of every file a run listed (see
 [Mutants](#mutants)), once. Runs that listed different mutants of a file

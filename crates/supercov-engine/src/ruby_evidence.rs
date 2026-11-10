@@ -2567,6 +2567,7 @@ pub(crate) mod tests {
             limitations: vec![],
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let index = ManifestIndex::new(&manifest);
         let observed = |hits: &[&str], vectors: &[(&str, Vec<Option<bool>>)]| {

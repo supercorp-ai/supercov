@@ -102,6 +102,10 @@ pub struct CandidateOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_statements: Vec<CandidatePoint>,
     pub branches: Vec<CandidateBranch>,
+    /// The ids the module's probes are numbered by, which the module itself
+    /// does not carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_table: Option<ProbeTable>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
@@ -110,6 +114,277 @@ pub struct CandidateOutput {
     /// branches and probes that decide it; only while `mutants_enabled`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mutants: Vec<crate::js_mutant_links::CandidateMutant>,
+}
+
+/// A module's points and decisions in the order its probes number them.
+/// Evidence names a probe `~p<key>.<place>` or `~d<key>.<place>`, and the
+/// report reads the id at that place: the module ships the key alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProbeTable {
+    pub key: String,
+    pub points: Vec<String>,
+    pub decisions: Vec<String>,
+    /// Places whose probe was dropped for the one right before it, as
+    /// `[place, leader]`: the leader's hit is the place's as well.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follows: Vec<[usize; 2]>,
+}
+
+impl ProbeTable {
+    /// The key is a digest of the file and both lists, so a module built
+    /// again from the same source -- a bundler's cache -- names the same
+    /// table, and two different tables never share a key.
+    pub fn new(
+        file: &str,
+        points: Vec<String>,
+        decisions: Vec<String>,
+        follows: Vec<[usize; 2]>,
+    ) -> Self {
+        // SipHash, not SHA-256: the key only tells one run's tables apart,
+        // as a 64-bit digest of either would, and on a CPU without SHA
+        // instructions hashing every id a second time with SHA-256 cost
+        // instrumentation time. The ids themselves stay SHA-256 digests.
+        use std::hash::Hasher as _;
+        let mut digest = siphasher::sip::SipHasher13::new();
+        for part in [file]
+            .into_iter()
+            .chain(points.iter().map(String::as_str))
+            .chain(["\0"])
+            .chain(decisions.iter().map(String::as_str))
+        {
+            digest.write_u64(part.len() as u64);
+            digest.write(part.as_bytes());
+        }
+        // Which probes were dropped is part of the table: one module built
+        // with them and one without must not share a key.
+        for [place, leader] in &follows {
+            digest.write_u64(*place as u64);
+            digest.write_u64(*leader as u64);
+        }
+        let key = format!("{:016x}", digest.finish());
+        Self {
+            key,
+            points,
+            decisions,
+            follows,
+        }
+    }
+}
+
+/// Drops each statement probe that comes right after another statement
+/// probe in the same list, and returns the dropped places beside the probe
+/// that stays. Nothing runs between two such probes and nothing can jump
+/// between them, so the second runs exactly when the first does, in the
+/// same phase: a function's entry and its first statement, a statement and
+/// the next. The report gives the first's hits to both; the module carries a
+/// probe fewer, which the browser parses, compiles and runs on every load.
+///
+/// Both probes must be statement points, each named by that one call in the
+/// module and by an id no other place has: a place another call names can
+/// be hit without its neighbour, and one whose id repeats is recorded under
+/// the first place with that id.
+///
+/// The merge is made on the last walk over the program,
+/// `AssertedTargetTransformer`'s, rather than on a walk of its own; this
+/// sets it up.
+fn adjacent_probe_merger(
+    hit: &str,
+    file: &str,
+    named: &PlacesNamed,
+    repeated: &[usize],
+) -> AdjacentProbeMerger {
+    let mut mergeable = named
+        .counts
+        .iter()
+        .map(|count| *count == 1)
+        .collect::<Vec<_>>();
+    for place in repeated {
+        if let Some(entry) = mergeable.get_mut(*place) {
+            *entry = false;
+        }
+    }
+    AdjacentProbeMerger {
+        hit: hit.to_owned(),
+        file: file.to_owned(),
+        mergeable,
+        follows: Vec::new(),
+    }
+}
+
+/// By place, how many calls name each statement point, as `(file, place)`.
+/// Counted on the request-phase walk, after which nothing adds a probe,
+/// rather than on a walk of its own.
+struct PlacesNamed {
+    file: String,
+    counts: Vec<u32>,
+}
+
+impl PlacesNamed {
+    fn count(&mut self, call: &CallExpression<'_>) {
+        if let Some(count) =
+            place_argument(call, &self.file).and_then(|place| self.counts.get_mut(place))
+        {
+            *count += 1;
+        }
+    }
+}
+
+// For the parts the request-phase walk leaves alone.
+impl<'a> Visit<'a> for PlacesNamed {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        self.count(call);
+        walk::walk_call_expression(self, call);
+    }
+}
+
+/// The place a call names after the file, as in `hit(file, place)`.
+fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
+    let [first, second, ..] = call.arguments.as_slice() else {
+        return None;
+    };
+    let Argument::Identifier(identifier) = first else {
+        return None;
+    };
+    if identifier.name != file {
+        return None;
+    }
+    let Argument::NumericLiteral(number) = second else {
+        return None;
+    };
+    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+}
+
+/// The place of a statement probe, `clock.fast && hits[place] === clock.epoch
+/// || hit(file, place);`.
+fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    let Expression::LogicalExpression(logical) = &statement.expression else {
+        return None;
+    };
+    if logical.operator != LogicalOperator::Or {
+        return None;
+    }
+    let Expression::LogicalExpression(guard) = &logical.left else {
+        return None;
+    };
+    if guard.operator != LogicalOperator::And {
+        return None;
+    }
+    let Expression::CallExpression(call) = &logical.right else {
+        return None;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return None;
+    };
+    if callee.name != hit || call.arguments.len() != 2 {
+        return None;
+    }
+    place_argument(call, file)
+}
+
+struct AdjacentProbeMerger {
+    hit: String,
+    file: String,
+    /// By place: a statement point named once, by an id no other place has.
+    mergeable: Vec<bool>,
+    follows: Vec<[usize; 2]>,
+}
+
+impl AdjacentProbeMerger {
+    /// Merges one list whose own lists are merged already.
+    fn merge<'a>(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let mergeable = |place: usize| self.mergeable.get(place) == Some(&true);
+        let mut leader = None;
+        let mut keep = Vec::new();
+        for (index, statement) in statements.iter().enumerate() {
+            let place = statement_probe_place(statement, &self.hit, &self.file);
+            match (leader, place) {
+                (Some(first), Some(place)) if mergeable(first) && mergeable(place) => {
+                    if keep.is_empty() {
+                        keep = vec![true; statements.len()];
+                    }
+                    keep[index] = false;
+                    self.follows.push([place, first]);
+                }
+                _ => leader = place,
+            }
+        }
+        if keep.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        statements.retain(|_| {
+            index += 1;
+            keep[index - 1]
+        });
+    }
+}
+
+/// Writes the table's key into the module's registration,
+/// `const <file> = registerProbeV2({ key: "", ... })` at the top level.
+fn set_registration_key<'a>(
+    ast: AstBuilder<'a>,
+    program: &mut Program<'a>,
+    probe_file: &str,
+    key: &str,
+) -> Result<(), CandidateError> {
+    let registration = program.body.iter_mut().find_map(|statement| {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            return None;
+        };
+        let declarator = declaration.declarations.first_mut()?;
+        if declarator.id.get_binding_identifier()?.name != probe_file {
+            return None;
+        }
+        let Some(Expression::CallExpression(call)) = declarator.init.as_mut() else {
+            return None;
+        };
+        let Some(Argument::ObjectExpression(object)) = call.arguments.first_mut() else {
+            return None;
+        };
+        object.properties.iter_mut().find_map(|property| {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                return None;
+            };
+            let property = &mut **property;
+            match (&property.key, &mut property.value) {
+                (PropertyKey::StaticIdentifier(name), Expression::StringLiteral(value))
+                    if name.name == "key" =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            }
+        })
+    });
+    let Some(value) = registration else {
+        return Err(CandidateError::Internal(
+            "the probe registration was not found to write its key into".to_string(),
+        ));
+    };
+    value.value = ast.str(key);
+    Ok(())
+}
+
+/// Each place whose id an earlier place has, beside that first place, flat.
+fn repeated_places(ids: &[String]) -> Vec<usize> {
+    // Called on every module's ids: a hasher made for short keys, not
+    // SipHash, which was most of what this cost.
+    let mut first = rustc_hash::FxHashMap::<&str, usize>::with_capacity_and_hasher(
+        ids.len(),
+        Default::default(),
+    );
+    let mut repeated = Vec::new();
+    for (place, id) in ids.iter().enumerate() {
+        let earlier = *first.entry(id.as_str()).or_insert(place);
+        if earlier != place {
+            repeated.extend([place, earlier]);
+        }
+    }
+    repeated
 }
 
 fn restore_comment_text(
@@ -3593,6 +3868,8 @@ struct AssertedTargetTransformer<'a> {
     /// Every one of Supercov's own names the program reads, gathered on this
     /// last walk over it for `prune_unused_runtime_helpers`.
     referenced: Vec<&'a str>,
+    /// Adjacent statement probes are merged on this walk too.
+    merger: Option<AdjacentProbeMerger>,
 }
 
 impl<'a> AssertedTargetTransformer<'a> {
@@ -3625,6 +3902,13 @@ impl<'a> AssertedTargetTransformer<'a> {
 }
 
 impl<'a> VisitMut<'a> for AssertedTargetTransformer<'a> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        walk_mut::walk_statements(self, statements);
+        if let Some(merger) = self.merger.as_mut() {
+            merger.merge(statements);
+        }
+    }
+
     fn visit_identifier_reference(
         &mut self,
         reference: &mut oxc_ast::ast::IdentifierReference<'a>,
@@ -4842,6 +5126,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
         referenced: Vec::new(),
+        merger: None,
     }
     .visit_program(&mut parsed.program);
     let (generated, map) =
@@ -4856,6 +5141,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         points: point_analysis.points,
         excluded_statements,
         branches,
+        probe_table: None,
         runtime: None,
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
@@ -5122,7 +5408,9 @@ fn instrument_candidate_with_binding(
     } else {
         (String::new(), VariableDeclarationKind::Const)
     };
-    let mut names = CandidateNames::within(source, &namespace);
+    // Each walk allocates its names afresh, from one scan of the source.
+    let name_base = CandidateNames::within(source, &namespace);
+    let mut names = name_base.fresh();
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
@@ -5351,7 +5639,7 @@ fn instrument_candidate_with_binding(
         typescript,
         try_targets,
         loop_targets,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         scope_declarations: Vec::new(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -5389,7 +5677,7 @@ fn instrument_candidate_with_binding(
         coverage_hit_v2: coverage_hit_v2.clone(),
         probe_file_v2: probe_file_v2.clone(),
         typescript,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         scope_declarations: Vec::new(),
         frameless: 0,
         trees: Vec::new(),
@@ -5404,7 +5692,7 @@ fn instrument_candidate_with_binding(
         ast,
         coverage_hit: coverage_hit.clone(),
         targets: switch_analysis.targets,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
@@ -5466,7 +5754,7 @@ fn instrument_candidate_with_binding(
         file,
         with_request_phase: with_request_phase.clone(),
         used: false,
-        names: CandidateNames::within(source, &namespace),
+        names: name_base.fresh(),
     };
     route_transformer.transform_program(&mut parsed.program);
     let mut request_transformer = RequestPhaseTransformer {
@@ -5474,40 +5762,65 @@ fn instrument_candidate_with_binding(
         with_request_phase: with_request_phase.clone(),
         used: route_transformer.used,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        named: PlacesNamed {
+            file: probe_file_v2.clone(),
+            counts: vec![0; point_analysis.points.len()],
+        },
     };
     request_transformer.visit_program(&mut parsed.program);
     let uses_request_phase = request_transformer.used;
 
-    // Ids and widths only: the text of each decision is in the manifest, and
-    // this literal sits at the top of the module, where a bundler that drops
-    // a route's server-only `loader` and `action` keeps it. With the text it
-    // carried their conditions (`process.env.QSTASH_RETRIES`) into browser
-    // chunks.
-    // The ids as one string, space-separated, which the runtime splits: a
-    // list of hundreds of quoted ids, one a line, was the largest part of a
-    // component's registration for every bundler and runner to parse. Any id
-    // with a space in it, or none at all, keeps the list.
-    let ids = |ids: Vec<&String>| {
-        if ids.iter().any(|id| id.is_empty() || id.contains(' ')) {
-            serde_json::json!(ids)
-        } else {
-            serde_json::Value::String(
-                ids.iter()
-                    .map(|id| id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            )
-        }
-    };
-    let registration = serde_json::json!({
-        "decisions": ids(collector.decisions.iter().map(|decision| &decision.id).collect()),
+    // Neither ids nor text: a module carries its table's key and the size of
+    // each list, and the manifest holds the table. The runtime names a point
+    // by the key and its place, which the report reads back through the
+    // table. The ids were most of what instrumentation added to a bundle
+    // after minification, a third on a Vite app, as strings no minifier can
+    // shorten. The text of a decision never travelled: a registration sits
+    // at the top of the module, where a bundler that drops a route's
+    // server-only `loader` and `action` keeps it, and it carried their
+    // conditions (`process.env.QSTASH_RETRIES`) into browser chunks.
+    let point_ids = point_analysis
+        .points
+        .iter()
+        .map(|point| point.id.clone())
+        .chain(default_point_ids.iter().cloned())
+        .chain(extra.ids.iter().cloned())
+        .collect::<Vec<_>>();
+    let point_aliases = repeated_places(&point_ids);
+    let merger = adjacent_probe_merger(
+        &coverage_hit_v2,
+        &probe_file_v2,
+        &request_transformer.named,
+        &point_aliases,
+    );
+    let decision_ids = collector
+        .decisions
+        .iter()
+        .map(|decision| decision.id.clone())
+        .collect::<Vec<_>>();
+    // The key digests which probes the merge drops, which the last walk
+    // decides: the registration is written with an empty key, filled in
+    // after that walk by `set_registration_key`.
+    let mut registration = serde_json::json!({
+        "key": "",
+        "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "pointIds": ids(point_analysis.points.iter().map(|point| &point.id).chain(&default_point_ids).chain(&extra.ids).collect()),
         "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
         "selectionTrees": &logical_transformer.trees,
     });
+    // Places that repeat an earlier place's id -- a selection's two short
+    // outcomes are one point -- as pairs of the place and the first: the
+    // runtime records them as that one point, as it did by id.
+    for (field, aliases) in [
+        ("pointAliases", point_aliases),
+        ("decisionAliases", repeated_places(&decision_ids)),
+    ] {
+        if !aliases.is_empty() {
+            registration[field] = serde_json::json!(aliases);
+        }
+    }
     let registration_call = ast.expression_call(
         Span::default(),
         ast.expression_identifier(Span::default(), ast.ident(&register_probe_v2)),
@@ -5679,8 +5992,17 @@ fn instrument_candidate_with_binding(
     let mut asserted_targets = AssertedTargetTransformer {
         ast: AstBuilder::new(&allocator),
         referenced: Vec::new(),
+        merger: Some(merger),
     };
     asserted_targets.visit_program(&mut parsed.program);
+    let mut follows = asserted_targets
+        .merger
+        .take()
+        .map(|merger| merger.follows)
+        .unwrap_or_default();
+    follows.sort_unstable();
+    let probe_table = ProbeTable::new(file, point_ids, decision_ids, follows);
+    set_registration_key(ast, &mut parsed.program, &probe_file_v2, &probe_table.key)?;
     // The first helper stays whatever the file calls: the loaders the
     // JavaScript frontend adds find the declarations by it.
     prune_unused_runtime_helpers(
@@ -5701,6 +6023,7 @@ fn instrument_candidate_with_binding(
         points: point_analysis.points,
         excluded_statements,
         branches,
+        probe_table: Some(probe_table),
         runtime: Some(CandidateRuntime {
             coverage_hit,
             mcdc_begin,
@@ -8354,6 +8677,10 @@ struct RequestPhaseTransformer<'a> {
     with_request_phase: String,
     used: bool,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// Every probe is in place by this walk, so it also counts the calls that
+    /// name each statement point, for `merge_adjacent_probes`, including in
+    /// what it does not rewrite.
+    named: PlacesNamed,
 }
 
 impl<'a> RequestPhaseTransformer<'a> {
@@ -8417,6 +8744,7 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
             .source_sensitive_functions
             .contains(&span_key(function.span))
         {
+            self.named.visit_function(function, flags);
             return;
         }
         walk_mut::walk_function(self, function, flags);
@@ -8427,6 +8755,7 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
             .source_sensitive_functions
             .contains(&span_key(function.span))
         {
+            self.named.visit_arrow_function_expression(function);
             return;
         }
         walk_mut::walk_arrow_function_expression(self, function);
@@ -8434,9 +8763,12 @@ impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
 
     // A with body is left uninstrumented: its object environment can
     // intercept probe identifiers (see `enter_with_statement`).
-    fn visit_with_statement(&mut self, _statement: &mut WithStatement<'a>) {}
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        self.named.visit_with_statement(statement);
+    }
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
+        self.named.count(call);
         walk_mut::walk_call_expression(self, call);
         let property = match &call.callee {
             Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
@@ -8494,6 +8826,18 @@ impl<'s> CandidateNames<'s> {
             allocated: HashSet::new(),
             suffix: 0,
             namespace: namespace.to_owned(),
+        }
+    }
+
+    /// The same source and namespace with no name allocated yet: what
+    /// `within` gives, without reading the source again.
+    fn fresh(&self) -> Self {
+        Self {
+            source: self.source,
+            underscored: self.underscored.clone(),
+            allocated: HashSet::new(),
+            suffix: 0,
+            namespace: self.namespace.clone(),
         }
     }
 
@@ -11874,6 +12218,82 @@ export const r = v && w && q;
             );
         }
         assert!(output.code.contains("decisionWidths"), "{}", output.code);
+    }
+
+    #[test]
+    fn a_module_names_its_table_by_key_and_carries_no_id() {
+        let source = "export function pick(a, b, options = {}) {\n  if (a && b) return a || b;\n  return options.name ?? 'none';\n}\n";
+        let output = instrument_candidate(source, "src/pick.js").unwrap();
+        let table = output.probe_table.as_ref().unwrap();
+        assert!(!table.points.is_empty() && !table.decisions.is_empty());
+        assert!(
+            output.code.contains(&format!("\"{}\"", table.key)),
+            "{}",
+            output.code
+        );
+        for id in table.points.iter().chain(&table.decisions) {
+            assert!(!output.code.contains(id.as_str()), "{id}\n{}", output.code);
+        }
+        // A selection's two short outcomes are one id at two places, and the
+        // module says the second is the first.
+        let repeated = repeated_places(&table.points);
+        assert!(!repeated.is_empty());
+        for pair in repeated.chunks(2) {
+            assert_eq!(table.points[pair[0]], table.points[pair[1]]);
+            assert!(pair[1] < pair[0]);
+        }
+        assert!(output.code.contains("pointAliases"), "{}", output.code);
+        // The same source names the same table; another file, another.
+        let again = instrument_candidate(source, "src/pick.js").unwrap();
+        assert_eq!(again.probe_table.as_ref(), Some(table));
+        let other = instrument_candidate(source, "src/other.js").unwrap();
+        assert_ne!(other.probe_table.unwrap().key, table.key);
+    }
+
+    /// A function's entry and its first statement are one probe, which the
+    /// table says is both; a statement after a call keeps its own, since the
+    /// call can throw before it.
+    #[test]
+    fn a_probe_right_after_another_is_carried_by_it() {
+        let source = "export function f(x) {\n  const y = g(x);\n  return y;\n}\n";
+        let output = instrument_candidate(source, "src/f.js").unwrap();
+        let table = output.probe_table.as_ref().unwrap();
+        assert_eq!(table.follows.len(), 1, "{}", output.code);
+        let [place, leader] = table.follows[0];
+        let id = |place: usize| table.points[place].as_str();
+        let point = |id: &str| output.points.iter().find(|point| point.id == id).unwrap();
+        assert_eq!(point(id(leader)).kind, "function", "{:?}", table);
+        assert_eq!(point(id(place)).kind, "statement", "{:?}", table);
+        let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
+        assert!(probed(leader) && !probed(place), "{}", output.code);
+        // The statement after the call keeps its probe.
+        assert_eq!(
+            output.code.matches(".fast &&").count(),
+            2,
+            "{}",
+            output.code
+        );
+        // Another table than a module with every probe would name.
+        assert_eq!(
+            table.key,
+            ProbeTable::new(
+                "src/f.js",
+                table.points.clone(),
+                table.decisions.clone(),
+                table.follows.clone()
+            )
+            .key
+        );
+        assert_ne!(
+            table.key,
+            ProbeTable::new(
+                "src/f.js",
+                table.points.clone(),
+                table.decisions.clone(),
+                Vec::new()
+            )
+            .key
+        );
     }
 
     #[test]

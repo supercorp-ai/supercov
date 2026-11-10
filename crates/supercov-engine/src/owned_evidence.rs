@@ -1035,6 +1035,7 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let probes = BTreeMap::from([(
             0_u64,
@@ -1176,6 +1177,7 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let probes = BTreeMap::from([
             (
@@ -1293,6 +1295,7 @@ mod tests {
             unmeasured: Vec::new(),
             scope: None,
             assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
         };
         let run = build_frontend_run(OwnedRunInputs {
             declaration: go_declaration(),
