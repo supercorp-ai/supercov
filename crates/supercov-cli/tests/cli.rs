@@ -20787,3 +20787,56 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     assert!(!summary.contains("Mutants "), "{summary}");
 }
+
+/// node:test records its tests' evidence as a server process does, in
+/// records rather than snapshots: the values its probes saw are recorded
+/// with them, and decide its mutants as Mocha's snapshots do.
+#[cfg(unix)]
+#[test]
+fn mutants_under_node_test_are_decided_from_the_values_its_records_carry() {
+    let project = Project::empty("mutants-node-test");
+    project.write("package.json", r#"{ "name": "mutants", "type": "module" }"#);
+    project.write(
+        "src/cart.js",
+        "export function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  return sum > 100 ? sum * 0.9 : sum;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { shipping, label } from \"../src/cart.js\";\ntest(\"ships big orders free\", () => assert.equal(shipping(80), 0));\ntest(\"charges small orders\", () => assert.equal(shipping(10), 5));\ntest(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("mutants");
+    project.supercov(&["--", "node", "--test"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let statuses = mutant_statuses(&reply);
+    for (id, status) in [
+        // `sum` was 80 and 10, never 50: a boundary only values decide.
+        ("src/cart.js:2:7-2:16:EqualityOperator:>", "not-infected"),
+        ("src/cart.js:2:7-2:16:EqualityOperator:<", "infected"),
+        ("src/cart.js:9:10-9:21:MethodExpression:removed", "infected"),
+        (
+            "src/cart.js:13:22-13:31:ArithmeticOperator:/",
+            "not-reached",
+        ),
+    ] {
+        assert_eq!(
+            statuses.get(id).map(String::as_str),
+            Some(status),
+            "{id}: {statuses:?}"
+        );
+    }
+    // What Mocha's run of the same tests says, mutant for mutant.
+    assert_eq!(
+        reply["data"]["summary"],
+        serde_json::json!({
+            "mutants": 15,
+            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0},
+            "weakScore": 0.5333,
+            "weakScoreReached": 0.8889,
+            "mutationScore": null,
+        }),
+        "{statuses:?}"
+    );
+}

@@ -547,9 +547,13 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
     const directory = resolve(root, "run-clone", "background");
     const files = readdirSync(directory).sort();
     assert.equal(files.length, 2, `expected a second shard after the clone, saw ${files}`);
-    const ids = files.map((file) =>
-      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    const shards = files.map((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)),
     );
+    // Each shard is a writer of its own, and says first that it records
+    // values; the clone's line is not that writer's first.
+    assert.ok(shards.every((records) => records[0].type === "values"), JSON.stringify(shards));
+    const ids = shards.map((records) => records.filter((record) => record.type !== "values").map((record) => record.id));
     assert.deepEqual(ids.flat().sort(), ["after-clone", "before-clone", "from-a-clone"]);
     assert.ok(ids.some((shard) => shard.length === 1 && shard[0] === "after-clone"));
   } finally {
@@ -590,8 +594,8 @@ test("background evidence is on disk once its turn ends, before an uncatchable p
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    assert.equal(records.length, 1);
-    assert.equal(records[0].id, "kill-safe-hit");
+    assert.deepEqual(records.map((record) => record.type), ["values", "hit"]);
+    assert.equal(records[1].id, "kill-safe-hit");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -648,9 +652,12 @@ test("background records are written once per turn through one open shard", () =
     assert.equal(calls.appendFileSync, undefined, child.stdout);
     assert.equal(calls.writeSync, 9, child.stdout);
     const directory = resolve(root, "run-descriptor", "background");
-    const ids = readdirSync(directory).flatMap((file) =>
-      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    const records = readdirSync(directory).flatMap((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)),
     );
+    // The writer's first record says it records values.
+    assert.equal(records[0].type, "values");
+    const ids = records.slice(1).map((record) => record.id);
     assert.deepEqual(ids.sort(), Array.from({ length: 100 }, (_, index) => `hit-${index}`).sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1267,4 +1274,87 @@ test("infection probes record whether Stryker's replacement would differ, runnin
     t: ['t:"aa"'],
     v: ["unknown"],
   });
+});
+
+test("a process writing records writes each value its probes see once per context, after saying it records values", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-server-values-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(${JSON.stringify(runtime)});
+         // One selection: points 0-3 are short falsy, short truthy, right
+         // falsy and right truthy.
+         const file = runtime.registerProbeV2({
+           file: "src/pick.js",
+           pointIds: ["pick:short", "pick:short", "pick:right", "pick:right"],
+           decisions: [],
+           decisionWidths: [],
+           selectionPoints: [0, 1],
+         });
+         const scope = (attemptId) => ({ version: 1, runId: "run-values", workerId: "w", testId: attemptId, testKey: attemptId, retry: 0, attemptId });
+         // Outside any test: the process's background. A repeat is not
+         // written again.
+         runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+         runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+         runtime.compareV2("src/a.js:1:1", 2, 2, 0);
+         // Each test's own, once each: the relation the background saw is
+         // the first test's too.
+         for (const attempt of ["first", "second"]) {
+           await runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, async () => {
+             runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+             runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+             runtime.arithV2("src/a.js:2:1-2:6#arith", 3, 0, 0);
+             runtime.selectShortV2(file, 0, "", 0) || runtime.selectRightV2(file, 0, 0);
+             runtime.selectShortV2(file, 0, "", 0) || runtime.selectRightV2(file, 0, 0);
+           });
+         }
+         await new Promise((done) => setImmediate(done));
+         // A snapshot keeps its values itself: nothing more is written.
+         runtime.enableRuntimeSnapshotEvidence();
+         runtime.compareV2("src/a.js:1:1", 3, 2, 0);
+         process.stdout.write(JSON.stringify(runtime.coverageSnapshot().comparisons));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_RUN_ID: "run-values", SUPERCOV_SERVER_EVIDENCE_ROOT: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    assert.deepEqual(JSON.parse(child.stdout), [
+      { id: "src/a.js:1:1", outcomes: ["lt", "eq", "gt"] },
+      { id: "src/a.js:2:1-2:6#arith", outcomes: ["same"] },
+    ]);
+    const read = (directory) =>
+      readdirSync(directory)
+        .filter((file) => file.endsWith(".jsonl"))
+        .sort()
+        .map((file) => readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+    const values = (records) =>
+      records
+        .filter((record) => record.type !== "hit")
+        .map(({ type, id, outcome }) => [type, id, outcome].filter((part) => part !== undefined).join(" "));
+    const [background] = read(resolve(root, "run-values", "background"));
+    assert.deepEqual(values(background), ["values", "comparison src/a.js:1:1 lt", "comparison src/a.js:1:1 eq"]);
+    const attempts = read(resolve(root, "run-values", "attempts"));
+    assert.equal(attempts.length, 2);
+    for (const records of attempts) {
+      // The note comes first, and names the attempt the lines after it are.
+      assert.equal(records[0].type, "values");
+      assert.equal(records.filter((record) => record.scope).length, 1);
+      assert.deepEqual(values(records), [
+        "values",
+        "comparison src/a.js:1:1 lt",
+        "comparison src/a.js:2:1-2:6#arith same",
+        "logical pick RF",
+      ]);
+    }
+    assert.deepEqual(attempts.map((records) => records[0].scope.attemptId).sort(), ["first", "second"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

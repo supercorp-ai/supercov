@@ -173,7 +173,12 @@ function createState() {
     // Per relational comparison site ("file:line:column"): the operand
     // relations seen -- lt, eq, gt, unordered (NaN), or other (objects that
     // are not Dates) -- for the infection research, beside the coverage.
+    // Each relation maps to the epoch a process writing records last wrote
+    // it in (0 where none did): see noteValue.
     comparisons: /* @__PURE__ */ new Map(),
+    // Per logical selection, outside a snapshot: each outcome's epoch, as
+    // for comparisons.
+    logicalEpochs: /* @__PURE__ */ new Map(),
     eventKeys: /* @__PURE__ */ new Set(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
@@ -271,6 +276,11 @@ function activateProbeV2Key(key, force = false) {
             vectors.clear();
         }
       }
+      for (const outcomes of state.comparisons.values()) {
+        for (const outcome of outcomes.keys())
+          outcomes.set(outcome, 0);
+      }
+      state.logicalEpochs.clear();
     }
     epoch = state.probeV2NextEpoch;
     state.probeV2ContextEpochs.set(key, epoch);
@@ -369,7 +379,7 @@ function logicalSnapshot() {
 function comparisonSnapshot() {
   return [...state.comparisons.entries()].map(([id, outcomes]) => ({
     id,
-    outcomes: [...outcomes]
+    outcomes: [...outcomes.keys()]
   }));
 }
 function coverageSnapshot() {
@@ -389,6 +399,7 @@ function resetCoverage(testId2) {
   state.events.length = 0;
   state.logicals.clear();
   state.comparisons.clear();
+  state.logicalEpochs.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
@@ -628,8 +639,14 @@ function persistBrowser() {
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
 }
+// Every writer says, before its first record, that it records the values
+// its comparisons, selections and probes see (`comparison` and `logical`
+// records): a writer that does not, a runtime older than them, leaves its
+// silence about values unread rather than read as "never seen".
+var valuesRecord = { type: "values" };
 // An attempt's file says its scope once per writing process: each line
-// without one is of the scope of the line before it in the same file.
+// without one is of the scope of the line before it in the same file. The
+// first is the writer's note that it records values.
 var scopedPathsWritten = /* @__PURE__ */ new Set();
 function serverLine(record, path) {
   if (!path)
@@ -637,13 +654,13 @@ function serverLine(record, path) {
   const { scope, ...line } = record;
   if (scope && !scopedPathsWritten.has(path)) {
     scopedPathsWritten.add(path);
-    line.scope = scope;
+    return JSON.stringify(__spreadProps(__spreadValues({}, valuesRecord), { scope })) + "\n" + JSON.stringify(line);
   }
   return JSON.stringify(line);
 }
 function serverRecordKey(record) {
   var _a8;
-  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.id;
+  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.outcome !== void 0 ? `${record.id}\0${record.outcome}` : record.id;
   // Each request that names no test keeps its own first hits: the report
   // credits them to the test running when it came, and a later request's
   // work belongs to whichever test was running then.
@@ -856,6 +873,9 @@ function writeBackgroundLines(fs, runId, payload) {
   if (!path) {
     const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
     const writer = `${shard}-${process.pid}-${backgroundWriterToken()}`;
+    // A writer's records are read together, by its name: its first says it
+    // records values.
+    payload = JSON.stringify(valuesRecord) + "\n" + payload;
     const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
     state.backgroundSequence = nextSequence;
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
@@ -1186,6 +1206,9 @@ function scheduleServerFlush() {
 function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
+    // A snapshot holds its values itself.
+    if (record.type !== "hit" && record.type !== "decision")
+      return;
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision") {
       recordBrowserEvent(__spreadProps(__spreadValues({
@@ -2236,6 +2259,16 @@ function recordSelectionOutcome(id, outcome) {
     vectors.set(key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
     workerEvidenceChanged();
   }
+  if (isBrowser || state.runtimeSnapshots)
+    return;
+  let epochs = state.logicalEpochs.get(branchId);
+  if (epochs === void 0) {
+    epochs = /* @__PURE__ */ new Map();
+    state.logicalEpochs.set(branchId, epochs);
+  }
+  const clock = state.probeV2Clock;
+  if (!clock.fast || epochs.get(key) !== clock.epoch)
+    noteValue(epochs, "logical", branchId, key);
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
@@ -2269,16 +2302,7 @@ function compareRelation(left, right) {
 function compareV2(site, left, right, op) {
   const result = op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
   try {
-    const relation = op === 4 ? result ? "true" : "false" : compareRelation(left, right);
-    let outcomes = state.comparisons.get(site);
-    if (outcomes === void 0) {
-      outcomes = /* @__PURE__ */ new Set();
-      state.comparisons.set(site, outcomes);
-    }
-    if (!outcomes.has(relation)) {
-      outcomes.add(relation);
-      workerEvidenceChanged();
-    }
+    recordProbeOutcome(site, op === 4 ? result ? "true" : "false" : compareRelation(left, right));
   } catch {
   }
   return result;
@@ -2291,16 +2315,58 @@ function compareV2(site, left, right, op) {
 // ("unknown"), under the site's id in the comparison records. Counterparts
 // are computed only by built-ins on primitives (or on verified built-in
 // arrays, strings, dates and Math), so no user code runs an extra time.
+// Every repeat in the same context ends at the first check, as a hit's does:
+// a snapshot keeps each outcome once per test, a process writing records
+// once per context.
 function recordProbeOutcome(site, outcome) {
   let outcomes = state.comparisons.get(site);
   if (outcomes === void 0) {
-    outcomes = /* @__PURE__ */ new Set();
+    outcomes = /* @__PURE__ */ new Map();
     state.comparisons.set(site, outcomes);
   }
-  if (!outcomes.has(outcome)) {
-    outcomes.add(outcome);
-    workerEvidenceChanged();
+  const seen = outcomes.get(outcome);
+  const clock = state.probeV2Clock;
+  if (seen !== void 0 && (clock.fast && seen === clock.epoch || isBrowser || state.runtimeSnapshots))
+    return;
+  noteValue(outcomes, "comparison", site, outcome);
+}
+// An outcome new to this test's snapshot, or to this context's records. A
+// process that writes records rather than snapshots -- a server, or a
+// node:test, AVA or tap test process -- writes each outcome a site sees once
+// per context, as recordCoverageHit writes a point's hit: the report reads
+// those records as it reads a snapshot's values. `epochs` maps each outcome
+// to the epoch it was last written in.
+function noteValue(epochs, type, id, outcome) {
+  const known = epochs.has(outcome);
+  if (isBrowser || state.runtimeSnapshots) {
+    if (!known) {
+      epochs.set(outcome, 0);
+      workerEvidenceChanged();
+    }
+    return;
   }
+  const clock = state.probeV2Clock;
+  let epoch = clock.epoch;
+  if (!clock.fast) {
+    const previousEpoch = clock.epoch;
+    activateProbeV2Context(currentRequestContext());
+    epoch = clock.epoch;
+    clock.epoch = previousEpoch;
+  } else if (epoch !== epoch) {
+    epoch = resolveProbeV2Epoch();
+  }
+  if (epochs.get(outcome) === epoch)
+    return;
+  epochs.set(outcome, epoch);
+  if (!known)
+    workerEvidenceChanged();
+  const phaseId = currentPhaseId();
+  appendServer(__spreadValues({
+    type,
+    id,
+    outcome,
+    timestampMs: Date.now()
+  }, phaseId ? { phaseId } : {}));
 }
 function probePrimitive(value) {
   return value === null || typeof value !== "object" && typeof value !== "function" && typeof value !== "symbol";

@@ -103,7 +103,7 @@ behind it:
 | `not-reached` | no test ran the mutated code | weak |
 | `not-infected` | reached, but every evaluation gave the mutant the original's value | weak |
 | `infected` | some evaluation gave the mutant another value | weak |
-| `unknown` | reached, but the run cannot tell (no probe at that site, values it cannot compare, code that ran in a server process) | weak |
+| `unknown` | reached, but the run cannot tell (no probe at that site, values it cannot compare, code that ran in a server process whose records carry no values) | weak |
 | `killed` | a test failed with the mutant in place | strong (reserved) |
 | `survived` | every test that reached it passed with it in place | strong (reserved) |
 | `timeout` | a test ran past its time with the mutant in place | strong (reserved) |
@@ -272,6 +272,44 @@ durationMs }`. `stryker` holds the joined StrykerJS status when `--stryker`
 was given. A reader that knows only `status` keeps working when strong results
 arrive.
 
+## Values from server processes
+
+A test process of Vitest, Jest or Mocha, and a Playwright page, hands over a
+snapshot per test: its hits, decision vectors, and the outcomes its
+comparisons, selections and probes saw. A process outside the test process
+-- an app server an end-to-end test drives -- and the test process of
+node:test, AVA and tap write records instead, one per first hit or decision
+vector in each context (a test's attempt and phase, or the process's
+background). They write the values the same way:
+
+```json
+{"type":"values"}
+{"type":"comparison","id":"src/a.ts:3:9","outcome":"lt","timestampMs":1793741378313}
+{"type":"logical","id":"0f3c…","outcome":"RT","timestampMs":1793741378313}
+```
+
+A `comparison` record is one outcome of a comparison or infection probe site
+(`lt`, `eq`, `same`, `differs`, ...), a `logical` one a selection's: `S` or
+`R` for the short or the right side, `F` or `T` for a falsy or truthy value.
+Each is written once per distinct outcome per context, as a hit is, and is
+credited to a test as the hits around it are: by the attempt a request
+names, or by time. Reading a run folds a test's value records into one
+snapshot of its values, so the verdicts read them as a test process's.
+
+`{"type":"values"}` is each writer's first record: the first line it writes
+to an attempt's file (with the attempt's scope), and the first of its
+background records. It says the writer records values, so its silence about
+one is a snapshot's: a comparison with no record there never ran there. It
+goes with the writer's work to each test that work is credited to. A test's
+hits from records without it were written by a runtime older than value
+records, and a not-reached or not-infected verdict that reads values, at a
+mutant whose statement or function such a test ran, stays `unknown`
+(`server-process`).
+
+The note is per test, not per process: a test credited with the work of two
+processes, one of them measured by an older Supercov (a server that outlived
+an upgrade and was reused), is read as if both recorded values.
+
 ## Merged runs
 
 A run's mutants are archived as one `mutants.json`. `supercov merge` writes
@@ -304,11 +342,13 @@ the reader requires every copy to be the same, which runs of one source are.
   strings in the evidence (only with `SUPERCOV_REGEX_INPUTS=1`), and comparing
   JavaScript regexes needs a JavaScript engine. A later step compares the
   original and mutated regex in the page or process instead.
-- Code that ran in a server process records hits but no values until those
-  processes report outcomes too, so its outcome-based verdicts stay `unknown`.
-  Runners whose test process records the way a server does, with records
-  rather than snapshots (node:test, AVA, tap), are in the same place today:
-  Vitest, Jest, Mocha and Playwright's pages keep values; node:test's verdicts
-  that need a value are `unknown`.
+- Code that ran in a server process measured by a runtime older than value
+  records (its records carry no `values` note): its outcome-based verdicts stay
+  `unknown`. A server process, and node:test, AVA and tap's test processes,
+  record values now (see Values from server processes).
+- A server process killed in the middle of an event-loop turn loses that
+  turn's records, values among them, as it loses its hits. A statement whose
+  hit was written in an earlier turn and whose comparison ran in the lost one
+  reads as if the comparison never ran there.
 - Equivalent mutants are not detected. They show up as `not-infected` with
   their reason, which is often what makes them recognisable.

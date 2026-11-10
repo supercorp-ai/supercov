@@ -5400,6 +5400,7 @@ mod tests {
                     phase_id: None,
                     scope: None,
                     request: None,
+                    outcome: None,
                 });
             }
             let mut report = report(vec![admin]);

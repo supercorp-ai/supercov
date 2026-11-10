@@ -10,10 +10,13 @@
 //! what was recorded; where the record cannot tell, the verdict is
 //! `Unknown`. `Infected` is a candidate kill, not a kill.
 //!
-//! A server process records hits and decision vectors but no comparisons,
-//! logical outcomes or probe outcomes. A `NotInfected` or `NotReached` read
-//! from those records is therefore `Unknown` when the mutant's statement ran
-//! in a server process: its outcomes there are missing, not absent.
+//! A server process records hits and decision vectors, and the outcomes of
+//! its comparisons, selections and probes as records the report reads as a
+//! snapshot's values. A runtime older than those records wrote none, and
+//! says nothing of it: a `NotInfected` or `NotReached` read from values is
+//! `Unknown` when the mutant's statement ran in a server process whose
+//! records do not say they carry values (`SERVER_VALUES_RECORD`). Its
+//! outcomes there are missing, not absent.
 //!
 //! The rules are those of an earlier research prototype, which matched
 //! evidence by text;
@@ -24,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::coverage_analysis::McdcVector;
 use crate::coverage_index::{IndexedMutant, MutantStatus, MutationResults};
-use crate::coverage_report::RawTestResult;
+use crate::coverage_report::{RawTestResult, SERVER_VALUES_RECORD};
 use crate::js_mutant_links::{BranchRole, CandidateMutant, MutantsFile};
 
 /// How far the run's tests got toward killing a mutant.
@@ -59,7 +62,8 @@ pub(crate) struct Observations {
     /// Every point hit, branch outcomes (`id:short`, `id:continued`) among
     /// them.
     pub hits: HashSet<String>,
-    /// The hits recorded in a server process.
+    /// The hits a server process recorded without saying it records values:
+    /// a runtime older than its value records.
     pub server_hits: HashSet<String>,
     /// The hits of tests measured without the probes (a merged run's
     /// `testsWithoutValues`): they ran the code and recorded no values.
@@ -95,7 +99,7 @@ pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> 
             reason_of(
                 "server-process",
                 format!(
-                    "ran in a server process, which records no values ({})",
+                    "ran in a server process whose records carry no values ({})",
                     reason.sentence
                 ),
             ),
@@ -116,7 +120,8 @@ pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> 
     (status, reason)
 }
 
-/// The outcome records a server process does not make, noting each read.
+/// The outcome records an older runtime's server process does not make,
+/// noting each read.
 struct Records<'o> {
     observations: &'o Observations,
     read: Cell<bool>,
@@ -870,8 +875,11 @@ fn arrow_function(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, R
 /// What the tests of `raw_results` observed between them: every hit,
 /// decision vector, logical outcome and probe outcome of every snapshot, and
 /// of every record a server process wrote. A process outside the test
-/// process (a server a browser test drives) writes records, not snapshots,
-/// and records carry no outcomes: its hits are also `server_hits`.
+/// process (a server a browser test drives) writes records, not snapshots;
+/// the outcomes among them were read into a snapshot of the test's as its
+/// evidence was read. A test whose records do not say they carry values was
+/// measured by a runtime that wrote none: its records' hits are also
+/// `server_hits`.
 pub(crate) fn observations(raw_results: &[RawTestResult]) -> Observations {
     let mut observations = Observations::default();
     let mut vectors = HashMap::<String, HashSet<Vector>>::new();
@@ -914,11 +922,17 @@ pub(crate) fn observations(raw_results: &[RawTestResult]) -> Observations {
                     .extend(comparison.outcomes.iter().cloned());
             }
         }
+        let valued = raw
+            .server
+            .iter()
+            .any(|record| record.record_type == SERVER_VALUES_RECORD);
         for record in &raw.server {
             match (record.record_type.as_str(), &record.id, &record.vector) {
                 ("hit", Some(id), _) => {
                     observations.hits.insert(id.clone());
-                    observations.server_hits.insert(id.clone());
+                    if !valued {
+                        observations.server_hits.insert(id.clone());
+                    }
                 }
                 ("decision", Some(id), Some(each)) => vector(id, each),
                 _ => {}
@@ -1067,7 +1081,8 @@ mod tests {
     use crate::js_mutant_links::{ArrowLink, BranchLink, ChainLink, DecisionLink, MutantOperator};
 
     /// Every test's snapshots and records are observed together, and only
-    /// what a process outside the test process recorded is a server hit.
+    /// what a process outside the test process recorded, without saying it
+    /// records values, is a server hit.
     #[test]
     fn observations_are_every_snapshot_and_record_and_a_server_s_hits() {
         use crate::coverage_report::{
@@ -1083,6 +1098,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: None,
+            outcome: None,
         };
         let raw = |runtime: RuntimeSnapshot, browser: Vec<RuntimeSnapshot>, server| {
             let mut raw: RawTestResult = serde_json::from_value(serde_json::json!({
@@ -1136,6 +1152,15 @@ mod tests {
             }],
             ..RuntimeSnapshot::default()
         };
+        // A process that records values says so: its values are in the
+        // test's snapshot, and its silence is a snapshot's.
+        let valued = RuntimeSnapshot {
+            comparisons: vec![ComparisonSnapshot {
+                id: "c".into(),
+                outcomes: vec!["gt".into()],
+            }],
+            ..RuntimeSnapshot::default()
+        };
         let observed = observations(&[
             raw(unit.clone(), vec![page], vec![]),
             raw(
@@ -1146,13 +1171,21 @@ mod tests {
                     record("decision", "d", Some(vector(vec![Some(true)], true))),
                 ],
             ),
+            raw(
+                valued,
+                vec![],
+                vec![
+                    record(SERVER_VALUES_RECORD, "", None),
+                    record("hit", "valued", None),
+                ],
+            ),
         ]);
         let sorted = |set: &HashSet<String>| {
             let mut values = set.iter().cloned().collect::<Vec<_>>();
             values.sort();
             values
         };
-        assert_eq!(sorted(&observed.hits), ["page", "s", "served"]);
+        assert_eq!(sorted(&observed.hits), ["page", "s", "served", "valued"]);
         assert_eq!(sorted(&observed.server_hits), ["served"]);
         let mut vectors = observed.decisions["d"].clone();
         vectors.sort();
@@ -1161,7 +1194,7 @@ mod tests {
             [(vec![Some(false)], false), (vec![Some(true)], true)]
         );
         assert_eq!(observed.logicals["b"], HashSet::from([(true, false)]));
-        assert_eq!(sorted(&observed.comparisons["c"]), ["eq", "lt"]);
+        assert_eq!(sorted(&observed.comparisons["c"]), ["eq", "gt", "lt"]);
     }
 
     /// A mutant's code with it in place, where that is simply written.
@@ -2057,6 +2090,67 @@ mod tests {
         let mut elsewhere = Observations::default();
         elsewhere.server_hits.insert("t".into());
         expect(&boundary, &elsewhere, NOT_REACHED, "statement-not-run");
+    }
+
+    /// A server process that records values is read as a test process is:
+    /// its hits are no `server_hits`, and its silence decides.
+    #[test]
+    fn a_verdict_from_a_server_process_that_records_values_stands() {
+        use crate::coverage_report::{ComparisonSnapshot, RuntimeSnapshot, ServerRecord};
+        let record = |kind: &str, id: &str| ServerRecord {
+            record_type: kind.into(),
+            vector: None,
+            id: Some(id.into()),
+            timestamp_ms: None,
+            phase_id: None,
+            scope: None,
+            request: None,
+            outcome: None,
+        };
+        let served = |values: bool, outcomes: &[&str]| {
+            let mut raw: RawTestResult = serde_json::from_value(serde_json::json!({
+                "test": "t", "provenance": {"runner": "r", "kind": "e2e", "source": "s"}
+            }))
+            .unwrap();
+            raw.server = vec![record("hit", "s"), record("hit", "f")];
+            if values {
+                raw.server.insert(0, record(SERVER_VALUES_RECORD, ""));
+                raw.runtime = vec![RuntimeSnapshot {
+                    comparisons: vec![ComparisonSnapshot {
+                        id: "c".into(),
+                        outcomes: outcomes.iter().map(|outcome| (*outcome).into()).collect(),
+                    }],
+                    ..RuntimeSnapshot::default()
+                }];
+            }
+            observations(&[raw])
+        };
+        let boundary = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("EqualityOperator", "<=", "a < b", "<")
+        };
+        expect(
+            &boundary,
+            &served(true, &["lt"]),
+            NOT_INFECTED,
+            "operands-never-equal",
+        );
+        expect(
+            &boundary,
+            &served(true, &["eq"]),
+            INFECTED,
+            "operands-equal",
+        );
+        // No record of the comparison from a process that records values:
+        // it never ran there.
+        expect(
+            &boundary,
+            &served(true, &[]),
+            NOT_REACHED,
+            "comparison-not-evaluated",
+        );
+        // An older runtime's process: its silence is unknown.
+        expect(&boundary, &served(false, &[]), UNKNOWN, "server-process");
     }
 
     /// A merged run's tests measured without the probes ran code and
