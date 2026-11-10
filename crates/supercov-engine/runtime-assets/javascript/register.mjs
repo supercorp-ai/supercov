@@ -23,7 +23,10 @@ import { writePlaywrightCacheWhole } from "./atomic.mjs";
 if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === "--enable-source-maps").length === 1 &&
     !process.execArgv.includes("--enable-source-maps") &&
     typeof Module.setSourceMapsSupport === "function")
-    Module.setSourceMapsSupport(true, { nodeModules: false, generatedCode: true });
+    // Vitest maps every stack it prints through Vite's own maps, which
+    // carry the copies' maps into them; Node's reading them again, in every
+    // worker, was work no printed frame used.
+    Module.setSourceMapsSupport(!/[\\/]node_modules[\\/](?:\.bin[\\/]vitest$|vitest[\\/])/.test(process.argv[1] ?? ""), { nodeModules: false, generatedCode: true });
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
 writePlaywrightCacheWhole();
