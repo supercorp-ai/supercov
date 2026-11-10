@@ -281,9 +281,6 @@ function activateProbeV2Key(key, force = false) {
         if (file === void 0)
           continue;
         file.hitEpochs.fill(0);
-        file.decisionObservationEpochs.fill(0);
-        file.decisionObservationCounts.fill(0);
-        file.decisionCompleteEpochs.fill(0);
         for (const vectors of file.decisionEpochs) {
           if (vectors.size === void 0)
             vectors.fill(0);
@@ -2152,7 +2149,6 @@ function probeDecisionName(file, place) {
 function registerProbeV2(definition) {
   var _a8, _b;
   const pointCount = definition.points;
-  const decisionCount = definition.decisionWidths.length;
   const file = {
     key: definition.key,
     pointCount,
@@ -2168,13 +2164,6 @@ function registerProbeV2(definition) {
     // the global on every evaluation, and under Vitest's jsdom environment
     // each read is a getter call, most of a canvas app's measured unit time.
     decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : /* @__PURE__ */ new Map()),
-    decisionVectorCounts: definition.decisionWidths.map((_, index) => {
-      var _a9, _b2;
-      return (_b2 = (_a9 = definition.decisionVectorCounts) == null ? void 0 : _a9[index]) != null ? _b2 : 0;
-    }),
-    decisionObservationEpochs: new Uint32Array(decisionCount),
-    decisionObservationCounts: new Uint16Array(decisionCount),
-    decisionCompleteEpochs: new Uint32Array(decisionCount),
     pendingDefaults: new Uint32Array(definition.defaultCount || 0),
     // A selection's outcomes -- short falsy, short truthy, right falsy, right
     // truthy -- are four consecutive points per site from the first index.
@@ -2284,7 +2273,6 @@ function mcdcEndV2(file, decisionIndex, encoded, value) {
   return recordMcdcEndV2(file, decisionIndex, encoded, value);
 }
 function recordMcdcEndV2(file, decisionIndex, encoded, value) {
-  var _a8, _b;
   const id = probeDecisionName(file, decisionIndex);
   if (!id || !Number.isSafeInteger(encoded) || encoded < 0)
     return value;
@@ -2311,17 +2299,6 @@ function recordMcdcEndV2(file, decisionIndex, encoded, value) {
       if (seen.get(vectorIndex) === epoch)
         return value;
       seen.set(vectorIndex, epoch);
-    }
-    const expectedCount = (_a8 = file.decisionVectorCounts[decisionIndex]) != null ? _a8 : 0;
-    if (expectedCount > 0) {
-      if (file.decisionObservationEpochs[decisionIndex] !== epoch) {
-        file.decisionObservationEpochs[decisionIndex] = epoch;
-        file.decisionObservationCounts[decisionIndex] = 0;
-      }
-      const observedCount = ((_b = file.decisionObservationCounts[decisionIndex]) != null ? _b : 0) + 1;
-      file.decisionObservationCounts[decisionIndex] = observedCount;
-      if (observedCount >= expectedCount)
-        file.decisionCompleteEpochs[decisionIndex] = epoch;
     }
     if (!state.decisions.has(id))
       state.decisions.set(id, { id, vectors: /* @__PURE__ */ new Map() });

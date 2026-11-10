@@ -4166,7 +4166,6 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         source,
         file,
         decisions: Vec::new(),
-        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         value_decisions: HashMap::new(),
@@ -4416,7 +4415,6 @@ fn instrument_candidate_with_binding(
         source,
         file,
         decisions: Vec::new(),
-        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         value_decisions: HashMap::new(),
@@ -4839,7 +4837,6 @@ fn instrument_candidate_with_binding(
         "key": "",
         "points": point_ids.len(),
         "decisionWidths": collector.decisions.iter().map(|decision| decision.conditions.len()).collect::<Vec<_>>(),
-        "decisionVectorCounts": &collector.decision_vector_counts,
         "defaultCount": default_count,
         "selectionPoints": [selection_first, selection_count],
         "selectionTrees": &logical_transformer.trees,
@@ -8755,7 +8752,6 @@ struct DecisionCollector<'s> {
     source: &'s str,
     file: &'s str,
     decisions: Vec<CandidateDecision>,
-    decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     /// The expressions recorded as decisions where they are used as values,
@@ -8802,13 +8798,6 @@ impl DecisionCollector<'_> {
                 .collect(),
             kind: kind.to_string(),
         });
-        self.decision_vector_counts.push(
-            if condition_spans.len() <= 6 && decision_conditions_are_transparent(test) {
-                reachable_vector_count(test, &condition_spans)
-            } else {
-                0
-            },
-        );
     }
 }
 
@@ -8922,116 +8911,6 @@ fn syntactic_boolean_outcome(expression: &Expression<'_>) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-#[derive(Default)]
-struct CoverageSurfaceScanner {
-    found: bool,
-}
-
-impl<'a> Visit<'a> for CoverageSurfaceScanner {
-    fn visit_logical_expression(&mut self, _expression: &LogicalExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_conditional_expression(&mut self, _expression: &ConditionalExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_chain_expression(&mut self, _expression: &ChainExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {
-        self.found = true;
-    }
-
-    fn visit_arrow_function_expression(&mut self, _function: &ArrowFunctionExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_class(&mut self, _class: &Class<'a>) {
-        self.found = true;
-    }
-
-    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        if expression.operator.is_logical() {
-            self.found = true;
-        } else {
-            walk::walk_assignment_expression(self, expression);
-        }
-    }
-}
-
-fn decision_conditions_are_transparent(expression: &Expression<'_>) -> bool {
-    fn visit_condition(expression: &Expression<'_>) -> bool {
-        let mut scanner = CoverageSurfaceScanner::default();
-        scanner.visit_expression(expression);
-        !scanner.found
-    }
-    match transparent_expression(expression) {
-        Expression::LogicalExpression(logical)
-            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
-        {
-            decision_conditions_are_transparent(&logical.left)
-                && decision_conditions_are_transparent(&logical.right)
-        }
-        Expression::UnaryExpression(unary)
-            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
-        {
-            decision_conditions_are_transparent(&unary.argument)
-        }
-        condition => visit_condition(condition),
-    }
-}
-
-fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> usize {
-    fn evaluate(
-        expression: &Expression<'_>,
-        assignment: usize,
-        encoded: &mut usize,
-        indices: &HashMap<SpanKey, usize>,
-    ) -> bool {
-        match transparent_expression(expression) {
-            // Only a decision whose conditions are transparent is evaluated,
-            // and a `??` is not: every logical expression here is `&&` or
-            // `||`.
-            Expression::LogicalExpression(logical) => {
-                let left = evaluate(&logical.left, assignment, encoded, indices);
-                if logical.operator == LogicalOperator::And {
-                    left && evaluate(&logical.right, assignment, encoded, indices)
-                } else {
-                    left || evaluate(&logical.right, assignment, encoded, indices)
-                }
-            }
-            Expression::UnaryExpression(unary)
-                if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
-            {
-                !evaluate(&unary.argument, assignment, encoded, indices)
-            }
-            condition => {
-                let index = indices
-                    .get(&span_key(condition.span()))
-                    .expect("decision condition index must remain stable");
-                let value = assignment & (1 << index) != 0;
-                *encoded += (if value { 2 } else { 1 }) * 3_usize.pow(*index as u32);
-                value
-            }
-        }
-    }
-
-    let indices = conditions
-        .iter()
-        .enumerate()
-        .map(|(index, span)| (span_key(*span), index))
-        .collect::<HashMap<_, _>>();
-    let mut vectors = HashSet::new();
-    (0..(1_usize << conditions.len())).for_each(|assignment| {
-        let mut encoded = 0;
-        let outcome = evaluate(expression, assignment, &mut encoded, &indices);
-        vectors.insert(encoded * 2 + usize::from(outcome));
-    });
-    vectors.len()
 }
 
 fn collect_decision_logical_nodes(expression: &Expression<'_>, nodes: &mut HashSet<SpanKey>) {
