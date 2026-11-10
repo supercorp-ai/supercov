@@ -830,7 +830,8 @@ pub fn run_direct_javascript(
         .join(".supercov")
         .join(format!("missing-loads-{run_id}.jsonl"));
     // Where the tests' processes keep the code V8 compiled for instrumented
-    // modules, for the processes after them (`compileCache.mjs`).
+    // modules, for the processes after them (`installCompileCache` in
+    // `atomic.mjs`).
     let compile_cache = workspace
         .join(".supercov")
         .join(format!("compile-cache-{run_id}"));

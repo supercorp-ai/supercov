@@ -1347,7 +1347,7 @@ test("a registered file no module holds is collected, and the epochs' wrap clear
 // and gets the same results; text that is not instrumented, and the
 // filename-only form, go to vm as they came.
 test("a worker compiles instrumented modules from the code the worker before it left", () => {
-  const cacheUrl = new URL("../../runtime/javascript/compileCache.mjs", import.meta.url).href;
+  const cacheUrl = new URL("../../runtime/javascript/atomic.mjs", import.meta.url).href;
   const directory = mkdtempSync(resolve(tmpdir(), "supercov-compile-cache-"));
   const script = `
     const vm = (await import("node:vm")).default;
