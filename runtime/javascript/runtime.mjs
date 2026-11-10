@@ -200,7 +200,10 @@ function createState() {
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
+    // Each registered file, held weakly where the engine can: only the
+    // epochs' wrap below reads them, to clear what live files remember.
     probeV2Files: /* @__PURE__ */ new Set(),
+    probeV2FilesSweepAt: 1024,
     // `e` is the epoch: every statement probe reads it by name, and a
     // minifier keeps a property's name, so it is one letter in every bundle.
     probeV2Clock: { e: Number.NaN, fast: false },
@@ -273,7 +276,10 @@ function activateProbeV2Key(key, force = false) {
       state.probeV2NextEpoch = 1;
       state.probeV2ContextEpochs.clear();
       state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
-      for (const file of state.probeV2Files) {
+      for (const held of state.probeV2Files) {
+        const file = typeof held.deref === "function" ? held.deref() : held;
+        if (file === void 0)
+          continue;
         file.hitEpochs.fill(0);
         file.decisionObservationEpochs.fill(0);
         file.decisionObservationCounts.fill(0);
@@ -2179,7 +2185,7 @@ function registerProbeV2(definition) {
     selectionChoices: (definition.selectionTrees || []).map((tree) => tree[1]),
     none: optionalCallEmptySpread
   };
-  state.probeV2Files.add(file);
+  rememberProbeV2File(file);
   // What a statement probe calls when its point is new in the context: this
   // file's hit, by place alone, so each probe line names the file once less.
   file.hit = (index) => coverageHitV2(file, index);
@@ -2196,6 +2202,26 @@ function registerProbeV2(definition) {
       activateProbeV2Context(currentRequestContext());
   }
   return file;
+}
+// Vitest evaluates a module again for every test file, and each evaluation
+// registers its file anew: held strongly, every evaluation's arrays stayed
+// alive for the worker's life, and the collector walked them all. A file no
+// module holds runs no probe, so the wrap has nothing of it to clear, and the
+// set is swept of them as it doubles.
+function rememberProbeV2File(file) {
+  const files = state.probeV2Files;
+  if (typeof WeakRef !== "function") {
+    files.add(file);
+    return;
+  }
+  files.add(new WeakRef(file));
+  if (files.size < state.probeV2FilesSweepAt)
+    return;
+  for (const held of files) {
+    if (held.deref() === void 0)
+      files.delete(held);
+  }
+  state.probeV2FilesSweepAt = Math.max(1024, 2 * files.size);
 }
 // Every repeat of a probe in the same context ends at the first check, so it
 // stays small enough for V8 to inline into the instrumented function; the

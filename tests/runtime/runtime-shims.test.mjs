@@ -1299,6 +1299,49 @@ test("without an async hook a probe's epoch is NaN, so each request works out it
   assert.equal(hits, 1);
 });
 
+// Vitest evaluates a module again for every test file, and each evaluation
+// registers its file anew. The runtime keeps no evaluation alive once no
+// module holds its file, and the epochs' wrap still clears every live file.
+test("a registered file no module holds is collected, and the epochs' wrap clears the live ones", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const definition = (key) => ({ file: "src/" + key + ".js", key, points: 2, decisionWidths: [2], pointAliases: [], decisionAliases: [] });
+    const collected = new Set();
+    const registry = new FinalizationRegistry((key) => collected.add(key));
+    const evaluations = 5000;
+    for (let index = 0; index < evaluations; index += 1)
+      registry.register(runtime.registerProbeV2(definition("dropped")), index);
+    const live = runtime.registerProbeV2(definition("live"));
+    runtime.resetCoverage("wrap");
+    live.hitEpochs[0] === live.clock.e || live.hit(0);
+    const before = live.hitEpochs[0];
+    for (let round = 0; round < 20 && collected.size < evaluations; round += 1) {
+      globalThis.gc();
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    const state = globalThis.__SUPERCOV_MCDC_STATES__.values().next().value;
+    // The next registration sweeps.
+    state.probeV2FilesSweepAt = 0;
+    const later = runtime.registerProbeV2(definition("later"));
+    const held = [...state.probeV2Files].map((entry) => entry.deref()?.key);
+    state.probeV2NextEpoch = 4294967294;
+    runtime.resetCoverage("past the wrap");
+    console.log(JSON.stringify({ collected: collected.size, held, before, after: live.hitEpochs[0], epoch: live.clock.e, later: later.key }));
+  `;
+  const ran = spawnSync(process.execPath, ["--expose-gc", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 30000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { collected, held, before, after, epoch } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  assert.equal(collected, 5000);
+  // A sweep keeps the files modules still hold, and no other.
+  assert.deepEqual(held.sort(), ["later", "live"]);
+  assert.ok(before > 0);
+  // The wrap cleared the live file's epochs, and the next context is the
+  // first epoch again.
+  assert.equal(after, 0);
+  assert.equal(epoch, 1);
+});
+
 // Events are kept as columns, not an object each. What a snapshot-kept run
 // writes (coverageSnapshotColumns) is what columnarEvents made of the
 // snapshot's events, byte for byte, and coverageSnapshot still gives every
