@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 import { adaptRunnerEntry, noteSkippedCoverageThresholds } from "./runnerEntry.mjs";
-import { writePlaywrightCacheWhole } from "./atomic.mjs";
+import { enableNodeCompileCache, writePlaywrightCacheWhole } from "./atomic.mjs";
 // Supercov runs Node with --enable-source-maps so a stack through an
 // instrumented copy names the project's file. The flag also reads the maps
 // every package ships, which a plain run never does: a third of the CPU a
@@ -27,6 +27,9 @@ if ((process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((option) => option === 
     // carry the copies' maps into them; Node's reading them again, in every
     // worker, was work no printed frame used.
     Module.setSourceMapsSupport(!/[\\/]node_modules[\\/](?:\.bin[\\/]vitest$|vitest[\\/])/.test(process.argv[1] ?? ""), { nodeModules: false, generatedCode: true });
+// Before anything else loads: every module after this compiles from the
+// code the run's earlier processes left (atomic.mjs says why).
+enableNodeCompileCache(process.env.SUPERCOV_COMPILE_CACHE);
 installLaunchSupervisor();
 // Playwright's compile cache, written whole (atomic.mjs says why).
 writePlaywrightCacheWhole();

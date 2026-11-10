@@ -1393,6 +1393,35 @@ test("a worker compiles instrumented modules from the code the worker before it 
   }
 });
 
+// Node's compile cache goes where the run keeps compiled code, and a
+// command's own NODE_COMPILE_CACHE is left alone.
+test("a process compiles into the run's cache unless the command named its own", () => {
+  const atomicUrl = new URL("../../runtime/javascript/atomic.mjs", import.meta.url).href;
+  const directory = mkdtempSync(resolve(tmpdir(), "supercov-node-cache-"));
+  const script = `
+    const { enableNodeCompileCache } = await import(${JSON.stringify(atomicUrl)});
+    const module = await import("node:module");
+    enableNodeCompileCache(process.env.CACHE);
+    console.log(JSON.stringify({ dir: module.getCompileCacheDir?.() ?? null, supported: typeof module.enableCompileCache === "function" }));
+  `;
+  const run = (env) => {
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000, env: { ...process.env, NODE_COMPILE_CACHE: undefined, ...env } });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    return JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  };
+  try {
+    const ours = run({ CACHE: directory });
+    if (ours.supported)
+      assert.ok(ours.dir.startsWith(resolve(directory, "node")), ours.dir);
+    const theirs = resolve(directory, "theirs");
+    const kept = run({ CACHE: directory, NODE_COMPILE_CACHE: theirs });
+    if (kept.supported)
+      assert.ok(kept.dir.startsWith(theirs), kept.dir);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // Events are kept as columns, not an object each. What a snapshot-kept run
 // writes (coverageSnapshotColumns) is what columnarEvents made of the
 // snapshot's events, byte for byte, and coverageSnapshot still gives every

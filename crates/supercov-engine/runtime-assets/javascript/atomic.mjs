@@ -1,6 +1,6 @@
 import fs, { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, fsyncSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { syncBuiltinESMExports } from "node:module";
+import Module, { syncBuiltinESMExports } from "node:module";
 import { threadId } from "node:worker_threads";
 import { basename, dirname, resolve, sep } from "node:path";
 import { Buffer } from "node:buffer";
@@ -231,6 +231,18 @@ const MARK = "__supercov";
  * from what `directory` keeps. Once per process: every copy of the runtime
  * shares the one wrapper.
  */
+/**
+ * Node's own compile cache for every module Node loads in this process --
+ * its CommonJS and ES modules, the runtime's among them -- kept in `directory`
+ * for the processes after it: a runner that starts a fresh process or worker
+ * per test file compiled the same packages again in each. A command that set
+ * NODE_COMPILE_CACHE keeps its own. Only how long compiling takes changes.
+ */
+export function enableNodeCompileCache(directory) {
+    if (!directory || process.env.NODE_COMPILE_CACHE !== undefined || typeof Module.enableCompileCache !== "function")
+        return;
+    Module.enableCompileCache(resolve(directory, "node"));
+}
 export function installCompileCache(directory) {
     if (!directory || vm.runInThisContext[STATE])
         return;
