@@ -11279,6 +11279,8 @@ export const r = v && w && q;
         assert_eq!(point(id(place)).kind, "statement", "{:?}", table);
         let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
         assert!(probed(leader) && !probed(place), "{}", output.code);
+        // A probe calls the file's own hit by place, bound once beside it.
+        assert!(output.code.contains(".hit;"), "{}", output.code);
         // The statement after the call keeps its probe.
         assert_eq!(output.code.matches(".e || ").count(), 2, "{}", output.code);
         // Another table than a module with every probe would name.
