@@ -264,22 +264,33 @@ test('an awaited operand keeps the asserts signature', async () => {
 
   // A type check before the tests that emits nothing because its project
   // says so, in a config it extends, reads the files as their author wrote
-  // them: tsc counts the same lines as it does without Supercov.
+  // them; one whose project emits reads the copies it compiles. The stand-in
+  // sits where tsc does (TypeScript 7's is native and reads no file through
+  // Node) and says which it read.
   const checked = resolve(temporary, 'checked');
-  mkdirSync(resolve(checked, 'node_modules/.bin'), { recursive: true });
-  symlinkSync(resolve(repository, 'node_modules/typescript'), resolve(checked, 'node_modules/typescript'));
-  symlinkSync(resolve(repository, 'node_modules/.bin/tsc'), resolve(checked, 'node_modules/.bin/tsc'));
   write(checked, 'package.json', JSON.stringify({
     name: 'checked-fixture',
     private: true,
-    scripts: { test: 'tsc --extendedDiagnostics && node --test' },
+    scripts: { test: 'tsc --extendedDiagnostics && tsc -p tsconfig.emit.json && node --test' },
   }));
+  write(checked, 'node_modules/typescript/package.json', JSON.stringify({ name: 'typescript', version: '5.9.3', bin: { tsc: 'bin/tsc' } }));
+  write(checked, 'node_modules/typescript/bin/tsc', `#!/usr/bin/env node
+const fs = require('node:fs');
+const text = fs.readFileSync('lib/index.js', 'utf8');
+const read = /__supercov/.test(text) ? 'instrumented' : 'authored';
+process.stdout.write('tsc ' + process.argv.slice(2).join(' ') + ' read ' + read + ' ' + text.split('\\n').length + ' lines\\n');
+`);
+  chmodSync(resolve(checked, 'node_modules/typescript/bin/tsc'), 0o755);
+  mkdirSync(resolve(checked, 'node_modules/.bin'), { recursive: true });
+  symlinkSync('../typescript/bin/tsc', resolve(checked, 'node_modules/.bin/tsc'));
   write(checked, 'tsconfig.base.json', `{
   // Emit nothing: the tests run the sources.
   "compilerOptions": { "noEmit": true, "allowJs": true, "checkJs": true, "strict": true, },
 }
 `);
   write(checked, 'tsconfig.json', JSON.stringify({ extends: './tsconfig.base', include: ['lib/**/*.js'] }));
+  write(checked, 'tsconfig.emit.json', JSON.stringify({ extends: './tsconfig.json', compilerOptions: { noEmit: false, outDir: 'out' } }));
+  write(checked, '.gitignore', 'out/\n');
   write(checked, 'lib/index.js', `'use strict';
 /** @param {string | undefined} value @param {string} fallback */
 exports.pick = function pick(value, fallback) {
@@ -297,13 +308,10 @@ test('picks', () => {
   assert.equal(pick('', 'b'), 'b');
 });
 `);
-  const lineCounts = (output) => output.match(/Lines of (?:TypeScript|JavaScript):\s+\d+/g)?.join(', ');
-  const plainCheck = spawnSync(process.execPath, [resolve(checked, 'node_modules/typescript/bin/tsc'), '--extendedDiagnostics'], { cwd: checked, encoding: 'utf8' });
-  assert.equal(plainCheck.status, 0, plainCheck.stdout + plainCheck.stderr);
-  assert.ok(lineCounts(plainCheck.stdout), plainCheck.stdout);
   const measuredCheck = supercov(checked, ['--', 'npm', 'test']);
   assert.equal(measuredCheck.status, 0, measuredCheck.output);
-  assert.equal(lineCounts(measuredCheck.output), lineCounts(plainCheck.stdout), measuredCheck.output);
+  assert.match(measuredCheck.output, /tsc --extendedDiagnostics read authored 7 lines/, measuredCheck.output);
+  assert.match(measuredCheck.output, /tsc -p tsconfig.emit.json read instrumented/, measuredCheck.output);
   const checkedCoverage = covered(checked);
   assert.ok(checkedCoverage.covered > 0, checkedCoverage.output);
 
