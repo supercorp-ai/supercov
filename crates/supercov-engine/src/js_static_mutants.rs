@@ -9,13 +9,13 @@
 //! status. `docs/design/mutants.md` lists each rule and why it is sound, and
 //! the rules considered and left out.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryExpression, CallExpression, Expression, Function,
-    LogicalExpression, NewExpression, Program, VariableDeclaration, VariableDeclarationKind,
-    WithStatement,
+    LogicalExpression, Program, ReturnStatement, Statement, VariableDeclaration,
+    VariableDeclarationKind, WithStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
@@ -44,13 +44,12 @@ fn within(inner: Span, outer: Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
 
-/// A relational comparison: its operator, operands and innermost function.
+/// A relational comparison: its operator, and whether an operand is a
+/// clock or random reading (`CLOCK`, `RANDOM`).
 #[derive(Debug)]
 struct Comparison {
     operator: &'static str,
-    left: Span,
-    right: Span,
-    function: Option<Span>,
+    untestable: Option<&'static str>,
 }
 
 /// A comparison of an identifier with the literal 0 inside a chain whose
@@ -62,12 +61,11 @@ struct GuardedZero {
     guard: &'static str,
 }
 
-/// A `const` with an identifier binding and an initializer.
-#[derive(Debug)]
-struct Constant {
-    name: String,
-    init: Span,
-    function: Option<Span>,
+/// Where a value comes from that one exact reading of decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Clock,
+    Random,
 }
 
 #[derive(Debug, Default)]
@@ -82,20 +80,27 @@ pub(crate) struct StaticFacts {
     /// A `with` statement or a reference to `eval`: a name may then be bound
     /// where no declaration says.
     dynamic_scope: bool,
-    constants: Vec<Constant>,
-    /// Functions a name declares: a function declaration's, or a `const`'s
-    /// arrow or function expression.
-    local_functions: HashMap<String, Span>,
-    clock_reads: Vec<Span>,
-    random_reads: Vec<Span>,
-    /// Identifiers read, by position.
-    references: Vec<(Span, String)>,
-    /// Identifiers called (`f(...)`), by position.
-    callees: Vec<(Span, String)>,
 }
 
-struct Collector {
+/// What `untestable` reads of the program, kept while it is visited.
+#[derive(Default)]
+struct Values<'a> {
+    /// Relational comparisons and their innermost function.
+    comparisons: Vec<(&'a BinaryExpression<'a>, Option<Span>)>,
+    /// `const`s with an identifier binding and an initializer, and their
+    /// innermost function.
+    constants: Vec<(String, &'a Expression<'a>, Option<Span>)>,
+    /// Functions a name declares (a function declaration's, or a `const`'s
+    /// arrow or function expression), by the function's span.
+    local_functions: HashMap<String, Span>,
+    /// What each function returns: its `return`s' arguments, or a concise
+    /// arrow's body.
+    returns: HashMap<SpanKey, Vec<&'a Expression<'a>>>,
+}
+
+struct Collector<'a> {
     facts: StaticFacts,
+    values: Values<'a>,
     /// Each node entered: the span a scope it opens covers (a function's
     /// body, not its parameters, which do not see the body's declarations).
     nodes: Vec<Span>,
@@ -110,15 +115,29 @@ impl StaticFacts {
     pub(crate) fn collect(program: &Program<'_>) -> Self {
         let mut collector = Collector {
             facts: StaticFacts::default(),
+            values: Values::default(),
             nodes: Vec::new(),
             scopes: Vec::new(),
             functions: Vec::new(),
             truthy: Vec::new(),
         };
         collector.visit_program(program);
-        let mut facts = collector.facts;
-        facts.references.sort_by_key(|(span, _)| span.start);
-        facts.callees.sort_by_key(|(span, _)| span.start);
+        let Collector {
+            mut facts, values, ..
+        } = collector;
+        for (binary, function) in &values.comparisons {
+            let untestable = [Source::Clock, Source::Random].into_iter().find(|source| {
+                [&binary.left, &binary.right]
+                    .into_iter()
+                    .any(|operand| values.valued(operand, *source, *function, 2))
+            });
+            if let Some(comparison) = facts.comparisons.get_mut(&key(binary.span)) {
+                comparison.untestable = untestable.map(|source| match source {
+                    Source::Clock => CLOCK,
+                    Source::Random => RANDOM,
+                });
+            }
+        }
         facts
     }
 
@@ -161,65 +180,162 @@ impl StaticFacts {
         if boundary_twin(comparison.operator) != Some(mutant.replacement.as_str()) {
             return None;
         }
-        let reads = |reads: &[Span]| {
-            [comparison.left, comparison.right]
-                .into_iter()
-                .any(|operand| self.reads(operand, reads, comparison.function, 2))
-        };
-        if reads(&self.clock_reads) {
-            Some(StaticNote {
+        match comparison.untestable? {
+            CLOCK => Some(StaticNote {
                 rule: CLOCK.to_owned(),
-                reason: "an operand reads the clock: they differ only on one exact millisecond"
+                reason: "an operand is a clock reading: they differ only on one exact millisecond"
                     .to_owned(),
-            })
-        } else if reads(&self.random_reads) {
-            Some(StaticNote {
+            }),
+            _ => Some(StaticNote {
                 rule: RANDOM.to_owned(),
                 reason:
-                    "an operand reads Math.random(): they differ only at one exact random value"
+                    "an operand is a Math.random() reading: they differ only at one exact random value"
                         .to_owned(),
-            })
-        } else {
-            None
+            }),
         }
-    }
-
-    /// Whether the code at `span` reads one of `reads`: itself, through the
-    /// initializer of a `const` of `function` it names (up to `hops` of
-    /// them), or in the body of a local function it calls.
-    fn reads(&self, span: Span, reads: &[Span], function: Option<Span>, hops: usize) -> bool {
-        if reads.iter().any(|read| within(*read, span)) {
-            return true;
-        }
-        let called = in_span(&self.callees, span).any(|name| {
-            self.local_functions
-                .get(name)
-                .is_some_and(|body| reads.iter().any(|read| within(*read, *body)))
-        });
-        if called {
-            return true;
-        }
-        if hops == 0 {
-            return false;
-        }
-        let named = in_span(&self.references, span).collect::<HashSet<_>>();
-        self.constants.iter().any(|constant| {
-            constant.function == function
-                && named.contains(constant.name.as_str())
-                && !within(constant.init, span)
-                && self.reads(constant.init, reads, function, hops - 1)
-        })
     }
 }
 
-/// The names at positions within `span`.
-fn in_span(names: &[(Span, String)], span: Span) -> impl Iterator<Item = &str> {
-    let first = names.partition_point(|(at, _)| at.start < span.start);
-    names[first..]
-        .iter()
-        .take_while(move |(at, _)| at.start < span.end)
-        .filter(move |(at, _)| at.end <= span.end)
-        .map(|(_, name)| name.as_str())
+const DATE_FNS_PREFIXES: [&str; 5] = ["add", "sub", "differenceIn", "startOf", "endOf"];
+
+/// A date-fns function that turns a time into a time or a length of time:
+/// `addMinutes`, `subDays`, `differenceInSeconds`, `startOfDay`, `endOfMonth`.
+fn date_fns_time(name: &str) -> bool {
+    DATE_FNS_PREFIXES.iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_uppercase)
+    })
+}
+
+/// An operand arithmetic may combine with a reading without making it any
+/// less one: a number literal, a name, or a member path of names.
+fn plain(expression: &Expression<'_>) -> bool {
+    match bare(expression) {
+        Expression::NumericLiteral(_) | Expression::Identifier(_) => true,
+        Expression::StaticMemberExpression(member) => plain(&member.object),
+        _ => false,
+    }
+}
+
+impl<'a> Values<'a> {
+    /// Whether `expression` is a clock (or random) reading itself, and not
+    /// only something worked out from one: the reading; arithmetic of it
+    /// with readings, numbers and names; `-x` and `+x`; `.getTime()`,
+    /// `.valueOf()`, `Number()` and `new Date()` of it; a date-fns `add*`,
+    /// `sub*`, `differenceIn*`, `startOf*` or `endOf*` of it; a `??` or `||`
+    /// fallback to it; and, up to `hops` of them, a `const` of an enclosing
+    /// function whose initializer is one or a local function whose return
+    /// is one. A count, a found element or a property read (`.length`,
+    /// `.find(...)`) of something worked out from the clock is not.
+    fn valued(
+        &self,
+        expression: &Expression<'a>,
+        source: Source,
+        function: Option<Span>,
+        hops: usize,
+    ) -> bool {
+        let valued = |expression: &Expression<'a>| self.valued(expression, source, function, hops);
+        match bare(expression) {
+            Expression::CallExpression(call) => {
+                if let Some(read) = static_call(call) {
+                    let reading = match source {
+                        Source::Clock => matches!(read, ("Date" | "performance", "now")),
+                        Source::Random => read == ("Math", "random"),
+                    };
+                    if reading {
+                        return true;
+                    }
+                }
+                let mut arguments = call
+                    .arguments
+                    .iter()
+                    .filter_map(|argument| argument.as_expression());
+                match bare(&call.callee) {
+                    Expression::StaticMemberExpression(member)
+                        if call.arguments.is_empty()
+                            && matches!(member.property.name.as_str(), "getTime" | "valueOf") =>
+                    {
+                        valued(&member.object)
+                    }
+                    Expression::Identifier(callee)
+                        if callee.name == "Number" || date_fns_time(&callee.name) =>
+                    {
+                        arguments.any(valued)
+                    }
+                    Expression::Identifier(callee) if hops > 0 => {
+                        let Some(span) = self.local_functions.get(callee.name.as_str()) else {
+                            return false;
+                        };
+                        self.returns.get(&key(*span)).is_some_and(|returns| {
+                            returns
+                                .iter()
+                                .any(|value| self.valued(value, source, Some(*span), hops - 1))
+                        })
+                    }
+                    _ => false,
+                }
+            }
+            Expression::NewExpression(new) => {
+                let date = matches!(bare(&new.callee), Expression::Identifier(callee) if callee.name == "Date");
+                date && match new.arguments.as_slice() {
+                    [] => source == Source::Clock,
+                    [argument] => argument.as_expression().is_some_and(valued),
+                    _ => false,
+                }
+            }
+            Expression::BinaryExpression(binary) => {
+                matches!(
+                    binary.operator,
+                    BinaryOperator::Addition
+                        | BinaryOperator::Subtraction
+                        | BinaryOperator::Multiplication
+                        | BinaryOperator::Division
+                ) && {
+                    match (valued(&binary.left), valued(&binary.right)) {
+                        (true, true) => true,
+                        (true, false) => plain(&binary.right),
+                        (false, true) => plain(&binary.left),
+                        (false, false) => false,
+                    }
+                }
+            }
+            Expression::UnaryExpression(unary) => {
+                matches!(
+                    unary.operator,
+                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus
+                ) && valued(&unary.argument)
+            }
+            Expression::LogicalExpression(logical) => {
+                logical.operator != LogicalOperator::And
+                    && (valued(&logical.left) || valued(&logical.right))
+            }
+            Expression::Identifier(identifier) if hops > 0 => self
+                .constant(identifier.name.as_str(), identifier.span, function)
+                .is_some_and(|(init, scope)| self.valued(init, source, scope, hops - 1)),
+            _ => false,
+        }
+    }
+
+    /// The `const` of `name` a read at `at` in `function` sees, among those
+    /// of the functions around it: the innermost one's.
+    fn constant(
+        &self,
+        name: &str,
+        at: Span,
+        function: Option<Span>,
+    ) -> Option<(&'a Expression<'a>, Option<Span>)> {
+        let inside = function.unwrap_or(at);
+        self.constants
+            .iter()
+            .filter(|(constant, init, scope)| {
+                constant == name
+                    && !within(at, init.span())
+                    && scope.is_some_and(|scope| within(inside, scope))
+            })
+            .min_by_key(|(_, _, scope)| scope.map_or(u32::MAX, |scope| scope.end - scope.start))
+            .map(|(_, init, scope)| (*init, *scope))
+    }
 }
 
 /// The relational operator that differs from `operator` only where its
@@ -355,8 +471,8 @@ fn static_call<'c>(call: &'c CallExpression<'_>) -> Option<(&'c str, &'c str)> {
     Some((object.name.as_str(), member.property.name.as_str()))
 }
 
-impl Collector {
-    fn comparison(&mut self, binary: &BinaryExpression<'_>) {
+impl<'a> Collector<'a> {
+    fn comparison(&mut self, binary: &BinaryExpression<'a>) {
         if !relational(binary.operator) {
             return;
         }
@@ -364,11 +480,13 @@ impl Collector {
             key(binary.span),
             Comparison {
                 operator: binary.operator.as_str(),
-                left: binary.left.span(),
-                right: binary.right.span(),
-                function: self.functions.last().copied(),
+                untestable: None,
             },
         );
+        let at = self.alloc(binary);
+        self.values
+            .comparisons
+            .push((at, self.functions.last().copied()));
         let operand = if zero(&binary.right) {
             &binary.left
         } else if zero(&binary.left) {
@@ -395,7 +513,7 @@ impl Collector {
     }
 }
 
-impl<'a> Visit<'a> for Collector {
+impl<'a> Visit<'a> for Collector<'a> {
     fn enter_node(&mut self, kind: AstKind<'a>) {
         let span = match kind {
             AstKind::Function(function) => function
@@ -471,9 +589,6 @@ impl<'a> Visit<'a> for Collector {
         if identifier.name == "eval" {
             self.facts.dynamic_scope = true;
         }
-        self.facts
-            .references
-            .push((identifier.span, identifier.name.to_string()));
     }
 
     fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
@@ -499,23 +614,24 @@ impl<'a> Visit<'a> for Collector {
                     bare(init),
                     Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
                 ) {
-                    self.facts.local_functions.insert(name.clone(), init.span());
+                    self.values
+                        .local_functions
+                        .insert(name.clone(), bare(init).span());
                 }
-                self.facts.constants.push(Constant {
-                    name,
-                    init: init.span(),
-                    function: self.functions.last().copied(),
-                });
+                let init = self.alloc(init);
+                self.values
+                    .constants
+                    .push((name, init, self.functions.last().copied()));
             }
         }
         walk::walk_variable_declaration(self, declaration);
     }
 
     fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
-        if let (Some(identifier), Some(body)) = (&function.id, &function.body) {
-            self.facts
+        if let Some(identifier) = &function.id {
+            self.values
                 .local_functions
-                .insert(identifier.name.to_string(), body.span);
+                .insert(identifier.name.to_string(), function.span);
         }
         self.functions.push(function.span);
         walk::walk_function(self, function, flags);
@@ -523,32 +639,31 @@ impl<'a> Visit<'a> for Collector {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        if arrow.expression
+            && let [Statement::ExpressionStatement(body)] = arrow.body.statements.as_slice()
+        {
+            let body = self.alloc(&body.expression);
+            self.values
+                .returns
+                .entry(key(arrow.span))
+                .or_default()
+                .push(body);
+        }
         self.functions.push(arrow.span);
         walk::walk_arrow_function_expression(self, arrow);
         self.functions.pop();
     }
 
-    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        match static_call(call) {
-            Some(("Date" | "performance", "now")) => self.facts.clock_reads.push(call.span),
-            Some(("Math", "random")) => self.facts.random_reads.push(call.span),
-            _ => {}
+    fn visit_return_statement(&mut self, statement: &ReturnStatement<'a>) {
+        if let (Some(argument), Some(function)) = (&statement.argument, self.functions.last()) {
+            let argument = self.alloc(argument);
+            self.values
+                .returns
+                .entry(key(*function))
+                .or_default()
+                .push(argument);
         }
-        if let Expression::Identifier(callee) = bare(&call.callee) {
-            self.facts
-                .callees
-                .push((callee.span, callee.name.to_string()));
-        }
-        walk::walk_call_expression(self, call);
-    }
-
-    fn visit_new_expression(&mut self, new: &NewExpression<'a>) {
-        if new.arguments.is_empty()
-            && matches!(bare(&new.callee), Expression::Identifier(callee) if callee.name == "Date")
-        {
-            self.facts.clock_reads.push(new.span);
-        }
-        walk::walk_new_expression(self, new);
+        walk::walk_return_statement(self, statement);
     }
 }
 
@@ -669,10 +784,30 @@ mod tests {
         );
     }
 
+    /// The shapes real clock boundaries take, and one that only
+    /// depends on the clock: a count of what a clock-dependent `find` found.
+    #[test]
+    fn a_clock_hint_needs_a_time_valued_operand_not_one_worked_out_from_the_clock() {
+        let source = "import { addMinutes } from 'date-fns';\nconst CRON_BUDGET_MS = 60000;\nexport function f(sub: { expires: string; trial: number }, deadline: number, expiry: number, params: { now?: Date }, items: { at: string }[]) {\n  const startedAt = Date.now();\n  const msRemaining = () => CRON_BUDGET_MS - (Date.now() - startedAt);\n  const tokenExpiresIn = expiry - Date.now();\n  const refreshBefore = addMinutes(new Date(), 5);\n  const now = params.now ?? new Date();\n  const expiresAt = new Date(sub.expires);\n  const groups = items.map((item) => ({ items: [item], isToday: new Date(item.at).getDate() === new Date().getDate() }));\n  const today = groups.find((g) => g.isToday);\n  const label = String(Date.now());\n  const run = async () => {\n    while (msRemaining() >= 1000) {}\n  };\n  return [\n    run,\n    tokenExpiresIn > 0,\n    expiresAt.getTime() < refreshBefore.getTime(),\n    sub.trial * 1000 <= now.getTime(),\n    expiresAt > now,\n    expiresAt > new Date(),\n    deadline - Date.now() < 0,\n    today && today.items.length > 0,\n    groups.length > 1,\n    label.length > 3,\n    -Date.now() < deadline,\n  ];\n}\n";
+        assert_eq!(
+            ruled(source, StaticFacts::untestable),
+            [
+                "msRemaining() >= 1000 → >: clock",
+                "tokenExpiresIn > 0 → >=: clock",
+                "expiresAt.getTime() < refreshBefore.getTime() → <=: clock",
+                "sub.trial * 1000 <= now.getTime() → <: clock",
+                "expiresAt > now → >=: clock",
+                "expiresAt > new Date() → >=: clock",
+                "deadline - Date.now() < 0 → <=: clock",
+                "-Date.now() < deadline → <=: clock",
+            ]
+        );
+    }
+
     #[test]
     fn a_clock_is_followed_through_two_consts_of_the_same_function_only() {
         // `later` names `now`, which reads the clock: two hops. `latest`
-        // needs three; `boot` is not of the function.
+        // needs three; `boot` is not of a function around it.
         let source = "const boot = Date.now();\nexport function f(a: number, b: number) {\n  const now = Date.now();\n  const later = now + 1;\n  const latest = later + 1;\n  const beyond = latest + 1;\n  return [later > a, latest > a, beyond > a, boot > a, a > b];\n}\n";
         assert_eq!(
             ruled(source, StaticFacts::untestable),

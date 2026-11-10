@@ -457,12 +457,23 @@ boundary mutant (`<` and `<=`, `>` and `>=`) differs from the original only
 where its operands are equal; where an operand reads the clock or a random
 number, that is one exact reading. Such a mutant carries `untestable`:
 
-- `clock`: an operand's expression, the initializer of a `const` of the same
-  function it names (followed up to two hops: an operand names `a`, whose
-  initializer names `b`, whose initializer reads the clock), or the body of a
-  function the file declares that the expression calls, contains
-  `Date.now()`, `new Date()` with no arguments, or `performance.now()`.
-- `random`: the same with `Math.random()`.
+- `clock`: an operand is a clock reading. A reading is `Date.now()`,
+  `performance.now()` or `new Date()` with no arguments; arithmetic (`+`, `-`,
+  `*`, `/`) of readings with readings, number literals, names or member paths;
+  `-x` or `+x` of one; `.getTime()`, `.valueOf()`, `Number()` or `new Date()` of
+  one; a date-fns `add*`, `sub*`, `differenceIn*`, `startOf*` or `endOf*` of
+  one; a `??` or `||` fallback to one (`params.now ?? new Date()`); and, up to
+  two hops, a name whose `const` in a function around the comparison is
+  initialized by one, or a call of a function the file declares that returns
+  one (`msRemaining()` with `() => budget - (Date.now() - startedAt)`).
+- `random`: the same with `Math.random()` as the reading.
+
+The operand must be time-valued, not merely worked out from the clock: a
+count, a found element or a property read of something that depends on the
+time (`today && today.items.length > 0`, where `today` is
+`groups.find((g) => g.isToday)`) is not a reading, and its boundary is
+testable with the right data. A first version followed any use of the clock
+in an operand's code and marked that one wrongly on the validation app.
 
 It is a hint, not a status: the mutant keeps its status and counts in both
 scores, since a test that fakes the clock (or random) can reach the boundary.

@@ -315,8 +315,10 @@ The weak score is `infected / (infected + not-infected + not-reached)`, with
 unknown and equivalent mutants left out, and beside it the same over reached
 mutants alone. They are shown beside coverage and never change it.
 
-A not-infected boundary comparison (`<` and `<=`, `>` and `>=`) of what reads
-the clock (`Date.now()`, `new Date()`, `performance.now()`) or `Math.random()`
+A not-infected boundary comparison (`<` and `<=`, `>` and `>=`) with an
+operand that is a clock reading (`Date.now()`, `new Date()`,
+`performance.now()`, and arithmetic, `.getTime()` or date-fns `add*`/`sub*` of
+one, through up to two consts or local functions) or a `Math.random()` reading
 is listed with `(clock boundary)` or `(random boundary)`: only one exact
 reading would make it differ, so a test can hardly reach it. It stays not
 infected, and the summary counts these beside the not-infected ones
