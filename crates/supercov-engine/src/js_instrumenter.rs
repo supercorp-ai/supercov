@@ -255,25 +255,30 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
-/// The place of a statement probe, `hits[place] === clock.e || hit(place);`.
+/// The place of a statement probe, `hit(place);` or, in a loop,
+/// `hits[place] === clock.e || hit(place);`.
 fn statement_probe_place(statement: &Statement<'_>, hit: &str) -> Option<usize> {
     let Statement::ExpressionStatement(statement) = statement else {
         return None;
     };
-    let Expression::LogicalExpression(logical) = &statement.expression else {
-        return None;
-    };
-    if logical.operator != LogicalOperator::Or {
-        return None;
-    }
-    let Expression::BinaryExpression(seen) = &logical.left else {
-        return None;
-    };
-    if seen.operator != BinaryOperator::StrictEquality {
-        return None;
-    }
-    let Expression::CallExpression(call) = &logical.right else {
-        return None;
+    let call = match &statement.expression {
+        Expression::CallExpression(call) => call,
+        Expression::LogicalExpression(logical) => {
+            if logical.operator != LogicalOperator::Or {
+                return None;
+            }
+            let Expression::BinaryExpression(seen) = &logical.left else {
+                return None;
+            };
+            if seen.operator != BinaryOperator::StrictEquality {
+                return None;
+            }
+            let Expression::CallExpression(call) = &logical.right else {
+                return None;
+            };
+            call
+        }
+        _ => return None,
     };
     let Expression::Identifier(callee) = &call.callee else {
         return None;
@@ -4651,13 +4656,12 @@ fn instrument_candidate_with_binding(
         probe_hits_v2: probe_hits_v2.clone(),
         targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        loop_depth: 0,
     };
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
         ast,
         coverage_hit_v2: probe_hit_at_v2.clone(),
-        probe_clock_v2: probe_clock_v2.clone(),
-        probe_hits_v2: probe_hits_v2.clone(),
         targets: function_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
@@ -4722,8 +4726,6 @@ fn instrument_candidate_with_binding(
     let mut extended_transformer = ExtendedTransformer {
         ast,
         coverage_hit_v2: probe_hit_at_v2.clone(),
-        probe_clock_v2: probe_clock_v2.clone(),
-        probe_hits_v2: probe_hits_v2.clone(),
         typescript,
         try_targets,
         loop_targets,
@@ -5087,9 +5089,11 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `hits[index] === clock.e || hit(index);`, where `clock`, `hits` and
-/// `hit` are the file's clock, hit epochs and its own hit, bound once beside
-/// it: `hit(file, index)` named the file again in every probe line.
+/// `hits[index] === clock.e || hit(index);`, the probe of a statement in a
+/// loop body, where `clock`, `hits` and `hit` are the file's clock, hit
+/// epochs and its own hit, bound once beside it: `hit(file, index)` named the
+/// file again in every probe line. Elsewhere a probe is `hit(index)` alone
+/// (`probe_v2_call`).
 ///
 /// A statement probe that already fired in this context costs two loads and
 /// a comparison, not a call (six, before the two were bound: each read them
@@ -5153,6 +5157,27 @@ fn probe_v2_hit_expression<'a>(
         false,
     );
     ast.expression_logical(span, seen, LogicalOperator::Or, call)
+}
+
+/// `hit(index)`: the probe outside a loop. The file's bound hit checks the
+/// epoch itself and returns; a module is mostly code that runs a few times,
+/// and the inline check was most of what an instrumented line added for V8
+/// to parse and compile -- several times the call's length and tokens -- on
+/// every load of every module.
+fn probe_v2_call<'a>(ast: AstBuilder<'a>, hit: &str, index: usize) -> Expression<'a> {
+    let span = Span::default();
+    ast.expression_call(
+        span,
+        ast.expression_identifier(span, ast.ident(hit)),
+        NONE,
+        ast.vec1(Argument::from(ast.expression_numeric_literal(
+            span,
+            index as f64,
+            None,
+            NumberBase::Decimal,
+        ))),
+        false,
+    )
 }
 
 /// `let` declarations for probe temporaries at the top of a scope. In
@@ -5240,17 +5265,34 @@ struct StatementProbeTransformer<'a> {
     probe_hits_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
+    /// Loops around the statement in its own function: a statement in a loop
+    /// body repeats, and its probe keeps the inline check there.
+    loop_depth: usize,
 }
 
 impl<'a> StatementProbeTransformer<'a> {
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        probe_v2_hit(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            target.index,
-        )
+        if self.loop_depth > 0 {
+            probe_v2_hit(
+                self.ast,
+                &self.coverage_hit_v2,
+                &self.probe_clock_v2,
+                &self.probe_hits_v2,
+                target.index,
+            )
+        } else {
+            self.ast.statement_expression(
+                Span::default(),
+                probe_v2_call(self.ast, &self.coverage_hit_v2, target.index),
+            )
+        }
+    }
+
+    /// `visit` with the statements under it in (or out of) a loop.
+    fn within(&mut self, depth: usize, visit: impl FnOnce(&mut Self)) {
+        let outer = std::mem::replace(&mut self.loop_depth, depth);
+        visit(self);
+        self.loop_depth = outer;
     }
 
     fn take_statement_ids(&mut self, statement: &Statement<'a>) -> Vec<PointTarget> {
@@ -5316,7 +5358,7 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         {
             return;
         }
-        walk_mut::walk_function(self, function, flags);
+        self.within(0, |this| walk_mut::walk_function(this, function, flags));
     }
 
     fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
@@ -5326,7 +5368,9 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         {
             return;
         }
-        walk_mut::walk_arrow_function_expression(self, function);
+        self.within(0, |this| {
+            walk_mut::walk_arrow_function_expression(this, function);
+        });
     }
 
     // A with body is left uninstrumented: its object environment can
@@ -5342,28 +5386,43 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
     }
 
     fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_while_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_while_statement(this, statement);
+        });
     }
 
     fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_do_while_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_do_while_statement(this, statement);
+        });
     }
 
     fn visit_for_statement(&mut self, statement: &mut ForStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_statement(this, statement);
+        });
     }
 
     fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_in_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_in_statement(this, statement);
+        });
     }
 
     fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
-        self.wrap_bare(&mut statement.body);
-        walk_mut::walk_for_of_statement(self, statement);
+        let depth = self.loop_depth + 1;
+        self.within(depth, |this| {
+            this.wrap_bare(&mut statement.body);
+            walk_mut::walk_for_of_statement(this, statement);
+        });
     }
 }
 
@@ -5434,20 +5493,16 @@ impl<'a> VisitMut<'a> for RenderedExpressionTransformer<'a> {
 struct FunctionProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_clock_v2: String,
-    probe_hits_v2: String,
     targets: HashMap<SpanKey, PointTarget>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
 
 impl<'a> FunctionProbeTransformer<'a> {
+    /// A function's entry runs once per call, never in a loop of its own.
     fn probe(&self, target: &PointTarget) -> Statement<'a> {
-        probe_v2_hit(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            target.index,
+        self.ast.statement_expression(
+            Span::default(),
+            probe_v2_call(self.ast, &self.coverage_hit_v2, target.index),
         )
     }
 }
@@ -6308,8 +6363,6 @@ enum Wrap<'a> {
 struct ExtendedTransformer<'a, 's> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_clock_v2: String,
-    probe_hits_v2: String,
     typescript: bool,
     try_targets: HashMap<SpanKey, usize>,
     loop_targets: HashMap<SpanKey, usize>,
@@ -6358,14 +6411,9 @@ impl<'a> ExtendedTransformer<'a, '_> {
         *body = ast.statement_block(span, ast.vec_from_array([entry, original]));
     }
 
+    /// Behind a flag that records once, so never a repeat.
     fn hit(&self, index: usize) -> Expression<'a> {
-        probe_v2_hit_expression(
-            self.ast,
-            &self.coverage_hit_v2,
-            &self.probe_clock_v2,
-            &self.probe_hits_v2,
-            index,
-        )
+        probe_v2_call(self.ast, &self.coverage_hit_v2, index)
     }
 
     /// `T = 0;`
@@ -11142,6 +11190,32 @@ export const r = v && w && q;
         assert_ne!(other.probe_table.unwrap().key, table.key);
     }
 
+    /// A statement in a loop body repeats, and its probe keeps the inline
+    /// check; outside a loop, and in a function a loop calls, a probe is the
+    /// call alone, which checks for itself.
+    #[test]
+    fn a_probe_in_a_loop_keeps_its_check_and_one_outside_is_a_call() {
+        let source = "export function f(items) {\n  let total = 0;\n  for (const item of items) {\n    total += item;\n    items.forEach((x) => {\n      total += x;\n    });\n  }\n  while (total > 10) total -= 10;\n  return total;\n}\n";
+        let output = instrument_candidate(source, "src/f.js").unwrap();
+        let lines = output.code.lines().map(str::trim).collect::<Vec<_>>();
+        let before = |statement: &str| {
+            let at = lines
+                .iter()
+                .position(|line| *line == statement)
+                .unwrap_or_else(|| panic!("{statement}\n{}", output.code));
+            lines[at - 1]
+        };
+        let call = |line: &str| {
+            line.starts_with("__supercovHitAt") && line.ends_with(");") && !line.contains(" || ")
+        };
+        let inline = |line: &str| line.contains(".e || __supercovHitAt");
+        assert!(call(before("let total = 0;")), "{}", output.code);
+        assert!(inline(before("total += item;")), "{}", output.code);
+        assert!(call(before("total += x;")), "{}", output.code);
+        assert!(inline(before("total -= 10;")), "{}", output.code);
+        assert!(call(before("return total;")), "{}", output.code);
+    }
+
     /// A function's entry and its first statement are one probe, which the
     /// table says is both; a statement after a call keeps its own, since the
     /// call can throw before it.
@@ -11156,12 +11230,24 @@ export const r = v && w && q;
         let point = |id: &str| output.points.iter().find(|point| point.id == id).unwrap();
         assert_eq!(point(id(leader)).kind, "function", "{:?}", table);
         assert_eq!(point(id(place)).kind, "statement", "{:?}", table);
-        let probed = |place: usize| output.code.contains(&format!("[{place}] === "));
-        assert!(probed(leader) && !probed(place), "{}", output.code);
-        // A probe calls the file's own hit by place, bound once beside it.
+        // Outside a loop a probe is a call of the file's own hit by place,
+        // bound once beside it.
         assert!(output.code.contains(".hit;"), "{}", output.code);
+        let probes = output
+            .code
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("__supercovHitAt") && line.ends_with(");"))
+            .collect::<Vec<_>>();
+        let probed = |place: usize| {
+            probes
+                .iter()
+                .any(|line| line.ends_with(&format!("({place});")))
+        };
+        assert!(probed(leader) && !probed(place), "{}", output.code);
         // The statement after the call keeps its probe.
-        assert_eq!(output.code.matches(".e || ").count(), 2, "{}", output.code);
+        assert_eq!(probes.len(), 2, "{}", output.code);
+        assert!(!output.code.contains(".e || "), "{}", output.code);
         // Another table than a module with every probe would name.
         assert_eq!(
             table.key,

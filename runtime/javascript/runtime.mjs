@@ -2175,9 +2175,17 @@ function registerProbeV2(definition) {
     none: optionalCallEmptySpread
   };
   rememberProbeV2File(file);
-  // What a statement probe calls when its point is new in the context: this
-  // file's hit, by place alone, so each probe line names the file once less.
-  file.hit = (index) => coverageHitV2(file, index);
+  // What a probe calls: this file's hit, by place alone. Outside a loop the
+  // probe is the call alone and this makes its check, so it stays small
+  // enough for V8 to inline where the code is hot. The epoch is NaN wherever
+  // the clock is not fast, which no recorded epoch equals, so the check needs
+  // no `fast` of its own (coverageHitV2's).
+  const hitEpochs = file.hitEpochs;
+  const clock = file.clock;
+  file.hit = (index) => {
+    if (hitEpochs[index] !== clock.e)
+      recordCoverageHitV2(file, index);
+  };
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);
