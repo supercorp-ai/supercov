@@ -34,6 +34,69 @@ pub struct MutantsOptions {
     /// `--stryker`: StrykerJS's results to join, read by the caller.
     #[serde(skip)]
     pub stryker: Option<StrykerReports>,
+    /// `--diff <base>`: the ref the caller reads the change against.
+    #[serde(default)]
+    pub diff_base: Option<String>,
+    /// `--diff`: only the mutants on lines a change added or modified,
+    /// worked out by the caller from git.
+    #[serde(skip)]
+    pub diff: Option<MutantDiff>,
+    /// `--fail-on`: the statuses no mutant asked about may have, for a gate.
+    #[serde(default)]
+    pub fail_on: Vec<MutantStatus>,
+}
+
+/// `--fail-on`: how many of the mutants asked about have a status the gate
+/// refuses.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailOn {
+    pub statuses: Vec<MutantStatus>,
+    pub mutants: usize,
+}
+
+/// The lines a change added or modified, by file, as `--diff <base>` reads
+/// them from git, and what they were read against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MutantDiff {
+    /// The ref asked for (`origin/main`).
+    pub base: String,
+    /// Where the change left it.
+    pub merge_base: String,
+    /// The commit the run measured, compared with the merge base; `None`
+    /// where the working tree was, as for a run with uncommitted changes.
+    pub commit: Option<String>,
+    /// Added and modified lines, 1-based, by file as the run names it.
+    pub changed: BTreeMap<String, std::collections::BTreeSet<u32>>,
+    /// Files the change added whole that git does not track yet: every line.
+    pub untracked: std::collections::BTreeSet<String>,
+}
+
+impl MutantDiff {
+    /// Whether a mutant spanning lines `start..=end` of `file` is on a line
+    /// the change added or modified.
+    pub fn touches(&self, file: &str, start: u32, end: u32) -> bool {
+        self.untracked.contains(file)
+            || self
+                .changed
+                .get(file)
+                .is_some_and(|lines| lines.range(start..=end).next().is_some())
+    }
+}
+
+/// What `--diff` read, in the reply.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSummary {
+    pub base: String,
+    pub merge_base: String,
+    /// The commit compared with the merge base, or null for the working
+    /// tree.
+    pub commit: Option<String>,
+    /// Added or modified lines in the files the run measured.
+    pub changed_lines: usize,
+    /// Of those, the lines a mutant of the files asked about is on.
+    pub lines_with_mutants: usize,
 }
 
 impl<'de> Deserialize<'de> for MutantStatus {
@@ -441,6 +504,14 @@ pub struct CoverageMutantsData {
     /// Every file's counts, for the table a reader is shown without a file.
     #[serde(skip)]
     pub files: Vec<MutantFileRow>,
+    /// With `--diff`: what the change was read against. Its mutants are
+    /// then listed not infected first, then not reached, then the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffSummary>,
+    /// With `--fail-on`: the gate's count, which fails the command when
+    /// any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fail_on: Option<FailOn>,
 }
 
 /// StrykerJS's statuses by how far toward a kill they got; a status not
@@ -656,6 +727,46 @@ pub fn coverage_mutants_query(
             asked.push(mutant);
         }
     }
+    let diff = options.options.diff.as_ref();
+    let mut diff_summary = None;
+    if let Some(diff) = diff {
+        asked.retain(|mutant| diff.touches(&mutant.file, mutant.start.0, mutant.end.0));
+        let measured = files
+            .iter()
+            .map(|file| file.file.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut changed_lines = 0;
+        let mut lines_with_mutants = 0;
+        for (file, lines) in &diff.changed {
+            if !measured.contains(file.as_str()) {
+                continue;
+            }
+            changed_lines += lines.len();
+            lines_with_mutants += lines
+                .iter()
+                .filter(|line| {
+                    asked.iter().any(|mutant| {
+                        &mutant.file == file && mutant.start.0 <= **line && **line <= mutant.end.0
+                    })
+                })
+                .count();
+        }
+        for file in &diff.untracked {
+            let mut lines = std::collections::BTreeSet::new();
+            for mutant in asked.iter().filter(|mutant| &mutant.file == file) {
+                lines.extend(mutant.start.0..=mutant.end.0);
+            }
+            lines_with_mutants += lines.len();
+            changed_lines += lines.len();
+        }
+        diff_summary = Some(DiffSummary {
+            base: diff.base.clone(),
+            merge_base: diff.merge_base.clone(),
+            commit: diff.commit.clone(),
+            changed_lines,
+            lines_with_mutants,
+        });
+    }
     let mut counts = MutantCounts::default();
     asked.iter().for_each(|mutant| counts.add(mutant.status));
     let untestable = asked
@@ -667,6 +778,8 @@ pub fn coverage_mutants_query(
             let in_scope = |mutant: &StrykerReportMutant| {
                 file.as_deref().is_none_or(|file| mutant.file == file)
                     && line.is_none_or(|line| mutant.start.0 == line)
+                    && diff
+                        .is_none_or(|diff| diff.touches(&mutant.file, mutant.start.0, mutant.end.0))
                     && mutator.is_none_or(|mutator| mutant.mutator.eq_ignore_ascii_case(mutator))
             };
             let (joined, statuses) = join(&asked, reports, in_scope);
@@ -674,11 +787,25 @@ pub fn coverage_mutants_query(
         }
         None => (None, BTreeMap::new()),
     };
+    let gate = &options.options.fail_on;
+    let fail_on = (!gate.is_empty()).then(|| FailOn {
+        statuses: gate.clone(),
+        mutants: gate.iter().map(|status| counts.of(*status)).sum(),
+    });
     let wanted = &options.options.statuses;
-    let listed = asked
+    let mut listed = asked
         .iter()
         .filter(|mutant| wanted.is_empty() || wanted.contains(&mutant.status))
         .collect::<Vec<_>>();
+    // A change's mutants, what its tests leave alive first: a stable sort
+    // keeps them by file and position within each status.
+    if diff.is_some() {
+        listed.sort_by_key(|mutant| match mutant.status {
+            MutantStatus::NotInfected => 0,
+            MutantStatus::NotReached => 1,
+            _ => 2,
+        });
+    }
     let total = listed.len();
     let page = listed
         .into_iter()
@@ -690,13 +817,29 @@ pub fn coverage_mutants_query(
         })
         .collect::<Vec<_>>();
     let pagination = agent_json::pagination(options.offset, options.limit, page.len(), total);
-    let mut rows = files
-        .iter()
-        .map(|file| MutantFileRow {
-            file: file.file.clone(),
-            status: file.counts.clone(),
-        })
-        .collect::<Vec<_>>();
+    let mut rows = match diff {
+        // The change's mutants of each file it touched.
+        Some(_) => {
+            let mut by_file = BTreeMap::<&str, MutantCounts>::new();
+            for mutant in &asked {
+                by_file.entry(&mutant.file).or_default().add(mutant.status);
+            }
+            by_file
+                .into_iter()
+                .map(|(file, status)| MutantFileRow {
+                    file: file.to_owned(),
+                    status,
+                })
+                .collect::<Vec<_>>()
+        }
+        None => files
+            .iter()
+            .map(|file| MutantFileRow {
+                file: file.file.clone(),
+                status: file.counts.clone(),
+            })
+            .collect::<Vec<_>>(),
+    };
     table_order(&mut rows);
     if mutation.is_none() {
         note = Some(NO_LIST.into());
@@ -720,6 +863,8 @@ pub fn coverage_mutants_query(
             mutants: page,
             stryker,
             files: rows,
+            diff: diff_summary,
+            fail_on,
         },
         pagination,
     ))
@@ -942,6 +1087,38 @@ mod tests {
         assert_eq!(json["weak"]["untestableReason"], "reads Math.random()");
         // StrykerJS killing an equivalent mutant is a rule's violation.
         assert!(unkilled(MutantStatus::Equivalent));
+    }
+
+    /// A mutant is on a change when a line it spans was added or modified,
+    /// its first and last line included; a file git does not track yet is
+    /// all added.
+    #[test]
+    fn a_mutant_is_on_a_change_where_its_span_meets_a_changed_line() {
+        let diff = MutantDiff {
+            changed: BTreeMap::from([(
+                "src/a.ts".to_owned(),
+                std::collections::BTreeSet::from([5, 9]),
+            )]),
+            untracked: std::collections::BTreeSet::from(["src/new.ts".to_owned()]),
+            ..MutantDiff::default()
+        };
+        for (start, end, touches) in [
+            (5, 5, true),
+            (3, 5, true),
+            (5, 8, true),
+            (6, 8, false),
+            (4, 4, false),
+            (10, 12, false),
+            (1, 20, true),
+        ] {
+            assert_eq!(
+                diff.touches("src/a.ts", start, end),
+                touches,
+                "{start}-{end}"
+            );
+        }
+        assert!(!diff.touches("src/b.ts", 5, 5));
+        assert!(diff.touches("src/new.ts", 1, 1));
     }
 
     #[test]

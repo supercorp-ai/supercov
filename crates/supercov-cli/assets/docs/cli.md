@@ -301,6 +301,9 @@ npx supercov runs <run-id> mutants --status not-infected,not-reached
 npx supercov runs <run-id> mutants --mutator EqualityOperator --json
 npx supercov runs <run-id> mutants --stryker reports/mutation/mutation.json
 npx supercov runs <run-id> mutants --format jsonl --output mutants.jsonl
+npx supercov runs <run-id> mutants --diff origin/main
+npx supercov runs <run-id> mutants --diff origin/main --format markdown --output mutants.md
+npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not-reached
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
@@ -380,6 +383,44 @@ matched, those only Supercov or only StrykerJS made (by mutator), and how many
 of StrykerJS's survivors this run says no test infects or reaches. A mutant
 this run says is not infected, not reached or equivalent that StrykerJS killed
 is a soundness violation: each is listed, and the command exits `1`.
+
+#### Mutants on a pull request
+
+`--diff <base>` keeps the mutants on lines a change added or modified since it
+left `<base>`, a git ref such as `origin/main`. The change is the commit the
+run measured against its merge base with `<base>`; a run measured with
+uncommitted changes, or one that records no commit, is compared as the working
+tree, untracked files added whole, and the output says so. Everything else
+composes with it: a file or line, `--status`, `--mutator`, the test filters,
+`--json`, `--format`, `--stryker`, and the scores, which are of the change's
+mutants. A base git does not know (a shallow checkout's) fails with exit `2`.
+
+The output names the base, the merge base and how many changed lines hold a
+mutant, then lists the mutants the tests leave alive, not infected first and
+then not reached, each with the part it changes and why, and counts the rest
+in one line. `--json` lists every mutant of the change, survivors first, with
+`diff` (`base`, `mergeBase`, `commit`, `changedLines`, `linesWithMutants`).
+
+`--format markdown` writes a table for a pull request's comment: the counts in
+one line, then up to 25 not-infected and not-reached mutants (or those
+`--status` names) with where they are, what they change, their status and why,
+and the command that lists the rest.
+
+`--fail-on <statuses>` exits `1` when any mutant asked about has one of them,
+`--diff`'s mutants with it: a gate CI can hold a change to. Without it the exit
+codes are as before. In GitHub Actions, after the tests are measured:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    fetch-depth: 0 # the base and the merge base
+- run: npx supercov -- npm test
+- run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --format markdown --output mutants.md
+- run: gh pr comment ${{ github.event.number }} --body-file mutants.md --edit-last --create-if-none
+  env:
+    GH_TOKEN: ${{ github.token }}
+- run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --fail-on not-infected
+```
 
 ## Fail CI below a coverage floor
 

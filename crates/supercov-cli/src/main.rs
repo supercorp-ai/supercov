@@ -1530,6 +1530,101 @@ fn changed_lines_against(
     Ok(changed)
 }
 
+/// `mutants --diff <base>`: the lines the change the run measured added or
+/// modified since it left `base`. The run's recorded commit is compared
+/// with the merge base where the run was measured on a clean checkout;
+/// otherwise the working tree is, with untracked files as added whole.
+fn mutant_diff(
+    root: &Path,
+    base: &str,
+    run: &StoredRun,
+) -> Result<supercov_engine::mutants_query::MutantDiff, String> {
+    git_output(root, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")])
+        .map_err(|error| {
+            if error.starts_with("could not run git") {
+                format!("--diff needs git: {error}")
+            } else {
+                format!(
+                    "--diff {base}: git knows no commit by that name here. Fetch it first (actions/checkout needs fetch-depth: 0 for a pull request's base), or name another ref."
+                )
+            }
+        })?;
+    // The commit the run measured, where the checkout had nothing else.
+    let commit = run
+        .metadata
+        .integrity
+        .git
+        .as_ref()
+        .filter(|git| !git.dirty)
+        .and_then(|git| git.revision.clone())
+        .filter(|revision| {
+            git_output(root, &["cat-file", "-e", &format!("{revision}^{{commit}}")]).is_ok()
+        });
+    let head = commit.as_deref().unwrap_or("HEAD");
+    let merge_base = git_output(root, &["merge-base", base, head])
+        .map_err(|error| format!(
+            "{error}\nCould not find where this change left {base}. A shallow checkout has no merge base: fetch with enough history (actions/checkout uses fetch-depth: 0)."
+        ))?
+        .trim()
+        .to_owned();
+    let mut arguments = vec![
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--find-renames",
+        merge_base.as_str(),
+    ];
+    if let Some(commit) = commit.as_deref() {
+        arguments.push(commit);
+    }
+    arguments.push("--");
+    let diff = git_output(root, &arguments)?;
+    let prefix = repository_prefix(root)?;
+    let relocate = |path: String| -> Option<String> {
+        match prefix.as_ref() {
+            Some(prefix) => path.strip_prefix(prefix).map(str::to_owned),
+            None => Some(path),
+        }
+    };
+    let changed = supercov_engine::patch_view::changed_lines(&diff)
+        .into_iter()
+        .filter_map(|(path, lines)| {
+            let lines = lines
+                .into_iter()
+                .filter_map(|line| u32::try_from(line).ok())
+                .collect();
+            relocate(path).map(|path| (path, lines))
+        })
+        .collect();
+    let mut untracked = std::collections::BTreeSet::new();
+    if commit.is_none() {
+        for path in git_output(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--full-name",
+            ],
+        )?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        {
+            untracked.extend(relocate(path.to_owned()));
+        }
+    }
+    Ok(supercov_engine::mutants_query::MutantDiff {
+        base: base.to_owned(),
+        merge_base,
+        commit,
+        changed,
+        untracked,
+    })
+}
+
 /// Report coverage of the lines a change touches.
 fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut base: Option<String> = None;
@@ -3115,6 +3210,17 @@ fn execute_coverage_query(
         .get_or_insert(run.metadata.test_exit_code == Some(0));
     request.test_exit_code = run.metadata.test_exit_code;
     let mut warnings = Vec::new();
+    if request.command == "mutants"
+        && let Some(base) = request.mutants.diff_base.clone()
+    {
+        let diff = mutant_diff(root, &base, run).map_err(|message| agent_json::AgentError {
+            code: agent_json::ErrorCode::InvalidArgument,
+            message,
+            retryable: false,
+            details: Some(serde_json::json!({ "diff": base })),
+        })?;
+        request.mutants.diff = Some(diff);
+    }
     let mut diff_inputs = None;
     {
         let comparison = checkout_comparison(root, run);
@@ -3574,7 +3680,8 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
 }
 
 /// Whether `mutants --stryker` found a mutant this run says no test infects
-/// or reaches that StrykerJS killed, which fails the command.
+/// or reaches that StrykerJS killed, or `--fail-on` a mutant with a status
+/// it refuses: either fails the command.
 fn soundness_violated(output: &PublicQueryOutput) -> bool {
     matches!(
         output,
@@ -3582,9 +3689,16 @@ fn soundness_violated(output: &PublicQueryOutput) -> bool {
             if matches!(
                 &output.data,
                 supercov_engine::indexed_query::IndexedQueryData::Mutants(data)
-                    if data.stryker.as_ref().is_some_and(|join| join.soundness_violations.total > 0)
+                    if mutants_failed(data)
             )
     )
+}
+
+pub(crate) fn mutants_failed(data: &supercov_engine::mutants_query::CoverageMutantsData) -> bool {
+    data.stryker
+        .as_ref()
+        .is_some_and(|join| join.soundness_violations.total > 0)
+        || data.fail_on.as_ref().is_some_and(|gate| gate.mutants > 0)
 }
 
 fn run_js_direct() -> ExitCode {

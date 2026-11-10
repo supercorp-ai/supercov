@@ -84,7 +84,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     Some(format!("Usage: {usage}\n"))
 }
 
-const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--offset <n>] [--limit <n>] [--json | --format jsonl [--output <file>]]
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
 
 Weak mutation: for each mutant StrykerJS would make, whether a test ran the
 mutated code (reach) and whether its value differed there (infection), read
@@ -101,17 +101,25 @@ Options:
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
   --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)
+  --diff <base>             only mutants on lines the change added or modified since it left <base> (a git
+                            ref, such as origin/main): the run's commit against the merge base, or the
+                            working tree where the run had uncommitted changes; not infected and not
+                            reached listed first
+  --fail-on <s1,s2>         exit 1 when any mutant asked about has one of these statuses: a CI gate
   --kind, --runner, --tag, --title, --test-file
                             only the verdicts of those tests: a mutant only other tests infect is not infected there
   --offset <n>
   --limit <n>               entries per page (default 20; 0 for all)
   --json                    the coverage.mutants reply, a page at a time
   --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
-  --output <file>           with --format jsonl, write them there instead of to standard output
+  --format markdown         the not-infected and not-reached mutants (or --status's) as a table for a pull
+                            request's comment, the first 25 and the command for the rest
+  --output <file>           with --format, write them there instead of to standard output
 
 Exit codes:
   0  the answer was given
-  1  with --stryker, a soundness violation: a mutant this run says no test infects or reaches, which StrykerJS killed
+  1  with --stryker, a soundness violation: a mutant this run says no test infects or reaches, which StrykerJS killed;
+     with --fail-on, a mutant with one of its statuses
   2  the run cannot answer, or the request is invalid
 ";
 
@@ -202,6 +210,9 @@ struct QueryOptions {
     mutator: Option<String>,
     stryker: Vec<String>,
     stryker_root: Option<String>,
+    /// `mutants --diff`, `--fail-on`.
+    diff_base: Option<String>,
+    fail_on: Vec<supercov_engine::coverage_index::MutantStatus>,
     positional: Vec<String>,
 }
 
@@ -231,6 +242,8 @@ impl Default for QueryOptions {
             mutator: None,
             stryker: Vec::new(),
             stryker_root: None,
+            diff_base: None,
+            fail_on: Vec::new(),
             positional: Vec::new(),
         }
     }
@@ -441,7 +454,8 @@ fn parse_options(
                     }
                 }
             }
-            flag @ ("--status" | "--mutator" | "--stryker" | "--stryker-root") => {
+            flag @ ("--status" | "--mutator" | "--stryker" | "--stryker-root" | "--diff"
+            | "--fail-on") => {
                 if command != "mutants" {
                     return Err(PublicQueryError::invalid(
                         Some(&agent_command),
@@ -462,12 +476,18 @@ fn parse_options(
                                 "--mutator requires a StrykerJS mutator, such as EqualityOperator"
                             }
                             "--stryker" => "--stryker requires a StrykerJS mutation.json report",
+                            "--diff" => {
+                                "--diff requires a git ref to compare with, such as origin/main"
+                            }
+                            "--fail-on" => {
+                                "--fail-on requires statuses, such as not-infected,not-reached"
+                            }
                             _ => "--stryker-root requires a directory",
                         },
                     ));
                 };
                 match flag {
-                    "--status" => {
+                    "--status" | "--fail-on" => {
                         for name in value
                             .split(',')
                             .map(str::trim)
@@ -482,11 +502,11 @@ fn parse_options(
                                     "killed" | "survived" | "timeout"
                                 ) {
                                     format!(
-                                        "--status {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 } else {
                                     format!(
-                                        "--status {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(
@@ -495,12 +515,18 @@ fn parse_options(
                                     message,
                                 ));
                             };
-                            if !options.statuses.contains(&status) {
-                                options.statuses.push(status);
+                            let statuses = if flag == "--status" {
+                                &mut options.statuses
+                            } else {
+                                &mut options.fail_on
+                            };
+                            if !statuses.contains(&status) {
+                                statuses.push(status);
                             }
                         }
                     }
                     "--mutator" => options.mutator = Some(value.clone()),
+                    "--diff" => options.diff_base = Some(value.clone()),
                     "--stryker" => {
                         // Every report after it, as a shell's glob gives
                         // them: the words that are a `.json` file or a
@@ -696,6 +722,16 @@ pub(crate) fn coverage_request(
             }
             request.mutants.statuses = options.statuses.clone();
             request.mutants.mutator = options.mutator.clone();
+            request.mutants.diff_base = options.diff_base.clone();
+            // A change's mutants for a reader: what its tests leave alive.
+            // The JSON and the export list them all unless asked.
+            if options.diff_base.is_some() && options.statuses.is_empty() && !json_output {
+                request.mutants.statuses = vec![
+                    supercov_engine::coverage_index::MutantStatus::NotInfected,
+                    supercov_engine::coverage_index::MutantStatus::NotReached,
+                ];
+            }
+            request.mutants.fail_on = options.fail_on.clone();
             if !options.stryker.is_empty() {
                 request.mutants.stryker = Some(
                     read_stryker_reports(&options.stryker, options.stryker_root.as_deref())

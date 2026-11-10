@@ -15478,7 +15478,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2503 => main.rs:2503",
+            "fs.canonicalize#main.rs:2598 => main.rs:2598",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
         ],
@@ -20445,6 +20445,172 @@ fn mutant_statuses(reply: &serde_json::Value) -> std::collections::BTreeMap<Stri
             )
         })
         .collect()
+}
+
+/// `mutants --diff`: only the mutants on lines a change added or modified
+/// since it left a base, the tests' survivors first, as a pull request's
+/// comment, and as a gate.
+#[cfg(unix)]
+#[test]
+fn mutants_on_a_change_are_those_on_its_lines() {
+    let project = mutants_project("mutants-diff");
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.commit("ignore the runs");
+    project.git(&["branch", "base"]);
+    // The change: a new module and its test, and one line of the old one.
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import assert from \"node:assert/strict\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => assert.equal(tax(20), 4));\n",
+    );
+    project.edit("src/cart.js", "return 5;", "return 6;");
+    project.edit("test/cart.test.js", "shipping(10), 5", "shipping(10), 6");
+    project.commit("tax");
+    let head = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let merge_base = project.git(&["rev-parse", "base"]).trim().to_owned();
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+
+    let reply = project
+        .supercov(&[
+            "runs", "latest", "mutants", "--diff", "base", "--json", "--limit", "0",
+        ])
+        .json();
+    let data = &reply["data"];
+    assert_eq!(data["diff"]["base"], "base");
+    assert_eq!(data["diff"]["mergeBase"], merge_base.as_str());
+    assert_eq!(data["diff"]["commit"], head.as_str());
+    // tax.js's three lines, and cart.js's changed `return`, whose only
+    // mutant is the body around it, emptied.
+    assert_eq!(data["diff"]["changedLines"], 4, "{data}");
+    assert_eq!(data["diff"]["linesWithMutants"], 4, "{data}");
+    let mutants = data["mutants"].as_array().unwrap();
+    assert!(!mutants.is_empty());
+    assert!(
+        mutants.iter().all(|mutant| mutant["file"] == "src/tax.js"
+            || mutant["id"].as_str().is_some_and(
+                |id| id.starts_with("src/cart.js:1:") && id.ends_with("-6:2:BlockStatement:{}")
+            )),
+        "{data}"
+    );
+    // The survivors first: `sum` was 20, never 10.
+    assert_eq!(mutants[0]["status"], "not-infected", "{data}");
+    assert!(
+        mutants.iter().any(
+            |mutant| mutant["id"] == "src/tax.js:2:10-2:19:EqualityOperator:>"
+                && mutant["status"] == "not-infected"
+        ),
+        "{data}"
+    );
+    let ranks = mutants
+        .iter()
+        .map(|mutant| match mutant["status"].as_str() {
+            Some("not-infected") => 0,
+            Some("not-reached") => 1,
+            _ => 2,
+        })
+        .collect::<Vec<_>>();
+    assert!(ranks.is_sorted(), "{data}");
+    assert_eq!(data["summary"]["mutants"], mutants.len());
+
+    let human = project
+        .supercov(&["runs", "latest", "mutants", "--diff", "base"])
+        .succeeds();
+    contains_all(
+        &human,
+        &[
+            "Change       ",
+            "(where it left base)",
+            "Lines        4 added or changed, 4 with mutants",
+            "Not infected",
+            "src/tax.js:2:10",
+            "sum >= 10 → sum > 10",
+            "why: `sum` never equal to `10`",
+            "Not listed: ",
+            "--diff 'base' --status infected",
+        ],
+    );
+    assert!(!human.contains("src/cart.js:"), "{human}");
+
+    let markdown = project
+        .supercov(&[
+            "runs", "latest", "mutants", "--diff", "base", "--format", "markdown",
+        ])
+        .succeeds();
+    contains_all(
+        &markdown,
+        &[
+            "### Mutants on this change",
+            "on 4 of 4 changed lines since `base`",
+            "| Where | Mutant | Status | Why |",
+            "| `src/tax.js:2:10` | `sum >= 10 → sum > 10` | not infected | `sum` never equal to `10` |",
+        ],
+    );
+
+    // A gate: a mutant the tests leave alive on the change fails it.
+    let failed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--diff",
+            "base",
+            "--fail-on",
+            "not-infected,not-reached",
+        ])
+        .exits(1);
+    assert!(
+        failed.contains("FAILED --fail-on not-infected,not-reached"),
+        "{failed}"
+    );
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--diff",
+            "base",
+            "--fail-on",
+            "equivalent",
+        ])
+        .succeeds();
+    project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--diff",
+            "base",
+            "--format",
+            "markdown",
+            "--fail-on",
+            "not-infected",
+        ])
+        .exits(1);
+    let gated = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--diff",
+            "base",
+            "--fail-on",
+            "not-infected",
+            "--json",
+        ])
+        .exits(1);
+    assert!(gated.contains("\"failOn\""), "{gated}");
+
+    // A base git does not know is refused, saying why.
+    let refused = project
+        .supercov(&["runs", "latest", "mutants", "--diff", "no-such-branch"])
+        .exits(2);
+    assert!(
+        refused.contains("git knows no commit by that name"),
+        "{refused}"
+    );
 }
 
 #[cfg(unix)]

@@ -229,6 +229,29 @@ because the weak pass already knows:
 - in what order: the tests that infected it, cheapest first, stopping at the
   first failure.
 
+## Pull requests
+
+A pull request asks about its own lines. `mutants --diff <base>` keeps the
+mutants whose span meets a line the change added or modified, from `git diff
+--unified=0 --find-renames` between the merge base of `<base>` and the
+commit the run measured: what the branch changed, not what `<base>` gained
+since. The commit is the run's recorded revision where the checkout was
+clean; otherwise the working tree is compared, untracked files counted as
+added whole, and the output says so. Only the post-image is read: a deleted
+line has no mutant left to kill, a renamed file's lines are its new name's,
+and a hunk's lines are read by its counts, so an added line that reads `++ x`
+is not taken for a file header. Git runs at the edge, in the CLI, as for
+`patch`; the query gets the changed lines and filters by them.
+
+The scores and counts are of the change's mutants, and the listing puts what
+the tests leave alive first: not infected, then not reached, each with the
+part it changes (see the listing above) and its reason, and one line for the
+rest. `--format markdown` is that list as a table for a comment, capped at 25
+rows with the command for the rest. `--fail-on not-infected,not-reached`
+fails the command (exit 1) when any such mutant remains, so CI can hold a
+change to it; equivalent mutants and the clock or random hint show as
+anywhere else, and a hint does not exempt a mutant from the gate.
+
 ## JSON
 
 `mutants --json` is the agent envelope's `coverage.mutants` command:
