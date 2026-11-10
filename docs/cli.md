@@ -384,6 +384,12 @@ of StrykerJS's survivors this run says no test infects or reaches. A mutant
 this run says is not infected, not reached or equivalent that StrykerJS killed
 is a soundness violation: each is listed, and the command exits `1`.
 
+The HTML report (`supercov report`) shows a run's mutants where it shows its
+coverage: the weak score and the counts by status, a column of each file's
+not-infected and not-reached mutants, and, in a file's source, a mark on each
+line such a mutant is on, whose evidence lists each with its change, status
+and reason. A run without mutants shows none.
+
 #### Mutants on a pull request
 
 `--diff <base>` keeps the mutants on lines a change added or modified since it

@@ -160,6 +160,18 @@ try {
   // continuation lines can show the state recorded on the first; the fixture
   // has none.
   assert.deepEqual(paired.runs[0].statementSpans, []);
+  // The run's mutants: the scores and counts, each file's counts, and each
+  // mutant no test infects or reaches with what it changes and why.
+  const mutants = paired.runs[0].mutants;
+  assert.equal(mutants.mutantSet, "stryker-js@10.1.1");
+  assert(mutants.summary.mutants > 0, JSON.stringify(mutants.summary));
+  assert(mutants.files["src/access.js"]["not-infected"] > 0, JSON.stringify(mutants.files));
+  assert(mutants.mutants.length > 0);
+  for (const mutant of mutants.mutants) {
+    assert(["not-infected", "not-reached"].includes(mutant.status), mutant.status);
+    assert.match(mutant.change, / \u2192 /);
+    assert(mutant.reason.length > 0);
+  }
   assert.doesNotMatch(JSON.stringify(paired), /\/(Users|home)\/[a-z]/i);
 
   // A snapshot of different bytes must not be folded into the run, however
@@ -416,7 +428,13 @@ try {
     assert(rendered.marks > 0, "the judgments must draw their marks");
     assert.equal(rendered.darkBlocks, 0, "light mode must not keep a dark block");
     assert.match(await page.locator(".run-test-summary").textContent(), /2 tests passed.*1 skipped/);
-    assert.deepEqual(await page.locator(".overview-label").allTextContents(), ["Coverage", "Assertions", "Quality", "Security"]);
+    assert.deepEqual(await page.locator(".overview-label").allTextContents(), ["Coverage", "Assertions", "Mutants", "Quality", "Security"]);
+    // The run's mutants beside its coverage: the score and the counts by status.
+    assert.match(await page.locator(".mutants-metric .figure-unit").textContent(), /weak mutation score/);
+    const mutantCounts = await page.locator(".mutant-counts li").allTextContents();
+    assert.equal(mutantCounts.length, 5);
+    assert.match(mutantCounts[0], /^\d+ not infected/);
+    assert.match(mutantCounts[4], /^\d+ equivalent$/);
     assert.equal(await page.locator(".sidebar-foot").count(), 0);
     await page.getByRole("button", { name: "Close dialog", exact: true }).click();
     assert.equal(await page.getByRole("dialog").count(), 0);
@@ -529,6 +547,18 @@ try {
     assert.equal(await page.locator(".kind-share > span:last-child").nth(1).textContent(), `${expectedStatements}%`);
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "detached" });
+    // A line a mutant the tests leave alive is on is marked, its gutter says
+    // each mutant's status, change and reason, and its evidence lists them.
+    const mutantRow = page.locator(".code-row.has-mutants").first();
+    assert(await mutantRow.count() > 0, "a mutant the test leaves alive marks its line");
+    assert.match(await mutantRow.locator(".code-evidence").getAttribute("title"), /Not infected: .+ \u2192 .+ \u2014 /);
+    assert.match(await mutantRow.locator(".code-evidence").getAttribute("aria-label"), /mutants? no test infects or reaches/);
+    assert.equal(await page.locator(".source-key").filter({ hasText: "Mutant no test infects or reaches" }).count(), 1);
+    await mutantRow.locator(".code-evidence").click();
+    const mutantEvidence = page.locator(".code-annotation");
+    assert.equal(await mutantEvidence.locator("h4").filter({ hasText: "Mutants" }).count(), 1);
+    assert.match(await mutantEvidence.textContent(), /Not infected \u00b7 \w+/);
+    await mutantEvidence.getByRole("button", { name: "Close", exact: true }).click();
     await page.getByRole("button", { name: "Improve assertions for src/access.js", exact: true }).click();
     const improve = page.getByRole("dialog", { name: "Improve assertions", exact: true });
     assert.match(await improve.locator(".improve-prompt").textContent(), /src\/access\.js/);
@@ -571,7 +601,8 @@ try {
     const assertionButton = page.locator('.code-row[data-line="3"] .code-assert');
     await coverageButton.click();
     const evidence = page.getByRole("region", { name: "Evidence for line 3", exact: true });
-    assert.deepEqual(await evidence.locator("h4").allTextContents(), ["Coverage", "Assertions"]);
+    // Line 3's `member && owner` leaves mutants the one test does not infect.
+    assert.deepEqual(await evidence.locator("h4").allTextContents(), ["Coverage", "Mutants", "Assertions"]);
     assert.match(await evidence.locator(".line-test-name").textContent(), /owner access/);
     assert.match(await evidence.textContent(), /owner access is judged to fail if this statement is changed/);
     assert.match(await evidence.textContent(), /Missing/);
@@ -646,7 +677,8 @@ try {
       await page.setViewportSize({ width, height: 844 });
       await page.getByRole("tab", { name: "Files", exact: true }).click();
       await checkMobileList(".file-table, .file-row, .file-row-marks");
-      assert.equal(await page.locator(".file-row").first().locator(".mobile-metric-label:visible").count(), 4);
+      // A label for each column but the file's: four, and a fifth for a run with mutants.
+      assert.equal(await page.locator(".file-row").first().locator(".mobile-metric-label:visible").count(), await page.locator(".file-head-cell").count() - 1);
       await page.getByRole("tab", { name: "Overview", exact: true }).click();
       await checkMobileList(".overview-files, .overview-row");
       await page.goto(`file://${comparedPath}`, { waitUntil: "load" });
@@ -715,6 +747,21 @@ try {
     await page.locator('.file-row').filter({ hasText: "src/access.js" }).click();
     assert.match(await page.locator(".file-security").textContent(), /missing authorization/);
     assert.deepEqual(failures, [], "security findings and standalone assessments render without errors");
+
+    // A run measured without mutants shows none of them.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    execFileSync(binary, ["--", "node", "--test"], { cwd: project, stdio: "pipe", env: { ...process.env, SUPERCOV_MUTANTS: "0" } });
+    execFileSync(binary, ["report", "--runs", "1", "--no-open", "--output", "no-mutants.html"], { cwd: project, stdio: "pipe" });
+    const plainHtml = readFileSync(resolve(project, "no-mutants.html"), "utf8");
+    const plainScripts = [...plainHtml.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
+    const plain = JSON.parse(gunzipSync(Buffer.from(plainScripts[0][1].trim(), "base64")).toString("utf8"));
+    assert.equal(plain.runs[0].mutants, undefined);
+    await page.goto(`file://${resolve(project, "no-mutants.html")}`, { waitUntil: "load" });
+    await page.waitForSelector(".overview-label");
+    assert.equal(await page.locator(".overview-label").filter({ hasText: "Mutants" }).count(), 0);
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    assert.equal(await page.locator(".file-head-cell").filter({ hasText: "Mutants" }).count(), 0);
+    assert.deepEqual(failures, [], "a run without mutants renders without errors");
 
 
 

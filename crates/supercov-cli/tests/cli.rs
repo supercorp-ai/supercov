@@ -3929,6 +3929,26 @@ fn the_html_report_says_what_it_could_not_embed() {
         "{run}"
     );
     assert_eq!(run["stale"], false);
+    // The run's mutants: its counts, each file's, and the mutants no test
+    // infects or reaches, each with its change, status and reason.
+    let mutants = &run["mutants"];
+    assert_eq!(mutants["mutantSet"], "stryker-js@10.1.1", "{mutants}");
+    assert!(
+        mutants["summary"]["mutants"].as_u64() > Some(0),
+        "{mutants}"
+    );
+    assert!(mutants["files"]["src/cart.js"].is_object(), "{mutants}");
+    for mutant in mutants["mutants"].as_array().unwrap() {
+        assert!(
+            ["not-infected", "not-reached"].contains(&mutant["status"].as_str().unwrap()),
+            "{mutant}"
+        );
+        assert!(
+            mutant["change"].as_str().unwrap().contains(" → "),
+            "{mutant}"
+        );
+        assert!(!mutant["reason"].as_str().unwrap().is_empty(), "{mutant}");
+    }
     assert!(
         run["sources"]["src/cart.js"].is_object(),
         "{}",
@@ -17331,12 +17351,12 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
     for (fault, output, place) in [
-        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:320"),
-        ("fs.read_to_string@6", "unread.html", "html_report.rs:355"),
+        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:410"),
+        ("fs.read_to_string@6", "unread.html", "html_report.rs:445"),
         (
-            "fs.metadata#html_report.rs:342",
+            "fs.metadata#html_report.rs:432",
             "unsized.html",
-            "html_report.rs:342",
+            "html_report.rs:432",
         ),
     ] {
         let ran = project.supercov_with(
