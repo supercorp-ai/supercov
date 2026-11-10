@@ -13298,6 +13298,35 @@ export function shapes(n: number): unknown {
         );
     }
 
+    /// Code at a module's or script's top level runs the probes before any
+    /// later statement: every probe helper is bound by the first statement,
+    /// ahead of a function declared and called there, recursion included.
+    #[test]
+    fn probe_helpers_are_bound_before_any_top_level_code() {
+        let source = concat!(
+            "function count(n) { return n > 0 ? 1 + count(n - 1) : 0; }\n",
+            "const depth = count(3);\n",
+            "let total = 2;\n",
+            "total += depth * 2;\n",
+            "const any = [depth].some((x) => x > 1) && /^a$/.test('a');\n",
+            "const ids = [depth].map((x) => x.id);\n",
+        );
+        for file in ["src/top.mjs", "src/top.cjs", "src/top.ts"] {
+            let code = instrument_candidate(source, file).unwrap().code;
+            let first_user_code = code.find("function count").expect("the function is kept");
+            for helper in ["compareV2", "arithV2", "assignV2", "methodV2", "valueV2"] {
+                let bound = code
+                    .find(&format!("{helper} as "))
+                    .or_else(|| code.find(&format!("__supercovRuntime.{helper}")))
+                    .unwrap_or_else(|| panic!("{file} binds no {helper}:\n{code}"));
+                assert!(
+                    bound < first_user_code,
+                    "{file} binds {helper} late:\n{code}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn direct_runtime_mode_has_no_virtual_module_or_legacy_global() {
         for file in ["src/module.mjs", "src/script.cjs"] {

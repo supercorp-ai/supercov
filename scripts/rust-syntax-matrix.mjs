@@ -187,8 +187,50 @@ function installRuntime(target) {
       frame.entered = true;
     },
     loopEnd() {},
+    // The infection probes: each does the program's own operation once and
+    // hands its value back, as the runtime does.
+    ...probeHelpers,
   };
 }
+
+// `compareV2(site, a, b, op)`: `<`, `<=`, `>`, `>=`, or (4) a value whose
+// truthiness is the test. `arithV2(site, a, b, op)` and `assignV2(site, x,
+// value, op)`: `+ - * / % << >> & |`, the compound assignment's operand
+// handed back for the assignment to apply. `methodV2(site, receiver, name,
+// arrow, copy)`: the receiver the method is then called on.
+function probeArithmetic(left, right, op) {
+  switch (op) {
+    case 0: return left + right;
+    case 1: return left - right;
+    case 2: return left * right;
+    case 3: return left / right;
+    case 4: return left % right;
+    case 5: return left << right;
+    case 6: return left >> right;
+    case 7: return left & right;
+    default: return left | right;
+  }
+}
+const probeHelpers = {
+  compareV2(_site, left, right, op) {
+    return op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
+  },
+  arithV2(_site, left, right, op) {
+    return probeArithmetic(left, right, op);
+  },
+  assignV2(_site, _current, value) {
+    return value;
+  },
+  methodV2(_site, receiver) {
+    return receiver;
+  },
+  valueV2(_site, value) {
+    return value;
+  },
+  regexV2(_site, value) {
+    return value;
+  },
+};
 
 function applyInferredName(value, inferredName) {
   if (inferredName && typeof value === "function" && value.name === "")
@@ -235,6 +277,7 @@ const runtimeExports = [
   "loopBegin",
   "loopEntered",
   "loopEnd",
+  ...Object.keys(probeHelpers),
 ];
 const runtimeModule = runtimeExports
   .map(
@@ -371,6 +414,12 @@ async function runBrowser(name) {
               defaultSelectedV2(file, slot, value, inferredName) { file.pendingDefaults[slot] += 1; return applyInferredName(value, inferredName); },
               defaultEnteredV2(file, slot) { if (file.pendingDefaults[slot] > 0) file.pendingDefaults[slot] -= 1; },
               optionalSelectV2(_file, _first, value) { return value; },
+              compareV2(_site, left, right, op) { return op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right; },
+              arithV2(_site, left, right, op) { switch (op) { case 0: return left + right; case 1: return left - right; case 2: return left * right; case 3: return left / right; case 4: return left % right; case 5: return left << right; case 6: return left >> right; case 7: return left & right; default: return left | right; } },
+              assignV2(_site, _current, value) { return value; },
+              methodV2(_site, receiver) { return receiver; },
+              valueV2(_site, value) { return value; },
+              regexV2(_site, value) { return value; },
               selectShortV2(_file, _first, value) { return value; },
               selectRightV2(_file, _first, value) { return value; },
               selectNamedRightV2(_file, _first, value, inferredName) { return applyInferredName(value, inferredName); },
