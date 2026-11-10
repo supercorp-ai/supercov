@@ -2023,6 +2023,10 @@ function recordCoverageHit(id) {
   if (isBrowser) {
     if (recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "browser")))
       persistBrowser();
+  } else if (state.runtimeSnapshots) {
+    // What appendServer does with a snapshot-kept run's record, without the
+    // record: an object built per first hit only to be read once.
+    recordBrowserEvent(hitEvent(id, timestampMs, phaseId, "server"));
   } else {
     appendServer(phaseId ? { type: "hit", id, timestampMs, phaseId } : { type: "hit", id, timestampMs });
   }
@@ -2536,6 +2540,8 @@ function mcdcEnd(frame, value) {
   if (isBrowser) {
     if (recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "browser")))
       persistBrowser();
+  } else if (state.runtimeSnapshots) {
+    recordBrowserEvent(decisionEvent(decision.id, vector, timestampMs, phaseId, "server"));
   } else {
     appendServer(phaseId ? { type: "decision", id: decision.id, vector, timestampMs, phaseId } : { type: "decision", id: decision.id, vector, timestampMs });
   }
