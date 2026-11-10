@@ -303,10 +303,25 @@ function activateProbeV2Context(context) {
   state.probeV2ContextEpochCache.set(context, { generation: state.probeV2EpochGeneration, epoch });
   return epoch;
 }
+// While the speed benchmark times a run: how often a server's async hook ran
+// and how often a probe then had to work out its context, said once when the
+// process ends.
+var serverTiming = !isBrowser && typeof process !== "undefined" && process.env && process.env["SUPERCOV_PHASE_TIMING"] === "1" ? { asyncHookCallbacks: 0, contextResolutions: 0 } : void 0;
+if (serverTiming) {
+  try {
+    process.once("exit", () => {
+      if (serverTiming.asyncHookCallbacks || serverTiming.contextResolutions)
+        process.stderr.write(`[supercov-timing] server ${process.pid} asyncHookCallbacks=${serverTiming.asyncHookCallbacks} contextResolutions=${serverTiming.contextResolutions}\n`);
+    });
+  } catch (e) {
+  }
+}
 // The context the async hook leaves to a callback's first probe: the
 // request's store, or else the one the environment carries.
 function resolveProbeV2Epoch() {
   var _a8, _b;
+  if (serverTiming)
+    serverTiming.contextResolutions += 1;
   return activateProbeV2Context((_b = (_a8 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a8 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
 }
 function withProbeV2Context(context, callback) {
@@ -335,6 +350,8 @@ function installProbeV2AsyncHook() {
       // environment twice and built a key each time: on a Next app's suite,
       // more of the server's time than any of Supercov's other work.
       before() {
+        if (serverTiming)
+          serverTiming.asyncHookCallbacks += 1;
         epochs.push(state.probeV2Clock.epoch);
         state.probeV2Clock.epoch = NaN;
       },

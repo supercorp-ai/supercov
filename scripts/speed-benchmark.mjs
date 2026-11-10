@@ -451,7 +451,14 @@ if (process.env.SPEED_DIAGNOSE === '1') {
         processes
           .filter(({ busy }) => busy >= 1)
           .sort((a, b) => b.busy - a.busy)
-          .map(({ file, busy, kinds, functions }) => [`== ${file} busy ${busy.toFixed(2)}s`, ...kinds, '--', ...functions].join('\n'))
+          .map(({ file, busy, kinds, functions, beneathTotal, beneath }) => [
+            `== ${file} busy ${busy.toFixed(2)}s`,
+            ...kinds,
+            '--',
+            ...functions,
+            `-- under Supercov's frames, inclusive: ${beneathTotal.toFixed(2)}s`,
+            ...beneath,
+          ].join('\n'))
           .join('\n\n') + '\n',
       );
       profiled[`${variant} ${suite.name}`] = totals;
@@ -634,11 +641,28 @@ function profileSelfTime(directory) {
     };
     const self = new Map();
     profile.samples.forEach((id, index) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[index] ?? 0)));
+    // Each sample charged to the nearest of Supercov's own frames on its
+    // stack, itself included: what each of Supercov's functions cost, with
+    // the Playwright, Node and engine work it started, where that work ran
+    // in the same synchronous stack.
+    const nearestOwn = new Map();
+    const ownFrame = (id) => {
+      if (nearestOwn.has(id)) return nearestOwn.get(id);
+      const node = nodes.get(id);
+      let found = null;
+      if (node && kindOf(node.callFrame.url, node.callFrame.functionName) === 'supercov runtime') found = frame(id);
+      else if (node) found = ownFrame(parents.get(id));
+      nearestOwn.set(id, found);
+      return found;
+    };
+    const beneath = {};
     const own = {};
     const ownFunctions = {};
     for (const [id, micros] of self) {
       const { url, functionName, lineNumber } = nodes.get(id).callFrame;
       const kind = kindOf(url, functionName);
+      const under = kind === '(idle)' ? null : ownFrame(id);
+      if (under) beneath[under] = (beneath[under] ?? 0) + micros / 1e6;
       totals[kind] = (totals[kind] ?? 0) + micros / 1e6;
       if (kind !== '(idle)') own[kind] = (own[kind] ?? 0) + micros / 1e6;
       if (!functionName.startsWith('(')) {
@@ -660,7 +684,8 @@ function profileSelfTime(directory) {
         .sort(([, a], [, b]) => b - a)
         .slice(0, count)
         .map(([what, seconds]) => `${seconds.toFixed(2)}s ${what}`);
-    processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 30) });
+    const beneathTotal = Object.values(beneath).reduce((sum, seconds) => sum + seconds, 0);
+    processes.push({ file, busy, kinds: top(own, 8), functions: top(ownFunctions, 30), beneathTotal, beneath: top(beneath, 25) });
   }
   return { totals, functions, processes, callers };
 }
