@@ -17360,7 +17360,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1313,fs.read_from#evidence_archive.rs:675",
+            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:675",
         )],
     );
     assert!(

@@ -5876,7 +5876,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1326,fs.read_from#evidence_archive.rs:675";
+    let unread = "fs.open#run_store.rs:1332,fs.read_from#evidence_archive.rs:675";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);
