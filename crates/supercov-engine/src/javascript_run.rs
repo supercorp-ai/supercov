@@ -230,7 +230,13 @@ fn javascript_archive_entries(
     manifest: &crate::javascript_frontend::JavascriptManifest,
     run_id: &str,
     exit_code: i32,
-) -> Result<Vec<EvidenceArchiveEntry>, String> {
+) -> Result<
+    (
+        Vec<EvidenceArchiveEntry>,
+        crate::coverage_report::ParsedResults,
+    ),
+    String,
+> {
     // Every record in archive order, then parsed on every core: one after
     // another on the run's own thread, a large Vitest run's records were
     // most of its evidence step. The first record in order that fails is
@@ -256,6 +262,11 @@ fn javascript_archive_entries(
             }
         }
     }
+    // Kept, by entry, for the analysis, which would parse them again.
+    let mut paths = records
+        .iter()
+        .map(|(_, path, _)| (*path).to_owned())
+        .collect::<Vec<_>>();
     let mut results = parse_records_in_order(&records, |(bytes, path, line)| {
         serde_json::from_slice::<RawTestResult>(bytes).map_err(|error| match line {
             None => format!("invalid {path}: {error}"),
@@ -297,6 +308,7 @@ fn javascript_archive_entries(
             path: "results/command/mcdc.json".into(),
             contents: serde_json::to_vec(&command_result).expect("plain data serializes"),
         });
+        paths.push("results/command/mcdc.json".into());
         results.push(command_result);
     }
     let mut by_runner = BTreeMap::<String, Vec<&RawTestResult>>::new();
@@ -340,7 +352,11 @@ fn javascript_archive_entries(
         path: "frontend.json".into(),
         contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
-    Ok(entries)
+    let mut parsed = crate::coverage_report::ParsedResults::default();
+    for (path, result) in paths.into_iter().zip(results) {
+        parsed.entry(path).or_default().push(result);
+    }
+    Ok((entries, parsed))
 }
 
 struct RunCleanup {
@@ -1473,7 +1489,7 @@ pub fn run_direct_javascript(
         },
     ])
     .map_err(|error| error.to_string())?;
-    let mut entries =
+    let (mut entries, parsed) =
         javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
     // The relay, and so what it gave settings to, is Unix's alone.
     #[cfg(unix)]
@@ -1531,7 +1547,12 @@ pub fn run_direct_javascript(
     };
     let (raw, analysed) = std::thread::scope(|scope| {
         let analysis = scope.spawn(|| {
-            crate::coverage_report::analyze_coverage_entries(&analysis_request, &entries).ok()
+            crate::coverage_report::analyze_coverage_entries(
+                &analysis_request,
+                &entries,
+                Some(parsed),
+            )
+            .ok()
         });
         let raw = crate::evidence_archive::write_canonical_archive(&entries, &archive_path);
         (raw, analysis.join().unwrap_or_else(crate::threads::rethrow))
@@ -2134,7 +2155,7 @@ mod environment_tests {
                 contents: b"x".to_vec(),
             },
         ];
-        let entries = javascript_archive_entries(entries, &manifest(), "run_1", 0).unwrap();
+        let (entries, _) = javascript_archive_entries(entries, &manifest(), "run_1", 0).unwrap();
         let declaration: supercov_contracts::FrontendRunDeclaration = serde_json::from_slice(
             &entries
                 .iter()
@@ -2485,7 +2506,21 @@ mod tests {
             contents: contents.to_vec(),
         };
         let read = |entries: Vec<EvidenceArchiveEntry>, exit: i32| {
-            javascript_archive_entries(entries, &manifest, "run", exit)
+            javascript_archive_entries(entries, &manifest, "run", exit).map(|(entries, parsed)| {
+                // Every result entry's records, as the analysis would parse
+                // them from the same bytes.
+                for entry in entries.iter().filter(|entry| {
+                    entry.path.ends_with("/mcdc.json") || entry.path.ends_with(".mcdc.jsonl")
+                }) {
+                    let text = String::from_utf8_lossy(&entry.contents);
+                    let again = text
+                        .lines()
+                        .map(|line| serde_json::from_str::<RawTestResult>(line).unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(parsed[&entry.path], again, "{}", entry.path);
+                }
+                entries
+            })
         };
         let good =
             serde_json::to_vec(&result(Some("a"), Some(0), Some(("w1", "a", 0)), true)).unwrap();

@@ -3499,7 +3499,7 @@ pub fn archive_request(
     ),
     ReportError,
 > {
-    archive_request_from(request, |visit| {
+    archive_request_from(request, None, |visit| {
         crate::evidence_archive::read_archive_each(
             Path::new(&request.archive_path),
             |_| true,
@@ -3515,17 +3515,24 @@ pub fn archive_request(
 pub fn analyze_coverage_entries(
     request: &ArchiveReportRequest,
     entries: &[EvidenceArchiveEntry],
+    parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, ()) = archive_request_from(request, |mut visit| {
+    let (_, normalized, transport, ()) = archive_request_from(request, parsed, |mut visit| {
         entries.iter().cloned().try_for_each(&mut visit)
     })?;
     finish_archive_analysis(normalized, transport)
 }
 
+/// The results of a run's `mcdc.json` and `.mcdc.jsonl` entries, by path, as
+/// a frontend parsed them already from the same bytes: what the analysis
+/// would parse again, taken instead.
+pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
+
 /// `archive_request`, from entries `read` hands to the visitor in the
 /// archive's order.
 fn archive_request_from<D>(
     request: &ArchiveReportRequest,
+    mut parsed: Option<ParsedResults>,
     read: impl FnOnce(
         &mut dyn FnMut(
             EvidenceArchiveEntry,
@@ -3556,6 +3563,20 @@ fn archive_request_from<D>(
         if failure.is_some() {
             results.clear();
             journals.clear();
+            return;
+        }
+        if let Some(parsed) = parsed.as_mut() {
+            let mut take = |entry: &EvidenceArchiveEntry| {
+                parsed
+                    .remove(&entry.path)
+                    .expect("a frontend parses every result entry it hands over")
+            };
+            results
+                .drain(..)
+                .for_each(|entry| raw_results.extend(take(&entry)));
+            journals
+                .drain(..)
+                .for_each(|entry| journal_results.extend(take(&entry)));
             return;
         }
         let parsed = parse_in_parallel(&results.iter().collect::<Vec<_>>(), |entry| {
