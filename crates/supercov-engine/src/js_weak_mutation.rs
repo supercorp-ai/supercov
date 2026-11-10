@@ -26,7 +26,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use crate::coverage_analysis::McdcVector;
-use crate::coverage_index::{IndexedMutant, MutantStatus, MutationResults};
+use crate::coverage_index::{IndexedMutant, MutantStatus, MutationResults, Untestable};
 use crate::coverage_report::{RawTestResult, SERVER_VALUES_RECORD};
 use crate::js_mutant_links::{BranchRole, CandidateMutant, MutantsFile};
 
@@ -42,6 +42,8 @@ pub(crate) enum Status {
     Infected { proxy: bool },
     /// Reached, but the run cannot tell.
     Unknown,
+    /// No input can make it differ, by a static rule (`js_static_mutants`).
+    Equivalent,
 }
 
 /// Why: a stable short code, and a sentence that says, for a mutant not
@@ -81,6 +83,17 @@ const BLOCK_STATEMENT: &str = "BlockStatement";
 
 /// The mutant's status, and why.
 pub(crate) fn verdict(mutant: &CandidateMutant, observations: &Observations) -> (Status, Reason) {
+    // Decided from the program alone, before reach or infection: whatever
+    // the tests did, they could not have made it differ.
+    if let Some(rule) = &mutant.equivalent {
+        return (
+            Status::Equivalent,
+            Reason {
+                code: static_code(&rule.rule),
+                sentence: rule.reason.clone(),
+            },
+        );
+    }
     let records = Records {
         observations,
         read: Cell::new(false),
@@ -154,6 +167,15 @@ impl Records<'_> {
             .get(decision)
             .map_or(&[], Vec::as_slice)
     }
+}
+
+/// A static rule's code as a reason's: one this build knows, or `static`
+/// for one a newer `mutants.json` names.
+fn static_code(rule: &str) -> &'static str {
+    [crate::js_static_mutants::ZERO_GUARDED]
+        .into_iter()
+        .find(|known| *known == rule)
+        .unwrap_or("static")
 }
 
 fn reason_of(code: &'static str, sentence: impl Into<String>) -> Reason {
@@ -985,15 +1007,21 @@ pub(crate) fn results(
                     descriptor: mutant.replacement.clone(),
                     original: one_line(&mutant.original),
                     replacement: one_line(&replaced(mutant)),
+                    changed: changed(mutant),
                     status: match status {
                         Status::NotReached => MutantStatus::NotReached,
                         Status::NotInfected => MutantStatus::NotInfected,
                         Status::Infected { .. } => MutantStatus::Infected,
                         Status::Unknown => MutantStatus::Unknown,
+                        Status::Equivalent => MutantStatus::Equivalent,
                     },
                     proxy: status == PROXY,
                     code: reason.code.to_owned(),
                     reason: reason.sentence,
+                    untestable: mutant.untestable.as_ref().and_then(|note| {
+                        let kind = Untestable::parse(&note.rule)?;
+                        Some((kind, note.reason.clone()))
+                    }),
                 }
             })
             .collect::<Vec<_>>();
@@ -1025,12 +1053,125 @@ fn one_line(text: &str) -> String {
 /// replacement's, and the operands reasons quote. What else a reason
 /// quotes is cut from one of those lines (`quoted` shows less of a text than
 /// `one_line` does).
-fn shown(mutant: &CandidateMutant) -> (String, String, Option<(String, String)>) {
+type Shown = (
+    String,
+    String,
+    Option<(String, String)>,
+    Option<(String, String)>,
+);
+
+fn shown(mutant: &CandidateMutant) -> Shown {
     (
         one_line(&mutant.original),
         one_line(&replaced(mutant)),
         operands(mutant).map(|(_, left, right)| (left, right)),
+        changed(mutant),
     )
+}
+
+/// The mutators whose replacement is the original with one part changed:
+/// an operator, a method's name or the call removed, a `!` or a unary
+/// operator. Not an optional link, whose part would be its `?` alone.
+const SPLICED: &[&str] = &[
+    "ArithmeticOperator",
+    "EqualityOperator",
+    "LogicalOperator",
+    "AssignmentOperator",
+    "UpdateOperator",
+    "UnaryOperator",
+    "BooleanLiteral",
+    "MethodExpression",
+];
+
+/// What the mutant changes: the part of the original it replaces and what
+/// replaces it, without the start and end they share, each written with `…`
+/// where that start or end is left out. Cut where a word or an operator
+/// would be split, so `a < b` to `a <= b` is `…<…` to `…<=…`, and a chain
+/// without its last call (`xs.filter(f).slice(0, n)` to `xs.filter(f)`) is
+/// `….slice(0, n)` to `…`. `None` where they share no start or end, or the
+/// mutant is not one of `SPLICED`.
+fn changed(mutant: &CandidateMutant) -> Option<(String, String)> {
+    if !SPLICED.contains(&mutant.mutator.as_str()) {
+        return None;
+    }
+    let replacement = replaced(mutant);
+    if replacement == mutant.replacement {
+        // Not written from the original: only the descriptor is known.
+        return None;
+    }
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (original, replacement) = (flat(&mutant.original), flat(&replacement));
+    let (from, to, before, after) = differing(&original, &replacement)?;
+    let (before, after) = (if before { "…" } else { "" }, if after { "…" } else { "" });
+    let shown = |part: &str| {
+        let part = part.trim();
+        if part.is_empty() {
+            "…".to_owned()
+        } else {
+            one_line(&format!("{before}{part}{after}"))
+        }
+    };
+    Some((shown(from), shown(to)))
+}
+
+/// The class of a character for where a change may be cut: words and
+/// operators are not split, anything else may be.
+fn class(character: char) -> u8 {
+    if character.is_alphanumeric() || matches!(character, '_' | '$') {
+        1
+    } else if "<>=!&|?+-*/%^~".contains(character) {
+        2
+    } else {
+        0
+    }
+}
+
+/// The parts of `from` and `to` between their longest shared start and end,
+/// each moved out to the nearest place no word or operator is split, and
+/// whether they share a start and an end. `None` where they share neither.
+fn differing<'t>(from: &'t str, to: &'t str) -> Option<(&'t str, &'t str, bool, bool)> {
+    let (a, b) = (
+        from.char_indices().collect::<Vec<_>>(),
+        to.char_indices().collect::<Vec<_>>(),
+    );
+    let mut prefix = a
+        .iter()
+        .zip(&b)
+        .take_while(|((_, x), (_, y))| x == y)
+        .count();
+    let longest = a.len().min(b.len());
+    let mut suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take(longest - prefix)
+        .take_while(|((_, x), (_, y))| x == y)
+        .count();
+    // A cut between two characters of a class, in either text, splits it.
+    let splits = |chars: &[(usize, char)], at: usize| {
+        at > 0 && at < chars.len() && {
+            let before = class(chars[at - 1].1);
+            before != 0 && before == class(chars[at].1)
+        }
+    };
+    while prefix > 0 && (splits(&a, prefix) || splits(&b, prefix)) {
+        prefix -= 1;
+    }
+    while suffix > 0 && (splits(&a, a.len() - suffix) || splits(&b, b.len() - suffix)) {
+        suffix -= 1;
+    }
+    if prefix == 0 && suffix == 0 {
+        return None;
+    }
+    let at = |chars: &[(usize, char)], text: &'t str, index: usize| {
+        chars.get(index).map_or(text.len(), |(at, _)| *at)
+    };
+    Some((
+        &from[at(&a, from, prefix)..at(&a, from, a.len() - suffix)],
+        &to[at(&b, to, prefix)..at(&b, to, b.len() - suffix)],
+        prefix > 0,
+        suffix > 0,
+    ))
 }
 
 /// The start of `text` whose whitespace flattens to more than `ONE_LINE`
@@ -1310,6 +1451,92 @@ mod tests {
         assert_eq!(one_line(&"x".repeat(200)).chars().count(), 120);
     }
 
+    /// What a mutant changes, without what it shares with the original.
+    #[test]
+    fn the_part_a_mutant_changes_is_cut_from_what_it_shares() {
+        let chain = "candidates\n    .filter((c) => c.ready)\n    .slice(0, maxUsers)";
+        let slice = mutant("MethodExpression", "removed", chain);
+        assert_eq!(
+            changed(&slice),
+            Some(("….slice(0, maxUsers)".into(), "…".into()))
+        );
+        // Two mutants of one chain, which start at the same place, differ.
+        let filter = mutant(
+            "MethodExpression",
+            "removed",
+            "candidates\n    .filter((c) => c.ready)",
+        );
+        assert_eq!(
+            changed(&filter),
+            Some(("….filter((c) => c.ready)".into(), "…".into()))
+        );
+        let renamed = mutant("MethodExpression", "endsWith", "s.trim().startsWith(p)");
+        assert_eq!(
+            changed(&renamed),
+            Some(("…startsWith…".into(), "…endsWith…".into()))
+        );
+        // An operator is not split: `<` becomes `<=`, not `` becomes `=`.
+        let boundary = operated("EqualityOperator", "<=", "a < b", "<");
+        assert_eq!(changed(&boundary), Some(("…<…".into(), "…<=…".into())));
+        let flipped = operated("EqualityOperator", ">", "a >= b", ">=");
+        assert_eq!(changed(&flipped), Some(("…>=…".into(), "…>…".into())));
+        // A replacement written whole, or only named, has no part; nor has
+        // an optional link, whose `?` alone would be the part.
+        for whole in [
+            mutant("OptionalChaining", ".name", "a?.b?.name"),
+            mutant("BlockStatement", "{}", "{ x(); }"),
+            mutant("ConditionalExpression", "true", "a > b"),
+            mutant("EqualityOperator", "<=", "a < b"),
+        ] {
+            assert_eq!(changed(&whole), None, "{}", whole.id);
+        }
+    }
+
+    /// A mutant a static rule shows equivalent is equivalent whatever ran.
+    #[test]
+    fn an_equivalent_mutant_is_decided_before_reach() {
+        let guarded = CandidateMutant {
+            equivalent: Some(crate::js_mutant_links::StaticNote {
+                rule: "zero-guarded".into(),
+                reason: "only 0 tells them apart".into(),
+            }),
+            ..operated("EqualityOperator", ">=", "n > 0", ">")
+        };
+        for observations in [Observations::default(), ran()] {
+            let (status, reason) = verdict(&guarded, &observations);
+            assert_eq!(
+                (status, reason.code, reason.sentence.as_str()),
+                (
+                    Status::Equivalent,
+                    "zero-guarded",
+                    "only 0 tells them apart"
+                )
+            );
+        }
+        // Even where a server process ran it without values.
+        let mut server = ran();
+        server.server_hits.insert("s".into());
+        assert_eq!(verdict(&guarded, &server).0, Status::Equivalent);
+        let newer = CandidateMutant {
+            equivalent: Some(crate::js_mutant_links::StaticNote {
+                rule: "a-later-rule".into(),
+                reason: "r".into(),
+            }),
+            ..guarded.clone()
+        };
+        assert_eq!(verdict(&newer, &ran()).1.code, "static");
+        // A hint changes nothing.
+        let clock = CandidateMutant {
+            equivalent: None,
+            untestable: Some(crate::js_mutant_links::StaticNote {
+                rule: "clock".into(),
+                reason: "reads the clock".into(),
+            }),
+            ..guarded
+        };
+        assert_ne!(verdict(&clock, &ran()).0, Status::Equivalent);
+    }
+
     /// A mutant of `original` on line 1, in statement `s` of function `f`.
     fn mutant(mutator: &str, replacement: &str, original: &str) -> CandidateMutant {
         let end = original.len() as u32 + 1;
@@ -1330,6 +1557,8 @@ mod tests {
             compare: None,
             probe: None,
             arrow: None,
+            equivalent: None,
+            untestable: None,
         }
     }
 

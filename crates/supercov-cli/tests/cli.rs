@@ -20354,7 +20354,9 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(
         &summary,
-        &["Mutants      15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown"],
+        &[
+            "Mutants      15 · weak score 53.3% · 1 not infected · 6 not reached · 0 unknown · 0 equivalent",
+        ],
     );
     let summary = project.supercov(&["runs", "latest", "--json"]).json();
     assert_eq!(summary["data"]["mutants"]["mutantSet"], "stryker-js@10.1.1");
@@ -20374,7 +20376,8 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         data["summary"],
         serde_json::json!({
             "mutants": 15,
-            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0},
+            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0, "equivalent": 0},
+            "untestable": 0,
             "weakScore": 0.5333,
             "weakScoreReached": 0.8889,
             "mutationScore": null,
@@ -20832,7 +20835,8 @@ fn mutants_under_node_test_are_decided_from_the_values_its_records_carry() {
         reply["data"]["summary"],
         serde_json::json!({
             "mutants": 15,
-            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0},
+            "status": {"not-reached": 6, "not-infected": 1, "infected": 8, "unknown": 0, "equivalent": 0},
+            "untestable": 0,
             "weakScore": 0.5333,
             "weakScoreReached": 0.8889,
             "mutationScore": null,

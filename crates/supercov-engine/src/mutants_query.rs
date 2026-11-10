@@ -15,7 +15,9 @@ use supercov_contracts::AgentPagination;
 
 use crate::{
     agent_json,
-    coverage_index::{CoverageIndex, CoverageViewId, IndexedMutant, MutantCounts, MutantStatus},
+    coverage_index::{
+        CoverageIndex, CoverageViewId, IndexedMutant, MutantCounts, MutantStatus, Untestable,
+    },
     coverage_query::QueryError,
 };
 
@@ -152,8 +154,11 @@ pub struct MutantLevels {
 pub struct MutantsSummary {
     pub mutants: usize,
     pub status: MutantCounts,
-    /// `infected / (infected + not-infected + not-reached)`; unknown
-    /// mutants are left out.
+    /// Of the not-infected mutants, those at a clock or random boundary:
+    /// practically untestable, and still counted as not infected.
+    pub untestable: usize,
+    /// `infected / (infected + not-infected + not-reached)`; unknown and
+    /// equivalent mutants are left out.
     pub weak_score: Option<f64>,
     /// `infected / (infected + not-infected)`: over reached code.
     pub weak_score_reached: Option<f64>,
@@ -162,7 +167,7 @@ pub struct MutantsSummary {
 }
 
 impl MutantsSummary {
-    pub fn of(status: MutantCounts) -> Self {
+    pub fn of(status: MutantCounts, untestable: usize) -> Self {
         let score = |denominator: usize| {
             (denominator > 0).then(|| {
                 (status.infected as f64 / denominator as f64 * 10_000.0).round() / 10_000.0
@@ -170,6 +175,7 @@ impl MutantsSummary {
         };
         Self {
             mutants: status.total(),
+            untestable,
             weak_score: score(status.infected + status.not_infected + status.not_reached),
             weak_score_reached: score(status.infected + status.not_infected),
             mutation_score: None,
@@ -197,9 +203,10 @@ pub fn run_summary(index: &CoverageIndex<'_>) -> Result<Option<MutantsRunSummary
         .files
         .iter()
         .for_each(|file| counts.merge(&file.counts));
+    let untestable = mutation.files.iter().map(|file| file.untestable).sum();
     Ok((counts.total() > 0).then(|| MutantsRunSummary {
         mutant_set: mutation.mutant_set,
-        summary: MutantsSummary::of(counts),
+        summary: MutantsSummary::of(counts, untestable),
     }))
 }
 
@@ -213,9 +220,11 @@ pub struct MutantSpan {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WeakResult {
-    /// `reached`, `not-reached`, or `unknown`.
+    /// `reached`, `not-reached`, or `unknown` (an equivalent mutant's,
+    /// which is decided before reach).
     pub reach: &'static str,
-    /// `infected`, `not-infected`, `unknown`, or null where not reached.
+    /// `infected`, `not-infected`, `unknown`, or null where not reached or
+    /// equivalent.
     pub infection: Option<&'static str>,
     /// A stable code for the reason.
     pub code: String,
@@ -223,6 +232,22 @@ pub struct WeakResult {
     /// An infection that is only that the code around it ran.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub proxy: bool,
+    /// The static rule an equivalent mutant is shown equivalent by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// `clock` or `random`: the input that would make it differ is one
+    /// exact reading, practically out of a test's reach. A hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untestable: Option<Untestable>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untestable_reason: Option<String>,
+}
+
+/// The part of the code a mutant changes, and what replaces it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MutantChange {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -234,6 +259,11 @@ pub struct MutantEntry {
     pub mutator: String,
     pub original: String,
     pub replacement: String,
+    /// Where `original` is on several lines or is too long to show beside
+    /// its replacement: the part the mutant changes, without the start and
+    /// end they share, which a reader is shown instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed: Option<MutantChange>,
     pub status: MutantStatus,
     pub weak: WeakResult,
     /// Reserved for strong mutation: `{ status, tests, durationMs }`.
@@ -246,13 +276,28 @@ pub struct MutantEntry {
 /// cannot say whether it ran.
 const UNPLACED: [&str; 2] = ["no-statement-point", "no-point"];
 
+/// How many characters `original → replacement` may take to be shown whole,
+/// as the per-file listing shows a mutant.
+pub const SHOWN_WHOLE: usize = 60;
+
 impl MutantEntry {
     fn of(mutant: &IndexedMutant, stryker: Option<String>) -> Self {
         let reach = match mutant.status {
             MutantStatus::NotReached => "not-reached",
             MutantStatus::Unknown if UNPLACED.contains(&mutant.code.as_str()) => "unknown",
+            MutantStatus::Equivalent => "unknown",
             _ => "reached",
         };
+        let whole = mutant.original.chars().count() + 3 + mutant.replacement.chars().count();
+        let shown_whole = mutant.start.0 == mutant.end.0 && whole <= SHOWN_WHOLE;
+        let changed = mutant
+            .changed
+            .as_ref()
+            .filter(|_| !shown_whole)
+            .map(|(from, to)| MutantChange {
+                from: from.clone(),
+                to: to.clone(),
+            });
         Self {
             id: mutant.id(),
             file: mutant.file.clone(),
@@ -263,14 +308,21 @@ impl MutantEntry {
             mutator: mutant.mutator.clone(),
             original: mutant.original.clone(),
             replacement: mutant.replacement.clone(),
+            changed,
             status: mutant.status,
             weak: WeakResult {
                 reach,
-                infection: (mutant.status != MutantStatus::NotReached)
-                    .then(|| mutant.status.name()),
+                infection: (!matches!(
+                    mutant.status,
+                    MutantStatus::NotReached | MutantStatus::Equivalent
+                ))
+                .then(|| mutant.status.name()),
                 code: mutant.code.clone(),
                 reason: mutant.reason.clone(),
                 proxy: mutant.proxy,
+                rule: (mutant.status == MutantStatus::Equivalent).then(|| mutant.code.clone()),
+                untestable: mutant.untestable.as_ref().map(|(kind, _)| *kind),
+                untestable_reason: mutant.untestable.as_ref().map(|(_, reason)| reason.clone()),
             },
             strong: None,
             stryker,
@@ -287,9 +339,10 @@ pub struct MutantFileRow {
 }
 
 impl MutantFileRow {
-    /// No test ran any of the file's mutants.
+    /// No test ran any of the file's mutants (an equivalent one needs none).
     pub fn unreached(&self) -> bool {
-        self.status.total() > 0 && self.status.not_reached == self.status.total()
+        self.status.not_reached > 0
+            && self.status.not_reached + self.status.equivalent == self.status.total()
     }
 }
 
@@ -446,8 +499,13 @@ fn stryker_by_id(
     merged
 }
 
+/// A status that says StrykerJS cannot kill the mutant. An equivalent one
+/// it killed is a static rule's violation.
 fn unkilled(status: MutantStatus) -> bool {
-    matches!(status, MutantStatus::NotInfected | MutantStatus::NotReached)
+    matches!(
+        status,
+        MutantStatus::NotInfected | MutantStatus::NotReached | MutantStatus::Equivalent
+    )
 }
 
 fn join(
@@ -600,6 +658,10 @@ pub fn coverage_mutants_query(
     }
     let mut counts = MutantCounts::default();
     asked.iter().for_each(|mutant| counts.add(mutant.status));
+    let untestable = asked
+        .iter()
+        .filter(|mutant| mutant.status == MutantStatus::NotInfected && mutant.untestable.is_some())
+        .count();
     let (stryker, statuses) = match &options.options.stryker {
         Some(reports) => {
             let in_scope = |mutant: &StrykerReportMutant| {
@@ -653,7 +715,7 @@ pub fn coverage_mutants_query(
             },
             file,
             line,
-            summary: MutantsSummary::of(counts),
+            summary: MutantsSummary::of(counts, untestable),
             note,
             mutants: page,
             stryker,
@@ -723,6 +785,7 @@ mod tests {
                     not_infected,
                     infected,
                     unknown: 0,
+                    equivalent: 0,
                 },
             };
         let mut rows = vec![
@@ -749,22 +812,163 @@ mod tests {
         );
     }
 
+    fn indexed(
+        start: (u32, u32),
+        end: (u32, u32),
+        original: &str,
+        replacement: &str,
+        changed: Option<(&str, &str)>,
+    ) -> IndexedMutant {
+        IndexedMutant {
+            file: "app/route.ts".into(),
+            start,
+            end,
+            mutator: "MethodExpression".into(),
+            descriptor: "removed".into(),
+            original: original.into(),
+            replacement: replacement.into(),
+            changed: changed.map(|(from, to)| (from.into(), to.into())),
+            status: MutantStatus::NotInfected,
+            proxy: false,
+            code: "c".into(),
+            reason: "r".into(),
+            untestable: None,
+        }
+    }
+
+    /// A mutant on several lines, or too long to show beside its
+    /// replacement, is shown by the part it changes; a short one whole.
     #[test]
-    fn scores_leave_unknown_mutants_out_and_are_null_over_nothing() {
-        let summary = MutantsSummary::of(MutantCounts {
-            not_reached: 1,
-            not_infected: 1,
-            infected: 2,
-            unknown: 5,
-        });
-        assert_eq!(summary.mutants, 9);
+    fn a_long_mutant_is_shown_by_the_part_it_changes() {
+        let slice = MutantEntry::of(
+            &indexed(
+                (687, 7),
+                (689, 25),
+                "candidates .filter((c) => c.ready) .slice(0, maxUsers)",
+                "candidates .filter((c) => c.ready)",
+                Some(("….slice(0, maxUsers)", "…")),
+            ),
+            None,
+        );
+        let filter = MutantEntry::of(
+            &indexed(
+                (687, 7),
+                (688, 29),
+                "candidates .filter((c) => c.ready)",
+                "candidates",
+                Some(("….filter((c) => c.ready)", "…")),
+            ),
+            None,
+        );
+        assert_eq!(
+            slice.changed,
+            Some(MutantChange {
+                from: "….slice(0, maxUsers)".into(),
+                to: "…".into()
+            })
+        );
+        // Two mutants of one chain start alike and are told apart.
+        assert_ne!(slice.changed, filter.changed);
+        // The original and replacement stay as they were.
+        assert_eq!(
+            slice.original,
+            "candidates .filter((c) => c.ready) .slice(0, maxUsers)"
+        );
+        let json = serde_json::to_value(&slice).unwrap();
+        assert_eq!(
+            json["changed"],
+            serde_json::json!({"from": "….slice(0, maxUsers)", "to": "…"})
+        );
+        // One line too long to show whole.
+        let long = MutantEntry::of(
+            &indexed(
+                (3, 1),
+                (3, 70),
+                "accounts.filter((account) => account.active).map(toRow).slice(0, n)",
+                "accounts.filter((account) => account.active).map(toRow)",
+                Some(("….slice(0, n)", "…")),
+            ),
+            None,
+        );
+        assert!(long.changed.is_some());
+        // A short one fits, and is shown whole.
+        let boundary = MutantEntry::of(
+            &IndexedMutant {
+                mutator: "EqualityOperator".into(),
+                descriptor: "<=".into(),
+                ..indexed((1, 1), (1, 6), "a < b", "a <= b", Some(("…<…", "…<=…")))
+            },
+            None,
+        );
+        assert_eq!(boundary.changed, None);
+        let json = serde_json::to_value(&boundary).unwrap();
+        assert!(json.get("changed").is_none(), "{json}");
+    }
+
+    /// An equivalent mutant names its rule; a hint is listed beside the
+    /// status it does not change.
+    #[test]
+    fn an_equivalent_mutant_names_its_rule_and_a_hint_its_kind() {
+        let equivalent = MutantEntry::of(
+            &IndexedMutant {
+                status: MutantStatus::Equivalent,
+                code: "zero-guarded".into(),
+                ..indexed((1, 1), (1, 6), "n > 0", "n >= 0", None)
+            },
+            None,
+        );
+        let json = serde_json::to_value(&equivalent).unwrap();
+        assert_eq!(json["status"], "equivalent");
+        assert_eq!(
+            json["weak"],
+            serde_json::json!({
+                "reach": "unknown",
+                "infection": null,
+                "code": "zero-guarded",
+                "reason": "r",
+                "rule": "zero-guarded",
+            })
+        );
+        let hinted = MutantEntry::of(
+            &IndexedMutant {
+                untestable: Some((Untestable::Random, "reads Math.random()".into())),
+                ..indexed((1, 1), (1, 6), "x < y", "x <= y", None)
+            },
+            None,
+        );
+        let json = serde_json::to_value(&hinted).unwrap();
+        assert_eq!(json["status"], "not-infected");
+        assert_eq!(json["weak"]["untestable"], "random");
+        assert_eq!(json["weak"]["untestableReason"], "reads Math.random()");
+        // StrykerJS killing an equivalent mutant is a rule's violation.
+        assert!(unkilled(MutantStatus::Equivalent));
+    }
+
+    #[test]
+    fn scores_leave_unknown_and_equivalent_mutants_out_and_are_null_over_nothing() {
+        let summary = MutantsSummary::of(
+            MutantCounts {
+                not_reached: 1,
+                not_infected: 1,
+                infected: 2,
+                unknown: 5,
+                equivalent: 4,
+            },
+            1,
+        );
+        assert_eq!(summary.mutants, 13);
         assert_eq!(summary.weak_score, Some(0.5));
         assert_eq!(summary.weak_score_reached, Some(0.6667));
         assert_eq!(summary.mutation_score, None);
-        let none = MutantsSummary::of(MutantCounts {
-            unknown: 3,
-            ..MutantCounts::default()
-        });
+        assert_eq!(summary.untestable, 1);
+        let none = MutantsSummary::of(
+            MutantCounts {
+                unknown: 3,
+                equivalent: 2,
+                ..MutantCounts::default()
+            },
+            0,
+        );
         assert_eq!((none.weak_score, none.weak_score_reached), (None, None));
     }
 }

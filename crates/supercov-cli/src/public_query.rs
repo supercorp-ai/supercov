@@ -96,7 +96,7 @@ by how many no test reaches; with a file, its mutants by line; with
 file:line, that line's mutants and why.
 
 Options:
-  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown
+  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent
   --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
@@ -482,11 +482,11 @@ fn parse_options(
                                     "killed" | "survived" | "timeout"
                                 ) {
                                     format!(
-                                        "--status {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected or unknown"
+                                        "--status {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 } else {
                                     format!(
-                                        "--status {name} is not a status; use not-reached, not-infected, infected or unknown"
+                                        "--status {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(

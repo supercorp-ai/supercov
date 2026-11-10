@@ -1000,13 +1000,49 @@ fn score(value: Option<f64>) -> String {
 fn mutants_summary_line(mutants: &supercov_engine::mutants_query::MutantsRunSummary) -> String {
     let summary = &mutants.summary;
     format!(
-        "Mutants      {} · weak score {} · {} not infected · {} not reached · {} unknown",
+        "Mutants      {} · weak score {} · {} · {} not reached · {} unknown · {} equivalent",
         count(summary.mutants),
         score(summary.weak_score),
-        count(summary.status.not_infected),
+        not_infected(summary),
         count(summary.status.not_reached),
         count(summary.status.unknown),
+        count(summary.status.equivalent),
     )
+}
+
+/// `211 not infected`, and how many of them are at a clock or random
+/// boundary where there are any.
+fn not_infected(summary: &supercov_engine::mutants_query::MutantsSummary) -> String {
+    let not_infected = format!("{} not infected", count(summary.status.not_infected));
+    if summary.untestable == 0 {
+        not_infected
+    } else {
+        format!(
+            "{not_infected} ({} at a clock or random boundary)",
+            count(summary.untestable)
+        )
+    }
+}
+
+/// A mutant's code: the part it changes where its original is too long or
+/// on several lines (`….slice(0, n) → …`), and otherwise all of it.
+fn mutant_change(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    match &mutant.changed {
+        Some(changed) => format!("{} → {}", changed.from, changed.to),
+        None => format!("{} → {}", mutant.original, mutant.replacement),
+    }
+}
+
+/// The hint that a mutant not infected is practically untestable.
+fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    match mutant.weak.untestable {
+        Some(kind)
+            if mutant.status == supercov_engine::coverage_index::MutantStatus::NotInfected =>
+        {
+            format!("  ({} boundary)", kind.name())
+        }
+        _ => String::new(),
+    }
 }
 
 /// Text cut to `width` characters, with `…` where it was cut.
@@ -1142,12 +1178,13 @@ fn mutants_text(
                 score(summary.weak_score_reached)
             ),
             format!(
-                "  Mutants      {} · {} infected · {} not infected · {} not reached · {} unknown",
+                "  Mutants      {} · {} infected · {} · {} not reached · {} unknown · {} equivalent",
                 count(summary.mutants),
                 count(summary.status.infected),
-                count(summary.status.not_infected),
+                not_infected(summary),
                 count(summary.status.not_reached),
                 count(summary.status.unknown),
+                count(summary.status.equivalent),
             ),
         ]);
     }
@@ -1232,19 +1269,26 @@ fn mutants_text(
         lines.extend([
             String::new(),
             format!(
-                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}",
-                "File", "Mutants", "Not infected", "Not reached", "Infected", "Unknown"
+                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}  {:>10}",
+                "File",
+                "Mutants",
+                "Not infected",
+                "Not reached",
+                "Infected",
+                "Unknown",
+                "Equivalent"
             ),
         ]);
         for row in &rows {
             lines.push(format!(
-                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}",
+                "{:<width$}  {:>7}  {:>12}  {:>11}  {:>8}  {:>7}  {:>10}",
                 row.file,
                 count(row.status.total()),
                 count(row.status.not_infected),
                 count(row.status.not_reached),
                 count(row.status.infected),
                 count(row.status.unknown),
+                count(row.status.equivalent),
             ));
         }
         let files = supercov_engine::agent_json::pagination(
@@ -1308,17 +1352,27 @@ fn mutants_text(
         for mutant in &data.mutants {
             lines.extend([
                 format!(
-                    "{}:{}  {}  {}{}",
+                    "{}:{}  {}  {}{}{}",
                     mutant.span.start[0],
                     mutant.span.start[1],
                     mutant.mutator,
                     mutant.status.name(),
+                    untestable_suffix(mutant),
                     stryker(&mutant.stryker)
                 ),
-                format!("  {} → {}", mutant.original, mutant.replacement),
-                format!("  why: {} ({})", mutant.weak.reason, mutant.weak.code),
-                format!("  id:  {}", mutant.id),
+                format!("  {}", mutant_change(mutant)),
             ]);
+            if mutant.changed.is_some() {
+                lines.push(format!("  in:  {}", mutant.original));
+            }
+            lines.push(format!(
+                "  why: {} ({})",
+                mutant.weak.reason, mutant.weak.code
+            ));
+            if let Some(reason) = &mutant.weak.untestable_reason {
+                lines.push(format!("  untestable in practice: {reason}"));
+            }
+            lines.push(format!("  id:  {}", mutant.id));
         }
     } else {
         let position = |mutant: &supercov_engine::mutants_query::MutantEntry| {
@@ -1330,7 +1384,10 @@ fn mutants_text(
             }
         };
         let change = |mutant: &supercov_engine::mutants_query::MutantEntry| {
-            clipped(&format!("{} → {}", mutant.original, mutant.replacement), 60)
+            clipped(
+                &mutant_change(mutant),
+                supercov_engine::mutants_query::SHOWN_WHOLE,
+            )
         };
         let widths = data.mutants.iter().fold([0; 4], |widths, mutant| {
             [
@@ -1343,12 +1400,13 @@ fn mutants_text(
         let [at, mutator, code, status] = widths;
         for mutant in &data.mutants {
             lines.push(format!(
-                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {}{}",
+                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {}{}{}",
                 position(mutant),
                 mutant.mutator,
                 change(mutant),
                 mutant.status.name(),
                 mutant.weak.reason,
+                untestable_suffix(mutant),
                 stryker(&mutant.stryker)
             ));
         }

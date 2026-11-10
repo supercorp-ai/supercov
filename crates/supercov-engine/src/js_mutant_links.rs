@@ -38,8 +38,9 @@ use crate::js_mutants::LedgerMutant;
 /// works out again: a mutant's `id`, from its file, span, mutator and
 /// descriptor, and of a long `original` all but what is shown of it (see
 /// `js_weak_mutation::abbreviated`). Version 1, which holds both whole, is
-/// read as it was.
-pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 2;
+/// read as it was. Version 3 adds what the program as written says of a
+/// mutant (`equivalent`, `untestable`); an older file has none.
+pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 3;
 
 /// `.supercov/frontend-evidence/mutants.json`: every instrumented file's
 /// mutants, or none when the run did not enumerate them (`mutantSet` null).
@@ -200,6 +201,23 @@ pub struct CandidateMutant {
     /// What the source says of a concise arrow's body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrow: Option<ArrowLink>,
+    /// The static rule that shows no input can make the mutant differ
+    /// (`js_static_mutants`): its status is then `equivalent`, whatever the
+    /// tests did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equivalent: Option<StaticNote>,
+    /// Why the input that would make it differ is practically out of a
+    /// test's reach (`clock`, `random`): a hint that changes no status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untestable: Option<StaticNote>,
+}
+
+/// A rule's stable code and the sentence that says why it applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StaticNote {
+    pub rule: String,
+    pub reason: String,
 }
 
 /// An operator and where it is: a byte offset into the mutant's `original`.
@@ -432,6 +450,8 @@ pub(crate) struct MutantFacts {
     /// Each optional link and the optional links of its chain before it.
     chains: HashMap<SpanKey, Vec<Span>>,
     arrows: HashMap<SpanKey, ArrowLink>,
+    /// Equivalent mutants and untestable boundaries, from the program alone.
+    statics: crate::js_static_mutants::StaticFacts,
 }
 
 struct FactCollector<'s> {
@@ -458,7 +478,9 @@ impl MutantFacts {
             facts: MutantFacts::default(),
         };
         collector.visit_program(program);
-        collector.facts
+        let mut facts = collector.facts;
+        facts.statics = crate::js_static_mutants::StaticFacts::collect(program);
+        facts
     }
 
     /// How the expression at `span` is used, through right operands.
@@ -968,6 +990,8 @@ pub(crate) fn link(
                     text: (*text).to_owned(),
                     at: (offset - span.start) as usize,
                 });
+            let equivalent = facts.statics.equivalent(&mutant);
+            let untestable = facts.statics.untestable(&mutant);
             CandidateMutant {
                 id: format!(
                     "{file}:{}:{}-{}:{}:{}:{}",
@@ -993,6 +1017,8 @@ pub(crate) fn link(
                 compare,
                 probe,
                 arrow,
+                equivalent,
+                untestable,
             }
         })
         .collect()
@@ -1442,7 +1468,7 @@ mod tests {
         // Written without the ids its mutants' places make.
         let encoded = serde_json::to_string(&file).unwrap();
         assert!(encoded.starts_with(
-            "{\"schemaVersion\":2,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"mutator\":"
+            "{\"schemaVersion\":3,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"mutator\":"
         ));
         let stored: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         for mutant in stored["files"]["src/links.ts"].as_array().unwrap() {
@@ -1464,6 +1490,68 @@ mod tests {
         let read: MutantsFile = serde_json::from_value(first).unwrap();
         assert_eq!(read.files, file.files);
         assert_eq!(read.schema_version, 1);
+    }
+
+    /// What the program alone says of a mutant is linked to it and stored
+    /// with it: a static rule's equivalence and an untestable boundary.
+    #[test]
+    fn static_rules_are_linked_and_stored() {
+        let source = "export function f(a: number, b: number) {\n  const n = a - b;\n  return [n && n > 0, Date.now() > a, a > 0];\n}\n";
+        let output = instrumented(source, true, true);
+        let guarded = mutant(&output, "n > 0", "EqualityOperator", ">=");
+        assert_eq!(
+            guarded.equivalent.as_ref().map(|note| note.rule.as_str()),
+            Some("zero-guarded")
+        );
+        assert_eq!(guarded.untestable, None);
+        let other_way = mutant(&output, "n > 0", "EqualityOperator", "<=");
+        assert_eq!(other_way.equivalent, None);
+        let clock = mutant(&output, "Date.now() > a", "EqualityOperator", ">=");
+        assert_eq!(clock.equivalent, None);
+        assert_eq!(
+            clock.untestable.as_ref().map(|note| note.rule.as_str()),
+            Some("clock")
+        );
+        let plain = mutant(&output, "a > 0", "EqualityOperator", ">=");
+        assert_eq!((&plain.equivalent, &plain.untestable), (&None, &None));
+        let file = MutantsFile {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            files: BTreeMap::from([("src/links.ts".to_owned(), output.mutants.clone())]),
+            tests_without_values: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&file).unwrap();
+        assert!(encoded.contains("\"equivalent\":{\"rule\":\"zero-guarded\",\"reason\":"));
+        assert!(encoded.contains("\"untestable\":{\"rule\":\"clock\",\"reason\":"));
+        let decoded: MutantsFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, file);
+        // The verdicts: equivalent before anything ran, the hint kept.
+        let results = crate::js_weak_mutation::results(&[], Some(decoded)).unwrap();
+        let listed = |original: &str, descriptor: &str| {
+            results
+                .mutants
+                .iter()
+                .find(|m| m.original == original && m.descriptor == descriptor)
+                .unwrap()
+                .clone()
+        };
+        let equivalent = listed("n > 0", ">=");
+        assert_eq!(
+            (equivalent.status, equivalent.code.as_str()),
+            (
+                crate::coverage_index::MutantStatus::Equivalent,
+                "zero-guarded"
+            )
+        );
+        let hinted = listed("Date.now() > a", ">=");
+        assert_eq!(
+            hinted.status,
+            crate::coverage_index::MutantStatus::NotReached
+        );
+        assert_eq!(
+            hinted.untestable.map(|(kind, _)| kind),
+            Some(crate::coverage_index::Untestable::Clock)
+        );
     }
 
     /// The JavaScript of every source a file of mutants could be made of:

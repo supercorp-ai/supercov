@@ -83,8 +83,8 @@ const DECISION_CONDITION_RECORD_SIZE: usize = 64;
 const LIMITATION_RECORD_SIZE: usize = 64;
 const COVERAGE_MODEL_RECORD_SIZE: usize = 48;
 const MUTATION_RECORD_SIZE: usize = 16;
-const MUTATION_FILE_RECORD_SIZE: usize = 32;
-const MUTANT_RECORD_SIZE: usize = 80;
+const MUTATION_FILE_RECORD_SIZE: usize = 40;
+const MUTANT_RECORD_SIZE: usize = 104;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4104,14 +4104,18 @@ pub enum MutantStatus {
     NotInfected,
     Infected,
     Unknown,
+    /// No input can make it differ, by a static rule: decided before reach
+    /// and infection, and left out of both weak scores.
+    Equivalent,
 }
 
 impl MutantStatus {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::NotReached,
         Self::NotInfected,
         Self::Infected,
         Self::Unknown,
+        Self::Equivalent,
     ];
 
     pub fn name(self) -> &'static str {
@@ -4120,6 +4124,7 @@ impl MutantStatus {
             Self::NotInfected => "not-infected",
             Self::Infected => "infected",
             Self::Unknown => "unknown",
+            Self::Equivalent => "equivalent",
         }
     }
 
@@ -4139,6 +4144,50 @@ impl MutantStatus {
     }
 }
 
+/// Why the input that would make a mutant differ is practically out of a
+/// test's reach. A hint: it changes no status or score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Untestable {
+    /// A boundary comparison of what reads the clock: equal only on one
+    /// exact millisecond.
+    Clock,
+    /// A boundary comparison of what reads `Math.random()`.
+    Random,
+}
+
+impl Untestable {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clock => "clock",
+            Self::Random => "random",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Clock, Self::Random]
+            .into_iter()
+            .find(|kind| kind.name() == name)
+    }
+
+    fn code(kind: Option<Self>) -> u8 {
+        match kind {
+            None => 0,
+            Some(Self::Clock) => 1,
+            Some(Self::Random) => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Option<Self>, CoverageIndexError> {
+        match code {
+            0 => Ok(None),
+            1 => Ok(Some(Self::Clock)),
+            2 => Ok(Some(Self::Random)),
+            _ => Err(CoverageIndexError::InvalidRecord("mutant untestable")),
+        }
+    }
+}
+
 /// One mutant and its weak-mutation verdict, as the index keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedMutant {
@@ -4154,12 +4203,18 @@ pub struct IndexedMutant {
     /// The code with the mutant in place, on one line, shortened; the
     /// descriptor where it is not simply written.
     pub replacement: String,
+    /// The part of `original` the mutant changes and what replaces it,
+    /// without the start and end they share, where it is one part.
+    pub changed: Option<(String, String)>,
     pub status: MutantStatus,
     /// An infection that is only that the code around it ran.
     pub proxy: bool,
-    /// A stable reason code, and the sentence that says why.
+    /// A stable reason code, and the sentence that says why. An equivalent
+    /// mutant's code is its rule's.
     pub code: String,
     pub reason: String,
+    /// Why the input that would make it differ is out of a test's reach.
+    pub untestable: Option<(Untestable, String)>,
 }
 
 impl IndexedMutant {
@@ -4195,6 +4250,7 @@ pub struct MutantCounts {
     pub not_infected: usize,
     pub infected: usize,
     pub unknown: usize,
+    pub equivalent: usize,
 }
 
 impl MutantCounts {
@@ -4208,6 +4264,7 @@ impl MutantCounts {
             MutantStatus::NotInfected => &mut self.not_infected,
             MutantStatus::Infected => &mut self.infected,
             MutantStatus::Unknown => &mut self.unknown,
+            MutantStatus::Equivalent => &mut self.equivalent,
         }
     }
 
@@ -4217,11 +4274,12 @@ impl MutantCounts {
             MutantStatus::NotInfected => self.not_infected,
             MutantStatus::Infected => self.infected,
             MutantStatus::Unknown => self.unknown,
+            MutantStatus::Equivalent => self.equivalent,
         }
     }
 
     pub fn total(&self) -> usize {
-        self.not_reached + self.not_infected + self.infected + self.unknown
+        self.not_reached + self.not_infected + self.infected + self.unknown + self.equivalent
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -4236,6 +4294,8 @@ impl MutantCounts {
 pub struct IndexedFileMutation {
     pub file: String,
     pub counts: MutantCounts,
+    /// Of its not-infected mutants, those at a clock or random boundary.
+    pub untestable: usize,
     /// The file's mutants are records `first..first + count`.
     first: u64,
     count: u64,
@@ -4294,7 +4354,7 @@ pub(crate) fn mutation_sections(
         run[0] = 1;
         text.put(&mut run, 8, &results.mutant_set)?;
         let mut file_numbers = HashMap::<&str, usize>::new();
-        let mut file_records = Vec::<([u8; MUTATION_FILE_RECORD_SIZE], MutantCounts)>::new();
+        let mut file_records = Vec::<([u8; MUTATION_FILE_RECORD_SIZE], MutantCounts, usize)>::new();
         for (index, mutant) in results.mutants.iter().enumerate() {
             let number = match file_numbers.get(mutant.file.as_str()) {
                 Some(number) if *number + 1 == file_records.len() => *number,
@@ -4308,14 +4368,19 @@ pub(crate) fn mutation_sections(
                     text.put(&mut record, 0, &mutant.file)?;
                     put_u32(&mut record, 24, usize_u32(index));
                     file_numbers.insert(&mutant.file, file_records.len());
-                    file_records.push((record, MutantCounts::default()));
+                    file_records.push((record, MutantCounts::default(), 0));
                     file_records.len() - 1
                 }
             };
             file_records[number].1.add(mutant.status);
+            if mutant.status == MutantStatus::NotInfected && mutant.untestable.is_some() {
+                file_records[number].2 += 1;
+            }
             let mut record = [0_u8; MUTANT_RECORD_SIZE];
             record[0] = mutant.status.code();
             record[1] = u8::from(mutant.proxy);
+            record[2] = Untestable::code(mutant.untestable.as_ref().map(|(kind, _)| *kind));
+            record[3] = u8::from(mutant.changed.is_some());
             put_u32(&mut record, 4, usize_u32(number));
             put_u32(&mut record, 8, mutant.start.0);
             put_u32(&mut record, 12, mutant.start.1);
@@ -4331,14 +4396,23 @@ pub(crate) fn mutation_sections(
             ] {
                 text.put(&mut record, offset, value)?;
             }
+            if let Some((_, reason)) = &mutant.untestable {
+                text.put(&mut record, 72, reason)?;
+            }
+            if let Some((from, to)) = &mutant.changed {
+                text.put(&mut record, 80, from)?;
+                text.put(&mut record, 88, to)?;
+            }
             mutants.extend_from_slice(&record);
         }
-        for (mut record, counts) in file_records {
+        for (mut record, counts, untestable) in file_records {
             put_u32(&mut record, 8, usize_u32(counts.not_reached));
             put_u32(&mut record, 12, usize_u32(counts.not_infected));
             put_u32(&mut record, 16, usize_u32(counts.infected));
             put_u32(&mut record, 20, usize_u32(counts.unknown));
             put_u32(&mut record, 28, usize_u32(counts.total()));
+            put_u32(&mut record, 32, usize_u32(counts.equivalent));
+            put_u32(&mut record, 36, usize_u32(untestable));
             files.extend_from_slice(&record);
         }
     }
@@ -4410,16 +4484,23 @@ impl CoverageIndex<'_> {
                 not_infected: get_u32(record, 12) as usize,
                 infected: get_u32(record, 16) as usize,
                 unknown: get_u32(record, 20) as usize,
+                equivalent: get_u32(record, 32) as usize,
             };
+            let untestable = get_u32(record, 36) as usize;
             let first = u64::from(get_u32(record, 24));
             let count = u64::from(get_u32(record, 28));
-            if first != next || count != counts.total() as u64 || first + count > mutants {
+            if first != next
+                || count != counts.total() as u64
+                || untestable > counts.not_infected
+                || first + count > mutants
+            {
                 return Err(CoverageIndexError::InvalidRecord("mutation file range"));
             }
             next = first + count;
             files.push(IndexedFileMutation {
                 file: self.mutant_text(record, 0)?,
                 counts,
+                untestable,
                 first,
                 count,
             });
@@ -4440,11 +4521,18 @@ impl CoverageIndex<'_> {
         let mut mutants = Vec::with_capacity(file.count as usize);
         for index in file.first..file.first + file.count {
             let record = self.index.record(SECTION_MUTANTS, index)?;
-            if record[2..4].iter().any(|byte| *byte != 0)
-                || record[72..].iter().any(|byte| *byte != 0)
-            {
+            if record[96..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("mutant reserved bytes"));
             }
+            let untestable = match Untestable::from_code(record[2])? {
+                Some(kind) => Some((kind, self.mutant_text(record, 72)?)),
+                None => None,
+            };
+            let changed = match record[3] {
+                0 => None,
+                1 => Some((self.mutant_text(record, 80)?, self.mutant_text(record, 88)?)),
+                _ => return Err(CoverageIndexError::InvalidRecord("mutant changed")),
+            };
             mutants.push(IndexedMutant {
                 file: file.file.clone(),
                 start: (get_u32(record, 8), get_u32(record, 12)),
@@ -4453,10 +4541,12 @@ impl CoverageIndex<'_> {
                 descriptor: self.mutant_text(record, 32)?,
                 original: self.mutant_text(record, 40)?,
                 replacement: self.mutant_text(record, 48)?,
+                changed,
                 status: MutantStatus::from_code(record[0])?,
                 proxy: bool_field(record[1])?,
                 code: self.mutant_text(record, 56)?,
                 reason: self.mutant_text(record, 64)?,
+                untestable,
             });
         }
         Ok(mutants)
@@ -4524,17 +4614,31 @@ mod tests {
             descriptor: "<=".into(),
             original: "a < b".into(),
             replacement: "a <= b".into(),
+            changed: None,
             status,
             proxy,
             code: format!("code-{line}"),
             reason: format!("the reason on line {line} — ünïcode"),
+            untestable: None,
         };
         let mutants = vec![
-            mutant("src/a.js", 1, MutantStatus::NotInfected, false),
+            IndexedMutant {
+                changed: Some(("<".into(), "<=".into())),
+                untestable: Some((Untestable::Clock, "reads the clock".into())),
+                ..mutant("src/a.js", 1, MutantStatus::NotInfected, false)
+            },
             mutant("src/a.js", 2, MutantStatus::Infected, true),
+            IndexedMutant {
+                untestable: Some((Untestable::Random, "reads Math.random()".into())),
+                ..mutant("src/a.js", 3, MutantStatus::NotInfected, false)
+            },
             mutant("src/b.js", 7, MutantStatus::NotReached, false),
             mutant("src/b.js", 8, MutantStatus::Unknown, false),
-            mutant("src/b.js", 9, MutantStatus::Infected, false),
+            IndexedMutant {
+                changed: Some((".slice(0, n)".into(), String::new())),
+                ..mutant("src/b.js", 9, MutantStatus::Infected, false)
+            },
+            mutant("src/b.js", 10, MutantStatus::Equivalent, false),
         ];
         let mut report = report();
         report.mutation = Some(MutationResults {
@@ -4558,16 +4662,17 @@ mod tests {
             mutation
                 .files
                 .iter()
-                .map(|file| (file.file.as_str(), file.counts.clone()))
+                .map(|file| (file.file.as_str(), file.counts.clone(), file.untestable))
                 .collect::<Vec<_>>(),
             [
                 (
                     "src/a.js",
                     MutantCounts {
-                        not_infected: 1,
+                        not_infected: 2,
                         infected: 1,
                         ..MutantCounts::default()
-                    }
+                    },
+                    2
                 ),
                 (
                     "src/b.js",
@@ -4575,8 +4680,10 @@ mod tests {
                         not_reached: 1,
                         infected: 1,
                         unknown: 1,
+                        equivalent: 1,
                         ..MutantCounts::default()
-                    }
+                    },
+                    0
                 ),
             ]
         );
@@ -4590,7 +4697,7 @@ mod tests {
 
         // A file's mutants apart are refused, not misfiled.
         let mut scattered = mutants.clone();
-        scattered.swap(1, 2);
+        scattered.swap(2, 3);
         assert!(matches!(
             mutation_sections(Some(&MutationResults {
                 mutant_set: "stryker-js@10.1.1".into(),
