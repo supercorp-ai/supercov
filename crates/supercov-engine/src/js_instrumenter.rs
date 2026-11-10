@@ -251,8 +251,8 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
-/// The place of a statement probe, `clock.fast && hits[place] === clock.epoch
-/// || hit(file, place);`.
+/// The place of a statement probe, `hits[place] === clock.epoch ||
+/// hit(file, place);`.
 fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
     let Statement::ExpressionStatement(statement) = statement else {
         return None;
@@ -263,10 +263,10 @@ fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Op
     if logical.operator != LogicalOperator::Or {
         return None;
     }
-    let Expression::LogicalExpression(guard) = &logical.left else {
+    let Expression::BinaryExpression(seen) = &logical.left else {
         return None;
     };
-    if guard.operator != LogicalOperator::And {
+    if seen.operator != BinaryOperator::StrictEquality {
         return None;
     }
     let Expression::CallExpression(call) = &logical.right else {
@@ -5083,15 +5083,17 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `clock.fast && hits[index] === clock.epoch || hit(file, index);`, where
-/// `clock` and `hits` are the file's clock and hit epochs, bound once beside it.
+/// `hits[index] === clock.epoch || hit(file, index);`, where `clock` and
+/// `hits` are the file's clock and hit epochs, bound once beside it.
 ///
-/// A statement probe that already fired in this context costs three loads and
+/// A statement probe that already fired in this context costs two loads and
 /// a comparison, not a call (six, before the two were bound: each read them
-/// through the file, in every probe of every render of a page): in minimatch's backtracking matcher the call per
-/// statement was most of a tenfold slowdown, and its guard test failed. The
-/// clock is `fast` only while an async hook keeps its epoch current; without
-/// one the call decides, as before.
+/// through the file, in every probe of every render of a page): in
+/// minimatch's backtracking matcher the call per statement was most of a
+/// tenfold slowdown, and its guard test failed. It checked `clock.fast` first,
+/// a load and a branch in every probe; the runtime instead keeps the epoch
+/// NaN, which nothing equals, wherever the clock is not fast (no async hook
+/// keeps it current), so the call decides there, as before.
 fn probe_v2_hit<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
@@ -5129,7 +5131,6 @@ fn probe_v2_hit_expression<'a>(
     };
     let index_literal =
         || ast.expression_numeric_literal(span, index as f64, None, NumberBase::Decimal);
-    let fast = member(clock_expression(), "fast");
     let seen = ast.expression_binary(
         span,
         Expression::from(ast.member_expression_computed(
@@ -5151,12 +5152,7 @@ fn probe_v2_hit_expression<'a>(
         ]),
         false,
     );
-    ast.expression_logical(
-        span,
-        ast.expression_logical(span, fast, LogicalOperator::And, seen),
-        LogicalOperator::Or,
-        call,
-    )
+    ast.expression_logical(span, seen, LogicalOperator::Or, call)
 }
 
 /// `let` declarations for probe temporaries at the top of a scope. In
@@ -11288,7 +11284,7 @@ export const r = v && w && q;
         assert!(probed(leader) && !probed(place), "{}", output.code);
         // The statement after the call keeps its probe.
         assert_eq!(
-            output.code.matches(".fast &&").count(),
+            output.code.matches(".epoch || ").count(),
             2,
             "{}",
             output.code
@@ -13485,7 +13481,7 @@ export function shapes(n: number): unknown {
         for (text, first) in &lines {
             // A probe maps to nothing: a coverage tool reading the copy
             // through its map counts no branch of the user's for its `||`.
-            if text.contains(&format!("{}.fast", runtime.probe_clock_v2))
+            if text.contains(&format!("{}.epoch", runtime.probe_clock_v2))
                 && let Some(first) = first
             {
                 assert_eq!(*first, None, "{text}");

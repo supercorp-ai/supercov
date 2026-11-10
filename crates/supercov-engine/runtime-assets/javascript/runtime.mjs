@@ -324,7 +324,15 @@ function resolveProbeV2Epoch() {
     serverTiming.contextResolutions += 1;
   return activateProbeV2Context((_b = (_a8 = serverPhaseStorage == null ? void 0 : serverPhaseStorage.getStore()) != null ? _a8 : environmentRequestContext()) != null ? _b : emptyProbeV2Context);
 }
+// A statement probe trusts the clock's epoch with no check of `fast`: while
+// the clock is not fast -- no async hook keeps it -- its epoch is NaN wherever
+// instrumented code can run, which no recorded epoch equals, so every probe
+// takes the slow path and works out its context there, as it did when probes
+// checked `fast` first. What sets the epoch while not fast restores it before
+// instrumented code runs, or does not set it.
 function withProbeV2Context(context, callback) {
+  if (!state.probeV2Clock.fast)
+    return callback();
   const previous = state.probeV2Clock.epoch;
   activateProbeV2Context(context);
   try {
@@ -398,6 +406,8 @@ function resetCoverage(testId2) {
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
+  if (!state.probeV2Clock.fast)
+    state.probeV2Clock.epoch = NaN;
   if (testId2)
     runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
   if (isBrowser) {
@@ -1488,12 +1498,15 @@ function enterCoverageCarrier(carrier) {
     };
   const previousStore = serverPhaseStorage.getStore();
   const previousEpoch = state.probeV2Clock.epoch;
+  const fast = state.probeV2Clock.fast;
   const context = __spreadValues(__spreadValues({}, carrier.scope ? { scope: carrier.scope } : {}), carrier.phaseId ? { phaseId: carrier.phaseId } : {});
   serverPhaseStorage.enterWith(context);
-  activateProbeV2Context(context);
+  if (fast)
+    activateProbeV2Context(context);
   return () => {
     serverPhaseStorage.enterWith(previousStore);
-    state.probeV2Clock.epoch = previousEpoch;
+    if (fast)
+      state.probeV2Clock.epoch = previousEpoch;
   };
 }
 var inertAssertionPhase = { close: (value) => value, fail: (error) => error };
@@ -2094,7 +2107,7 @@ function registerProbeV2(definition) {
     // before any did -- a script's own top level -- found it NaN, which no
     // epoch equals, so every probe there took the slow path every time: a
     // million-iteration loop ran 1,700 times slower than without Supercov.
-    if (Number.isNaN(state.probeV2Clock.epoch))
+    if (state.probeV2Clock.fast && Number.isNaN(state.probeV2Clock.epoch))
       activateProbeV2Context(currentRequestContext());
   }
   return file;

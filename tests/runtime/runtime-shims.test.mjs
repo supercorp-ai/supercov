@@ -1247,3 +1247,54 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   // whole point: the enclosing JSX statement alone used to imply both.
   assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
 });
+
+// A statement probe is `hits[place] === clock.epoch || hit(file, place)`: it
+// no longer checks `clock.fast` first. Where no async hook keeps the epoch
+// current (no `createHook`), the clock is not fast, and its epoch stays NaN
+// wherever instrumented code can run -- after registration, after a reset,
+// inside a request's carrier -- so every probe still takes the slow path and
+// works out its own context, and each request's scope still gets its hit.
+test("without an async hook a probe's epoch is NaN, so each request works out its own context", () => {
+  const runtimeUrl = new URL("../../runtime/javascript/runtime.mjs", import.meta.url).href;
+  const script = `
+    const real = process.getBuiltinModule;
+    process.getBuiltinModule = (name) => name === "node:async_hooks"
+      ? { AsyncLocalStorage: real("node:async_hooks").AsyncLocalStorage }
+      : real(name);
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const file = runtime.registerProbeV2({
+      file: "src/served.js", key: "served", points: 1, decisionWidths: [], pointAliases: [], decisionAliases: [],
+    });
+    const seen = [];
+    const look = (where) => seen.push([where, file.clock.fast, Number.isNaN(file.clock.epoch)]);
+    look("registered");
+    runtime.resetCoverage("no-hook");
+    look("reset");
+    const probe = () => file.hitEpochs[0] === file.clock.epoch || runtime.coverageHitV2(file, 0);
+    const scope = (testId) => ({ version: 1, runId: "run", workerId: "w", testId, testKey: testId, retry: 0, attemptId: testId + "-0" });
+    let slowPaths = 0;
+    const counted = () => { slowPaths += 1; };
+    for (const testId of ["first", "second"]) {
+      runtime.withCoverageCarrier({ scope: scope(testId), phaseId: testId + "-phase" }, () => {
+        look("carrier " + testId);
+        if (!(file.hitEpochs[0] === file.clock.epoch)) counted();
+        probe();
+        if (!(file.hitEpochs[0] === file.clock.epoch)) counted();
+        probe();
+      });
+    }
+    look("after");
+    console.log(JSON.stringify({ seen, slowPaths, hits: runtime.coverageSnapshot().hits.length }));
+  `;
+  const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  const { seen, slowPaths, hits } = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  for (const [where, fast, isNaN] of seen) {
+    assert.equal(fast, false, where);
+    assert.equal(isNaN, true, where);
+  }
+  // Every probe went to the runtime, as with the `fast` check: none was
+  // taken for already seen in another request's context.
+  assert.equal(slowPaths, 4);
+  assert.equal(hits, 1);
+});
