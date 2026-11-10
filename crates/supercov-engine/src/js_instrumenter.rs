@@ -4500,12 +4500,28 @@ fn instrument_candidate_with_binding(
     // on the second, and a shared probe-file binding would credit one file's
     // statements to another. Names are made unique per file, and declared with
     // `var` so a script included twice is still legal, as it was before.
+    // A file that imports or exports is a module, never a classic script:
+    // its names are its own, and a suffix on each was a tenth of what an
+    // instrumented module held, for the browser, a bundler or Vitest to read.
+    let module_syntax = parsed.program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+        )
+    });
     let (namespace, runtime_declaration_kind) = if runtime_binding == RuntimeBinding::DirectGlobal {
         (
-            format!(
-                "_{}",
-                &stable_id("", file, "runtime", Span::default(), "")[..8]
-            ),
+            if module_syntax {
+                String::new()
+            } else {
+                format!(
+                    "_{}",
+                    &stable_id("", file, "runtime", Span::default(), "")[..8]
+                )
+            },
             VariableDeclarationKind::Var,
         )
     } else {
@@ -11032,6 +11048,32 @@ mod tests {
                 id
             );
         }
+    }
+
+    #[test]
+    fn a_module_names_its_helpers_plainly_and_a_script_per_file() {
+        // A file that imports or exports is a module, with names of its own;
+        // only a classic script, which shares the page's, needs them unique.
+        let module = instrument_direct_candidate(
+            "export function f(x) { if (x) { return 1; } return 2; }",
+            "public/m.js",
+        )
+        .unwrap();
+        assert!(
+            module.code.contains("var __supercovMcdcBegin = "),
+            "{}",
+            module.code
+        );
+        let script = instrument_direct_candidate(
+            "function f(x) { if (x) { return 1; } return 2; }",
+            "public/s.js",
+        )
+        .unwrap();
+        assert!(
+            script.code.contains("var __supercovMcdcBegin_"),
+            "{}",
+            script.code
+        );
     }
 
     #[test]

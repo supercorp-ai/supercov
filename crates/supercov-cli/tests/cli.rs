@@ -5180,8 +5180,8 @@ fn bun_sources_bootstrap_when_an_unused_package_script_names_a_browser_runner() 
             .succeeds();
         let source = kept_workspace_source(&project, "src/core/runtime/clock.ts");
         assert!(
-            source.contains("__supercovMcdcBegin_c101cf5a"),
-            "the fixture should reproduce the source path and helper name shown in #176"
+            source.contains("var __supercovMcdcBegin"),
+            "the fixture should reproduce the source path and helper shown in #176"
         );
         assert!(
             source.contains("if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"),
