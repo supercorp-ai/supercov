@@ -33,7 +33,10 @@ const tests = 10;
 const files = {
   'package.json': '{ "name": "context-script-copies", "private": true, "type": "module" }\n',
   'server.mjs': `import { createServer } from 'node:http';\nimport { readFileSync } from 'node:fs';\n\ncreateServer((request, response) => {\n  const path = new URL(request.url, 'http://x').pathname;\n  const file = path === '/' ? 'index.html' : path.slice(1);\n  try {\n    const body = readFileSync(new URL(\`./public/\${file}\`, import.meta.url));\n    response.writeHead(200, { 'content-type': file.endsWith('.js') ? 'text/javascript' : 'text/html' });\n    response.end(body);\n  } catch {\n    response.writeHead(404);\n    response.end();\n  }\n}).listen(${port});\n`,
-  'public/index.html': '<!doctype html><button id="press">press</button><p id="out"></p><script type="module" src="/app.js"></script>\n',
+  // The first script of the document reads the count before anything but
+  // the init scripts ran: Supercov's own activation tells a document its
+  // test again at each action, after it loads.
+  'public/index.html': '<!doctype html><head><script>window.__TOLD_AT_LOAD__ = window.__TOLD__;</script></head><button id="press">press</button><p id="out"></p><script type="module" src="/app.js"></script>\n',
   'public/app.js': "export function press() {\n  document.getElementById('out').textContent = 'pressed';\n}\n\ndocument.getElementById('press').addEventListener('click', press);\n",
   'playwright.config.js': `export default {\n  testDir: 'tests',\n  workers: 1,\n  reporter: 'line',\n  use: { baseURL: 'http://127.0.0.1:${port}', browserName: 'chromium' },\n  webServer: { command: 'node server.mjs', url: 'http://127.0.0.1:${port}/', reuseExistingServer: false },\n};\n`,
   // One context for the worker. Before any test, a script of the suite's own
@@ -53,7 +56,7 @@ export const test = base.extend({
         get() { return attempt; },
         set(value) { told += 1; attempt = value; },
       });
-      Object.defineProperty(globalThis, '__TOLD__', { get() { return told; } });
+      Object.defineProperty(globalThis, '__TOLD__', { configurable: true, get() { return told; } });
     });
     await use(context);
     await context.close();
@@ -72,7 +75,7 @@ for (let index = 1; index <= ${tests}; index += 1) {
     await page.goto('/');
     await page.click('#press');
     await expect(page.locator('#out')).toHaveText('pressed');
-    const { told, attempt } = await page.evaluate(() => ({ told: globalThis.__TOLD__, attempt: globalThis.__SUPERCOV_ATTEMPT__?.attemptId }));
+    const { told, attempt } = await page.evaluate(() => ({ told: globalThis.__TOLD_AT_LOAD__, attempt: globalThis.__SUPERCOV_ATTEMPT__?.attemptId }));
     seen({ index, told, attempt });
     await page.close();
   });
