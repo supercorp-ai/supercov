@@ -3796,7 +3796,39 @@ fn resolve_probe_places(
             })
             .collect(),
     };
-    for raw in raw_results.iter_mut() {
+    // Each result is its own, and the tables are only read: on every core,
+    // a chunk of results at a time, the next chunk to whichever is free.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(raw_results.len().max(1));
+    let chunks = std::sync::Mutex::new(raw_results.chunks_mut(64));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let Some(chunk) = chunks.lock().expect("no worker panics holding it").next()
+                    else {
+                        return;
+                    };
+                    chunk.iter_mut().for_each(|raw| places.resolve(raw));
+                }
+            });
+        }
+    });
+}
+
+// Keyed by a table's 16-hex key and a place: a hasher made for short keys,
+// as every hit, event and server record of a run is looked up here.
+struct ProbePlaces<'a> {
+    tables: rustc_hash::FxHashMap<&'a str, &'a ProbeTableIds>,
+    /// For each table with dropped probes, the ids each leader place carries.
+    followers: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashMap<usize, Vec<&'a str>>>,
+}
+
+impl<'a> ProbePlaces<'a> {
+    /// Every place `raw` names, named by its id.
+    fn resolve(&self, raw: &mut RawTestResult) {
+        let places = self;
         for snapshot in raw.runtime.iter_mut().chain(raw.browser.iter_mut()) {
             // A dropped probe's hit comes right after its leader's, where
             // the probe ran.
@@ -3856,17 +3888,7 @@ fn resolve_probe_places(
             raw.server.extend(copies);
         }
     }
-}
 
-// Keyed by a table's 16-hex key and a place: a hasher made for short keys,
-// as every hit, event and server record of a run is looked up here.
-struct ProbePlaces<'a> {
-    tables: rustc_hash::FxHashMap<&'a str, &'a ProbeTableIds>,
-    /// For each table with dropped probes, the ids each leader place carries.
-    followers: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashMap<usize, Vec<&'a str>>>,
-}
-
-impl<'a> ProbePlaces<'a> {
     /// A point's id in place of the name `~p<key>.<place>` labels it by,
     /// with the ids whose probes were dropped beside it: the name read once
     /// for both, where each read it again.
