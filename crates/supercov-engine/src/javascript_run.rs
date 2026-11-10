@@ -831,9 +831,10 @@ pub fn run_direct_javascript(
         .join(format!("missing-loads-{run_id}.jsonl"));
     // Where the tests' processes keep the code V8 compiled for instrumented
     // modules, for the processes after them (`installCompileCache` in
-    // `atomic.mjs`).
+    // `atomic.mjs`): beside the run's evidence, never archived with it, and
+    // removed with the rest of that tree once the run is published.
     let compile_cache = workspace
-        .join(".supercov")
+        .join(".supercov/evidence")
         .join(format!("compile-cache-{run_id}"));
     let mut overrides: BTreeMap<String, String> = BTreeMap::from([
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
@@ -1142,9 +1143,6 @@ pub fn run_direct_javascript(
         }
         None => crate::docker_proxy::Journal::default(),
     };
-    // Of no use once the tests' processes are done; a cache left behind is
-    // the workspace's to clear with it.
-    let _ = crate::lifecycle::remove_scratch_tree_deferred(&root, &compile_cache);
     let test_command_ms = execution
         .phases
         .iter()
