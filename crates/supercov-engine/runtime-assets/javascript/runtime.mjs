@@ -2525,7 +2525,11 @@ function probeObservedCallback(callback, arrow, observe) {
     return result;
   };
 }
-function probeArrayCall(site, receiver, name, arrow, args) {
+// `pure` is a copy of a some/every callback the instrumenter found pure
+// (pure_callback: no calls, no writes, only its parameters' properties), without
+// the program's probes: where the call stopped at the first of several
+// elements, the probe runs it through the other method to decide.
+function probeArrayCall(site, receiver, name, arrow, args, pure) {
   const builtin = probeBuiltins.array.get(name);
   const length = receiver.length;
   if (name === "some" || name === "every" || name === "filter" || name.startsWith("find")) {
@@ -2548,7 +2552,16 @@ function probeArrayCall(site, receiver, name, arrow, args) {
         if (calls === 0) outcome = "differs";
         else if (!stoppedEarly) outcome = "same";
         else if (calls > 1) outcome = "differs";
-        else outcome = lastIndex === length - 1 ? "same" : "unknown";
+        else if (lastIndex === length - 1) outcome = "same";
+        else if (typeof pure === "function") {
+          // A throw from the copy (a property of null) is no answer.
+          try {
+            const other = Reflect.apply(probeBuiltins.array.get(name === "some" ? "every" : "some"), receiver, [pure]);
+            outcome = other === result ? "same" : "differs";
+          } catch {
+            outcome = "unknown";
+          }
+        } else outcome = "unknown";
         recordProbeOutcome(site, outcome);
       }
     } catch {
@@ -2638,12 +2651,12 @@ function probeMathCall(site, name, args) {
 // For a built-in receiver whose method is the built-in, the stand-in makes
 // the program's one call itself and compares Stryker's replacement; any
 // other receiver comes back unchanged and the call is the program's own.
-function methodV2(site, receiver, name, arrow) {
+function methodV2(site, receiver, name, arrow, pure) {
   try {
     let call;
     if (Array.isArray(receiver)) {
       if (Object.getPrototypeOf(receiver) === probeArray && probeBuiltins.array.has(name) && receiver[name] === probeBuiltins.array.get(name))
-        call = (args) => probeArrayCall(site, receiver, name, arrow, args);
+        call = (args) => probeArrayCall(site, receiver, name, arrow, args, pure);
     } else if (typeof receiver === "string") {
       if (probeBuiltins.string.has(name) && probeString[name] === probeBuiltins.string.get(name))
         call = (args) => probeStringCall(site, receiver, name, args);

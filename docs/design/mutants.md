@@ -320,6 +320,28 @@ durationMs }`. `stryker` holds the joined StrykerJS status when `--stryker`
 was given. A reader that knows only `status` keeps working when strong results
 arrive.
 
+## `every` and `some` that stop early
+
+`xs.every(f)` stops at its first falsy result and `xs.some(f)` at its first
+truthy one, so what the other method would give is known from the callback's
+results seen, except where the call stopped at the first of several elements:
+the other method would have gone on to the rest. The probe calls the
+program's callback only where the program does. Where the callback is
+statically pure, the instrumenter passes a copy of it as written, without the
+program's probes, and in that case the probe runs the copy through the other
+method over the array and records `same` or `differs`; a throw from the copy
+is `unknown`. Pure is: an arrow, not async, with plain parameters, whose
+concise body is made only of its parameters, literals, property reads by name
+or literal key (`?.` too), `!`, `typeof`, comparison and equality operators,
+`&&`, `||`, `??` and conditionals of those: no call, `new`, assignment,
+update, `delete`, spread, template, `this` or `arguments`. A getter, or a
+`valueOf` a comparison calls, can still run code; the probe accepts that, as
+it already reads the callback's result. Any other callback keeps `unknown`
+there. A real bug, `useState(items.every((item) =>
+item.enabled))` tested only with lists that agreed, was `unknown` for this
+reason and is now not infected, as it should be. `find`, `findIndex` and
+`findLast*` have no StrykerJS mutant, so nothing is decided for them.
+
 ## Values from server processes
 
 A test process of Vitest, Jest or Mocha, and a Playwright page, hands over a

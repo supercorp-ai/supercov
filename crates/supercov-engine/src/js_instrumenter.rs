@@ -4500,19 +4500,111 @@ fn concise_body<'r, 'a>(arrow: &'r ArrowFunctionExpression<'a>) -> Option<&'r Ex
     }
 }
 
+/// A `some` or `every` callback that evaluating again changes nothing the
+/// program can see, so the probe may run it on the elements the call did not
+/// reach: an arrow (not async) with plain parameters whose concise body is
+/// made only of its parameters, literals, property reads by name or literal
+/// key (`?.` too), `!`, `typeof`, comparison and equality operators, `&&`,
+/// `||`, `??` and conditionals of those. No call, `new`, assignment,
+/// update, `delete`, spread, template, `this` or `arguments`. A getter, or a
+/// `valueOf` a comparison calls, can still run code: the probe accepts that,
+/// as it already reads the callback's result.
+fn pure_callback(arrow: &ArrowFunctionExpression<'_>) -> bool {
+    if arrow.r#async || arrow.params.rest.is_some() {
+        return false;
+    }
+    let mut parameters = HashSet::new();
+    for parameter in &arrow.params.items {
+        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+            return false;
+        };
+        if parameter.initializer.is_some() {
+            return false;
+        }
+        parameters.insert(identifier.name.as_str());
+    }
+    concise_body(arrow).is_some_and(|body| pure_expression(body, &parameters))
+}
+
+fn pure_expression(expression: &Expression<'_>, parameters: &HashSet<&str>) -> bool {
+    let pure = |expression: &Expression<'_>| pure_expression(expression, parameters);
+    match expression {
+        Expression::Identifier(identifier) => parameters.contains(identifier.name.as_str()),
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        Expression::ParenthesizedExpression(inner) => pure(&inner.expression),
+        Expression::TSAsExpression(inner) => pure(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => pure(&inner.expression),
+        Expression::TSNonNullExpression(inner) => pure(&inner.expression),
+        Expression::StaticMemberExpression(member) => pure(&member.object),
+        Expression::ComputedMemberExpression(member) => {
+            matches!(
+                member.expression,
+                Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+            ) && pure(&member.object)
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::StaticMemberExpression(member) => pure(&member.object),
+            ChainElement::ComputedMemberExpression(member) => {
+                matches!(
+                    member.expression,
+                    Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+                ) && pure(&member.object)
+            }
+            ChainElement::TSNonNullExpression(inner) => pure(&inner.expression),
+            _ => false,
+        },
+        Expression::UnaryExpression(unary) => {
+            matches!(
+                unary.operator,
+                UnaryOperator::LogicalNot | UnaryOperator::Typeof
+            ) && pure(&unary.argument)
+        }
+        Expression::BinaryExpression(binary) => {
+            matches!(
+                binary.operator,
+                BinaryOperator::Equality
+                    | BinaryOperator::Inequality
+                    | BinaryOperator::StrictEquality
+                    | BinaryOperator::StrictInequality
+                    | BinaryOperator::LessThan
+                    | BinaryOperator::LessEqualThan
+                    | BinaryOperator::GreaterThan
+                    | BinaryOperator::GreaterEqualThan
+            ) && pure(&binary.left)
+                && pure(&binary.right)
+        }
+        Expression::LogicalExpression(logical) => pure(&logical.left) && pure(&logical.right),
+        Expression::ConditionalExpression(conditional) => {
+            pure(&conditional.test) && pure(&conditional.consequent) && pure(&conditional.alternate)
+        }
+        _ => false,
+    }
+}
+
 /// Where the Phase 3-5 probes go, found on the source as written (the other
 /// passes rewrite bodies with calls of their own).
 #[derive(Default)]
-struct InfectionSites {
+struct InfectionSites<'a> {
+    /// The program's allocator, for `pure_callbacks`.
+    allocator: Option<&'a Allocator>,
     /// call -> (method, an inline arrow passed first whose value it reads)
     methods: HashMap<SpanKey, (String, Option<Span>)>,
+    /// `some` and `every` calls whose callback is `pure_callback`: a copy
+    /// of it as written, without the probes the other passes put in the
+    /// program's, which the method probe may run on the elements the call
+    /// did not reach.
+    pure_callbacks: HashMap<SpanKey, Expression<'a>>,
     /// concise arrows whose body value is wrapped
     arrows: HashSet<SpanKey>,
     /// returned expressions, where a bare-name `every` may infer a predicate
     returned: HashSet<SpanKey>,
 }
 
-impl InfectionSites {
+impl InfectionSites<'_> {
     fn arrow_argument<'r, 'a>(
         argument: &'r Argument<'a>,
     ) -> Option<&'r ArrowFunctionExpression<'a>> {
@@ -4537,7 +4629,7 @@ impl InfectionSites {
     }
 }
 
-impl<'a> Visit<'a> for InfectionSites {
+impl<'a> Visit<'a> for InfectionSites<'a> {
     fn visit_return_statement(&mut self, statement: &oxc_ast::ast::ReturnStatement<'a>) {
         if let Some(argument) = &statement.argument {
             self.returned
@@ -4581,6 +4673,19 @@ impl<'a> Visit<'a> for InfectionSites {
                         PREDICATE_CONSUMERS.contains(&method) && concise_body(arrow).is_some()
                     })
                     .map(|arrow| arrow.span);
+                if let (Some(allocator), Some(callback)) = (
+                    self.allocator,
+                    call.arguments
+                        .first()
+                        .and_then(Argument::as_expression)
+                        .map(unparenthesized),
+                ) && arrow.is_some()
+                    && matches!(method, "some" | "every")
+                    && matches!(callback, Expression::ArrowFunctionExpression(arrow) if pure_callback(arrow))
+                {
+                    self.pure_callbacks
+                        .insert(span_key(call.span), callback.clone_in(allocator));
+                }
                 self.methods
                     .insert(span_key(call.span), (method.to_string(), arrow));
             }
@@ -4630,7 +4735,7 @@ struct InfectionProbeTransformer<'a, 'b> {
     helpers: ProbeHelpers<'b>,
     /// `SUPERCOV_REGEX_INPUTS=1`: regular expressions' inputs recorded.
     regex_inputs: bool,
-    sites: InfectionSites,
+    sites: InfectionSites<'a>,
     file: &'b str,
     source: &'b str,
     source_sensitive_functions: HashSet<SpanKey>,
@@ -4839,6 +4944,7 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 }
                 let site = self.site(call.span, "method");
                 let arrow_site = arrow.map(|span| self.site(span, "arrow"));
+                let pure_callback = self.sites.pure_callbacks.remove(&span_key(call.span));
                 let Expression::StaticMemberExpression(member) = &mut call.callee else {
                     return;
                 };
@@ -4852,6 +4958,9 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                 ];
                 if let Some(arrow_site) = arrow_site {
                     arguments.push(self.string(&arrow_site));
+                    if let Some(callback) = pure_callback {
+                        arguments.push(Argument::from(callback));
+                    }
                 }
                 let method_v2 = self.helpers.name("methodV2");
                 member.object = self.call(Span::default(), &method_v2, arguments);
@@ -5319,7 +5428,10 @@ fn instrument_candidate_with_binding(
     collector.visit_program(&parsed.program);
     let mut equality_values = EqualityValueSites::default();
     equality_values.visit_program(&parsed.program);
-    let mut infection_sites = InfectionSites::default();
+    let mut infection_sites = InfectionSites {
+        allocator: Some(&allocator),
+        ..InfectionSites::default()
+    };
     infection_sites.visit_program(&parsed.program);
     // StrykerJS's mutants, enumerated on the program as written, with the
     // facts about it their links need; linked once the probes are placed.
@@ -14860,6 +14972,62 @@ export function shapes(n: number): unknown {
         );
     }
 
+    /// Which some/every callbacks the method probe may run again: each
+    /// excluded form on its own is impure.
+    #[test]
+    fn a_pure_callback_reads_only_its_parameters() {
+        let pure = |text: &str| {
+            let allocator = Allocator::default();
+            let expression = Parser::new(&allocator, text, SourceType::tsx())
+                .parse_expression()
+                .unwrap();
+            matches!(&expression, Expression::ArrowFunctionExpression(arrow) if pure_callback(arrow))
+        };
+        for text in [
+            "(c) => c.enabled",
+            "(c: { a: boolean }) => c.a",
+            "(c) => !c.a",
+            "(c) => c?.a?.b",
+            "(c) => c[\"a-b\"] && c[0]",
+            "(c) => typeof c.a === \"string\"",
+            "(c, i) => i < 3 || c.a == null",
+            "(c) => c.a ?? false",
+            "(c) => (c.a ? c.b : c.c !== 1n)",
+            "(c) => (c.a as boolean)",
+            "(c) => c!.a",
+            "(c) => c.a >= 2",
+        ] {
+            assert!(pure(text), "{text} is pure");
+        }
+        for text in [
+            "function (c) { return c.a; }",
+            "async (c) => c.a",
+            "(c) => { return c.a; }",
+            "(c) => c.a()",
+            "(c) => isOk(c)",
+            "(c) => new Set(c.a)",
+            "(c) => (c.a = true)",
+            "(c) => c.n++",
+            "(c) => delete c.a",
+            "(c) => [...c.a]",
+            "(c) => `${c.a}`",
+            "(c) => tag`x`",
+            "(c) => this.a",
+            "(c) => arguments.length",
+            "(c) => outer.a",
+            "(c) => c[key]",
+            "(c) => -c.a",
+            "(c) => c.a + 1",
+            "(c) => c instanceof Date",
+            "({ a }) => a",
+            "(c = {}) => c.a",
+            "(...cs) => cs.length",
+            "(c) => /a/.test",
+        ] {
+            assert!(!pure(text), "{text} is not pure");
+        }
+    }
+
     #[test]
     fn infection_probes_wrap_strykers_sites() {
         let source = concat!(
@@ -14905,7 +15073,8 @@ export function shapes(n: number): unknown {
             "(\"src/infection.ts:11:35-11:40#arith\", n, 1, 0)",
             // an arrow whose value is only a value; a predicate's is read by its method
             "(\"src/infection.ts:5:22-5:33#arrow\", x.id)",
-            "(\"src/infection.ts:6:15-6:35#method\", xs, \"some\", \"src/infection.ts:6:23-6:34#arrow\").some(",
+            // a pure callback goes along as written, without the program's probes
+            "(\"src/infection.ts:6:15-6:35#method\", xs, \"some\", \"src/infection.ts:6:23-6:34#arrow\", (x) => x.ok).some(",
             "(\"src/infection.ts:8:60-8:91#method\", xs, \"filter\", \"src/infection.ts:8:70-8:90#arrow\").filter(",
             // a regular expression and its input
             "(\"src/infection.ts:6:39-6:50#regex\", /^n[0-9]+$/)",

@@ -1255,6 +1255,34 @@ test("a rendered JSX expression records its own evaluation and passes the value 
   assert.ok(!covered.has("child"), "the unevaluated child is not recorded");
 });
 
+test("every and some that stop at the first of several elements are decided by a pure callback's copy", async () => {
+  const { methodV2, resetCoverage, coverageSnapshot } = await import("../../runtime/javascript/runtime.mjs");
+  resetCoverage("pure-callbacks");
+  const outcomes = () =>
+    Object.fromEntries((coverageSnapshot().comparisons ?? []).map(({ id, outcomes }) => [id, [...outcomes].sort()]));
+  // A real bug: useState(items.every((item) => item.enabled)), with
+  // lists of two that agree, and a mixed one.
+  let calls = 0;
+  const program = (c) => (calls++, c.enabled);
+  const copy = (c) => c.enabled;
+  const list = (...flags) => flags.map((enabled) => ({ enabled }));
+  assert.equal(methodV2("agree", list(true, true), "every", "agree-arrow", copy).every(program), true);
+  assert.equal(methodV2("agree", list(false, false), "every", "agree-arrow", copy).every(program), false);
+  // The program's callback ran as the built-in ran it: three times, not five.
+  assert.equal(calls, 3);
+  assert.equal(methodV2("mixed", list(false, true), "every", "mixed-arrow", copy).every(program), false);
+  assert.equal(methodV2("some-mixed", list(true, false), "some", "some-mixed-arrow", copy).some(program), true);
+  // A copy that throws on a later element decides nothing.
+  assert.equal(methodV2("throws", [{ enabled: false }, null], "every", "throws-arrow", copy).every(program), false);
+  // Without a copy (an impure callback), as before.
+  assert.equal(methodV2("impure", list(false, true), "every", "impure-arrow").every(program), false);
+  const seen = outcomes();
+  assert.deepEqual(
+    { agree: seen.agree, mixed: seen.mixed, "some-mixed": seen["some-mixed"], throws: seen.throws, impure: seen.impure },
+    { agree: ["same"], mixed: ["differs"], "some-mixed": ["differs"], throws: ["unknown"], impure: ["unknown"] },
+  );
+});
+
 test("infection probes record whether Stryker's replacement would differ, running the program's code once", async () => {
   const { arithV2, assignV2, methodV2, valueV2, regexV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
