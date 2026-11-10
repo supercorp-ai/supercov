@@ -2,7 +2,8 @@ import fs, { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, closeSy
 import { createHash, randomUUID } from "node:crypto";
 import Module, { syncBuiltinESMExports } from "node:module";
 import { threadId } from "node:worker_threads";
-import { basename, dirname, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Buffer } from "node:buffer";
 import vm from "node:vm";
 
@@ -238,6 +239,23 @@ const MARK = "__supercov";
  * per test file compiled the same packages again in each. A command that set
  * NODE_COMPILE_CACHE keeps its own. Only how long compiling takes changes.
  */
+/**
+ * What the author wrote of the rewritten copy at `file`, kept beside the
+ * copies (`.authored/`), or undefined where none is kept: a copy's inline
+ * map names the project's file without carrying its text.
+ */
+export function authoredText(file) {
+    try {
+        const root = fileURLToPath(new URL("../../", import.meta.url));
+        const local = relative(root, file);
+        if (local.startsWith("..") || isAbsolute(local))
+            return undefined;
+        return readFileSync(fileURLToPath(new URL(`./.authored/${local.split(sep).join("/")}`, import.meta.url)), "utf8");
+    }
+    catch {
+        return undefined;
+    }
+}
 export function enableNodeCompileCache(directory) {
     if (!directory || process.env.NODE_COMPILE_CACHE !== undefined || typeof Module.enableCompileCache !== "function")
         return;

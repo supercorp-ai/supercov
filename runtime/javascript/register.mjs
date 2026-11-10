@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 import { adaptRunnerEntry, noteSkippedCoverageThresholds } from "./runnerEntry.mjs";
-import { enableNodeCompileCache, writePlaywrightCacheWhole } from "./atomic.mjs";
+import { authoredText, enableNodeCompileCache, writePlaywrightCacheWhole } from "./atomic.mjs";
 // Supercov runs Node with --enable-source-maps so a stack through an
 // instrumented copy names the project's file. The flag also reads the maps
 // every package ships, which a plain run never does: a third of the CPU a
@@ -192,6 +192,13 @@ function mapToCopy(source, filename) {
         if (!Array.isArray(map.sources) || map.sources.length !== 1)
             return source;
         map.sources = [filename.replace(/^.*[\\/]/, "")];
+        // Node's coverage reads the source's text from the map once the map
+        // names the copy: the author's, kept beside it.
+        if (map.sourcesContent === undefined) {
+            const authored = authoredText(filename);
+            if (authored !== undefined)
+                map.sourcesContent = [authored];
+        }
         return `${source.slice(0, at)}${INLINE_MAP}${Buffer.from(JSON.stringify(map)).toString("base64")}${end < 0 ? "" : source.slice(end)}`;
     }
     catch {

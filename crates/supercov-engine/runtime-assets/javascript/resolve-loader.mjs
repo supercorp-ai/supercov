@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { writePlaywrightCacheWhole } from "./atomic.mjs";
+import { authoredText, writePlaywrightCacheWhole } from "./atomic.mjs";
 // This thread is where Playwright compiles ES modules and writes them into
 // its cache: written whole here too (atomic.mjs says why).
 writePlaywrightCacheWhole();
@@ -229,6 +229,13 @@ function mapToCopy(source, filename) {
         if (!Array.isArray(map.sources) || map.sources.length !== 1)
             return source;
         map.sources = [filename.replace(/^.*[\\/]/, "")];
+        // Node's coverage reads the source's text from the map once the map
+        // names the copy: the author's, kept beside it.
+        if (map.sourcesContent === undefined) {
+            const authored = authoredText(filename);
+            if (authored !== undefined)
+                map.sourcesContent = [authored];
+        }
         return `${source.slice(0, at)}${INLINE_MAP}${Buffer.from(JSON.stringify(map)).toString("base64")}${end < 0 ? "" : source.slice(end)}`;
     }
     catch {
