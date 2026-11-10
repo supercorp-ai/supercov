@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1152")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1168")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1152"),
+        seen.contains("test fault at fs (javascript_run.rs:1168"),
         "{seen}"
     );
 }
@@ -17044,18 +17044,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1338",
-        "fs.create_dir_all#javascript_run.rs:723",
-        "fs.write#javascript_run.rs:1029",
+        "fs.create_dir_all#javascript_run.rs:739",
+        "fs.write#javascript_run.rs:1045",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1100",
-        "fs.create_dir_all#javascript_run.rs:1271",
+        "fs.create_dir_all#javascript_run.rs:1116",
+        "fs.create_dir_all#javascript_run.rs:1287",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1541",
-        "fs.create_dir_all#javascript_run.rs:1543",
+        "fs.create_dir_all#javascript_run.rs:1562",
+        "fs.create_dir_all#javascript_run.rs:1564",
         "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1643",
-        "fs.create_dir_all#javascript_run.rs:1645",
+        "fs.create_dir_all#javascript_run.rs:1664",
+        "fs.create_dir_all#javascript_run.rs:1666",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
