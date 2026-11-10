@@ -2246,7 +2246,9 @@ function recordCoverageHitV2(file, index) {
     if (file.hitEpochs[index] === epoch)
       return;
     file.hitEpochs[index] = epoch;
-    coverageHit(id);
+    // New in this context for this file: recordCoverageHit makes the check
+    // coverageHit would, across files and aliases, without a second lookup.
+    recordCoverageHit(id);
     const selections = file.selectionPoints;
     if (selections !== void 0 && index >= selections[0] && index < selections[0] + 4 * selections[1])
       recordLogicalOutcome(id, index - selections[0] & 3);
