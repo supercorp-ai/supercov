@@ -2100,6 +2100,9 @@ function registerProbeV2(definition) {
     none: optionalCallEmptySpread
   };
   state.probeV2Files.add(file);
+  // What a statement probe calls when its point is new in the context: this
+  // file's hit, by place alone, so each probe line names the file once less.
+  file.hit = (index) => coverageHitV2(file, index);
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(`browser\0${(_a8 = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__) != null ? _a8 : testId}\0${(_b = runtimeGlobal.__SUPERCOV_PHASE_ID__) != null ? _b : "unscoped"}`);

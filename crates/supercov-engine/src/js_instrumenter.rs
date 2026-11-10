@@ -186,7 +186,6 @@ impl ProbeTable {
 /// sets it up.
 fn adjacent_probe_merger(
     hit: &str,
-    file: &str,
     named: &PlacesNamed,
     repeated: &[usize],
 ) -> AdjacentProbeMerger {
@@ -202,25 +201,30 @@ fn adjacent_probe_merger(
     }
     AdjacentProbeMerger {
         hit: hit.to_owned(),
-        file: file.to_owned(),
         mergeable,
         follows: Vec::new(),
     }
 }
 
-/// By place, how many calls name each statement point, as `(file, place)`.
-/// Counted on the request-phase walk, after which nothing adds a probe,
-/// rather than on a walk of its own.
+/// By place, how many calls name each statement point: `(file, place)` to a
+/// runtime helper, or `place` to the file's own bound hit. Counted on the
+/// request-phase walk, after which nothing adds a probe, rather than on a
+/// walk of its own.
 struct PlacesNamed {
     file: String,
+    hit: String,
     counts: Vec<u32>,
 }
 
 impl PlacesNamed {
     fn count(&mut self, call: &CallExpression<'_>) {
-        if let Some(count) =
-            place_argument(call, &self.file).and_then(|place| self.counts.get_mut(place))
-        {
+        let bound = matches!(&call.callee, Expression::Identifier(callee) if callee.name == self.hit.as_str());
+        let place = if bound {
+            bound_place_argument(call)
+        } else {
+            place_argument(call, &self.file)
+        };
+        if let Some(count) = place.and_then(|place| self.counts.get_mut(place)) {
             *count += 1;
         }
     }
@@ -251,9 +255,8 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
-/// The place of a statement probe, `hits[place] === clock.e ||
-/// hit(file, place);`.
-fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Option<usize> {
+/// The place of a statement probe, `hits[place] === clock.e || hit(place);`.
+fn statement_probe_place(statement: &Statement<'_>, hit: &str) -> Option<usize> {
     let Statement::ExpressionStatement(statement) = statement else {
         return None;
     };
@@ -275,15 +278,22 @@ fn statement_probe_place(statement: &Statement<'_>, hit: &str, file: &str) -> Op
     let Expression::Identifier(callee) = &call.callee else {
         return None;
     };
-    if callee.name != hit || call.arguments.len() != 2 {
+    if callee.name != hit {
         return None;
     }
-    place_argument(call, file)
+    bound_place_argument(call)
+}
+
+/// The place `hit(place)` names, its only argument.
+fn bound_place_argument(call: &CallExpression<'_>) -> Option<usize> {
+    let [Argument::NumericLiteral(number)] = call.arguments.as_slice() else {
+        return None;
+    };
+    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 struct AdjacentProbeMerger {
     hit: String,
-    file: String,
     /// By place: a statement point named once, by an id no other place has.
     mergeable: Vec<bool>,
     follows: Vec<[usize; 2]>,
@@ -296,7 +306,7 @@ impl AdjacentProbeMerger {
         let mut leader = None;
         let mut keep = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
-            let place = statement_probe_place(statement, &self.hit, &self.file);
+            let place = statement_probe_place(statement, &self.hit);
             match (leader, place) {
                 (Some(first), Some(place)) if mergeable(first) && mergeable(place) => {
                     if keep.is_empty() {
@@ -4503,6 +4513,8 @@ fn instrument_candidate_with_binding(
     let probe_file_v2 = names.allocate("__supercovFile");
     let probe_clock_v2 = names.allocate("__supercovClock");
     let probe_hits_v2 = names.allocate("__supercovHits");
+    // The file's own hit, bound to it: a statement probe calls it by place.
+    let probe_hit_at_v2 = names.allocate("__supercovHitAt");
     let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
     let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
@@ -4636,8 +4648,7 @@ fn instrument_candidate_with_binding(
         .collect();
     let mut statement_transformer = StatementProbeTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         probe_clock_v2: probe_clock_v2.clone(),
         probe_hits_v2: probe_hits_v2.clone(),
         targets: statement_targets,
@@ -4646,8 +4657,7 @@ fn instrument_candidate_with_binding(
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         probe_clock_v2: probe_clock_v2.clone(),
         probe_hits_v2: probe_hits_v2.clone(),
         targets: function_targets,
@@ -4713,8 +4723,7 @@ fn instrument_candidate_with_binding(
     default_transformer.visit_program(&mut parsed.program);
     let mut extended_transformer = ExtendedTransformer {
         ast,
-        coverage_hit_v2: coverage_hit_v2.clone(),
-        probe_file_v2: probe_file_v2.clone(),
+        coverage_hit_v2: probe_hit_at_v2.clone(),
         probe_clock_v2: probe_clock_v2.clone(),
         probe_hits_v2: probe_hits_v2.clone(),
         typescript,
@@ -4792,6 +4801,7 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         named: PlacesNamed {
             file: probe_file_v2.clone(),
+            hit: probe_hit_at_v2.clone(),
             counts: vec![0; point_analysis.points.len()],
         },
     };
@@ -4815,12 +4825,8 @@ fn instrument_candidate_with_binding(
         .chain(extra.ids.iter().cloned())
         .collect::<Vec<_>>();
     let point_aliases = repeated_places(&point_ids);
-    let merger = adjacent_probe_merger(
-        &coverage_hit_v2,
-        &probe_file_v2,
-        &request_transformer.named,
-        &point_aliases,
-    );
+    let merger =
+        adjacent_probe_merger(&probe_hit_at_v2, &request_transformer.named, &point_aliases);
     let decision_ids = collector
         .decisions
         .iter()
@@ -4893,6 +4899,7 @@ fn instrument_candidate_with_binding(
                 ),
                 probe_part(&probe_clock_v2, "clock"),
                 probe_part(&probe_hits_v2, "hitEpochs"),
+                probe_part(&probe_hit_at_v2, "hit"),
             ]),
             false,
         )),
@@ -5083,8 +5090,9 @@ fn instrument_candidate_with_binding(
     })
 }
 
-/// `hits[index] === clock.e || hit(file, index);`, where `clock` and
-/// `hits` are the file's clock and hit epochs, bound once beside it.
+/// `hits[index] === clock.e || hit(index);`, where `clock`, `hits` and
+/// `hit` are the file's clock, hit epochs and its own hit, bound once beside
+/// it: `hit(file, index)` named the file again in every probe line.
 ///
 /// A statement probe that already fired in this context costs two loads and
 /// a comparison, not a call (six, before the two were bound: each read them
@@ -5097,14 +5105,13 @@ fn instrument_candidate_with_binding(
 fn probe_v2_hit<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
-    file: &str,
     clock: &str,
     hits: &str,
     index: usize,
 ) -> Statement<'a> {
     ast.statement_expression(
         Span::default(),
-        probe_v2_hit_expression(ast, hit, file, clock, hits, index),
+        probe_v2_hit_expression(ast, hit, clock, hits, index),
     )
 }
 
@@ -5113,13 +5120,11 @@ fn probe_v2_hit<'a>(
 fn probe_v2_hit_expression<'a>(
     ast: AstBuilder<'a>,
     hit: &str,
-    file: &str,
     clock: &str,
     hits: &str,
     index: usize,
 ) -> Expression<'a> {
     let span = Span::default();
-    let file_expression = || ast.expression_identifier(span, ast.ident(file));
     let clock_expression = || ast.expression_identifier(span, ast.ident(clock));
     let member = |object: Expression<'a>, name: &str| -> Expression<'a> {
         Expression::from(ast.member_expression_static(
@@ -5147,10 +5152,7 @@ fn probe_v2_hit_expression<'a>(
         span,
         ast.expression_identifier(span, ast.ident(hit)),
         NONE,
-        ast.vec_from_array([
-            Argument::from(file_expression()),
-            Argument::from(index_literal()),
-        ]),
+        ast.vec1(Argument::from(index_literal())),
         false,
     );
     ast.expression_logical(span, seen, LogicalOperator::Or, call)
@@ -5237,7 +5239,6 @@ impl ExtraPoints {
 struct StatementProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
     probe_clock_v2: String,
     probe_hits_v2: String,
     targets: HashMap<SpanKey, Vec<PointTarget>>,
@@ -5249,7 +5250,6 @@ impl<'a> StatementProbeTransformer<'a> {
         probe_v2_hit(
             self.ast,
             &self.coverage_hit_v2,
-            &self.probe_file_v2,
             &self.probe_clock_v2,
             &self.probe_hits_v2,
             target.index,
@@ -5437,7 +5437,6 @@ impl<'a> VisitMut<'a> for RenderedExpressionTransformer<'a> {
 struct FunctionProbeTransformer<'a> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
     probe_clock_v2: String,
     probe_hits_v2: String,
     targets: HashMap<SpanKey, PointTarget>,
@@ -5449,7 +5448,6 @@ impl<'a> FunctionProbeTransformer<'a> {
         probe_v2_hit(
             self.ast,
             &self.coverage_hit_v2,
-            &self.probe_file_v2,
             &self.probe_clock_v2,
             &self.probe_hits_v2,
             target.index,
@@ -6313,7 +6311,6 @@ enum Wrap<'a> {
 struct ExtendedTransformer<'a, 's> {
     ast: AstBuilder<'a>,
     coverage_hit_v2: String,
-    probe_file_v2: String,
     probe_clock_v2: String,
     probe_hits_v2: String,
     typescript: bool,
@@ -6368,7 +6365,6 @@ impl<'a> ExtendedTransformer<'a, '_> {
         probe_v2_hit_expression(
             self.ast,
             &self.coverage_hit_v2,
-            &self.probe_file_v2,
             &self.probe_clock_v2,
             &self.probe_hits_v2,
             index,
