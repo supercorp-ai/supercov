@@ -434,9 +434,17 @@ function coverageSnapshotColumns() {
     }
     return found;
   };
-  const columns = { id: log.id.slice(), type: [], phase: [], environment: [], t: [], vector: {} };
+  // An event that is one of the hits names it by its position in `hits`
+  // (snapshots.mjs's columnarEvents says why).
+  const hitAt = /* @__PURE__ */ new Map();
+  for (let position = 0; position < hits.length; position += 1)
+    hitAt.set(hits[position], position);
+  const columns = { id: [], type: [], phase: [], environment: [], t: [], vector: {} };
   let previous = 0;
   for (let position = 0; position < log.id.length; position += 1) {
+    const id = log.id[position];
+    const at = hitAt.get(id);
+    columns.id.push(at === void 0 ? id : at);
     const phaseId = log.phaseId[position];
     columns.type.push(index(tables.types, log.type[position]));
     // An event built without a phase -- phaseId falsy -- has none.

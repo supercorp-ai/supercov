@@ -194,14 +194,17 @@ struct RuntimeSnapshotWire {
 /// Events by column. `type`, `phase` and `environment` index the tables of
 /// their names (a phase of -1 is none), `t` holds each timestamp as its
 /// difference from the one before it (the first from 0), and `vector` holds
-/// each decision event's vector under its position.
+/// each decision event's vector under its position. An `id` is the event's
+/// id, or, where it is one of the snapshot's hits, that hit's position in
+/// `hits`: a test's every first hit is in both, and writing each id twice
+/// was a third of what a test's evidence held.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EventColumns {
     types: Vec<String>,
     phases: Vec<String>,
     environments: Vec<String>,
-    id: Vec<String>,
+    id: Vec<EventId>,
     #[serde(rename = "type")]
     event_type: Vec<usize>,
     phase: Vec<i64>,
@@ -211,8 +214,35 @@ struct EventColumns {
     vector: BTreeMap<usize, McdcVector>,
 }
 
+/// An event's id as a column holds it: written out, or the position of the
+/// snapshot's hit it is.
+enum EventId {
+    Text(String),
+    Hit(usize),
+}
+
+impl<'de> Deserialize<'de> for EventId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = EventId;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an event id or the position of a hit")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<EventId, E> {
+                Ok(EventId::Text(value.to_owned()))
+            }
+            // A position no snapshot has is refused where it is looked up.
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<EventId, E> {
+                Ok(EventId::Hit(usize::try_from(value).unwrap_or(usize::MAX)))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 impl EventColumns {
-    fn decode(self) -> Result<Vec<RuntimeEvent>, String> {
+    fn decode(self, hits: &[String]) -> Result<Vec<RuntimeEvent>, String> {
         let count = self.id.len();
         if [
             self.event_type.len(),
@@ -229,6 +259,13 @@ impl EventColumns {
         let mut timestamp = 0_i64;
         let mut events = Vec::with_capacity(count);
         for (index, id) in self.id.into_iter().enumerate() {
+            let id = match id {
+                EventId::Text(id) => id,
+                EventId::Hit(at) => hits
+                    .get(at)
+                    .ok_or("an event naming a hit the snapshot does not have")?
+                    .clone(),
+            };
             timestamp = timestamp
                 .checked_add(self.t[index])
                 .ok_or("an event timestamp overflows")?;
@@ -274,7 +311,7 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
     fn try_from(wire: RuntimeSnapshotWire) -> Result<Self, Self::Error> {
         let mut events = wire.events;
         if let Some(columns) = wire.event_columns {
-            events.extend(columns.decode()?);
+            events.extend(columns.decode(&wire.hits)?);
         }
         Ok(Self {
             decisions: wire.decisions,
@@ -4120,6 +4157,14 @@ mod tests {
         let columnar: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":["a","b","d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
         assert_eq!(columnar, written);
         assert_eq!(columnar.events.len(), 5);
+        // A hit named by its position in `hits` is that hit; any other id is
+        // written out.
+        let positions: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"eventColumns":{"types":["hit","decision"],"phases":["p:1","p:2"],"environments":["browser","server"],"id":[0,1,"d","c","d"],"type":[0,0,1,0,1],"phase":[0,-1,1,0,-1],"environment":[0,0,0,1,0],"t":[1793741378313,-3,90,0,1],"vector":{"2":{"values":[true,null,false],"outcome":true},"4":{"values":[false,null,false],"outcome":false}}}}"#).unwrap();
+        assert_eq!(positions, written);
+        let past = r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":[1],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(past).is_err());
+        let negative = r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":[-1],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
+        assert!(serde_json::from_str::<RuntimeSnapshot>(negative).is_err());
         let uneven = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0],"phase":[-1],"environment":[0],"t":[1]}}"#;
         assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
         let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
