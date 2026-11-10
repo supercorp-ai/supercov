@@ -98,8 +98,11 @@ try {
   assert.equal(new Set(seen.map((entry) => entry.attempt)).size, tests, JSON.stringify(seen));
   assert.ok(seen.every((entry) => typeof entry.attempt === 'string'), JSON.stringify(seen));
   // And ran one copy, or two while the last removal was on its way, where
-  // the tenth test's document ran ten.
-  for (const entry of seen) assert.ok(entry.told >= 1 && entry.told <= 2, JSON.stringify(seen));
+  // the tenth test's document ran ten. The context is made in the first
+  // test, after that test's registration, so its document ran none and was
+  // told its test by the first action, as the attempt above shows.
+  for (const entry of seen)
+    assert.ok(entry.index === 1 ? entry.told <= 1 : entry.told >= 1 && entry.told <= 2, JSON.stringify(seen));
   // Each test is credited with its own click.
   const runId = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
   const answer = run(binary, ['runs', runId, 'line', 'public/app.js:2', '--json']);
