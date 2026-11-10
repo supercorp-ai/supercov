@@ -23,8 +23,7 @@ Each mutant moves through the steps of the RIPR model (Ammann and Offutt,
 Weak mutation answers the first two exactly or says it cannot. A mutant that no
 test infects cannot be killed by these tests (weak live implies strong live), so
 "not infected" is a certain survivor, with a reason that says which input is
-missing. "Infected" is a candidate kill, not a kill: on the app it was validated on, 17% of
-infected mutants still survived StrykerJS.
+missing. "Infected" is a candidate kill, not a kill.
 
 ## Which mutants
 
@@ -42,29 +41,14 @@ the tests that reach it are unchanged.
 ### On by default
 
 Every JavaScript and TypeScript run places the probes and lists its mutants;
-`SUPERCOV_MUTANTS=0` turns both off. The research switches they replace,
-`SUPERCOV_COMPARISONS=1` and `SUPERCOV_INFECTION_PROBES=1`, are gone rather
-than kept as aliases: each turned on one group of probes, which is now on,
-and no switch turns one group off alone. The probes measured about 0% of run
-time on a large Next.js app's unit, integration and browser e2e suites. Instrumenting
-its 511 source files took 0.56 s of one core with them, against 0.42 s
-without, and wrote 2% more code; its `mutants.json` listed 58,000 mutants in
-24 MB (2.5 MB compressed in the archive) as version 1 stored them, about
-two thirds of that as version 2 does (see The stored list).
+`SUPERCOV_MUTANTS=0` turns both off.
 
 Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
-`valueV2`, `regexV2`) is named only once the file has a site of that kind,
+`valueV2`) is named only once the file has a site of that kind,
 after every other name the file's allocator gives. A file with no site of a
 kind imports nothing for it, and the names of everything else in it are those
 it has with the probes off: a file with no site at all is instrumented byte
 for byte as with `SUPERCOV_MUTANTS=0`.
-
-The regex probe stays off unless `SUPERCOV_REGEX_INPUTS=1`. It keeps up to 200
-characters of every string a regular expression is matched against, which is
-user input (emails, names, URLs a test typed) written into the run's evidence
-and archived with it. No regex mutant is enumerated yet, so nothing uses
-those inputs; a later step can compare the original and the mutated regex in
-the page or process instead of storing what they matched.
 
 ### Ids and descriptors
 
@@ -186,7 +170,7 @@ written whole. A one-line listing (`file:line`) shows the original after it
 (`in:`).
 `--format jsonl` writes all of them, one per line in that order, each as
 `--json` lists it, as `gaps --format jsonl` does for gaps: a reply stops at 64
-KB, about 128 mutants, and a large app has 61,000. The scores and counts are of
+KB, about 128 mutants, and a large app has tens of thousands. The scores and counts are of
 the mutants asked about: the run, a file or a line, and one mutator with
 `--mutator`; `--status` picks from them without changing the scores.
 
@@ -195,8 +179,7 @@ by id. One `--stryker` takes every report after it (the words that are a
 `.json` file or a directory, as a glob gives them), and a directory stands for
 every `.json` file under it. The commands a reply suggests repeat what was
 given, up to three reports or directories, and otherwise write `<56 reports>`
-with a line saying what it stands for: users with chunked reports pass dozens,
-and every suggested command repeated them all. Each mutant then shows
+with a line saying what it stands for. Each mutant then shows
 StrykerJS's status beside Supercov's (`stryker: Killed`), and the summary
 counts disagreements. A not-infected or not-reached mutant StrykerJS killed (or
 timed out) is a soundness violation, and the command exits 1. This is how
@@ -363,10 +346,7 @@ assignment, update, `delete`, spread, tagged template or `this`. A name read
 before its declaration throws, which the probe catches as `unknown`. A
 getter, or a `valueOf` or `toString` a comparison or template calls, can
 still run code; the probe accepts that, as it already reads the callback's
-result. Any other callback keeps `unknown` there. A real bug,
-`useState(items.every((item) => item.enabled))` tested only with lists that
-agreed, was `unknown` for this reason and is now not infected, as it should
-be. `find`, `findIndex` and `findLast*` have no StrykerJS mutant, so nothing
+result. Any other callback keeps `unknown` there. `find`, `findIndex` and `findLast*` have no StrykerJS mutant, so nothing
 is decided for them.
 
 ### Where the method probe goes
@@ -434,33 +414,25 @@ an upgrade and was reused), is read as if both recorded values.
 
 ## The stored list
 
-A run's mutants are archived as `mutants.json`: each file's mutants with the
-evidence each is linked to. Version 2 leaves out what reading it works out
-again. A mutant's `id` is its file, span, mutator and descriptor, and is
-written only where it is not exactly those. Of a long `original` (a block
-statement's is a whole function body) it keeps what is shown of it: the
-start of the whole, or of each operand around an operator, up to the first
-121 characters once whitespace is flattened, with `operator.at` moved to
-where the operator is in what is kept. A mutant's line, its replacement's and
-every reason that quotes its code are cut from no more than that. The writer
-keeps the whole original wherever a shorter one would not show exactly the
-same, as where the replacement is written by parsing all of it (a method
-call's) or from its end (an optional link's). The run's sources are not in
-the archive, which keeps only their hashes, so nothing is read back from
-them. Version 1, with every id and original whole, is read as it was.
+A run's mutants are archived as `mutants.json` (`schemaVersion` 1): each
+file's mutants with the evidence each is linked to, without what reading it
+works out again. A mutant's `id` is its file, span, mutator and descriptor,
+and is written only where it is not exactly those. Of a long `original` (a
+block statement's is a whole function body) it keeps what is shown of it:
+the start of the whole, or of each operand around an operator, up to the
+first 121 characters once whitespace is flattened, with `operator.at` moved
+to where the operator is in what is kept. A mutant's line, its
+replacement's, its changed part and every reason that quotes its code are cut
+from no more than that. The writer keeps the whole original wherever a
+shorter one would not show exactly the same, as where the replacement is
+written by parsing all of it (a method call's) or from its end (an optional
+link's). The run's sources are not in the archive, which keeps only their
+hashes, so nothing is read back from them. A probe or comparison site in the
+mutant's own file is written from its line (`:3:9` for `src/a.ts:3:9`).
 
-A probe or comparison site in the mutant's own file is written from its line
-too (`:3:9` for `src/a.ts:3:9`). On the engine's fixtures (the StrykerJS
-parity files and the runtime's own modules, 12,008 mutants) version 1 took
-4.55 MB (471 KB gzipped) and version 2 takes 2.92 MB (329 KB): 243 bytes a
-mutant, of 379. At that ratio a large app's 61,000 mutants, 414 bytes each in
-version 1, come to about 16 MB (1.8 MB compressed), and less where its longer
-originals (JSX under `&&`) are cut.
-
-Version 3 adds to a mutant what the program as written says of it:
-`equivalent` (`{ rule, reason }`) where a static rule shows it equivalent, and
-`untestable` (`{ rule: "clock" | "random", reason }`). A version 2 file has
-neither, and its mutants are read as having none.
+A mutant also carries what the program as written says of it: `equivalent`
+(`{ rule, reason }`) where a static rule shows it equivalent, and
+`untestable` (`{ rule: "clock" | "random", reason }`).
 
 ## Equivalent mutants
 
@@ -502,27 +474,7 @@ nothing types at run time), a call (`Number(s)` can be shadowed) or a `+` with
 a string are not. And the `const` must be the file's only binding of its name,
 the comparison inside the block (or function body: a parameter's default does
 not see it) that declares it, and the file must hold no `with` and no
-reference to `eval`, which can bind a name no declaration shows. On the validation app,
-the guards the triage found (`data?.count && data.count > 0`)
-read a member path of data loaded from the database: equivalent in practice,
-not by this rule.
-
-### Considered and left out: `email-input-trim`
-
-The idea: a MethodExpression mutant that removes `.trim()` from the value of a
-controlled `<input type="email">`, whose state only `e.target.value` sets. The
-HTML Living Standard's value sanitization algorithm for the E-mail state strips
-newlines and leading and trailing **ASCII whitespace** (tab, line feed, form
-feed, carriage return, space). `String.prototype.trim` strips every
-ECMAScript WhiteSpace and LineTerminator: also U+00A0 (no-break space), U+FEFF,
-U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and U+000B.
-The sanitizer keeps those, and a user can type or paste them (Option-Space
-types U+00A0 on a Mac; text copied from a web page often carries one): the
-input's value is then `"a@b.co\u00a0"`, which `trim` changes and the mutant
-does not. The rule is not sound for every input, and there is no narrower
-claim of the same rule that is, so it is not implemented. Of the validation app's 61
-equivalent mutants triaged by hand, the six `type="email"` ones are practically
-equivalent, not equivalent.
+reference to `eval`, which can bind a name no declaration shows.
 
 ### Untestable boundaries: a hint
 
@@ -546,8 +498,7 @@ The operand must be time-valued, not merely worked out from the clock: a
 count, a found element or a property read of something that depends on the
 time (`today && today.items.length > 0`, where `today` is
 `groups.find((g) => g.isToday)`) is not a reading, and its boundary is
-testable with the right data. A first version followed any use of the clock
-in an operand's code and marked that one wrongly on the validation app.
+testable with the right data.
 
 It is a hint, not a status: the mutant keeps its status and counts in both
 scores, since a test that fakes the clock (or random) can reach the boundary.
@@ -558,9 +509,7 @@ part.
 ## Merged runs
 
 A run's mutants are archived as one `mutants.json`. `supercov merge` writes
-exactly one for the merged run, as it writes one `manifest.json`, instead of
-keeping each run's under `shards/<n>/` (which the reader, looking for the one
-at the top, did not see: merged runs had no mutants). The list is the union by
+exactly one for the merged run, as it writes one `manifest.json`. The list is the union by
 file of the runs that listed mutants, each file's from the run whose manifest
 the merge takes (the latest, where the tests grew) or else the first that
 listed it. Runs that recorded a file with the same bytes enumerate the same
@@ -583,10 +532,9 @@ the reader requires every copy to be the same, which runs of one source are.
 
 ## What stays out
 
-- Regex mutants are not enumerated. Recording the regex inputs stores user
-  strings in the evidence (only with `SUPERCOV_REGEX_INPUTS=1`), and comparing
-  JavaScript regexes needs a JavaScript engine. A later step compares the
-  original and mutated regex in the page or process instead.
+- Regex mutants are not enumerated: comparing JavaScript regexes needs a
+  JavaScript engine, and a later step compares the original and the mutated
+  regex in the page or process.
 - Code that ran in a server process measured by a runtime older than value
   records (its records carry no `values` note): its outcome-based verdicts stay
   `unknown`. A server process, and node:test, AVA and tap's test processes,

@@ -3992,17 +3992,15 @@ thread_local! {
     /// In this crate's tests, on the thread that sets it: the mutants on or
     /// off whatever `SUPERCOV_MUTANTS` says.
     pub(crate) static MUTANTS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    /// With the mutants on, one group of probes left out, so a test can
-    /// compare the links each makes.
-    pub(crate) static COMPARISONS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    pub(crate) static INFECTION_PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    pub(crate) static REGEX_INPUTS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// With the mutants on, their probes left out, so a test can see which
+    /// links only the probes make.
+    pub(crate) static PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
-/// The probe switches, for the frontend cache key: instrumentation cached
-/// with the probes off must not be reused once they are on, or the reverse.
-pub(crate) fn probe_options() -> (bool, bool) {
-    (mutants_enabled(), regex_inputs_enabled())
+/// The probe switch, for the frontend cache key: instrumentation cached with
+/// the probes off must not be reused once they are on, or the reverse.
+pub(crate) fn probe_options() -> bool {
+    mutants_enabled()
 }
 
 /// Whether instrumentation places the probes and enumerates StrykerJS's
@@ -4017,11 +4015,11 @@ pub(crate) fn mutants_enabled() -> bool {
     std::env::var("SUPERCOV_MUTANTS").map_or(true, |value| !matches!(value.trim(), "0" | "false"))
 }
 
-/// The comparison probe: relational comparisons, and equalities whose value
-/// is only a value.
-fn comparisons_enabled() -> bool {
+/// Whether the mutants' probes are placed: the comparison probe and those
+/// of arithmetic, compound assignment, method calls and concise arrows.
+fn probes_enabled() -> bool {
     #[cfg(test)]
-    if !COMPARISONS_FOR_TEST.with(std::cell::Cell::get) {
+    if !PROBES_FOR_TEST.with(std::cell::Cell::get) {
         return false;
     }
     mutants_enabled()
@@ -4172,14 +4170,7 @@ impl<'a> Visit<'a> for EqualityValueSites {
 }
 
 /// The runtime's probe helpers, in the order a file imports them.
-const PROBE_HELPERS: [&str; 6] = [
-    "compareV2",
-    "arithV2",
-    "assignV2",
-    "methodV2",
-    "valueV2",
-    "regexV2",
-];
+const PROBE_HELPERS: [&str; 5] = ["compareV2", "arithV2", "assignV2", "methodV2", "valueV2"];
 
 /// The probes' helpers, each named the first time a site of its kind is
 /// probed. Named with the file's other helpers' suffix counter and after
@@ -4317,32 +4308,8 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
     }
 }
 
-/// The probes for the Stryker mutator groups whose infection no other
-/// record decides: arithmetic and arithmetic compound assignment, method
-/// calls Stryker swaps or removes, and concise arrows' return values.
-fn infection_probes_enabled() -> bool {
-    #[cfg(test)]
-    if !INFECTION_PROBES_FOR_TEST.with(std::cell::Cell::get) {
-        return false;
-    }
-    mutants_enabled()
-}
-
-/// The regex probe, which records up to 200 characters of each string a
-/// regular expression is matched against: user input, in the evidence. Only
-/// with `SUPERCOV_REGEX_INPUTS=1`, and no regex mutant is enumerated yet.
-fn regex_inputs_enabled() -> bool {
-    #[cfg(test)]
-    if REGEX_INPUTS_FOR_TEST.with(std::cell::Cell::get) {
-        return infection_probes_enabled();
-    }
-    infection_probes_enabled()
-        && std::env::var_os("SUPERCOV_REGEX_INPUTS").is_some_and(|value| value == "1")
-}
-
-/// StrykerJS 10.1.1's MethodExpression names, then the calls the probe reads
-/// for others: predicate callbacks (the arrow probe) and regular expressions'
-/// inputs (the regex probe).
+/// StrykerJS 10.1.1's MethodExpression names, then the calls whose
+/// predicate callback the arrow probe reads through the method.
 const INFECTION_METHODS: &[&str] = &[
     "charAt",
     "endsWith",
@@ -4383,10 +4350,6 @@ const INFECTION_METHODS: &[&str] = &[
     "findIndex",
     "findLast",
     "findLastIndex",
-    "test",
-    "exec",
-    "match",
-    "search",
 ];
 
 /// Callees that may give an inline arrow an inferred type predicate: their
@@ -4725,8 +4688,9 @@ fn pure_expression(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// Where the Phase 3-5 probes go, found on the source as written (the other
-/// passes rewrite bodies with calls of their own).
+/// Where the arithmetic, assignment, method and arrow probes go, found on the
+/// source as written (the other passes rewrite bodies with calls of their
+/// own).
 #[derive(Default)]
 struct InfectionSites<'a> {
     /// The program's allocator, for `pure_callbacks`.
@@ -4881,22 +4845,19 @@ impl<'a> Visit<'a> for InfectionSites<'a> {
     }
 }
 
-/// The Phase 3-5 probes. Each runtime helper evaluates nothing the program
-/// did not, calls no user code, and records `differs`, `same` or `unknown`
-/// for Stryker's replacement (arrows: `defined` / `undefined`; regexes: their
-/// inputs, matched against Stryker's patterns after the run).
+/// The probes of arithmetic, compound assignment, method calls and concise
+/// arrows. Each runtime helper evaluates nothing the program did not, calls
+/// no user code, and records `differs`, `same` or `unknown` for Stryker's
+/// replacement (arrows: `defined` / `undefined`).
 /// - `a + b` -> `arithV2(site, a, b, op)`: the operation, done once there.
 /// - `x += e` (a bare name) -> `x += assignV2(site, x, e, op)`: `x` is read
 ///   before `e`, as the compound assignment reads it.
 /// - `r.some(f)` -> `methodV2(site, r, "some", arrowSite).some(f)`: for a
 ///   built-in receiver a stand-in makes the one call the program made.
 /// - `(x) => x.id` -> `(x) => valueV2(site, x.id)`.
-/// - `/re/` -> `regexV2(site, /re/)`: the expression is tagged with its site.
 struct InfectionProbeTransformer<'a, 'b> {
     ast: AstBuilder<'a>,
     helpers: ProbeHelpers<'b>,
-    /// `SUPERCOV_REGEX_INPUTS=1`: regular expressions' inputs recorded.
-    regex_inputs: bool,
     sites: InfectionSites<'a>,
     file: &'b str,
     source: &'b str,
@@ -4907,7 +4868,7 @@ struct InfectionProbeTransformer<'a, 'b> {
 }
 
 /// An infection probe's site: the file, the probed expression's span and
-/// the probe's kind (`arith`, `assign`, `method`, `arrow`, `regex`).
+/// the probe's kind (`arith`, `assign`, `method`, `arrow`).
 pub(crate) fn infection_probe_site(file: &str, source: &str, span: Span, kind: &str) -> String {
     let (line, column) = line_and_utf16_column(source, span.start as usize);
     let (end_line, end_column) = line_and_utf16_column(source, span.end as usize);
@@ -5079,21 +5040,6 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                         Argument::from(right),
                         self.number(code),
                     ],
-                );
-            }
-            Expression::RegExpLiteral(regex) => {
-                if !self.regex_inputs || regex.span.is_unspanned() {
-                    return;
-                }
-                let span = regex.span;
-                let site = self.site(span, "regex");
-                self.placed.push(site.clone());
-                let literal = expression.take_in(self.ast.allocator);
-                let regex_v2 = self.helpers.name("regexV2");
-                *expression = self.call(
-                    span,
-                    &regex_v2,
-                    vec![self.string(&site), Argument::from(literal)],
                 );
             }
             Expression::CallExpression(call) => {
@@ -6144,20 +6090,19 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         placed: Vec::new(),
     };
-    if comparisons_enabled() {
+    if probes_enabled() {
         comparison_transformer.visit_program(&mut parsed.program);
     }
     let mut infection_transformer = InfectionProbeTransformer {
         ast,
         helpers: comparison_transformer.helpers,
-        regex_inputs: regex_inputs_enabled(),
         sites: infection_sites,
         file,
         source,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         placed: Vec::new(),
     };
-    if infection_probes_enabled() {
+    if probes_enabled() {
         infection_transformer.visit_program(&mut parsed.program);
     }
     let probe_helpers = infection_transformer.helpers.named;
@@ -15222,19 +15167,14 @@ export function shapes(n: number): unknown {
     }
 
     #[test]
-    fn the_cache_key_follows_each_probe_switch() {
+    fn the_cache_key_follows_the_probe_switch() {
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let on = probe_options();
-        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(true));
-        let regex = probe_options();
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
-        // Regular expressions' inputs are recorded only with the probes on.
         let off = probe_options();
-        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(false));
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        assert_eq!(on, (true, false));
-        assert_eq!(regex, (true, true));
-        assert_eq!(off, (false, false));
+        assert!(on);
+        assert!(!off);
     }
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are
@@ -15248,7 +15188,7 @@ export function shapes(n: number): unknown {
             MUTANTS_FOR_TEST.with(|flag| flag.set(None));
             output.unwrap()
         };
-        // No comparison, arithmetic, method, arrow or regex site.
+        // No comparison, arithmetic, method or arrow site.
         let siteless = "export function f(a: boolean, b: boolean) {\n  if (a && b) {\n    return 'both';\n  }\n  const o = a ? { x: 1 } : null;\n  return o?.x;\n}\n";
         let (on, off) = (instrumented(true, siteless), instrumented(false, siteless));
         assert_eq!(on.code, off.code);
@@ -15261,7 +15201,7 @@ export function shapes(n: number): unknown {
             instrumented(true, arithmetic),
             instrumented(false, arithmetic),
         );
-        for absent in ["CompareV2", "AssignV2", "MethodV2", "ValueV2", "RegexV2"] {
+        for absent in ["CompareV2", "AssignV2", "MethodV2", "ValueV2"] {
             assert!(!on.code.contains(absent), "{absent}:\n{}", on.code);
         }
         // Every generated name, which begins with `_`.
@@ -15478,25 +15418,18 @@ export function shapes(n: number): unknown {
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/infection.ts").unwrap();
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        for helper in ["ArithV2", "AssignV2", "MethodV2", "ValueV2", "RegexV2"] {
+        for helper in ["ArithV2", "AssignV2", "MethodV2", "ValueV2"] {
             assert!(
                 !plain.code.contains(helper),
                 "off with SUPERCOV_MUTANTS=0:\n{}",
                 plain.code
             );
         }
-        // Regular expressions' inputs are user strings: recorded only when
-        // asked for.
-        let unasked = instrument_candidate(source, "src/infection.ts")
+        let probed = instrument_candidate(source, "src/infection.ts")
             .unwrap()
             .code;
-        assert!(unasked.contains("ArithV2"), "{unasked}");
-        assert!(!unasked.contains("RegexV2"), "{unasked}");
-        assert!(!unasked.contains("#regex"), "{unasked}");
-        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(true));
-        let probed = instrument_candidate(source, "src/infection.ts");
-        REGEX_INPUTS_FOR_TEST.with(|flag| flag.set(false));
-        let probed = probed.unwrap().code;
+        // A regular expression and its `test` are no mutant's: as written.
+        assert!(probed.contains("/^n[0-9]+$/.test(label)"), "{probed}");
         for expected in [
             // arithmetic, inner and outer; a bare name's compound assignment
             "(\"src/infection.ts:2:15-2:23#arith\", a, 1e3, 2)",
@@ -15510,9 +15443,6 @@ export function shapes(n: number): unknown {
             // a pure callback goes along as written, without the program's probes
             "(\"src/infection.ts:6:15-6:35#method\", xs, \"some\", \"src/infection.ts:6:23-6:34#arrow\", (x) => x.ok).some(",
             "(\"src/infection.ts:8:60-8:91#method\", xs, \"filter\", \"src/infection.ts:8:70-8:90#arrow\").filter(",
-            // a regular expression and its input
-            "(\"src/infection.ts:6:39-6:50#regex\", /^n[0-9]+$/)",
-            "(\"src/infection.ts:6:39-6:62#method\", __supercovRegexV2",
             // built-in receivers
             "(\"src/infection.ts:8:34-8:42#method\", s, \"trim\").trim()",
             "(\"src/infection.ts:8:44-8:58#method\", Math, \"min\").min(a, b)",
@@ -15524,7 +15454,6 @@ export function shapes(n: number): unknown {
             ("AssignV2", "assign"),
             ("MethodV2", "method"),
             ("ValueV2", "arrow\", x.id"),
-            ("RegexV2", "regex"),
         ] {
             let call = probed
                 .split(&format!("#{kind}"))

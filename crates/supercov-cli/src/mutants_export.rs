@@ -1,7 +1,7 @@
 //! `supercov runs <run-id> mutants --format jsonl`: every mutant asked
 //! about, one JSON object per line, each as `mutants --json` lists it. A
-//! reply holds a page, about 128 mutants under its 64 KB limit, and a run of
-//! a large app's size has 61,000.
+//! reply holds a page, about 128 mutants under its 64 KB limit, and a large
+//! app's run has tens of thousands.
 //!
 //! `--format markdown`: the mutants the tests leave alive as a table for a
 //! pull request's comment, `--diff` the change's, capped at

@@ -1089,7 +1089,6 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
 | `SUPERCOV_MUTANTS` | Set to `0` to measure a JavaScript or TypeScript run without the probes that decide its mutants, and without listing them (see [Mutants](#mutants)) |
-| `SUPERCOV_REGEX_INPUTS` | Set to `1` to record, with the mutants, up to 200 characters of each string a regular expression is matched against. Off by default: those strings are often user input, and they are kept in the run's evidence |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

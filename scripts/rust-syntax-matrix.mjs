@@ -222,9 +222,6 @@ const probeHelpers = {
   valueV2(_site, value) {
     return value;
   },
-  regexV2(_site, value) {
-    return value;
-  },
 };
 
 function applyInferredName(value, inferredName) {
@@ -414,7 +411,6 @@ async function runBrowser(name) {
               assignV2(_site, _current, value) { return value; },
               methodV2(_site, receiver) { return receiver; },
               valueV2(_site, value) { return value; },
-              regexV2(_site, value) { return value; },
               selectShortV2(_file, _first, value) { return value; },
               selectRightV2(_file, _first, value) { return value; },
               selectNamedRightV2(_file, _first, value, inferredName) { return applyInferredName(value, inferredName); },

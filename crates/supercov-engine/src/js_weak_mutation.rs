@@ -18,9 +18,7 @@
 //! records do not say they carry values (`SERVER_VALUES_RECORD`). Its
 //! outcomes there are missing, not absent.
 //!
-//! The rules are those of an earlier research prototype, which matched
-//! evidence by text;
-//! here every rule reads a link made from exact spans.
+//! Every rule reads a link made from exact spans, never matched text.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -249,11 +247,6 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             probed_operation(mutant, records)
         }
         "ArrowFunction" => arrow_function(mutant, records),
-        "Regex" => verdict_of(
-            Status::Unknown,
-            "regex",
-            "regular expression mutants are not decided yet",
-        ),
         other => verdict_of(
             Status::Unknown,
             "no-rule",
@@ -1677,7 +1670,6 @@ mod tests {
             UNKNOWN,
             "no-rule",
         );
-        expect(&mutant("Regex", "", "/a/"), &ran(), UNKNOWN, "regex");
     }
 
     #[test]

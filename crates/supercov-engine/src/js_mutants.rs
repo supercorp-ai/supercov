@@ -40,8 +40,6 @@
 //! The same grammar is implemented in JavaScript in the parity script; keep
 //! the two in step.
 
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;

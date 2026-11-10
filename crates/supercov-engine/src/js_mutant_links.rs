@@ -34,20 +34,17 @@ use crate::js_instrumenter::{
 };
 use crate::js_mutants::LedgerMutant;
 
-/// The version of `mutants.json` written. Version 2 leaves out what a reader
-/// works out again: a mutant's `id`, from its file, span, mutator and
-/// descriptor, and of a long `original` all but what is shown of it (see
-/// `js_weak_mutation::abbreviated`). Version 1, which holds both whole, is
-/// read as it was. Version 3 adds what the program as written says of a
-/// mutant (`equivalent`, `untestable`); an older file has none.
-pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 3;
+/// The version of `mutants.json`. It leaves out what a reader works out
+/// again: a mutant's `id`, from its file, span, mutator and descriptor, and
+/// of a long `original` all but what is shown of it (see
+/// `js_weak_mutation::abbreviated`).
+pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 1;
 
 /// `.supercov/frontend-evidence/mutants.json`: every instrumented file's
 /// mutants, or none when the run did not enumerate them (`mutantSet` null).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredMutants", into = "StoredMutants")]
 pub struct MutantsFile {
-    /// The version read; a file is always written as the current one.
     pub schema_version: u32,
     pub mutant_set: Option<String>,
     pub files: BTreeMap<String, Vec<CandidateMutant>>,
@@ -157,7 +154,7 @@ impl From<StoredMutants> for MutantsFile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateMutant {
     /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`. Left
-    /// out of `mutants.json` (version 2) where it is exactly that.
+    /// out of `mutants.json` where it is exactly that.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     pub mutator: String,
@@ -166,9 +163,9 @@ pub struct CandidateMutant {
     /// 1-based line and 1-based UTF-16 column, as StrykerJS reports them.
     pub start: (u32, u32),
     pub end: (u32, u32),
-    /// The mutated span's source text. In `mutants.json` (version 2), of a
-    /// long span only what is shown of it: the start of each operand around
-    /// an operator, or of the whole, with `operator.at` where it is there.
+    /// The mutated span's source text. In `mutants.json`, of a long span
+    /// only what is shown of it: the start of each operand around an
+    /// operator, or of the whole, with `operator.at` where it is there.
     pub original: String,
     /// The operator of a binary, logical or assignment expression mutated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1028,20 +1025,17 @@ pub(crate) fn link(
 mod tests {
     use super::*;
     use crate::js_instrumenter::{
-        COMPARISONS_FOR_TEST, CandidateOutput, INFECTION_PROBES_FOR_TEST, MUTANTS_FOR_TEST,
-        instrument_candidate,
+        CandidateOutput, MUTANTS_FOR_TEST, PROBES_FOR_TEST, instrument_candidate,
     };
 
-    /// `source` instrumented with the mutants on, and the probes asked for.
-    fn instrumented(source: &str, comparisons: bool, probes: bool) -> CandidateOutput {
+    /// `source` instrumented with the mutants on, with or without their
+    /// probes.
+    fn instrumented(source: &str, probes: bool) -> CandidateOutput {
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
-        COMPARISONS_FOR_TEST.with(|flag| flag.set(comparisons));
-        INFECTION_PROBES_FOR_TEST.with(|flag| flag.set(probes));
+        PROBES_FOR_TEST.with(|flag| flag.set(probes));
         let output = instrument_candidate(source, "src/links.ts");
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        for flag in [&COMPARISONS_FOR_TEST, &INFECTION_PROBES_FOR_TEST] {
-            flag.with(|flag| flag.set(true));
-        }
+        PROBES_FOR_TEST.with(|flag| flag.set(true));
         output.unwrap()
     }
 
@@ -1107,7 +1101,7 @@ mod tests {
         assert!(off.mutants.is_empty());
         let serialized = serde_json::to_value(&off).unwrap();
         assert!(serialized.get("mutants").is_none(), "{serialized}");
-        let on = instrumented(source, false, false);
+        let on = instrumented(source, false);
         assert!(!on.mutants.is_empty());
         assert_eq!(on.code, off.code);
         // Each mutant carries StrykerJS's id, span and original text.
@@ -1133,7 +1127,7 @@ mod tests {
             "  return g;\n",
             "}\n",
         );
-        let output = instrumented(source, false, false);
+        let output = instrumented(source, false);
         let function = point(&output, "function", &source[7..source.len() - 1]);
         let literal = mutant(&output, "\"x\"", "StringLiteral", "empty");
         assert_eq!(
@@ -1183,7 +1177,7 @@ mod tests {
             "  return 0;\n",
             "}\n",
         );
-        let output = instrumented(source, false, false);
+        let output = instrumented(source, false);
         let first = decision(&output, "a > 0 && b < 1 && c === 2");
         let link = |original: &str, mutator: &str, replacement: &str, line: u32| {
             output
@@ -1292,7 +1286,7 @@ mod tests {
             "  return [v, w, z, !(x || y)];\n",
             "}\n",
         );
-        let output = instrumented(source, false, false);
+        let output = instrumented(source, false);
         let coalesce = branch(&output, "logical-value", "x ?? (a > b)");
         assert_eq!(
             mutant(&output, "a > b", "ConditionalExpression", "true").branch,
@@ -1332,7 +1326,7 @@ mod tests {
     #[test]
     fn an_optional_link_names_the_links_before_it_in_its_chain() {
         let source = "export const h = (o: any) => [o?.a?.b, (o?.c)?.d, o?.e?.()];\n";
-        let output = instrumented(source, false, false);
+        let output = instrumented(source, false);
         let id = |source: &str| branch(&output, "optional-chain", source).to_owned();
         let chain = |original: &str, link: &str| {
             mutant(&output, original, "OptionalChaining", link)
@@ -1379,7 +1373,7 @@ mod tests {
             "export const text = (function (a: number, b: number) { return [a < b, a + b]; }).toString();\n",
             "export const chained = (a: number, b: number, c: number) => [a < b < c];\n",
         );
-        let probed = instrumented(source, true, true);
+        let probed = instrumented(source, true);
         let on_line = |line: u32, original: &str, mutator: &str, replacement: &str| {
             probed
                 .mutants
@@ -1445,7 +1439,7 @@ mod tests {
             None
         );
         // With the probes off nothing is placed.
-        let plain = instrumented(source, false, false);
+        let plain = instrumented(source, false);
         assert!(
             plain
                 .mutants
@@ -1458,7 +1452,7 @@ mod tests {
     #[test]
     fn mutants_round_trip_through_their_json() {
         let source = "export const h = (o: any, a: number) => o?.a ?? a > 1;\n";
-        let output = instrumented(source, true, true);
+        let output = instrumented(source, true);
         let file = MutantsFile {
             schema_version: MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
@@ -1468,7 +1462,7 @@ mod tests {
         // Written without the ids its mutants' places make.
         let encoded = serde_json::to_string(&file).unwrap();
         assert!(encoded.starts_with(
-            "{\"schemaVersion\":3,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"mutator\":"
+            "{\"schemaVersion\":1,\"mutantSet\":\"stryker-js@10.1.1\",\"files\":{\"src/links.ts\":[{\"mutator\":"
         ));
         let stored: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         for mutant in stored["files"]["src/links.ts"].as_array().unwrap() {
@@ -1480,16 +1474,6 @@ mod tests {
         }
         let decoded: MutantsFile = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, file);
-        // Version 1 held every id, and is read as it was.
-        let first = serde_json::json!({
-            "schemaVersion": 1,
-            "mutantSet": crate::js_mutants::MUTANT_SET,
-            "files": {"src/links.ts": output.mutants},
-        });
-        assert!(first.to_string().contains("\"id\":\"src/links.ts:1:"));
-        let read: MutantsFile = serde_json::from_value(first).unwrap();
-        assert_eq!(read.files, file.files);
-        assert_eq!(read.schema_version, 1);
     }
 
     /// What the program alone says of a mutant is linked to it and stored
@@ -1497,7 +1481,7 @@ mod tests {
     #[test]
     fn static_rules_are_linked_and_stored() {
         let source = "export function f(a: number, b: number) {\n  const n = a - b;\n  return [n && n > 0, Date.now() > a, a > 0];\n}\n";
-        let output = instrumented(source, true, true);
+        let output = instrumented(source, true);
         let guarded = mutant(&output, "n > 0", "EqualityOperator", ">=");
         assert_eq!(
             guarded.equivalent.as_ref().map(|note| note.rule.as_str()),
@@ -1604,7 +1588,8 @@ mod tests {
         let whole = file.files.values().flatten().collect::<Vec<_>>();
         let count = whole.len();
         assert!(count > 3_000, "{count} mutants");
-        let first = serde_json::to_vec(&serde_json::json!({
+        // Every mutant with its id and its whole original.
+        let whole_list = serde_json::to_vec(&serde_json::json!({
             "schemaVersion": 1,
             "mutantSet": file.mutant_set,
             "files": file.files,
@@ -1664,12 +1649,12 @@ mod tests {
             encoder.finish().unwrap().len()
         };
         let sizes = format!(
-            "{count} mutants, {abbreviated} originals cut: version 1 {} bytes ({} gzipped), version 2 {} bytes ({} gzipped)",
-            first.len(),
-            gzip(&first),
+            "{count} mutants, {abbreviated} originals cut: whole {} bytes ({} gzipped), stored {} bytes ({} gzipped)",
+            whole_list.len(),
+            gzip(&whole_list),
             stored.len(),
             gzip(&stored)
         );
-        assert!(stored.len() * 10 < first.len() * 7, "{sizes}");
+        assert!(stored.len() * 10 < whole_list.len() * 7, "{sizes}");
     }
 }

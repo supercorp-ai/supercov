@@ -7012,9 +7012,9 @@ mod tests {
         };
         let mut result = raw("t", 0, "passed", &[]);
         result.scope = Some(scope.clone());
-        // Stored as version 2 writes it: no id, worked out from its place.
+        // Stored without its id, worked out from its place.
         let mutants = serde_json::json!({
-            "schemaVersion": 2,
+            "schemaVersion": 1,
             "mutantSet": crate::js_mutants::MUTANT_SET,
             "files": {"src/app.js": [{
                 "mutator": "EqualityOperator", "replacement": "<=",

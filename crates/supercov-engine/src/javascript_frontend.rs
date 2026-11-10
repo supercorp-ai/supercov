@@ -2208,7 +2208,7 @@ pub fn prepare_javascript_frontend(
 }
 
 /// The first lines of the runtime's declarations: the lint exemption, then the
-/// infection-research helpers, whose types are not a plain value pass-through.
+/// mutants' probe helpers, whose types are not a plain value pass-through.
 const RUNTIME_DECLARATIONS_HEAD: &str = concat!(
     "/* eslint-disable */\n",
     "export declare function compareV2(site: string, left: any, right: any, op: number): boolean;\n",
@@ -2216,9 +2216,8 @@ const RUNTIME_DECLARATIONS_HEAD: &str = concat!(
     // other operators give a number, or a bigint for bigints.
     "export declare function arithV2<L, R>(site: string, left: L, right: R, op: number): 0 extends 1 & L ? any : 0 extends 1 & R ? any : L extends string ? string : R extends string ? string : L extends bigint ? bigint : number;\n",
     "export declare function assignV2<T>(site: string, current: any, value: T, op: number): T;\n",
-    "export declare function methodV2<T>(site: string, receiver: T, method: string, arrow?: string): T;\n",
+    "export declare function methodV2<T>(site: string, receiver: T, method: string, arrow?: string, copy?: (...args: any[]) => unknown): T;\n",
     "export declare function valueV2<T>(site: string, value: T): T;\n",
-    "export declare function regexV2<T>(site: string, value: T): T;\n",
 );
 
 #[cfg(test)]

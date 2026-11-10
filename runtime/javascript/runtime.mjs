@@ -199,7 +199,7 @@ function createState() {
     logicals: /* @__PURE__ */ new Map(),
     // Per relational comparison site ("file:line:column"): the operand
     // relations seen -- lt, eq, gt, unordered (NaN), or other (objects that
-    // are not Dates) -- for the infection research, beside the coverage.
+    // are not Dates) -- that decide comparison mutants, beside the coverage.
     // Each relation maps to the epoch a process writing records last wrote
     // it in (0 where none did): see noteValue.
     comparisons: /* @__PURE__ */ new Map(),
@@ -2486,9 +2486,8 @@ function compareV2(site, left, right, op) {
   }
   return result;
 }
-// The infection probes (on unless SUPERCOV_MUTANTS=0; regexV2 only with
-// SUPERCOV_REGEX_INPUTS=1, as it keeps user strings). Each helper
-// gets the values the program computed, does the program's own operation or
+// The mutants' probes (on unless SUPERCOV_MUTANTS=0). Each helper gets the
+// values the program computed, does the program's own operation or
 // call once, and records whether Stryker's replacement would have given a
 // different value ("differs"), the same one ("same"), or cannot be told
 // ("unknown"), under the site's id in the comparison records. Counterparts
@@ -2607,40 +2606,13 @@ function valueV2(site, value) {
   }
   return value;
 }
-const probeRegexSites = /* @__PURE__ */ new WeakMap();
-function regexV2(site, value) {
-  try {
-    if (value instanceof RegExp) probeRegexSites.set(value, site);
-  } catch {
-  }
-  return value;
-}
-// A regular expression's input, kept for matching against Stryker's patterns
-// after the run: "t:" test, "e:" exec, "m:" match, "s:" search. A stateful
-// (g or y) expression's result depends on lastIndex, which is not kept.
-function probeRegexInput(regex, kind, input) {
-  const site = probeRegexSites.get(regex);
-  if (site === void 0) return;
-  if (typeof input !== "string" || regex.global || regex.sticky) {
-    recordProbeOutcome(site, "unknown");
-    return;
-  }
-  const outcomes = state.comparisons.get(site);
-  if (input.length > 200 || outcomes !== void 0 && outcomes.size >= 32) {
-    recordProbeOutcome(site, "overflow");
-    return;
-  }
-  recordProbeOutcome(site, kind + ":" + JSON.stringify(input));
-}
-const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype, probeRegExp = RegExp.prototype;
+const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype;
 const probeBuiltins = {
   array: new Map(["some", "every", "filter", "reverse", "slice", "sort", "find", "findIndex", "findLast", "findLastIndex"].filter((name) => typeof probeArray[name] === "function").map((name) => [name, probeArray[name]])),
-  string: new Map(["charAt", "endsWith", "startsWith", "substr", "substring", "slice", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart", "match", "search"].filter((name) => typeof probeString[name] === "function").map((name) => [name, probeString[name]])),
+  string: new Map(["charAt", "endsWith", "startsWith", "substr", "substring", "slice", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart"].filter((name) => typeof probeString[name] === "function").map((name) => [name, probeString[name]])),
   date: new Map(["setDate", "setTime", "setFullYear", "setMonth", "setHours", "setMinutes", "setSeconds", "setMilliseconds", "setUTCDate", "setUTCFullYear", "setUTCMonth", "setUTCHours", "setUTCMinutes", "setUTCSeconds", "setUTCMilliseconds"].map((name) => [name, probeDate[name]])),
   min: Math.min,
   max: Math.max,
-  test: probeRegExp.test,
-  exec: probeRegExp.exec,
   getTime: probeDate.getTime
 };
 // Stryker's swaps (StrykerJS 10.1.1); a name it removes has none.
@@ -2735,12 +2707,6 @@ function probeArrayCall(site, receiver, name, arrow, args, pure) {
 }
 function probeStringCall(site, receiver, name, args) {
   const builtin = probeBuiltins.string.get(name);
-  if ((name === "match" || name === "search") && args[0] instanceof RegExp && probeRegexSites.has(args[0])) {
-    try {
-      probeRegexInput(args[0], name === "match" ? "m" : "s", receiver);
-    } catch {
-    }
-  }
   const result = Reflect.apply(builtin, receiver, args);
   try {
     if (probeRemoved.has(name)) recordProbeOutcome(site, Object.is(result, receiver) ? "same" : "differs");
@@ -2813,15 +2779,6 @@ function methodV2(site, receiver, name, arrow, pure) {
     } else if (receiver === Math) {
       if ((name === "min" || name === "max") && Math[name] === probeBuiltins[name])
         call = (args) => probeMathCall(site, name, args);
-    } else if (receiver instanceof RegExp) {
-      if ((name === "test" || name === "exec") && Object.getPrototypeOf(receiver) === probeRegExp && receiver[name] === probeBuiltins[name] && probeRegexSites.has(receiver))
-        call = (args) => {
-          try {
-            probeRegexInput(receiver, name === "test" ? "t" : "e", args[0]);
-          } catch {
-          }
-          return Reflect.apply(probeBuiltins[name], receiver, args);
-        };
     }
     if (call !== void 0) return { [name]: (...args) => call(args) };
   } catch {
@@ -3128,7 +3085,6 @@ const directRuntimeApi = {
   assignV2,
   methodV2,
   valueV2,
-  regexV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -3204,7 +3160,6 @@ export {
   assignV2,
   methodV2,
   valueV2,
-  regexV2,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

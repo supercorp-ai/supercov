@@ -1428,8 +1428,8 @@ test("every and some that stop at the first of several elements are decided by a
   );
 });
 
-test("infection probes record whether Stryker's replacement would differ, running the program's code once", async () => {
-  const { arithV2, assignV2, methodV2, valueV2, regexV2, resetCoverage, coverageSnapshot } = await import(
+test("the mutants' probes record whether Stryker's replacement would differ, running the program's code once", async () => {
+  const { arithV2, assignV2, methodV2, valueV2, resetCoverage, coverageSnapshot } = await import(
     "../../runtime/javascript/runtime.mjs"
   );
   resetCoverage("infection-probes");
@@ -1472,12 +1472,10 @@ test("infection probes record whether Stryker's replacement would differ, runnin
   assert.equal(methodV2("r", custom, "some"), custom);
   const plain = [1];
   assert.equal(methodV2("r", plain, "map"), plain);
-  // A concise arrow's value, and a regular expression's inputs.
+  // A concise arrow's value. A regular expression comes back as it is.
   assert.equal(valueV2("s", undefined), undefined);
-  const literal = regexV2("t", /^a+$/);
-  assert.equal(methodV2("u", literal, "test").test("aa"), true);
-  const global = regexV2("v", /a/g);
-  assert.equal(methodV2("w", global, "test").test("a"), true);
+  const pattern = /^a+$/;
+  assert.equal(methodV2("u", pattern, "test"), pattern);
   assert.deepEqual(outcomes(), {
     a: ["same"],
     b: ["differs"],
@@ -1499,8 +1497,6 @@ test("infection probes record whether Stryker's replacement would differ, runnin
     p: ["same"],
     q: ["differs"],
     s: ["undefined"],
-    t: ['t:"aa"'],
-    v: ["unknown"],
   });
 });
 

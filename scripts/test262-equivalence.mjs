@@ -173,7 +173,6 @@ function runtimePrelude(transformed) {
     assignV2: "function(site,current,value){return value;}",
     methodV2: "function(site,receiver){return receiver;}",
     valueV2: "function(site,value){return value;}",
-    regexV2: "function(site,value){return value;}",
   };
   if (!importMatch) {
     const implementations = globalMatches.map(([, , imported]) => {
