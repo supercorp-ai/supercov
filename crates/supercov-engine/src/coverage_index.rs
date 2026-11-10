@@ -1079,9 +1079,58 @@ fn scope_projection<'a>(
 }
 
 /// `scope` is the view's own, read once for all its projections.
+/// What a projection's records need of its selection that reads every line,
+/// point, branch and decision of the view, and no string: worked out for
+/// every selection at once, each on its own thread, before the records that
+/// intern strings in their order.
+struct Projected {
+    /// None where only the gaps are filed: the files every test together
+    /// covers.
+    summary: Option<CoverageSummary>,
+    gaps: Vec<(String, MutableFileGap)>,
+}
+
+impl Projected {
+    fn of(view: &CoverageView, selected: Option<&Selected>, summarized: bool) -> Self {
+        Self {
+            summary: summarized.then(|| {
+                selected.map_or_else(
+                    || view.summary.clone(),
+                    |ids| {
+                        coverage_summary_for_tests(view, &ids.iter().cloned().collect())
+                            .expect(CHECKED)
+                    },
+                )
+            }),
+            gaps: file_gaps(view, selected),
+        }
+    }
+}
+
+/// [`Projected`] for each selection, in their order, and whether it is
+/// summarized.
+fn projected_all(view: &CoverageView, selections: &[(Option<&Selected>, bool)]) -> Vec<Projected> {
+    std::thread::scope(|scope| {
+        let workers = selections
+            .iter()
+            .map(|&(selected, summarized)| {
+                scope.spawn(move || Projected::of(view, selected, summarized))
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .expect("a projection is worked out without a panic")
+            })
+            .collect()
+    })
+}
+
 fn projection_record(
     (view_id, view, scope): (CoverageViewId, &CoverageView, &Option<ScopeProjection<'_>>),
-    selected: Option<&Selected>,
+    (selected, projected): (Option<&Selected>, &Projected),
     kind: Option<&str>,
     runner: Option<&str>,
     strings: &mut StringTable,
@@ -1118,11 +1167,15 @@ fn projection_record(
     put_u64(&mut record, 24, roots_offset);
     put_u32(&mut record, 32, u64_u32(roots_count));
 
-    let summary = selected.map_or_else(
-        || view.summary.clone(),
-        |ids| coverage_summary_for_tests(view, &ids.iter().cloned().collect()).expect(CHECKED),
+    put_summary_payload(
+        &mut record,
+        36,
+        40,
+        projected
+            .summary
+            .as_ref()
+            .expect("a projection's selection is summarized"),
     );
-    put_summary_payload(&mut record, 36, 40, &summary);
 
     let mut limitation_kinds = [0_usize; 3];
     let mut limitation_files = BTreeSet::new();
@@ -1195,7 +1248,7 @@ fn projection_record(
             put_u64(&mut record, 280 + index * 8, usize_u64(count));
         });
 
-    let gaps = file_gaps(view, selected);
+    let gaps = &projected.gaps;
     put_u64(
         &mut record,
         320,
@@ -2102,9 +2155,30 @@ where
             model_of_all = Some((view.variant.clone(), view.model.clone()));
         }
         summaries.extend_from_slice(&summary_record(id, view, &mut strings));
+        // What the tests cover of each file, all kinds together: a directory
+        // read e2e 18.18%, every other kind 0.00% and 100.00% in all, and
+        // nothing said that the rest ran while no test was running. Filed
+        // under the name the tests' own dimension has, which no kind can be.
+        let tested = crate::coverage_report::entries_in_kind_rows(view)
+            .into_iter()
+            .collect::<Selected>();
+        let selections = projections(view);
+        let mut projected = projected_all(
+            view,
+            &std::iter::once((None, true))
+                .chain(
+                    selections
+                        .iter()
+                        .map(|(_, _, selected)| (Some(selected), true)),
+                )
+                .chain((!tested.is_empty()).then_some((Some(&tested), false)))
+                .collect::<Vec<_>>(),
+        )
+        .into_iter();
+        let whole = projected.next().expect("the whole view is projected");
         projection_records.extend_from_slice(&projection_record(
             (id, view, &scope),
-            None,
+            (None, &whole),
             None,
             None,
             &mut strings,
@@ -2399,13 +2473,14 @@ where
                 &mut strings,
             ));
         }
-        for (file, gap) in file_gaps(view, None) {
-            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings));
+        for (file, gap) in &whole.gaps {
+            gaps.extend_from_slice(&file_gap_record(id, file, gap, None, None, &mut strings));
         }
-        for (kind, runner, selected) in projections(view) {
+        for (kind, runner, selected) in &selections {
+            let projected = projected.next().expect("each selection is projected");
             projection_records.extend_from_slice(&projection_record(
                 (id, view, &scope),
-                Some(&selected),
+                (Some(selected), &projected),
                 kind.as_deref(),
                 runner.as_deref(),
                 &mut strings,
@@ -2415,36 +2490,29 @@ where
                 decision_gaps.extend_from_slice(&decision_gap_record(
                     id,
                     decision,
-                    Some(&selected),
+                    Some(selected),
                     kind.as_deref(),
                     runner.as_deref(),
                     &mut strings,
                 ));
             }
-            for (file, gap) in file_gaps(view, Some(&selected)) {
+            for (file, gap) in &projected.gaps {
                 gaps.extend_from_slice(&file_gap_record(
                     id,
-                    &file,
-                    &gap,
+                    file,
+                    gap,
                     kind.as_deref(),
                     runner.as_deref(),
                     &mut strings,
                 ));
             }
         }
-        // What the tests cover of each file, all kinds together: a directory
-        // read e2e 18.18%, every other kind 0.00% and 100.00% in all, and
-        // nothing said that the rest ran while no test was running. Filed
-        // under the name the tests' own dimension has, which no kind can be.
-        let tested = crate::coverage_report::entries_in_kind_rows(view)
-            .into_iter()
-            .collect::<Selected>();
-        if !tested.is_empty() {
-            for (file, gap) in file_gaps(view, Some(&tested)) {
+        if let Some(tested) = projected.next() {
+            for (file, gap) in &tested.gaps {
                 gaps.extend_from_slice(&file_gap_record(
                     id,
-                    &file,
-                    &gap,
+                    file,
+                    gap,
                     Some(ALL_TESTS),
                     None,
                     &mut strings,
