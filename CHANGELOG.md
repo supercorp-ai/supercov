@@ -5,7 +5,7 @@
 **Changed**
 
 - Measured runs of JavaScript suites are faster. On a Vite canvas app's Vitest suite under jsdom, a measured run takes 1.28× the plain run, against 1.49× with 4.26.0. On a Next.js app, its Vitest suite takes 1.10× the plain run, against 1.23×, and its Playwright suite 1.13×, against 1.15×. Measured in GitHub Actions on 4-CPU runners, three rounds each.
-- Every Node process of a measured run uses Node's compile cache (Node 22.1 or later), kept with the run's evidence, unless the command sets `NODE_COMPILE_CACHE` itself. Vitest workers also share the compiled code of instrumented modules, so each module is compiled once per run rather than once per test file.
+- Every Node process of a measured run uses Node's compile cache (Node 22.1 or later, outside Windows), kept with the run's evidence, unless the command sets `NODE_COMPILE_CACHE` itself. Vitest workers also share the compiled code of instrumented modules, so each module is compiled once per run rather than once per test file.
 - A probe outside a loop is a call that checks for itself; probes in loops keep the inline check. Instrumented code is smaller, which browsers and bundlers parse faster. Modules name their helpers without a per-file suffix, and decisions use shorter temporaries.
 - A Playwright context that outlives its test, such as a worker-scoped one, now holds one copy of Supercov's page script. Each test added another copy and every page ran all of them.
 - The work after the tests is faster: records are parsed once, on every core, probe places are resolved in parallel, and Supercov allocates with mimalloc outside Windows.

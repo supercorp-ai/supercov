@@ -237,9 +237,12 @@ const MARK = "__supercov";
  * for the processes after it: a runner that starts a fresh process or worker
  * per test file compiled the same packages again in each. A command that set
  * NODE_COMPILE_CACHE keeps its own. Only how long compiling takes changes.
+ * Not on Windows: there `node --test`'s child for a test file never finished
+ * once the cache was on.
  */
 export function enableNodeCompileCache(directory) {
-    if (!directory || process.env.NODE_COMPILE_CACHE !== undefined || typeof Module.enableCompileCache !== "function")
+    if (!directory || process.platform === "win32" || process.env.NODE_COMPILE_CACHE !== undefined ||
+        typeof Module.enableCompileCache !== "function")
         return;
     Module.enableCompileCache(resolve(directory, "node"));
 }
