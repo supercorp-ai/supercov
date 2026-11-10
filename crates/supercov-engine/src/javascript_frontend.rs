@@ -2265,9 +2265,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:472",
-            "javascript-source-path#javascript_frontend.rs:1886",
-            "javascript-source-path#javascript_frontend.rs:1816",
+            "javascript-source-path#javascript_frontend.rs:473",
+            "javascript-source-path#javascript_frontend.rs:1887",
+            "javascript-source-path#javascript_frontend.rs:1817",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2378,8 +2378,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:529",
-            "javascript-source-path#javascript_frontend.rs:472",
+            "fs.read_to_string#javascript_frontend.rs:530",
+            "javascript-source-path#javascript_frontend.rs:473",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
