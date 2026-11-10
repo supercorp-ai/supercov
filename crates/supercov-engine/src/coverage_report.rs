@@ -3150,13 +3150,18 @@ pub fn analyze_coverage_results(
             &mut Interner::default(),
         )
     };
+    // A run whose every result passed has passing results that are all of
+    // them, in the same order (the filter keeps order), so its passed view is
+    // the whole view: built again, it was a second whole view's work beside
+    // the first, on a large Vitest run 6.5 s of a core.
+    let passing_is_all = passing.len() == all.len();
     let (view, passed, failed) = std::thread::scope(|scope| {
-        let passed = scope.spawn(|| build(&passing));
+        let passed = (!passing_is_all).then(|| scope.spawn(|| build(&passing)));
         let failed = scope.spawn(|| build(&failing));
         let view = build(&all);
         (
             view,
-            passed.join().unwrap_or_else(crate::threads::rethrow),
+            passed.map(|passed| passed.join().unwrap_or_else(crate::threads::rethrow)),
             failed.join().unwrap_or_else(crate::threads::rethrow),
         )
     });
@@ -3164,7 +3169,7 @@ pub fn analyze_coverage_results(
     // what built whole builds in part.
     let view = view?;
     let (passed, failed) = (
-        passed.expect("built whole above"),
+        passed.map_or_else(|| view.clone(), |passed| passed.expect("built whole above")),
         failed.expect("built whole above"),
     );
     let execution = match request.test_exit_code {
@@ -5304,6 +5309,49 @@ mod tests {
         // Two that both lie within the millisecond: the later, as before.
         let instant = [phase("first", 200, 200), phase("second", 200, 210)];
         assert_eq!(phase_at(&instant, 200), Some("second"));
+    }
+
+    /// A run whose every result passed takes its passed view from the whole
+    /// view rather than building it again, and it is what building it again
+    /// gives: the passing results are all of them, in order.
+    #[test]
+    fn a_run_that_all_passed_has_the_whole_view_as_its_passed_view() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("a", 1), point("b", 2), point("unreached", 3)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let request = CoverageReportRequest {
+            run_id: "run".into(),
+            manifest,
+            raw_results: vec![
+                raw("first", 0, "passed", &["a"]),
+                raw("second", 0, "passed", &["a", "b"]),
+            ],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        };
+        let report = analyze_coverage_results(&request).unwrap();
+        let passing = passing_coverage_results(&request.raw_results);
+        assert_eq!(passing.len(), request.raw_results.len());
+        let built = create_coverage_view_with_model(
+            &request.manifest,
+            &passing,
+            &request.generated_at,
+            &javascript_coverage_model(),
+            &mut Interner::default(),
+        )
+        .unwrap();
+        assert_eq!(report.filters.passed, built);
+        assert_eq!(report.filters.passed, report.view);
+        assert!(report.filters.failed.tests.is_empty());
     }
 
     #[test]
