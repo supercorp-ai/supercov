@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.27.0
 
 **Changed**
 
