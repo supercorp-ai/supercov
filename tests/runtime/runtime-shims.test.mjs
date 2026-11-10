@@ -1342,11 +1342,10 @@ test("a process writing records writes each value its probes see once per contex
         "--eval",
         `const runtime = await import(${JSON.stringify(runtime)});
          // One selection: points 0-3 are short falsy, short truthy, right
-         // falsy and right truthy.
+         // falsy and right truthy, named by their table's key and place.
          const file = runtime.registerProbeV2({
-           file: "src/pick.js",
-           pointIds: ["pick:short", "pick:short", "pick:right", "pick:right"],
-           decisions: [],
+           key: "k",
+           points: 4,
            decisionWidths: [],
            selectionPoints: [0, 1],
          });
@@ -1405,7 +1404,8 @@ test("a process writing records writes each value its probes see once per contex
         "values",
         "comparison src/a.js:1:1 lt",
         "comparison src/a.js:2:1-2:6#arith same",
-        "logical pick RF",
+        // By the place of the point hit: the report reads its branch there.
+        "logical ~pk.2 RF",
       ]);
     }
     assert.deepEqual(attempts.map((records) => records[0].scope.attemptId).sort(), ["first", "second"]);

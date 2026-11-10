@@ -4480,6 +4480,63 @@ mod tests {
         }
     }
 
+    /// A server process names a selection's outcome by the place of the
+    /// point it hit, as a snapshot does: once its records are a snapshot,
+    /// the outcome is its branch's.
+    #[test]
+    fn a_server_s_logical_record_by_place_is_its_branch_s() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec![
+                    "pick:short".into(),
+                    "pick:short".into(),
+                    "pick:right".into(),
+                    "pick:right".into(),
+                ],
+                decisions: Vec::new(),
+                follows: Vec::new(),
+            },
+        )]);
+        let record = |kind: &str, id: Option<&str>, outcome: Option<&str>| ServerRecord {
+            record_type: kind.into(),
+            vector: None,
+            id: id.map(str::to_owned),
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+            outcome: outcome.map(str::to_owned),
+        };
+        let mut result = raw("a", 0, "passed", &[]);
+        result.server = vec![
+            record(SERVER_VALUES_RECORD, None, None),
+            record("hit", Some("~pk.2"), None),
+            record("logical", Some("~pk.2"), Some("RF")),
+            record("logical", Some("~pk.1"), Some("ST")),
+        ];
+        let mut results = vec![result];
+        fold_server_values(&mut results).unwrap();
+        resolve_probe_places(&mut results, &tables);
+        let values = results[0].runtime.last().unwrap();
+        assert_eq!(
+            values.logicals,
+            [LogicalSnapshot {
+                id: "pick".into(),
+                vectors: vec![
+                    LogicalVector {
+                        right: false,
+                        truthy: true
+                    },
+                    LogicalVector {
+                        right: true,
+                        truthy: false
+                    },
+                ],
+            }]
+        );
+    }
+
     /// Evidence names a probe by its module's table and place; the report
     /// reads the id there, in every kind of record, and leaves a name of no
     /// table, or of a place beyond it, as an id it does not know.
