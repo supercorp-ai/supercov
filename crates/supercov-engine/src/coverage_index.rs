@@ -1957,7 +1957,6 @@ pub fn coverage_index_sections(
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
     // A run whose every result passed has the whole view as its passed view;
     // its records are then the whole view's, written again under its id.
-    let passed_is_whole = report.filters.passed == report.view;
     sections_from(
         [
             (CoverageViewId::All, &report.view),
@@ -1965,7 +1964,7 @@ pub fn coverage_index_sections(
             (CoverageViewId::Failed, &report.filters.failed),
         ]
         .map(Ok),
-        passed_is_whole,
+        report.passed_is_whole,
     )
 }
 
@@ -1982,13 +1981,26 @@ where
     sections_from(views, false)
 }
 
-/// `coverage_index_sections_from`, told whether the passed view is the whole
-/// view: its records are then the whole view's with the passed view's id,
+/// [`coverage_index_sections_from`], told whether the passed view is the
+/// whole view (`passing_is_every_result`), which it then need not be given:
+/// its records are the whole view's with the passed view's id, written right
+/// after the whole view's,
 /// copied where they were built again -- on a large all-passing run the most
 /// of a second whole index, alone after the analysis. Each copied record
 /// points into the shared confidence, vector and condition records at the
 /// whole view's entries, which are the same; its strings and string runs
 /// are interned once already.
+pub fn coverage_index_sections_with_whole_passed<V, E>(
+    views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
+    passed_is_whole: bool,
+) -> Result<Vec<QueryIndexSection>, E>
+where
+    V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
+    E: From<CoverageIndexError>,
+{
+    sections_from(views, passed_is_whole)
+}
+
 fn sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
     passed_is_whole: bool,
@@ -2076,14 +2088,10 @@ where
             )*
         }};
     }
-    let mut whole: Option<Vec<(usize, usize)>> = None;
     for item in views {
         let (id, owned) = item?;
-        if id == CoverageViewId::Passed
-            && passed_is_whole
-            && let Some(whole) = &whole
-        {
-            per_view!(copy_whole_as_passed, whole);
+        // Written with the whole view's, below.
+        if id == CoverageViewId::Passed && passed_is_whole {
             continue;
         }
         let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
@@ -2443,8 +2451,14 @@ where
                 ));
             }
         }
-        if let Some(starts) = starts {
-            whole = Some(starts.into_iter().zip(per_view!(lengths)).collect());
+        if let Some(starts) = starts
+            && passed_is_whole
+        {
+            let whole = starts
+                .into_iter()
+                .zip(per_view!(lengths))
+                .collect::<Vec<_>>();
+            per_view!(copy_whole_as_passed, whole);
         }
     }
     let (variant, model) =
@@ -5681,6 +5695,7 @@ mod tests {
     fn a_passed_view_that_is_the_whole_reads_as_when_built_again() {
         for mut whole in [report(), scoped_report(), phased_report()] {
             whole.filters.passed = whole.view.clone();
+            whole.passed_is_whole = true;
             let copied = coverage_index_sections(&whole).unwrap();
             let built = sections_from::<_, CoverageIndexError>(
                 [

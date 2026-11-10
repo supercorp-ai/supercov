@@ -13803,8 +13803,8 @@ export function shapes(n: number): unknown {
             // operand is a decision too: its conditions are recorded in the
             // leaves and its outcome after the tree, from their values with
             // `&`, so the tree stays one tree and narrows as written.
-            "(s1 = 0, _supercovMcdcFrame27 = 1, _supercovMcdcValue29 = 0, _supercovMcdcValue28 = total > 0) && (s1 = 1, _supercovMcdcFrame27 += 3, _supercovMcdcValue29 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
-            "!!(+!!_supercovMcdcValue28 & +!!_supercovMcdcValue29)), _supercovMcdcResult30;",
+            "(s1 = 0, _supercovMcdcFrame28 = 1, _supercovMcdcValue30 = 0, _supercovMcdcValue29 = total > 0) && (s1 = 1, _supercovMcdcFrame28 += 3, _supercovMcdcValue30 = name !== \"x\") || (NEXT(0, s1, 2), s1 = 2, !!name), s1)",
+            "!!(+!!_supercovMcdcValue29 & +!!_supercovMcdcValue30)), _supercovMcdcResult31;",
             "|| (NEXT(1, s2, 2), s2 = 2, force), s2)",
             // Only `b` can come before `c`: a first `??` that kept `a` ends
             // the second.

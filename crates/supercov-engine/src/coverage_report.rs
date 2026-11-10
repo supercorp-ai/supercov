@@ -919,6 +919,18 @@ pub struct CoverageReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionResult>,
     pub filters: CoverageFilters,
+    /// Every result passed, so the passed view is the whole view
+    /// ([`passing_is_every_result`]): its query index records are the whole
+    /// view's, copied.
+    #[serde(skip)]
+    pub passed_is_whole: bool,
+}
+
+/// Whether the passing results are all of them: then they are all of them in
+/// order, and the passed view is the whole view. Publication and a query that
+/// rebuilds the index both decide by it, so both write the same bytes.
+pub fn passing_is_every_result(results: &[RawTestResult]) -> bool {
+    passing_coverage_results(results).len() == results.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3155,6 +3167,10 @@ pub fn analyze_coverage_results(
     // the whole view: built again, it was a second whole view's work beside
     // the first, on a large Vitest run 6.5 s of a core.
     let passing_is_all = passing.len() == all.len();
+    debug_assert_eq!(
+        passing_is_all,
+        passing_is_every_result(&request.raw_results)
+    );
     let (view, passed, failed) = std::thread::scope(|scope| {
         let passed = (!passing_is_all).then(|| scope.spawn(|| build(&passing)));
         let failed = scope.spawn(|| build(&failing));
@@ -3191,6 +3207,7 @@ pub fn analyze_coverage_results(
         view,
         execution,
         filters: CoverageFilters { passed, failed },
+        passed_is_whole: passing_is_all,
     })
 }
 
