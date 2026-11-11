@@ -261,7 +261,8 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     let Argument::NumericLiteral(number) = second else {
         return None;
     };
-    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+    // A numeric literal is never negative: `-1` is a negation of one.
+    (number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 /// The place of a statement probe, `hit(place);` or, in a loop,
@@ -303,7 +304,8 @@ fn bound_place_argument(call: &CallExpression<'_>) -> Option<usize> {
     let [Argument::NumericLiteral(number)] = call.arguments.as_slice() else {
         return None;
     };
-    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+    // A numeric literal is never negative: `-1` is a negation of one.
+    (number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 struct AdjacentProbeMerger {
@@ -15036,7 +15038,7 @@ export function shapes(n: number): unknown {
     /// that is not, is passed over.
     #[test]
     fn the_key_is_written_into_the_registration_alone() {
-        let source = "import x from \"x\";\nconst { a } = x;\nconst other = 1;\nvar F = 1;\nvar F = g();\nvar F = g({ points: 1, [\"key\"]: \"\", ...rest, key: 1 });\nvar F = g({ key: \"\" });\n";
+        let source = "import x from \"x\";\nconst { a } = x;\nconst other = 1;\nvar F = 1;\nvar F = 1;\nvar F = g();\nvar F = g({ points: 1, kind: \"\", [\"key\"]: \"\", ...rest, key: 1 });\nvar F = g({ key: \"\" });\n";
         let written = with_program(source, |ast, program| {
             // A declaration whose names were all pruned declares nothing.
             let Statement::VariableDeclaration(declaration) = &mut program.body[3] else {
@@ -15051,7 +15053,7 @@ export function shapes(n: number): unknown {
             "{written}"
         );
         assert!(
-            written.contains("var F = g({\n\tpoints: 1,\n\t[\"key\"]: \"\""),
+            written.contains("var F = g({\n\tpoints: 1,\n\tkind: \"\",\n\t[\"key\"]: \"\""),
             "{written}"
         );
         let missing = with_program("const F = g({ points: 1 });\n", |ast, program| {

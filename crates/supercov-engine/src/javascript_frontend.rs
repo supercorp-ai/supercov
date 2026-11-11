@@ -1322,11 +1322,11 @@ fn is_es_module(path: &Path, code: &str) -> bool {
     match path.extension().and_then(|value| value.to_str()) {
         Some("mjs" | "mts") => true,
         Some("cjs" | "cts") => false,
+        // The code as the instrumenter printed it, which spaces every
+        // `import` and `export` the same way.
         _ => code.lines().any(|line| {
             let line = line.trim_start();
-            line.starts_with("import ")
-                || line.starts_with("import{")
-                || line.starts_with("export ")
+            line.starts_with("import ") || line.starts_with("export ")
         }),
     }
 }
