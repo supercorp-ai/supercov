@@ -804,9 +804,13 @@ fn reports_carry_the_same_view_in_every_format() {
             .succeeds(),
     )
     .unwrap();
+    // Keyed as Node writes a path: on Windows without the verbatim prefix
+    // the test's own root carries.
     let cart = project.root.join("src").join("cart.js");
-    let file = &istanbul[cart.to_string_lossy().as_ref()];
-    assert_eq!(file["path"], cart.to_string_lossy().as_ref());
+    let cart = cart.to_string_lossy();
+    let cart = cart.strip_prefix(r"\\?\").unwrap_or(&cart);
+    let file = &istanbul[cart];
+    assert_eq!(file["path"], cart);
     let statements = file["statementMap"].as_object().unwrap();
     let missed = statements
         .iter()

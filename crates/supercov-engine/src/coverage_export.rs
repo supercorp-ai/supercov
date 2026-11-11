@@ -259,12 +259,16 @@ pub fn cobertura(view: &RunView, timestamp: u64) -> String {
 }
 
 /// A file's absolute path in the checkout, which is how Istanbul's own
-/// reports key their files and what their readers resolve.
+/// reports key their files and what their readers resolve. On Windows it is
+/// the plain `C:\...` form Node writes, never a verbatim `\\?\` one, which
+/// no reader would match to the file.
 fn absolute(root: &Path, file: &str) -> String {
-    file.split('/')
-        .fold(root.to_path_buf(), |path, part| path.join(part))
-        .to_string_lossy()
-        .into_owned()
+    crate::workspace::simplified(
+        file.split('/')
+            .fold(root.to_path_buf(), |path, part| path.join(part)),
+    )
+    .to_string_lossy()
+    .into_owned()
 }
 
 /// How a frontend counts the column it records a point or branch at.
