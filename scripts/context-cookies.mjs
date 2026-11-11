@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -22,7 +23,6 @@ const files = {
   'package.json': '{ "name": "context-cookies", "private": true, "type": "module" }\n',
   'server.mjs': `import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { freePort } from './free-ports.mjs';
 
 export function answer(path) {
   if (path === '/api/after-clear') {

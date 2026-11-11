@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -36,7 +37,6 @@ const files = {
   // script registered after it.
   'tests/fixtures.js': `import { test as base } from '@playwright/test';
 import { appendFileSync } from 'node:fs';
-import { freePort } from './free-ports.mjs';
 
 export const test = base.extend({
   shared: [async ({ browser }, use) => {
