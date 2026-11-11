@@ -52,10 +52,15 @@ impl<'de> serde::Deserialize<'de> for TopLevel<'de> {
 /// A record with every scope's run id rewritten, as `rewrite_scope_run_ids`
 /// rewrites its parsed value; each top-level entry that holds no scope is
 /// written as it was.
+///
+/// Parsing a scope again can fail where reading the record did not: the
+/// record's entries are read as raw text, which nests without a limit, and a
+/// value parsed from them stops at serde_json's recursion limit.
 fn rewritten_record(
     entries: &TopLevel<'_>,
     merged_run_id: &str,
 ) -> Result<Vec<u8>, serde_json::Error> {
+    const WRITES: &str = "JSON writes to memory";
     let mut written =
         Vec::with_capacity(entries.0.iter().map(|(_, raw)| raw.get().len() + 16).sum());
     written.push(b'{');
@@ -63,17 +68,17 @@ fn rewritten_record(
         if index > 0 {
             written.push(b',');
         }
-        serde_json::to_writer(&mut written, key)?;
+        serde_json::to_writer(&mut written, key).expect(WRITES);
         written.push(b':');
         let text = raw.get();
         if key == "scope" && text.starts_with('{') {
             let mut scope = serde_json::from_str::<serde_json::Map<String, Value>>(text)?;
             scope.insert("runId".into(), Value::String(merged_run_id.into()));
-            serde_json::to_writer(&mut written, &scope)?;
+            serde_json::to_writer(&mut written, &scope).expect(WRITES);
         } else if text.contains("\"scope\"") {
             let mut value = serde_json::from_str::<Value>(text)?;
             rewrite_scope_run_ids(&mut value, merged_run_id);
-            serde_json::to_writer(&mut written, &value)?;
+            serde_json::to_writer(&mut written, &value).expect(WRITES);
         } else {
             written.extend_from_slice(text.as_bytes());
         }
@@ -103,14 +108,6 @@ fn rewrite_scope_run_ids(value: &mut Value, merged_run_id: &str) {
         }
         _ => {}
     }
-}
-
-/// The test a record is of: a test's own record names it, and a server's
-/// names it in its scope.
-fn record_test(value: &Value) -> Option<&str> {
-    value["testId"]
-        .as_str()
-        .or_else(|| value["scope"]["testId"].as_str())
 }
 
 /// The tests a run's archive holds a record of.
@@ -154,70 +151,55 @@ pub(crate) fn rewritten_contents(
             continue;
         }
         // An object, nearly every record: its entries as written, its scope
-        // and test read from them alone.
-        if let Ok(entries) = serde_json::from_str::<TopLevel<'_>>(line) {
-            let entry = |name: &str| {
-                entries
-                    .0
-                    .iter()
-                    .find(|(key, _)| key == name)
-                    .map(|(_, raw)| raw.get())
-            };
-            let scope_test = entry("scope").and_then(|scope| {
-                serde_json::from_str::<Value>(scope)
-                    .ok()
-                    .and_then(|scope| scope["testId"].as_str().map(str::to_owned))
-            });
-            let own_test = entry("testId")
-                .and_then(|test| serde_json::from_str::<Value>(test).ok())
-                .and_then(|test| test.as_str().map(str::to_owned));
-            if entry("scope").is_some() {
-                current_test = own_test.clone().or_else(|| scope_test.clone());
+        // and test read from them alone. Anything else holds no scope of its
+        // own and is of the test of the line before it.
+        let (test, record) = match serde_json::from_str::<TopLevel<'_>>(line) {
+            Ok(entries) => {
+                let entry = |name: &str| {
+                    entries
+                        .0
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, raw)| raw.get())
+                };
+                let scope_test = entry("scope").and_then(|scope| {
+                    serde_json::from_str::<Value>(scope)
+                        .ok()
+                        .and_then(|scope| scope["testId"].as_str().map(str::to_owned))
+                });
+                let own_test = entry("testId")
+                    .and_then(|test| serde_json::from_str::<Value>(test).ok())
+                    .and_then(|test| test.as_str().map(str::to_owned));
+                if entry("scope").is_some() {
+                    current_test = own_test.clone().or_else(|| scope_test.clone());
+                }
+                let test = own_test.or(scope_test).or_else(|| current_test.clone());
+                (test, Ok(entries))
             }
-            let test = own_test.or(scope_test).or_else(|| current_test.clone());
-            if superseded
-                .is_some_and(|tests| test.as_ref().is_some_and(|test| tests.contains(test)))
-            {
-                left_out = true;
-                continue;
+            Err(_) => {
+                let value = serde_json::from_str::<Value>(line).map_err(|error| {
+                    format!("cannot merge malformed recognized JSON evidence: {error}")
+                })?;
+                (current_test.clone(), Err(value))
             }
-            if kept {
-                rewritten.push(b'\n');
-            }
-            kept = true;
-            rewritten.extend(rewritten_record(&entries, merged_run_id).map_err(|error| {
-                format!("cannot merge malformed recognized JSON evidence: {error}")
-            })?);
+        };
+        if superseded.is_some_and(|tests| test.as_ref().is_some_and(|test| tests.contains(test))) {
+            left_out = true;
             continue;
         }
-        let parsed = serde_json::from_str::<Value>(line);
-        if let Ok(value) = &parsed
-            && value.get("scope").is_some()
-        {
-            current_test = record_test(value).map(str::to_owned);
+        if kept {
+            rewritten.push(b'\n');
         }
-        match parsed {
-            Ok(value)
-                if superseded.is_some_and(|tests| {
-                    record_test(&value)
-                        .or(current_test.as_deref())
-                        .is_some_and(|test| tests.contains(test))
-                }) =>
-            {
-                left_out = true;
+        kept = true;
+        match record {
+            Ok(entries) => {
+                rewritten.extend(rewritten_record(&entries, merged_run_id).map_err(|error| {
+                    format!("cannot merge malformed recognized JSON evidence: {error}")
+                })?);
             }
-            Ok(mut value) => {
-                if kept {
-                    rewritten.push(b'\n');
-                }
-                kept = true;
+            Err(mut value) => {
                 rewrite_scope_run_ids(&mut value, merged_run_id);
                 rewritten.extend(serde_json::to_vec(&value).expect("plain data serializes"));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "cannot merge malformed recognized JSON evidence: {error}"
-                ));
             }
         }
     }
@@ -1061,6 +1043,52 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Runs whose archives hold only the files of the whole run, no record
+    /// of any test, merge into a run that holds the same.
+    #[test]
+    fn runs_with_no_records_merge_into_a_run_with_none() {
+        let root = temporary();
+        for id in ["run-a", "run-b"] {
+            create_analyzable_test_run(&root, id);
+            let path = root.join(".supercov/runs").join(id).join("evidence.raw.gz");
+            let kept = read_archive(&path)
+                .unwrap()
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.path.as_str(),
+                        "coverage-model.json" | "frontend.json" | "manifest.json"
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(kept.len(), 3);
+            let written = write_archive(kept, &path).unwrap();
+            let run = root.join(".supercov/runs").join(id).join("run.json");
+            let mut metadata: Value = serde_json::from_slice(&fs::read(&run).unwrap()).unwrap();
+            metadata["rawEvidence"]["files"] = written.files.into();
+            metadata["rawEvidence"]["compressedBytes"] = written.compressed_bytes.into();
+            metadata["rawEvidence"]["uncompressedBytes"] = written.uncompressed_bytes.into();
+            fs::write(&run, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        }
+        merge_coverage_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap();
+        let archive = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        assert_eq!(
+            archive
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["coverage-model.json", "frontend.json", "manifest.json"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn names_every_incompatible_integrity_dimension() {
         let root = temporary();
@@ -1698,6 +1726,48 @@ mod tests {
             "{\"scope\":{\"runId\":\"merged\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"merged\"}}]}\n"
         );
         assert!(rewritten_contents(b"plain\n", "merged", None).is_err());
+    }
+
+    /// Record shapes a writer may produce besides the usual: an empty
+    /// object, a repeated key, a scope that is not an object, an array of
+    /// records, and a line that is not an object following a record whose
+    /// test is kept or measured again.
+    #[test]
+    fn every_record_shape_keeps_its_text_and_takes_the_merged_run() {
+        let superseded = BTreeSet::from(["t2".to_owned()]);
+        let rewrite = |text: &str| {
+            rewritten_contents(text.as_bytes(), "merged", Some(&superseded))
+                .map(|kept| kept.map(|bytes| String::from_utf8(bytes).unwrap()))
+        };
+        assert_eq!(
+            rewrite("{}\n{\"a\":1,\"b\":0,\"a\":2}\n{\"a\":{\"scope\":1}}\n[{},{\"scope\":{}}]\n"),
+            Ok(Some(
+                "{}\n{\"a\":2,\"b\":0}\n{\"a\":{\"scope\":1}}\n[{},{\"scope\":{\"runId\":\"merged\"}}]\n"
+                    .to_owned()
+            ))
+        );
+        // A line that is not an object is of the test of the record before it.
+        assert_eq!(
+            rewrite("{\"scope\":{\"testId\":\"t1\"}}\n[1]\n{\"scope\":{\"testId\":\"t2\"}}\n[2]\n"),
+            Ok(Some(
+                "{\"scope\":{\"testId\":\"t1\",\"runId\":\"merged\"}}\n[1]\n".to_owned()
+            ))
+        );
+    }
+
+    /// A record's entries are read as raw text, which nests without a limit;
+    /// a scope nested deeper than a parsed value may be is refused, whether
+    /// it is the record's own or one inside another entry.
+    #[test]
+    fn a_scope_nested_past_the_parse_limit_is_refused() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        for record in [
+            format!("{{\"scope\":{{\"a\":{deep}}}}}"),
+            format!("{{\"n\":{{\"scope\":{{}},\"d\":{deep}}}}}"),
+        ] {
+            let error = rewritten_contents(record.as_bytes(), "merged", None).unwrap_err();
+            assert!(error.contains("recursion limit"), "{error}");
+        }
     }
 
     #[test]
