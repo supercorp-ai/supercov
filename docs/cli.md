@@ -467,7 +467,11 @@ Supercov records that a line ran, not how many times, so `DA:`, `hits`,
 Istanbul's counts and Clover's `count` state `1` or `0`. They are not execution
 frequencies, and Supercov will not invent one to fill a field. JaCoCo counts
 bytecode instructions, which Supercov does not measure, so the `jacoco` export
-states each measured line as one instruction, missed or covered.
+states each measured line as one instruction, missed or covered. Cobertura,
+Clover, JaCoCo and SonarQube state branches by line; a branch on a line that is
+not itself measured, such as a later line of a statement written across
+several, is stated on the measured line its statement starts on, so their
+branch totals are Supercov's.
 
 The `istanbul` export places every statement, function and branch by its range
 in the source, found in this checkout; its keys are absolute paths, as Istanbul

@@ -234,22 +234,17 @@ pub fn cobertura(view: &RunView, timestamp: u64) -> String {
             rate(branch_covered, branch_total),
         );
         out.push_str("          <methods/>\n          <lines>\n");
+        let branches = branches_by_line(file);
         for (line, covered) in file.line_hits() {
-            let alternatives = file
-                .branches
-                .iter()
-                .filter(|branch| branch.line == line)
-                .collect::<Vec<_>>();
-            if alternatives.is_empty() {
+            let Some((taken, untaken)) = branches.get(&line).copied() else {
                 let _ = writeln!(
                     out,
                     "            <line number=\"{line}\" hits=\"{}\"/>",
                     u8::from(covered)
                 );
                 continue;
-            }
-            let taken = alternatives.iter().filter(|branch| branch.taken).count();
-            let total = alternatives.len();
+            };
+            let total = taken + untaken;
             let _ = writeln!(
                 out,
                 "            <line number=\"{line}\" hits=\"{}\" branch=\"true\" condition-coverage=\"{}% ({taken}/{total})\"/>",
@@ -531,11 +526,27 @@ pub fn istanbul_summary(view: &RunView, root: &Path) -> String {
     format!("{}\n", Value::Object(out))
 }
 
-/// Taken and not-taken alternatives of the branches on each line.
+/// Taken and not-taken alternatives of the branches on each measured line.
+///
+/// A branch can sit on a line that is not itself measured: a later line of a
+/// statement written across several, or a parameter's default in a signature
+/// that spans lines. A format that states branches by line would drop it, and
+/// its branch totals would fall short of Supercov's. It is stated on the
+/// nearest measured line above it, where its statement starts, or on the
+/// first measured line where there is none above.
 fn branches_by_line(file: &FileView) -> BTreeMap<usize, (usize, usize)> {
     let mut lines = BTreeMap::<usize, (usize, usize)>::new();
+    let measured = &file.measured_lines;
     for branch in &file.branches {
-        let entry = lines.entry(branch.line).or_default();
+        let at = measured.partition_point(|line| *line <= branch.line);
+        let Some(line) = at
+            .checked_sub(1)
+            .map(|index| measured[index])
+            .or_else(|| measured.first().copied())
+        else {
+            continue;
+        };
+        let entry = lines.entry(line).or_default();
         if branch.taken {
             entry.0 += 1;
         } else {
@@ -1095,6 +1106,38 @@ mod tests {
         assert!(
             written.ends_with("<counter type=\"METHOD\" missed=\"0\" covered=\"1\"/>\n</report>\n")
         );
+    }
+
+    /// A branch on a line no measured line holds is stated on the measured
+    /// line above it, so every line format counts every branch.
+    #[test]
+    fn a_branch_off_a_measured_line_is_stated_where_its_statement_starts() {
+        let mut view = fixture();
+        let file = &mut view.files[0];
+        file.branches.push(BranchRecord {
+            line: 5,
+            block: 1,
+            index: 0,
+            taken: false,
+        });
+        file.branches.push(BranchRecord {
+            line: 0,
+            block: 2,
+            index: 0,
+            taken: true,
+        });
+        assert_eq!(
+            branches_by_line(file),
+            BTreeMap::from([(1, (1, 0)), (2, (1, 1)), (4, (0, 1))])
+        );
+        assert!(sonar(&view).contains(
+            "<lineToCover lineNumber=\"4\" covered=\"false\" branchesToCover=\"1\" coveredBranches=\"0\"/>"
+        ));
+        assert!(cobertura(&view, 0).contains(
+            "<line number=\"4\" hits=\"0\" branch=\"true\" condition-coverage=\"0% (0/1)\"/>"
+        ));
+        view.files[0].measured_lines.clear();
+        assert_eq!(branches_by_line(&view.files[0]), BTreeMap::new());
     }
 
     #[test]
