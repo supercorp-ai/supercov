@@ -796,6 +796,108 @@ fn reports_carry_the_same_view_in_every_format() {
             "filename=\"src/cart.js\"",
         ],
     );
+    // Istanbul places what it reports by range, found in the checkout: the
+    // cart's `shipping` returns 15 or 5 on line 14, which no test reached.
+    let istanbul: serde_json::Value = serde_json::from_str(
+        &project
+            .supercov(&["runs", "report", "--format", "istanbul"])
+            .succeeds(),
+    )
+    .unwrap();
+    let cart = project.root.join("src").join("cart.js");
+    let file = &istanbul[cart.to_string_lossy().as_ref()];
+    assert_eq!(file["path"], cart.to_string_lossy().as_ref());
+    let statements = file["statementMap"].as_object().unwrap();
+    let missed = statements
+        .iter()
+        .filter(|(key, _)| file["s"][key.as_str()] == 0)
+        .map(|(_, range)| range.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        missed,
+        [
+            serde_json::json!({ "start": { "line": 14, "column": 4 }, "end": { "line": 14, "column": 28 } }),
+            serde_json::json!({ "start": { "line": 20, "column": 2 }, "end": { "line": 20, "column": 51 } }),
+        ]
+    );
+    assert_eq!(
+        file["fnMap"]["1"]["loc"],
+        serde_json::json!({ "start": { "line": 12, "column": 7 }, "end": { "line": 17, "column": 1 } })
+    );
+    assert_eq!(
+        file["f"],
+        serde_json::json!({ "0": 1, "1": 1, "2": 0, "3": 0 })
+    );
+    let summary = project
+        .supercov(&["runs", "report", "--format", "istanbul-summary"])
+        .succeeds();
+    contains_all(
+        &summary,
+        &[
+            "\"total\":{\"lines\":{\"total\":13,\"covered\":10,\"skipped\":0,\"pct\":76.92}",
+            "\"statements\":{\"total\":10,\"covered\":8,\"skipped\":0,\"pct\":80.0}",
+            "\"functions\":{\"total\":4,\"covered\":2,\"skipped\":0,\"pct\":50.0}",
+            "\"branches\":{\"total\":8,\"covered\":4,\"skipped\":0,\"pct\":50.0}",
+        ],
+    );
+    let clover = project
+        .supercov(&["runs", "report", "--format", "clover"])
+        .succeeds();
+    contains_all(
+        &clover,
+        &[
+            "statements=\"10\" coveredstatements=\"8\" conditionals=\"8\" coveredconditionals=\"4\" methods=\"4\" coveredmethods=\"2\"",
+            "<file name=\"cart.js\" path=\"src/cart.js\">",
+            "<line num=\"14\" count=\"0\" type=\"cond\" truecount=\"0\" falsecount=\"2\"/>",
+        ],
+    );
+    let jacoco = project
+        .supercov(&["runs", "report", "--format", "jacoco"])
+        .succeeds();
+    contains_all(
+        &jacoco,
+        &[
+            "<package name=\"src\">",
+            "<sourcefile name=\"cart.js\">",
+            "<line nr=\"14\" mi=\"1\" ci=\"0\" mb=\"2\" cb=\"0\"/>",
+            "<counter type=\"LINE\" missed=\"3\" covered=\"10\"/>",
+            "<counter type=\"BRANCH\" missed=\"4\" covered=\"4\"/>",
+        ],
+    );
+    let sonar = project
+        .supercov(&["runs", "report", "--format", "sonar"])
+        .succeeds();
+    contains_all(
+        &sonar,
+        &[
+            "<file path=\"src/cart.js\">",
+            "<lineToCover lineNumber=\"14\" covered=\"false\" branchesToCover=\"2\" coveredBranches=\"0\"/>",
+        ],
+    );
+    // A file that no longer holds what the run recorded is not placed by a
+    // guess: Istanbul refuses it, and the formats that state lines still
+    // write.
+    project.edit(
+        "src/cart.js",
+        "    return express ? 15 : 5;",
+        "    return 9;",
+    );
+    let refused = project
+        .supercov(&["runs", "report", "--format", "istanbul"])
+        .exits(2);
+    // `shipping` spans the changed line, and comes first.
+    assert!(
+        refused.contains("src/cart.js:12 no longer holds"),
+        "{refused}"
+    );
+    project
+        .supercov(&["runs", "report", "--format", "sonar"])
+        .succeeds();
+    project.edit(
+        "src/cart.js",
+        "    return 9;",
+        "    return express ? 15 : 5;",
+    );
 
     let written = project.root.join("coverage/lcov.info");
     project
@@ -1777,7 +1879,7 @@ fn every_subcommand_explains_itself_and_names_a_mistake() {
         (vec!["runs", "patch", "--help"], "patch --base <ref>"),
         (
             vec!["runs", "report", "--help"],
-            "--format lcov|cobertura|html",
+            "--format lcov|cobertura|istanbul|istanbul-summary|clover|jacoco|sonar|html",
         ),
         (
             vec!["merge", "--help"],

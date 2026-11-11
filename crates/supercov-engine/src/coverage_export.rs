@@ -1,7 +1,9 @@
-//! LCOV and Cobertura exports, written from the shared run view.
+//! The coverage formats other tools read, written from the shared run view:
+//! LCOV, Cobertura, Istanbul's `coverage-final.json` and its summary, Clover,
+//! JaCoCo and SonarQube's generic coverage XML.
 //!
 //! These exist for compatibility, not as a headline: they let Supercov feed
-//! the viewers, hosted services and CI integrations a team already uses. Both
+//! the viewers, hosted services and CI integrations a team already uses. All
 //! read the same view the CLI and the gates read, so a consumer's totals match
 //! what `check` enforced.
 //!
@@ -11,11 +13,17 @@
 //! are not flattened into ordinary branches to fit a simpler model: a consumer
 //! would then report condition obligations as branch coverage, which is a
 //! different measurement. LCOV has records of its own for them, which are
-//! written; Cobertura has none, and the evidence stays in the JSON view.
+//! written; the other formats have none, and the evidence stays in the JSON
+//! view.
 
 use std::fmt::Write as _;
 
-use crate::run_view::{ConditionRecord, Metric, RunView};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde_json::{Map, Value, json};
+
+use crate::run_view::{ConditionRecord, FileView, Metric, RunView};
 
 /// Escape text for XML character data and attribute values.
 fn xml(value: &str) -> String {
@@ -54,13 +62,34 @@ fn counts(view: &RunView, metric: Metric) -> (usize, usize) {
 /// spell them. Supercov emits these formats; it never invokes the tools they
 /// are named after, and the packaging audit that enforces that reads this
 /// module as the single place allowed to name them.
-pub const FORMATS: &str = "lcov|cobertura|html";
+pub const FORMATS: &str = "lcov|cobertura|istanbul|istanbul-summary|clover|jacoco|sonar|html";
+
+/// Whether a format places statements and functions by their source range,
+/// and so needs the text of every file the run measured.
+pub fn needs_source(format: &str) -> bool {
+    format == "istanbul"
+}
 
 /// Render a run in the named format.
-pub fn export(view: &RunView, format: &str, timestamp: u64) -> Result<String, String> {
+///
+/// `root` is the checkout the run measured, and `sources` the text of its
+/// files by repository-relative path; only a format that [`needs_source`]
+/// reads them.
+pub fn export(
+    view: &RunView,
+    format: &str,
+    timestamp: u64,
+    root: &Path,
+    sources: &BTreeMap<String, String>,
+) -> Result<String, String> {
     match format {
         "lcov" => Ok(lcov(view)),
         "cobertura" => Ok(cobertura(view, timestamp)),
+        "istanbul" => istanbul(view, root, sources),
+        "istanbul-summary" => Ok(istanbul_summary(view, root)),
+        "clover" => Ok(clover(view, timestamp)),
+        "jacoco" => Ok(jacoco(view, timestamp)),
+        "sonar" => Ok(sonar(view)),
         // `html` is rendered by `coverage_html`, which also needs verified
         // source text; the CLI routes it before reaching here.
         other => Err(format!(
@@ -234,12 +263,440 @@ pub fn cobertura(view: &RunView, timestamp: u64) -> String {
     out
 }
 
+/// A file's absolute path in the checkout, which is how Istanbul's own
+/// reports key their files and what their readers resolve.
+fn absolute(root: &Path, file: &str) -> String {
+    file.split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A file's text with where each of its lines starts, to place a recorded
+/// point by the source it spans.
+struct Placed<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> Placed<'a> {
+    fn new(text: &'a str) -> Self {
+        let starts = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+            .collect();
+        Placed { text, starts }
+    }
+
+    /// A byte offset as Istanbul states a position: the 1-based line and the
+    /// 0-based column in UTF-16 units, which is how JavaScript counts.
+    fn position(&self, offset: usize) -> Value {
+        let line = self.starts.partition_point(|start| *start <= offset) - 1;
+        let column = self.text[self.starts[line]..offset].encode_utf16().count();
+        json!({ "line": line + 1, "column": column })
+    }
+
+    /// Where `source` sits in the file, as a byte range, given the line it
+    /// starts on and the column its frontend recorded.
+    ///
+    /// Frontends count columns their own way: JavaScript from 1 in UTF-16
+    /// units, Python, Rust and Ruby from 0 in bytes, Go and the JVM from 1 in
+    /// bytes. Finding the recorded source on its line places it exactly
+    /// whichever way its column was counted. Of several occurrences on the
+    /// line, the one at the recorded column is taken; text no longer on the
+    /// line is not placed at all.
+    fn find(&self, line: usize, column: usize, source: &str) -> Option<(usize, usize)> {
+        if source.is_empty() || line == 0 {
+            return None;
+        }
+        let start = *self.starts.get(line - 1)?;
+        let next = self.starts.get(line).copied().unwrap_or(self.text.len());
+        let window = &self.text[start..self.text.len().min(next + source.len())];
+        window
+            .match_indices(source)
+            .filter(|(at, _)| start + at < next)
+            .min_by_key(|(at, _)| {
+                let bytes = *at;
+                let units = window[..*at].encode_utf16().count();
+                [bytes, units]
+                    .into_iter()
+                    .flat_map(|counted| [counted, counted + 1])
+                    .map(|counted| counted.abs_diff(column))
+                    .min()
+            })
+            .map(|(at, _)| (start + at, start + at + source.len()))
+    }
+
+    fn range(&self, file: &str, line: usize, column: usize, source: &str) -> Result<Value, String> {
+        let (start, end) = self.find(line, column, source).ok_or_else(|| {
+            format!(
+                "{file}:{line} no longer holds the source the run recorded there; run the tests again to export it"
+            )
+        })?;
+        Ok(json!({ "start": self.position(start), "end": self.position(end) }))
+    }
+}
+
+/// Istanbul's names for the kinds of branch it has, so a reader that treats
+/// one kind specially sees it; a kind Istanbul has no name for keeps
+/// Supercov's.
+fn istanbul_branch_type(kind: &str) -> &str {
+    match kind {
+        "logical-value" => "binary-expr",
+        "default-value" => "default-arg",
+        other => other,
+    }
+}
+
+fn istanbul_file(root: &Path, file: &FileView, text: &str) -> Result<Value, String> {
+    let placed = Placed::new(text);
+    let (mut statements, mut hits) = (Map::new(), Map::new());
+    let (mut functions, mut calls) = (Map::new(), Map::new());
+    for point in &file.points {
+        let range = placed.range(&file.file, point.line, point.column, &point.source)?;
+        let shown = u8::from(point.covered);
+        if point.function {
+            let key = functions.len().to_string();
+            let name = point
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", point.line, point.column));
+            functions.insert(
+                key.clone(),
+                json!({ "name": name, "decl": range, "loc": range, "line": point.line }),
+            );
+            calls.insert(key, json!(shown));
+        } else {
+            let key = statements.len().to_string();
+            statements.insert(key.clone(), range);
+            hits.insert(key, json!(shown));
+        }
+    }
+    let (mut branches, mut taken) = (Map::new(), Map::new());
+    for (index, branch) in file.branch_sites.iter().enumerate() {
+        let range = placed.range(&file.file, branch.line, branch.column, &branch.source)?;
+        // Supercov records where a branch is, not where each of its
+        // alternatives is, so each alternative is placed at its branch.
+        let locations = vec![range.clone(); branch.taken.len()];
+        branches.insert(
+            index.to_string(),
+            json!({
+                "loc": range,
+                "type": istanbul_branch_type(&branch.kind),
+                "locations": locations,
+                "line": branch.line,
+            }),
+        );
+        taken.insert(
+            index.to_string(),
+            Value::Array(
+                branch
+                    .taken
+                    .iter()
+                    .map(|each| json!(u8::from(*each)))
+                    .collect(),
+            ),
+        );
+    }
+    Ok(json!({
+        "path": absolute(root, &file.file),
+        "statementMap": statements,
+        "fnMap": functions,
+        "branchMap": branches,
+        "s": hits,
+        "f": calls,
+        "b": taken,
+    }))
+}
+
+/// Istanbul's `coverage-final.json`: every statement, function and branch
+/// placed by its source range, keyed by absolute path as Istanbul keys them.
+///
+/// A count is `1` or `0`, never a frequency. Istanbul has no record for an
+/// MC/DC condition, so conditions are left out rather than shown as branches.
+pub fn istanbul(
+    view: &RunView,
+    root: &Path,
+    sources: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut out = Map::new();
+    for file in &view.files {
+        let text = sources.get(&file.file).ok_or_else(|| {
+            format!(
+                "{} could not be read from this checkout, and Istanbul places every statement by its source",
+                file.file
+            )
+        })?;
+        out.insert(absolute(root, &file.file), istanbul_file(root, file, text)?);
+    }
+    Ok(format!("{}\n", Value::Object(out)))
+}
+
+fn istanbul_count(covered: usize, total: usize) -> Value {
+    // Istanbul states an empty denominator as 100% and rounds to hundredths.
+    let pct = if total == 0 {
+        100.0
+    } else {
+        (covered as f64 * 10_000.0 / total as f64).round() / 100.0
+    };
+    json!({ "total": total, "covered": covered, "skipped": 0, "pct": pct })
+}
+
+fn istanbul_summary_of(metric: impl Fn(Metric) -> (usize, usize)) -> Value {
+    let mut entry = Map::new();
+    for (name, each) in [
+        ("lines", Metric::Lines),
+        ("statements", Metric::Statements),
+        ("functions", Metric::Functions),
+        ("branches", Metric::Branches),
+    ] {
+        let (covered, total) = metric(each);
+        entry.insert(name.into(), istanbul_count(covered, total));
+    }
+    Value::Object(entry)
+}
+
+/// Istanbul's `coverage-summary.json`: the run's totals and each file's, as
+/// Supercov counted them.
+pub fn istanbul_summary(view: &RunView, root: &Path) -> String {
+    let mut out = Map::new();
+    out.insert(
+        "total".into(),
+        istanbul_summary_of(|metric| counts(view, metric)),
+    );
+    for file in &view.files {
+        out.insert(
+            absolute(root, &file.file),
+            istanbul_summary_of(|metric| file.metric(metric).counts()),
+        );
+    }
+    format!("{}\n", Value::Object(out))
+}
+
+/// Taken and not-taken alternatives of the branches on each line.
+fn branches_by_line(file: &FileView) -> BTreeMap<usize, (usize, usize)> {
+    let mut lines = BTreeMap::<usize, (usize, usize)>::new();
+    for branch in &file.branches {
+        let entry = lines.entry(branch.line).or_default();
+        if branch.taken {
+            entry.0 += 1;
+        } else {
+            entry.1 += 1;
+        }
+    }
+    lines
+}
+
+fn clover_metrics(metric: impl Fn(Metric) -> (usize, usize), extra: &str) -> String {
+    let (statements_covered, statements) = metric(Metric::Statements);
+    let (branches_covered, branches) = metric(Metric::Branches);
+    let (functions_covered, functions) = metric(Metric::Functions);
+    let (_, lines) = metric(Metric::Lines);
+    format!(
+        "<metrics statements=\"{statements}\" coveredstatements=\"{statements_covered}\" conditionals=\"{branches}\" coveredconditionals=\"{branches_covered}\" methods=\"{functions}\" coveredmethods=\"{functions_covered}\" elements=\"{}\" coveredelements=\"{}\" complexity=\"0\" loc=\"{lines}\" ncloc=\"{lines}\"{extra}/>",
+        statements + branches + functions,
+        statements_covered + branches_covered + functions_covered,
+    )
+}
+
+/// A Clover XML report, shaped as Istanbul writes one: a `stmt` line for
+/// each measured line and a `cond` line, with its taken and untaken
+/// alternatives, where branches are.
+pub fn clover(view: &RunView, timestamp: u64) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let _ = writeln!(
+        out,
+        "<coverage generated=\"{timestamp}\" clover=\"3.2.0\">\n  <project timestamp=\"{timestamp}\" name=\"All files\">"
+    );
+    let _ = writeln!(
+        out,
+        "    {}",
+        clover_metrics(
+            |metric| counts(view, metric),
+            &format!(
+                " packages=\"1\" files=\"{0}\" classes=\"{0}\"",
+                view.files.len()
+            ),
+        )
+    );
+    for file in &view.files {
+        let name = file.file.rsplit('/').next().unwrap_or(&file.file);
+        let _ = writeln!(
+            out,
+            "    <file name=\"{}\" path=\"{}\">\n      {}",
+            xml(name),
+            xml(&file.file),
+            clover_metrics(|metric| file.metric(metric).counts(), ""),
+        );
+        let branches = branches_by_line(file);
+        for (line, covered) in file.line_hits() {
+            match branches.get(&line) {
+                Some((taken, untaken)) => {
+                    let _ = writeln!(
+                        out,
+                        "      <line num=\"{line}\" count=\"{}\" type=\"cond\" truecount=\"{taken}\" falsecount=\"{untaken}\"/>",
+                        u8::from(covered)
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "      <line num=\"{line}\" count=\"{}\" type=\"stmt\"/>",
+                        u8::from(covered)
+                    );
+                }
+            }
+        }
+        out.push_str("    </file>\n");
+    }
+    out.push_str("  </project>\n</coverage>\n");
+    out
+}
+
+fn jacoco_counter(out: &mut String, indent: &str, kind: &str, (covered, total): (usize, usize)) {
+    let _ = writeln!(
+        out,
+        "{indent}<counter type=\"{kind}\" missed=\"{}\" covered=\"{covered}\"/>",
+        total - covered
+    );
+}
+
+/// The counters JaCoCo states at every level. Supercov counts no bytecode
+/// instructions, so an instruction here is a measured line, the unit the
+/// line records below count in.
+fn jacoco_counters(out: &mut String, indent: &str, metric: impl Fn(Metric) -> (usize, usize)) {
+    jacoco_counter(out, indent, "INSTRUCTION", metric(Metric::Lines));
+    jacoco_counter(out, indent, "BRANCH", metric(Metric::Branches));
+    jacoco_counter(out, indent, "LINE", metric(Metric::Lines));
+    jacoco_counter(out, indent, "METHOD", metric(Metric::Functions));
+}
+
+/// A JaCoCo XML report: a package for each directory, holding a class and a
+/// source file for each file in it.
+///
+/// A line states one instruction, missed or covered, rather than a count of
+/// bytecode Supercov never measured, and its branches as taken and untaken
+/// alternatives.
+pub fn jacoco(view: &RunView, timestamp: u64) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
+    out.push_str("<!DOCTYPE report PUBLIC \"-//JACOCO//DTD Report 1.1//EN\" \"report.dtd\">\n");
+    let _ = writeln!(
+        out,
+        "<report name=\"Supercov\">\n  <sessioninfo id=\"supercov\" start=\"{0}\" dump=\"{0}\"/>",
+        timestamp * 1000
+    );
+    let mut packages = BTreeMap::<&str, Vec<&FileView>>::new();
+    for file in &view.files {
+        let directory = file
+            .file
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory);
+        packages.entry(directory).or_default().push(file);
+    }
+    for (package, files) in packages {
+        let _ = writeln!(out, "  <package name=\"{}\">", xml(package));
+        for file in &files {
+            let name = file.file.rsplit('/').next().unwrap_or(&file.file);
+            let class = file
+                .file
+                .rsplit_once('.')
+                .map_or(file.file.as_str(), |(stem, _)| stem);
+            let _ = writeln!(
+                out,
+                "    <class name=\"{}\" sourcefilename=\"{}\">",
+                xml(class),
+                xml(name)
+            );
+            for function in &file.functions {
+                let _ = writeln!(
+                    out,
+                    "      <method name=\"{}\" desc=\"()\" line=\"{}\">",
+                    xml(&function.name),
+                    function.line
+                );
+                jacoco_counter(
+                    &mut out,
+                    "        ",
+                    "METHOD",
+                    (usize::from(function.covered), 1),
+                );
+                out.push_str("      </method>\n");
+            }
+            jacoco_counter(
+                &mut out,
+                "      ",
+                "METHOD",
+                file.metric(Metric::Functions).counts(),
+            );
+            out.push_str("    </class>\n");
+        }
+        for file in &files {
+            let name = file.file.rsplit('/').next().unwrap_or(&file.file);
+            let _ = writeln!(out, "    <sourcefile name=\"{}\">", xml(name));
+            let branches = branches_by_line(file);
+            for (line, covered) in file.line_hits() {
+                let (taken, untaken) = branches.get(&line).copied().unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "      <line nr=\"{line}\" mi=\"{}\" ci=\"{}\" mb=\"{untaken}\" cb=\"{taken}\"/>",
+                    u8::from(!covered),
+                    u8::from(covered)
+                );
+            }
+            jacoco_counters(&mut out, "      ", |metric| file.metric(metric).counts());
+            out.push_str("    </sourcefile>\n");
+        }
+        let sum = |metric: Metric| {
+            files.iter().fold((0, 0), |(covered, total), file| {
+                let (each_covered, each_total) = file.metric(metric).counts();
+                (covered + each_covered, total + each_total)
+            })
+        };
+        jacoco_counters(&mut out, "    ", sum);
+        out.push_str("  </package>\n");
+    }
+    jacoco_counters(&mut out, "  ", |metric| counts(view, metric));
+    out.push_str("</report>\n");
+    out
+}
+
+/// SonarQube's generic coverage XML: each measured line, covered or not, with
+/// the alternatives of the branches on it.
+pub fn sonar(view: &RunView) -> String {
+    let mut out = String::from("<coverage version=\"1\">\n");
+    for file in &view.files {
+        let _ = writeln!(out, "  <file path=\"{}\">", xml(&file.file));
+        let branches = branches_by_line(file);
+        for (line, covered) in file.line_hits() {
+            match branches.get(&line) {
+                Some((taken, untaken)) => {
+                    let _ = writeln!(
+                        out,
+                        "    <lineToCover lineNumber=\"{line}\" covered=\"{covered}\" branchesToCover=\"{}\" coveredBranches=\"{taken}\"/>",
+                        taken + untaken
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "    <lineToCover lineNumber=\"{line}\" covered=\"{covered}\"/>"
+                    );
+                }
+            }
+        }
+        out.push_str("  </file>\n");
+    }
+    out.push_str("</coverage>\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::run_view::{
-        Applicability, BranchRecord, FileView, FunctionRecord, MetricView, RUN_VIEW_SCHEMA_VERSION,
-        RunView,
+        Applicability, BranchRecord, BranchSite, FileView, FunctionRecord, MetricView, PointSite,
+        RUN_VIEW_SCHEMA_VERSION, RunView,
     };
     use std::collections::BTreeSet;
 
@@ -286,6 +743,7 @@ mod tests {
             limitations: Vec::new(),
             totals: vec![
                 metric(Metric::Lines, 3, 4),
+                metric(Metric::Statements, 1, 2),
                 metric(Metric::Branches, 1, 2),
                 metric(Metric::Functions, 1, 1),
             ],
@@ -293,6 +751,7 @@ mod tests {
                 file: "src/a & b.ts".into(),
                 metrics: vec![
                     metric(Metric::Lines, 3, 4),
+                    metric(Metric::Statements, 1, 2),
                     metric(Metric::Branches, 1, 2),
                     metric(Metric::Functions, 1, 1),
                 ],
@@ -339,9 +798,213 @@ mod tests {
                     source: source.into(),
                 })
                 .collect(),
+                // Placed in SOURCE, columns as JavaScript counts them: from 1,
+                // in UTF-16 units.
+                points: vec![
+                    PointSite {
+                        function: true,
+                        line: 1,
+                        column: 1,
+                        source: SOURCE.trim_end().into(),
+                        name: Some("run".into()),
+                        covered: true,
+                    },
+                    PointSite {
+                        function: false,
+                        line: 2,
+                        column: 20,
+                        source: "return 1;".into(),
+                        name: None,
+                        covered: true,
+                    },
+                    PointSite {
+                        function: false,
+                        line: 3,
+                        column: 3,
+                        source: "return c && d || e && f(1, 2);".into(),
+                        name: None,
+                        covered: false,
+                    },
+                ],
+                branch_sites: vec![BranchSite {
+                    kind: "if".into(),
+                    line: 2,
+                    column: 3,
+                    source: "if (a && b == 1) return 1;".into(),
+                    taken: vec![true, false],
+                }],
             }],
             source_neighbourhoods: BTreeSet::new(),
         }
+    }
+
+    /// The text of the fixture's one file.
+    const SOURCE: &str = "export function run(a, b) {\n  if (a && b == 1) return 1;\n  return c && d || e && f(1, 2);\n}\n";
+
+    fn sources() -> BTreeMap<String, String> {
+        BTreeMap::from([("src/a & b.ts".to_owned(), SOURCE.to_owned())])
+    }
+
+    /// One statement placed from each frontend's column convention lands on
+    /// one range: JavaScript's 1-based UTF-16 units, Python's 0-based bytes
+    /// and Go's 1-based bytes, on a line where they differ.
+    #[test]
+    fn a_point_is_placed_by_its_source_whatever_its_column_counts() {
+        let text = "x = 1\nif \u{e9}\u{1f600}: g()\n";
+        let placed = Placed::new(text);
+        let bytes = text.lines().nth(1).unwrap().find("g()").unwrap();
+        let units = "if \u{e9}\u{1f600}: ".encode_utf16().count();
+        assert_ne!(bytes, units);
+        let expected = Some((6 + bytes, 6 + bytes + 3));
+        for column in [units + 1, bytes, bytes + 1] {
+            assert_eq!(placed.find(2, column, "g()"), expected, "column {column}");
+        }
+        assert_eq!(
+            placed.position(6 + bytes),
+            json!({ "line": 2, "column": units })
+        );
+    }
+
+    /// Of two occurrences on a line, the one at the recorded column.
+    #[test]
+    fn a_repeated_statement_is_the_one_at_its_column() {
+        let placed = Placed::new("f(); f();\n");
+        assert_eq!(placed.find(1, 1, "f();"), Some((0, 4)));
+        assert_eq!(placed.find(1, 6, "f();"), Some((5, 9)));
+        assert_eq!(placed.find(1, 5, "f();"), Some((5, 9)));
+    }
+
+    /// Source the line no longer holds is not placed, and the export says
+    /// which file and line to measure again rather than guessing.
+    #[test]
+    fn source_no_longer_in_the_file_is_not_placed() {
+        let placed = Placed::new("a();\nb();\n");
+        assert_eq!(placed.find(1, 1, "b();"), None);
+        assert_eq!(placed.find(3, 1, "b();"), None);
+        assert_eq!(placed.find(1, 1, ""), None);
+        let mut changed = sources();
+        changed.insert("src/a & b.ts".into(), "export function run() {}\n".into());
+        let error = istanbul(&fixture(), Path::new("/w"), &changed).unwrap_err();
+        assert!(
+            error.starts_with("src/a & b.ts:1 no longer holds"),
+            "{error}"
+        );
+        let error = istanbul(&fixture(), Path::new("/w"), &BTreeMap::new()).unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
+    }
+
+    #[test]
+    fn istanbul_places_every_statement_function_and_branch() {
+        let root = Path::new("/w");
+        let written = istanbul(&fixture(), root, &sources()).unwrap();
+        let parsed: Value = serde_json::from_str(&written).unwrap();
+        let key = absolute(root, "src/a & b.ts");
+        let file = &parsed[&key];
+        assert_eq!(file["path"], json!(key));
+        assert_eq!(
+            file["statementMap"],
+            json!({
+                "0": { "start": { "line": 2, "column": 19 }, "end": { "line": 2, "column": 28 } },
+                "1": { "start": { "line": 3, "column": 2 }, "end": { "line": 3, "column": 32 } },
+            })
+        );
+        assert_eq!(file["s"], json!({ "0": 1, "1": 0 }));
+        let range =
+            json!({ "start": { "line": 1, "column": 0 }, "end": { "line": 4, "column": 1 } });
+        assert_eq!(
+            file["fnMap"],
+            json!({ "0": { "name": "run", "decl": range, "loc": range, "line": 1 } })
+        );
+        assert_eq!(file["f"], json!({ "0": 1 }));
+        let branch =
+            json!({ "start": { "line": 2, "column": 2 }, "end": { "line": 2, "column": 28 } });
+        assert_eq!(
+            file["branchMap"],
+            json!({ "0": { "loc": branch, "type": "if", "locations": [branch, branch], "line": 2 } })
+        );
+        assert_eq!(file["b"], json!({ "0": [1, 0] }));
+    }
+
+    #[test]
+    fn the_istanbul_summary_states_supercov_s_counts() {
+        let root = Path::new("/w");
+        let parsed: Value = serde_json::from_str(&istanbul_summary(&fixture(), root)).unwrap();
+        let expected = json!({
+            "lines": { "total": 4, "covered": 3, "skipped": 0, "pct": 75.0 },
+            "statements": { "total": 2, "covered": 1, "skipped": 0, "pct": 50.0 },
+            "functions": { "total": 1, "covered": 1, "skipped": 0, "pct": 100.0 },
+            "branches": { "total": 2, "covered": 1, "skipped": 0, "pct": 50.0 },
+        });
+        assert_eq!(parsed["total"], expected);
+        assert_eq!(parsed[absolute(root, "src/a & b.ts")], expected);
+        assert_eq!(
+            istanbul_count(1, 3),
+            json!({ "total": 3, "covered": 1, "skipped": 0, "pct": 33.33 })
+        );
+        assert_eq!(istanbul_count(0, 0)["pct"], json!(100.0));
+    }
+
+    #[test]
+    fn clover_states_lines_and_the_branches_on_them() {
+        let written = clover(&fixture(), 7);
+        for expected in [
+            "<coverage generated=\"7\" clover=\"3.2.0\">",
+            "<metrics statements=\"2\" coveredstatements=\"1\" conditionals=\"2\" coveredconditionals=\"1\" methods=\"1\" coveredmethods=\"1\" elements=\"5\" coveredelements=\"3\" complexity=\"0\" loc=\"4\" ncloc=\"4\" packages=\"1\" files=\"1\" classes=\"1\"/>",
+            "<file name=\"a &amp; b.ts\" path=\"src/a &amp; b.ts\">",
+            "<line num=\"1\" count=\"1\" type=\"stmt\"/>",
+            "<line num=\"2\" count=\"1\" type=\"cond\" truecount=\"1\" falsecount=\"1\"/>",
+            "<line num=\"4\" count=\"0\" type=\"stmt\"/>",
+        ] {
+            assert!(written.contains(expected), "{expected}\n{written}");
+        }
+    }
+
+    #[test]
+    fn jacoco_groups_files_by_directory_and_states_lines_once() {
+        let written = jacoco(&fixture(), 7);
+        for expected in [
+            "<sessioninfo id=\"supercov\" start=\"7000\" dump=\"7000\"/>",
+            "<package name=\"src\">",
+            "<class name=\"src/a &amp; b\" sourcefilename=\"a &amp; b.ts\">",
+            "<method name=\"run\" desc=\"()\" line=\"1\">",
+            "<sourcefile name=\"a &amp; b.ts\">",
+            "<line nr=\"2\" mi=\"0\" ci=\"1\" mb=\"1\" cb=\"1\"/>",
+            "<line nr=\"4\" mi=\"1\" ci=\"0\" mb=\"0\" cb=\"0\"/>",
+            "<counter type=\"INSTRUCTION\" missed=\"1\" covered=\"3\"/>",
+            "<counter type=\"BRANCH\" missed=\"1\" covered=\"1\"/>",
+            "<counter type=\"LINE\" missed=\"1\" covered=\"3\"/>",
+            "<counter type=\"METHOD\" missed=\"0\" covered=\"1\"/>",
+        ] {
+            assert!(written.contains(expected), "{expected}\n{written}");
+        }
+        // The report's counters close it, after its one package.
+        assert!(
+            written.ends_with("<counter type=\"METHOD\" missed=\"0\" covered=\"1\"/>\n</report>\n")
+        );
+    }
+
+    #[test]
+    fn sonar_states_each_measured_line_and_its_branches() {
+        assert_eq!(
+            sonar(&fixture()),
+            "<coverage version=\"1\">\n  <file path=\"src/a &amp; b.ts\">\n    <lineToCover lineNumber=\"1\" covered=\"true\"/>\n    <lineToCover lineNumber=\"2\" covered=\"true\" branchesToCover=\"2\" coveredBranches=\"1\"/>\n    <lineToCover lineNumber=\"3\" covered=\"true\"/>\n    <lineToCover lineNumber=\"4\" covered=\"false\"/>\n  </file>\n</coverage>\n"
+        );
+    }
+
+    #[test]
+    fn export_routes_each_format_and_names_them_all_when_asked_for_another() {
+        let root = Path::new("/w");
+        let view = fixture();
+        for format in FORMATS.split('|').filter(|format| *format != "html") {
+            assert!(
+                export(&view, format, 0, root, &sources()).is_ok(),
+                "{format}"
+            );
+        }
+        assert!(needs_source("istanbul"));
+        assert!(!needs_source("istanbul-summary"));
+        let error = export(&view, "html", 0, root, &sources()).unwrap_err();
+        assert!(error.contains(FORMATS), "{error}");
     }
 
     #[test]
