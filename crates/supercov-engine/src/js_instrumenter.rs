@@ -261,7 +261,8 @@ fn place_argument(call: &CallExpression<'_>, file: &str) -> Option<usize> {
     let Argument::NumericLiteral(number) = second else {
         return None;
     };
-    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+    // A numeric literal is never negative: `-1` is a negation of one.
+    (number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 /// The place of a statement probe, `hit(place);` or, in a loop,
@@ -303,7 +304,8 @@ fn bound_place_argument(call: &CallExpression<'_>) -> Option<usize> {
     let [Argument::NumericLiteral(number)] = call.arguments.as_slice() else {
         return None;
     };
-    (number.value >= 0.0 && number.value.fract() == 0.0).then_some(number.value as usize)
+    // A numeric literal is never negative: `-1` is a negation of one.
+    (number.value.fract() == 0.0).then_some(number.value as usize)
 }
 
 struct AdjacentProbeMerger {
@@ -5061,7 +5063,10 @@ fn instrument_candidate_with_binding(
         .unwrap_or_default();
     follows.sort_unstable();
     let probe_table = ProbeTable::new(file, point_ids, decision_ids, follows);
-    set_registration_key(ast, &mut parsed.program, &probe_file_v2, &probe_table.key)?;
+    // The registration was written at the top of this module, as the walks
+    // since keep it.
+    set_registration_key(ast, &mut parsed.program, &probe_file_v2, &probe_table.key)
+        .expect("the module holds the registration it was given");
     // The first helper stays whatever the file calls: the loaders the
     // JavaScript frontend adds find the declarations by it.
     prune_unused_runtime_helpers(
@@ -11172,7 +11177,7 @@ export const r = v && w && q;
     /// a decision like any other.
     #[test]
     fn a_runtime_test_next_decides_at_build_is_left_as_written() {
-        let source = "export async function register() {\n  if (process.env.NEXT_RUNTIME === \"nodejs\") {\n    await import(\"./node-only\");\n  }\n  if (process.env[\"NEXT_RUNTIME\"] !== \"edge\") {\n    await import(\"./also-node\");\n  }\n  if (!(\"edge\" == process.env.NEXT_RUNTIME)) {\n    await import(\"./still-node\");\n  }\n  if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {\n    await import(\"./ready\");\n  }\n}\n";
+        let source = "export async function register() {\n  if (process.env.NEXT_RUNTIME === \"nodejs\") {\n    await import(\"./node-only\");\n  }\n  if (process.env[\"NEXT_RUNTIME\"] !== \"edge\") {\n    await import(\"./also-node\");\n  }\n  if (!(\"edge\" == process.env.NEXT_RUNTIME)) {\n    await import(\"./still-node\");\n  }\n  if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {\n    await import(\"./ready\");\n  }\n  if (config.NEXT_RUNTIME === \"nodejs\") {\n    await import(\"./configured\");\n  }\n  if (process.env.NEXT_RUNTIME === wanted) {\n    await import(\"./wanted\");\n  }\n}\n";
         let output = instrument_candidate(source, "src/instrumentation.ts").unwrap();
         for test in [
             "if (process.env.NEXT_RUNTIME === \"nodejs\") {",
@@ -11181,14 +11186,21 @@ export const r = v && w && q;
         ] {
             assert!(output.code.contains(test), "{test}\n{}", output.code);
         }
-        assert!(
-            !output
-                .code
-                .contains("if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {"),
-            "{}",
-            output.code
-        );
-        assert_eq!(output.decisions.len(), 1, "{:?}", output.decisions);
+        // Joined with anything else, read off another object than
+        // `process.env`, or compared with something not written out, it is
+        // no test the bundler decides.
+        for measured in [
+            "if (process.env.NEXT_RUNTIME === \"nodejs\" && globalThis.ready) {",
+            "if (config.NEXT_RUNTIME === \"nodejs\") {",
+            "if (process.env.NEXT_RUNTIME === wanted) {",
+        ] {
+            assert!(
+                !output.code.contains(measured),
+                "{measured}\n{}",
+                output.code
+            );
+        }
+        assert_eq!(output.decisions.len(), 3, "{:?}", output.decisions);
         // The branches' statements are measured all the same.
         assert!(
             output.points.iter().any(|point| point.line == 3),
@@ -14927,6 +14939,158 @@ export function shapes(n: number): unknown {
                 "an internal error: boom",
                 "2 comments in the source, 1 after instrumenting: lost",
             ]
+        );
+    }
+
+    /// Parses `source` and hands its program to `with`.
+    fn with_program<R>(
+        source: &str,
+        with: impl for<'a> FnOnce(AstBuilder<'a>, &mut Program<'a>) -> R,
+    ) -> R {
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        with(AstBuilder::new(&allocator), &mut parsed.program)
+    }
+
+    /// Only the shapes the instrumenter writes name a place: `h(file, n)`,
+    /// `hit(n)` and, in a loop, `hits[n] === clock.e || hit(n)`, with `n` a
+    /// whole number. Anything else in a statement list, as an uninstrumented
+    /// function's body keeps, names none.
+    #[test]
+    fn only_a_probe_the_instrumenter_writes_names_a_place() {
+        let place = |source: &str| {
+            with_program(source, |_, program| {
+                statement_probe_place(&program.body[0], "hit")
+            })
+        };
+        assert_eq!(place("hit(3);"), Some(3));
+        assert_eq!(place("hits[3] === clock.e || hit(3);"), Some(3));
+        for other in [
+            "a && hit(3);",
+            "x || hit(3);",
+            "a == b || hit(3);",
+            "a === b || c;",
+            "other(3);",
+            "a.hit(3);",
+            "hit(n);",
+            "hit(3, 4);",
+            "hit(-1);",
+            "hit(1.5);",
+            "x;",
+        ] {
+            assert_eq!(place(other), None, "{other}");
+        }
+        let argument = |source: &str| {
+            with_program(source, |_, program| {
+                let Statement::ExpressionStatement(statement) = &program.body[0] else {
+                    unreachable!()
+                };
+                let Expression::CallExpression(call) = &statement.expression else {
+                    unreachable!()
+                };
+                place_argument(call, "file")
+            })
+        };
+        assert_eq!(argument("h(file, 2);"), Some(2));
+        for other in [
+            "h(file);",
+            "h(\"file\", 2);",
+            "h(other, 2);",
+            "h(file, n);",
+            "h(file, -1);",
+            "h(file, 1.5);",
+        ] {
+            assert_eq!(argument(other), None, "{other}");
+        }
+    }
+
+    /// A statement probe merges into the one before it only where both are
+    /// named once by an id no other place has; a run of them all merges into
+    /// its first.
+    #[test]
+    fn probes_merge_only_where_both_may() {
+        let merged = |repeated: &[usize], counts: Vec<u32>, source: &str| {
+            let named = PlacesNamed {
+                file: "file".into(),
+                hit: "hit".into(),
+                others: Vec::new(),
+                counts,
+            };
+            let mut merger = adjacent_probe_merger("hit", &named, repeated);
+            let left = with_program(source, |_, program| {
+                merger.merge(&mut program.body);
+                program.body.len()
+            });
+            (left, merger.follows)
+        };
+        let run = "hit(0);\nhit(1);\nhit(2);\n";
+        assert_eq!(merged(&[], vec![1, 1, 1], run), (1, vec![[1, 0], [2, 0]]));
+        // A repeated id, or one named twice, keeps its probe; a repeated
+        // place past the statement points is no statement's.
+        assert_eq!(merged(&[1, 9], vec![1, 1, 1], run), (3, vec![]));
+        assert_eq!(merged(&[], vec![2, 1, 1], run), (2, vec![[2, 1]]));
+        assert_eq!(merged(&[], vec![1, 2, 1], run), (3, vec![]));
+    }
+
+    /// The registration is the declaration of the module's file name whose
+    /// call is given an object with a `key` string; everything before it
+    /// that is not, is passed over.
+    #[test]
+    fn the_key_is_written_into_the_registration_alone() {
+        let source = "import x from \"x\";\nconst { a } = x;\nconst other = 1;\nvar F = 1;\nvar F = 1;\nvar F = g();\nvar F = g({ points: 1, kind: \"\", [\"key\"]: \"\", ...rest, key: 1 });\nvar F = g({ key: \"\" });\n";
+        let written = with_program(source, |ast, program| {
+            // A declaration whose names were all pruned declares nothing.
+            let Statement::VariableDeclaration(declaration) = &mut program.body[3] else {
+                unreachable!()
+            };
+            declaration.declarations.clear();
+            set_registration_key(ast, program, "F", "0123").unwrap();
+            Codegen::new().build(program).code
+        });
+        assert!(
+            written.ends_with("var F = g({ key: \"0123\" });\n"),
+            "{written}"
+        );
+        assert!(
+            written.contains("var F = g({\n\tpoints: 1,\n\tkind: \"\",\n\t[\"key\"]: \"\""),
+            "{written}"
+        );
+        let missing = with_program("const F = g({ points: 1 });\n", |ast, program| {
+            set_registration_key(ast, program, "F", "0123")
+        });
+        assert!(missing.is_err());
+    }
+
+    /// Pruning keeps the helpers a module calls: in the declaration of the
+    /// file's own names or the runtime import, whichever comes first; a
+    /// declaration of other names, an import of nothing and a name that is
+    /// not the file's own are left alone, as is a program of nothing.
+    #[test]
+    fn pruning_removes_only_the_file_s_own_unused_helpers() {
+        let locals = ["anchor".to_owned(), "used".to_owned(), "unused".to_owned()];
+        let pruned = |source: &str| {
+            with_program(source, |_, program| {
+                prune_unused_runtime_helpers(program, &locals, "anchor", &["used"]);
+                Codegen::new().build(program).code
+            })
+        };
+        assert_eq!(pruned(""), "");
+        assert_eq!(
+            pruned("const mine = 1, anchor = 2;\nconst used = 2, unused = 3, anchor = 4;\n"),
+            "const mine = 1, anchor = 2;\nconst used = 2, anchor = 4;\n"
+        );
+        assert_eq!(
+            pruned(
+                "import \"virtual:supercov-runtime\";\nimport { a as used, b as unused, c as theirs } from \"virtual:supercov-runtime\";\n"
+            ),
+            "import \"virtual:supercov-runtime\";\nimport { a as used, b as unused, c as theirs } from \"virtual:supercov-runtime\";\n"
+        );
+        assert_eq!(
+            pruned(
+                "import { a as used, b as unused, c as theirs } from \"virtual:supercov-runtime\";\n"
+            ),
+            "import { a as used, c as theirs } from \"virtual:supercov-runtime\";\n"
         );
     }
 }

@@ -1120,7 +1120,7 @@ pub(crate) fn publish_run_with_fault(
                 if crate::run_store::write_query_index_from(
                     &derived,
                     report,
-                    Some((evidence_sha256, copied)),
+                    (evidence_sha256, copied),
                 )
                 .is_err()
                 {
@@ -1608,9 +1608,16 @@ pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
 /// thousands of files: one thread unlinking them was most of the ten
 /// seconds a run waits at its end for the trash to empty.
 fn remove_tree(root: &Path) -> io::Result<()> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(16);
+    remove_tree_on(
+        root,
+        std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(16),
+    )
+}
+
+/// [`remove_tree`] on `threads` threads: one removes it whole.
+fn remove_tree_on(root: &Path, threads: usize) -> io::Result<()> {
     let gone = |result: io::Result<()>| match result {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
@@ -3824,5 +3831,23 @@ mod tests {
                 "evidence changed during publication",
             ]
         );
+    }
+
+    /// A tree is removed whole on one thread or several. What is gone
+    /// meanwhile, or cannot be removed, is a removal on other threads, which
+    /// a test sets faults for from outside the process: `cli.rs` does.
+    #[test]
+    fn a_tree_is_removed_whole_on_one_thread_or_several() {
+        for threads in [1, 4] {
+            let root = project();
+            for file in ["a/one", "a/two", "b/c/three", "four"] {
+                let path = root.join("tree").join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "x").unwrap();
+            }
+            remove_tree_on(&root.join("tree"), threads).unwrap();
+            assert!(!root.join("tree").exists(), "{threads}");
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

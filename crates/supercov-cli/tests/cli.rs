@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:675",
+                "fs.read_from#evidence_archive.rs:676",
             )],
         )
         .exits(2);
@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1168")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1170")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1168"),
+        seen.contains("test fault at fs (javascript_run.rs:1170"),
         "{seen}"
     );
 }
@@ -1012,12 +1012,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:675",
+            "fs.read_from#evidence_archive.rs:676",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:675"), "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:676"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1389,7 +1389,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:675",
+            "fs.read_from#evidence_archive.rs:676",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -6802,7 +6802,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695=50")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696=50")],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -8117,7 +8117,7 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696")],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -13549,7 +13549,7 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:695=50",
+        "fs.open#evidence_archive.rs:696=50",
         "fs.open#source_manifest.rs:359@2",
     ] {
         let unjudged = project
@@ -15588,7 +15588,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2516 => main.rs:2516",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
+            "fs.read_to_string#javascript_frontend.rs:2018 => javascript_frontend.rs:2018",
         ],
     );
 }
@@ -17152,18 +17152,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1338",
-        "fs.create_dir_all#javascript_run.rs:739",
-        "fs.write#javascript_run.rs:1045",
+        "fs.create_dir_all#javascript_run.rs:741",
+        "fs.write#javascript_run.rs:1047",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1116",
-        "fs.create_dir_all#javascript_run.rs:1287",
+        "fs.create_dir_all#javascript_run.rs:1118",
+        "fs.create_dir_all#javascript_run.rs:1289",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1562",
         "fs.create_dir_all#javascript_run.rs:1564",
+        "fs.create_dir_all#javascript_run.rs:1566",
         "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1664",
         "fs.create_dir_all#javascript_run.rs:1666",
+        "fs.create_dir_all#javascript_run.rs:1668",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17405,7 +17405,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:675",
+        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:676",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:672@2",
     ] {
@@ -17468,11 +17468,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:675",
+            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:676",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:675"),
+        fired_at(&spanless.stderr(), "evidence_archive.rs:676"),
         "{}",
         spanless.stderr()
     );
@@ -17695,12 +17695,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1818@2",
+            "fs.read_to_string#javascript_frontend.rs:1807@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1818"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1807"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -20508,4 +20508,92 @@ test("a server the test stops is not a crash", async () => {
         ],
     );
     assert!(!output.contains("SIGTERM"), "{output}");
+}
+
+/// A test that writes a file of the run's own name into the run's evidence
+/// directory -- the declaration beside the evidence -- does not get it into
+/// the archive under that name: the run stops and names the file.
+#[test]
+fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
+    let project = Project::cart("evidence-collision");
+    project.write(
+        "test/collide.test.js",
+        "import test from 'node:test';\nimport { mkdirSync, writeFileSync } from 'node:fs';\ntest('writes beside the evidence', () => {\n  const directory = `.supercov/evidence/${process.env.SUPERCOV_RUN_ID}`;\n  mkdirSync(directory, { recursive: true });\n  writeFileSync(`${directory}/frontend.json`, '{}');\n});\n",
+    );
+    let ran = project.supercov(&["--", "node", "--test"]);
+    let said = ran.stderr();
+    assert_ne!(ran.code(), 0, "{said}");
+    assert!(
+        said.contains("duplicate Supercov evidence archive path: frontend.json"),
+        "{said}"
+    );
+}
+
+/// The workspace a run replaces is swept from the trash while the tests run.
+/// A part of it already gone -- removed by hand meanwhile, its listing or
+/// itself -- is as swept as one removed here, and the trash is left empty; a
+/// part that cannot be removed leaves the rest of that tree in the trash, for
+/// a later sweep.
+#[test]
+fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
+    for (fault, emptied) in [
+        ("fs.remove_file:2#lifecycle.rs:1665", true),
+        ("fs.read_dir:2#lifecycle.rs:1634", true),
+        ("fs.remove_file#lifecycle.rs:1665", false),
+    ] {
+        let project = Project::cart("sweep");
+        assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{fault}: {said}");
+        let place = &fault[fault.find('#').unwrap() + 1..];
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        let trash = project.root.join(".supercov/.trash");
+        let left = std::fs::read_dir(&trash)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name != ".deleter.lock")
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(left == 0, emptied, "{fault}: {left} left");
+    }
+}
+
+/// A run prunes the sources from its workspace copy into the trash as it
+/// ends, best effort: when one cannot be moved there the prune stops, what
+/// it had not moved stays in the copy, which the next run copies over, and
+/// the run is not failed for it.
+#[test]
+fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
+    let left_in_copy = |fault: &str| {
+        let project = Project::cart("prune");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{said}");
+        assert_eq!(
+            fired_at(&said, "workspace.rs:2226"),
+            !fault.is_empty(),
+            "{said}"
+        );
+        let copies = project.root.join(".supercov/workspaces/workspace");
+        std::fs::read_dir(&copies)
+            .unwrap()
+            .map(|copy| copy.unwrap().path())
+            .filter(|copy| copy.is_dir())
+            .map(|copy| {
+                std::fs::read_dir(copy)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name != "node_modules" && name != ".supercov")
+                    .count()
+            })
+            .sum::<usize>()
+    };
+    assert_eq!(left_in_copy(""), 0);
+    // The prune stops there: that source and those after it stay.
+    assert!(left_in_copy("fs.rename#workspace.rs:2226") > 0);
 }

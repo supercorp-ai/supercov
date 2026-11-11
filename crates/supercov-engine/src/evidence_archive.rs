@@ -493,16 +493,17 @@ fn write_entries(
     };
 
     let result = (|| {
-        let buffered = BufWriter::new(FaultingWriter::new(file, fault));
+        let mut buffered = BufWriter::new(FaultingWriter::new(file, fault));
+        buffered
+            .write_all(&GZIP_HEADER)
+            .expect("ten bytes fit an empty buffer, and nothing is written yet");
         // Compressed on every core, as one gzip member any reader reads: on
         // one core, compressing was most of a large run's evidence step.
         // See `ParallelGzip`.
-        let gzip = ParallelGzip::new(buffered)?;
+        let gzip = ParallelGzip::new(buffered);
         let (gzip, uncompressed_bytes) = write_framed_with_magic(entries, gzip, magic)?;
-        let buffered = gzip.finish()?;
-        let faulting = buffered
-            .into_inner()
-            .map_err(|error| EvidenceArchiveError::Io(error.into_error()))?;
+        // Finishing flushed the buffer, so nothing is left in it.
+        let (faulting, _) = gzip.finish()?.into_parts();
         let file = faulting.inner;
         fs::sync_all(&file)?;
         let compressed_bytes = fs::file_metadata(&file)?.len();
@@ -730,41 +731,55 @@ pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveEr
     schema_version_from_magic(&magic)
 }
 
-/// A gzip member made by compressing fixed-size pieces of the input side by
-/// side, as pigz does. Each piece is raw deflate from a fresh compressor,
-/// ended by a sync flush and the last by the final block, so the pieces join
-/// into one deflate stream; their CRCs combine into the member's. The header
-/// is the one `GzBuilder` wrote at the fastest level: no name, no time,
-/// unknown system.
+/// The header of the gzip member a `ParallelGzip` writes after it: the one
+/// `GzBuilder` wrote at the fastest level: no name, no time, unknown system.
+const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 4, 255];
+
+/// The body of a gzip member made by compressing fixed-size pieces of the
+/// input side by side, as pigz does, written after a [`GZIP_HEADER`]. Each
+/// piece is raw deflate from a fresh compressor, ended by a sync flush and
+/// the last by the final block, so the pieces join into one deflate stream;
+/// their CRCs combine into the member's.
 struct ParallelGzip<W: Write> {
     inner: W,
     pending: Vec<u8>,
     crc: crc32fast::Hasher,
     total: u64,
+    piece: usize,
     threads: usize,
 }
 
 const PARALLEL_GZIP_PIECE: usize = 4 << 20;
 
+/// How many pieces a `ParallelGzip` compresses at once: one per core.
+fn parallel_gzip_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(32)
+}
+
 impl<W: Write> ParallelGzip<W> {
-    fn new(mut inner: W) -> io::Result<Self> {
-        inner.write_all(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 4, 255])?;
-        let threads = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .min(32);
-        Ok(Self {
+    fn new(inner: W) -> Self {
+        Self::with_pieces(inner, PARALLEL_GZIP_PIECE, parallel_gzip_threads())
+    }
+
+    /// Pieces of `piece` bytes, `threads` of them to a batch.
+    fn with_pieces(inner: W, piece: usize, threads: usize) -> Self {
+        Self {
             inner,
             pending: Vec::new(),
             crc: crc32fast::Hasher::new(),
             total: 0,
+            piece,
             threads,
-        })
+        }
     }
 
     /// Compress the pieces of `input`, the last ending the stream when
-    /// `last`, and write them in order.
+    /// `last`, and write them in order. `input` is never empty: a batch is
+    /// written once more than a batch is held, and the rest when it is.
     fn compress(&mut self, input: &[u8], last: bool) -> io::Result<()> {
-        let pieces = input.chunks(PARALLEL_GZIP_PIECE).collect::<Vec<_>>();
+        let pieces = input.chunks(self.piece).collect::<Vec<_>>();
         let count = pieces.len();
         let compressed = std::thread::scope(|scope| {
             let handles = pieces
@@ -784,17 +799,17 @@ impl<W: Write> ParallelGzip<W> {
                 .map(|handle| handle.join().unwrap_or_else(crate::threads::rethrow))
                 .collect::<Vec<_>>()
         });
-        for (bytes, crc) in compressed {
-            self.inner.write_all(&bytes?)?;
+        compressed.into_iter().try_for_each(|(bytes, crc)| {
+            self.inner.write_all(&bytes)?;
             self.crc.combine(&crc);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn finish(mut self) -> io::Result<W> {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
-            self.inner.write_all(&deflate_piece(&[], true)?)?;
+            self.inner.write_all(&deflate_piece(&[], true))?;
         } else {
             self.compress(&pending, true)?;
         }
@@ -811,7 +826,7 @@ impl<W: Write> Write for ParallelGzip<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.pending.extend_from_slice(buffer);
         self.total += buffer.len() as u64;
-        let batch = PARALLEL_GZIP_PIECE * self.threads;
+        let batch = self.piece * self.threads;
         // A piece is held back so that the last one, which ends the stream,
         // is never empty while there was input.
         while self.pending.len() > batch {
@@ -828,7 +843,7 @@ impl<W: Write> Write for ParallelGzip<W> {
 }
 
 /// One piece as raw deflate: sync-flushed, or ending the stream.
-fn deflate_piece(piece: &[u8], last: bool) -> io::Result<Vec<u8>> {
+fn deflate_piece(piece: &[u8], last: bool) -> Vec<u8> {
     let mut compressor = Compress::new(Compression::fast(), false);
     let flush = if last {
         FlushCompress::Finish
@@ -841,9 +856,11 @@ fn deflate_piece(piece: &[u8], last: bool) -> io::Result<Vec<u8>> {
             output.reserve(output.capacity().max(4096));
         }
         let consumed = compressor.total_in() as usize;
+        // Deflate refuses only a call it cannot make progress on, and every
+        // call here has room in the output, which is grown when full.
         let status = compressor
             .compress_vec(&piece[consumed..], &mut output, flush)
-            .map_err(io::Error::other)?;
+            .expect("deflate has room in the output to compress into");
         let all_in = compressor.total_in() as usize == piece.len();
         match status {
             Status::StreamEnd => break,
@@ -851,7 +868,7 @@ fn deflate_piece(piece: &[u8], last: bool) -> io::Result<Vec<u8>> {
             _ => {}
         }
     }
-    Ok(output)
+    output
 }
 
 #[cfg(test)]
@@ -1857,14 +1874,12 @@ mod tests {
     fn a_parallel_gzip_is_one_member_any_gzip_reader_reads_whole() {
         // Pieces of varied bytes, a few more than a batch, and the small and
         // empty inputs at the edges.
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get())
-            .min(32);
+        let threads = parallel_gzip_threads();
         let large = (0..PARALLEL_GZIP_PIECE * (threads + 2) + 12_345)
             .map(|index| ((index * 31) ^ (index >> 7)) as u8)
             .collect::<Vec<_>>();
         for input in [Vec::new(), b"x".to_vec(), large] {
-            let mut gzip = ParallelGzip::new(Vec::new()).unwrap();
+            let mut gzip = ParallelGzip::new(GZIP_HEADER.to_vec());
             // Written in uneven parts, as the framed writer does.
             for part in input.chunks(1_000_003) {
                 gzip.write_all(part).unwrap();
@@ -1877,5 +1892,125 @@ mod tests {
             // Nothing after the one member.
             assert!(decoder.into_inner().is_empty());
         }
+    }
+
+    /// Bytes that do not compress, the same for the same seed.
+    fn noise(length: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// A disk that fills at any byte of a gzip member's body fails its
+    /// writing there: compressing a batch while input is written, the last
+    /// pieces as it finishes, the empty stream's end, the CRC and the size.
+    #[test]
+    fn a_parallel_gzip_fails_wherever_its_disk_fills() {
+        let full = |limit: u64| {
+            FaultingWriter::new(
+                Vec::new(),
+                Some(EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit)),
+            )
+        };
+        let filled = |error: io::Error| assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        // More than a batch written: the batch is compressed then, and fails.
+        let mut gzip = ParallelGzip::with_pieces(full(0), 16, 2);
+        filled(gzip.write_all(&noise(40, 3)).unwrap_err());
+        // An empty stream, and a stream of input, failing as they finish.
+        filled(
+            ParallelGzip::with_pieces(full(0), 16, 2)
+                .finish()
+                .err()
+                .unwrap(),
+        );
+        let mut gzip = ParallelGzip::with_pieces(full(0), 16, 2);
+        gzip.write_all(b"x").unwrap();
+        filled(gzip.finish().err().unwrap());
+        // The body's deflate written, then the CRC, then the size.
+        let mut whole = ParallelGzip::with_pieces(Vec::new(), 16, 2);
+        whole.write_all(b"x").unwrap();
+        let body = whole.finish().unwrap().len() as u64 - 8;
+        for limit in [body, body + 4] {
+            let mut gzip = ParallelGzip::with_pieces(full(limit), 16, 2);
+            gzip.write_all(b"x").unwrap();
+            filled(gzip.finish().err().unwrap());
+        }
+        // A flush writes nothing: the pieces are written as they are made.
+        ParallelGzip::with_pieces(full(0), 16, 2).flush().unwrap();
+    }
+
+    /// A piece compresses into as much output as it needs, whether the
+    /// output fills before the input is all in or exactly as it is: 1,829
+    /// bytes of this noise fill their first output to the byte.
+    #[test]
+    fn a_piece_that_fills_its_output_is_compressed_whole() {
+        for piece in [noise(1_829, 1_836), noise(64 * 1024, 5)] {
+            let mut stream = deflate_piece(&piece, false);
+            stream.extend(deflate_piece(&[], true));
+            let mut read = Vec::new();
+            flate2::read::DeflateDecoder::new(stream.as_slice())
+                .read_to_end(&mut read)
+                .unwrap();
+            assert_eq!(read, piece);
+        }
+    }
+
+    /// An archive larger than a batch is compressed as it is written, and a
+    /// disk already full fails it there, leaving nothing.
+    #[test]
+    fn an_archive_larger_than_a_batch_fails_as_it_is_written() {
+        let root = temporary_directory("archive-batch");
+        let destination = root.join("evidence.raw.gz");
+        let mut entries = identity_entries();
+        entries.push(entry(
+            "noise.bin",
+            &noise(PARALLEL_GZIP_PIECE * parallel_gzip_threads() + 1, 9),
+        ));
+        let error = write_archive_with_fault(
+            entries,
+            &destination,
+            EvidenceArchiveWriteFault::NoSpaceAfterBytes(0),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            EvidenceArchiveError::Io(ref source) if source.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Canonical entries are written as they are, and only with the run's
+    /// declaration and model; entries out of order are a caller's mistake.
+    #[test]
+    fn a_canonical_archive_holds_its_declaration_and_model() {
+        let root = temporary_directory("archive-canonical");
+        let destination = root.join("evidence.raw.gz");
+        let entries = canonicalize_entries(identity_entries()).unwrap();
+        for (missing, expected) in [
+            ("frontend.json", "Frontend"),
+            ("coverage-model.json", "CoverageModel"),
+        ] {
+            let held = entries
+                .iter()
+                .filter(|entry| entry.path != missing)
+                .cloned()
+                .collect::<Vec<_>>();
+            let error = write_canonical_archive(&held, &destination).unwrap_err();
+            assert!(format!("{error:?}").contains(expected), "{error:?}");
+        }
+        write_canonical_archive(&entries, &destination).unwrap();
+        assert_eq!(read_archive(&destination).unwrap(), entries);
+        let reversed = entries.iter().rev().cloned().collect::<Vec<_>>();
+        assert!(
+            std::panic::catch_unwind(|| write_canonical_archive(&reversed, &destination)).is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
