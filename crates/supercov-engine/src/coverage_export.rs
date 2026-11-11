@@ -638,7 +638,10 @@ fn jacoco_counters(out: &mut String, indent: &str, metric: impl Fn(Metric) -> (u
 /// alternatives.
 pub fn jacoco(view: &RunView, timestamp: u64) -> String {
     let mut out = String::new();
-    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n");
+    // Not `standalone`, as JaCoCo writes it: its document has no whitespace
+    // between elements, and this one is indented, which a standalone
+    // document whose elements the DTD declares may not be.
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<!DOCTYPE report PUBLIC \"-//JACOCO//DTD Report 1.1//EN\" \"report.dtd\">\n");
     let _ = writeln!(
         out,
