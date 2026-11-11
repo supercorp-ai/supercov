@@ -272,19 +272,44 @@ fn absolute(root: &Path, file: &str) -> String {
         .into_owned()
 }
 
-/// A file's text with where each of its lines starts, to place a recorded
-/// point by the source it spans.
+/// How a frontend counts the column it records a point or branch at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Columns {
+    /// JavaScript and TypeScript: from 1, in UTF-16 units.
+    Utf16FromOne,
+    /// Python, Ruby and Rust: from 0, in bytes.
+    BytesFromZero,
+    /// Go, Java and Kotlin: from 1, in bytes.
+    BytesFromOne,
+}
+
+/// The column convention of the frontend that measures `file`.
+fn columns_of(file: &str) -> Columns {
+    match file.rsplit_once('.').map_or("", |(_, extension)| extension) {
+        "py" | "pyi" | "rb" | "rs" => Columns::BytesFromZero,
+        "go" | "java" | "kt" => Columns::BytesFromOne,
+        _ => Columns::Utf16FromOne,
+    }
+}
+
+/// A file's text with where each of its lines starts, to place what a run
+/// recorded in it.
 struct Placed<'a> {
     text: &'a str,
     starts: Vec<usize>,
+    columns: Columns,
 }
 
 impl<'a> Placed<'a> {
-    fn new(text: &'a str) -> Self {
+    fn new(text: &'a str, columns: Columns) -> Self {
         let starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(at, _)| at + 1))
             .collect();
-        Placed { text, starts }
+        Placed {
+            text,
+            starts,
+            columns,
+        }
     }
 
     /// A byte offset as Istanbul states a position: the 1-based line and the
@@ -295,44 +320,76 @@ impl<'a> Placed<'a> {
         json!({ "line": line + 1, "column": column })
     }
 
-    /// Where `source` sits in the file, as a byte range, given the line it
-    /// starts on and the column its frontend recorded.
-    ///
-    /// Frontends count columns their own way: JavaScript from 1 in UTF-16
-    /// units, Python, Rust and Ruby from 0 in bytes, Go and the JVM from 1 in
-    /// bytes. Finding the recorded source on its line places it exactly
-    /// whichever way its column was counted. Of several occurrences on the
-    /// line, the one at the recorded column is taken; text no longer on the
-    /// line is not placed at all.
-    fn find(&self, line: usize, column: usize, source: &str) -> Option<(usize, usize)> {
-        if source.is_empty() || line == 0 {
-            return None;
-        }
-        let start = *self.starts.get(line - 1)?;
+    /// The byte offset of a recorded line and column, past any whitespace
+    /// there: a frontend that trims the source it records may start its
+    /// range before it. `None` when the line no longer reaches that far.
+    fn offset(&self, line: usize, column: usize) -> Option<usize> {
+        let start = *self.starts.get(line.checked_sub(1)?)?;
         let next = self.starts.get(line).copied().unwrap_or(self.text.len());
-        let window = &self.text[start..self.text.len().min(next + source.len())];
-        window
-            .match_indices(source)
-            .filter(|(at, _)| start + at < next)
-            .min_by_key(|(at, _)| {
-                let bytes = *at;
-                let units = window[..*at].encode_utf16().count();
-                [bytes, units]
-                    .into_iter()
-                    .flat_map(|counted| [counted, counted + 1])
-                    .map(|counted| counted.abs_diff(column))
-                    .min()
-            })
-            .map(|(at, _)| (start + at, start + at + source.len()))
+        let text = &self.text[start..next];
+        let within = match self.columns {
+            Columns::BytesFromZero => column,
+            Columns::BytesFromOne => column.checked_sub(1)?,
+            Columns::Utf16FromOne => {
+                let wanted = column.checked_sub(1)?;
+                let mut units = 0;
+                let mut found = None;
+                for (at, character) in text.char_indices() {
+                    if units == wanted {
+                        found = Some(at);
+                        break;
+                    }
+                    units += character.len_utf16();
+                }
+                found.or((units == wanted).then_some(text.len()))?
+            }
+        };
+        text.get(within..)?;
+        let rest = &self.text[start + within..];
+        Some(start + within + rest.len() - rest.trim_start().len())
+    }
+
+    /// Where `source` sits, as a byte range: at the recorded line and column,
+    /// and only if the file still holds that source there.
+    fn find(&self, line: usize, column: usize, source: &str) -> Option<(usize, usize)> {
+        let at = self.offset(line, column)?;
+        (!source.is_empty() && self.text[at..].starts_with(source))
+            .then_some((at, at + source.len()))
+    }
+
+    fn stale(file: &str, line: usize) -> String {
+        format!(
+            "{file}:{line} no longer holds the source the run recorded there; run the tests again to export it"
+        )
     }
 
     fn range(&self, file: &str, line: usize, column: usize, source: &str) -> Result<Value, String> {
-        let (start, end) = self.find(line, column, source).ok_or_else(|| {
-            format!(
-                "{file}:{line} no longer holds the source the run recorded there; run the tests again to export it"
-            )
-        })?;
+        let (start, end) = self
+            .find(line, column, source)
+            .ok_or_else(|| Self::stale(file, line))?;
         Ok(json!({ "start": self.position(start), "end": self.position(end) }))
+    }
+
+    /// A branch's range. A frontend records some branches by a name, such as
+    /// `try / catch`, or by a part, such as a loop's iterable, rather than by
+    /// their source: those are placed at their start, with no extent, rather
+    /// than given one Supercov never recorded.
+    fn branch(
+        &self,
+        file: &str,
+        line: usize,
+        column: usize,
+        source: &str,
+    ) -> Result<Value, String> {
+        let at = self
+            .offset(line, column)
+            .ok_or_else(|| Self::stale(file, line))?;
+        let end = if !source.is_empty() && self.text[at..].starts_with(source) {
+            at + source.len()
+        } else {
+            at
+        };
+        Ok(json!({ "start": self.position(at), "end": self.position(end) }))
     }
 }
 
@@ -348,7 +405,7 @@ fn istanbul_branch_type(kind: &str) -> &str {
 }
 
 fn istanbul_file(root: &Path, file: &FileView, text: &str) -> Result<Value, String> {
-    let placed = Placed::new(text);
+    let placed = Placed::new(text, columns_of(&file.file));
     let (mut statements, mut hits) = (Map::new(), Map::new());
     let (mut functions, mut calls) = (Map::new(), Map::new());
     for point in &file.points {
@@ -356,10 +413,12 @@ fn istanbul_file(root: &Path, file: &FileView, text: &str) -> Result<Value, Stri
         let shown = u8::from(point.covered);
         if point.function {
             let key = functions.len().to_string();
+            // A function with no name is named as Istanbul names one, by its
+            // place in the map, which is how readers tell it is anonymous.
             let name = point
                 .name
                 .clone()
-                .unwrap_or_else(|| format!("{}:{}", point.line, point.column));
+                .unwrap_or_else(|| format!("(anonymous_{key})"));
             functions.insert(
                 key.clone(),
                 json!({ "name": name, "decl": range, "loc": range, "line": point.line }),
@@ -373,7 +432,7 @@ fn istanbul_file(root: &Path, file: &FileView, text: &str) -> Result<Value, Stri
     }
     let (mut branches, mut taken) = (Map::new(), Map::new());
     for (index, branch) in file.branch_sites.iter().enumerate() {
-        let range = placed.range(&file.file, branch.line, branch.column, &branch.source)?;
+        let range = placed.branch(&file.file, branch.line, branch.column, &branch.source)?;
         // Supercov records where a branch is, not where each of its
         // alternatives is, so each alternative is placed at its branch.
         let locations = vec![range.clone(); branch.taken.len()];
@@ -845,42 +904,94 @@ mod tests {
         BTreeMap::from([("src/a & b.ts".to_owned(), SOURCE.to_owned())])
     }
 
-    /// One statement placed from each frontend's column convention lands on
-    /// one range: JavaScript's 1-based UTF-16 units, Python's 0-based bytes
-    /// and Go's 1-based bytes, on a line where they differ.
+    /// A line where bytes and UTF-16 units differ before the statement,
+    /// placed from each frontend's convention, lands on one range.
     #[test]
-    fn a_point_is_placed_by_its_source_whatever_its_column_counts() {
+    fn a_point_is_placed_by_its_frontend_s_column_convention() {
         let text = "x = 1\nif \u{e9}\u{1f600}: g()\n";
-        let placed = Placed::new(text);
         let bytes = text.lines().nth(1).unwrap().find("g()").unwrap();
         let units = "if \u{e9}\u{1f600}: ".encode_utf16().count();
         assert_ne!(bytes, units);
         let expected = Some((6 + bytes, 6 + bytes + 3));
-        for column in [units + 1, bytes, bytes + 1] {
-            assert_eq!(placed.find(2, column, "g()"), expected, "column {column}");
+        for (columns, column) in [
+            (Columns::Utf16FromOne, units + 1),
+            (Columns::BytesFromZero, bytes),
+            (Columns::BytesFromOne, bytes + 1),
+        ] {
+            let placed = Placed::new(text, columns);
+            assert_eq!(placed.find(2, column, "g()"), expected, "{columns:?}");
+            assert_eq!(
+                placed.position(6 + bytes),
+                json!({ "line": 2, "column": units })
+            );
         }
+        // Read with another frontend's convention, the column is not at the
+        // statement, and nothing is placed.
         assert_eq!(
-            placed.position(6 + bytes),
-            json!({ "line": 2, "column": units })
+            Placed::new(text, Columns::BytesFromZero).find(2, units + 1, "g()"),
+            None
         );
+        assert_eq!(columns_of("src/a.py"), Columns::BytesFromZero);
+        assert_eq!(columns_of("lib/a.rb"), Columns::BytesFromZero);
+        assert_eq!(columns_of("src/lib.rs"), Columns::BytesFromZero);
+        assert_eq!(columns_of("calc.go"), Columns::BytesFromOne);
+        assert_eq!(columns_of("src/main/java/A.java"), Columns::BytesFromOne);
+        assert_eq!(columns_of("src/main/kotlin/A.kt"), Columns::BytesFromOne);
+        assert_eq!(columns_of("src/a.tsx"), Columns::Utf16FromOne);
+        assert_eq!(columns_of("Makefile"), Columns::Utf16FromOne);
+    }
+
+    /// A frontend that trims what it records may start the range before the
+    /// whitespace it trimmed, even on the line before.
+    #[test]
+    fn whitespace_before_recorded_source_is_passed_over() {
+        let placed = Placed::new("#[a]\n    f();\n", Columns::BytesFromZero);
+        assert_eq!(placed.find(1, 4, "f();"), Some((9, 13)));
+        assert_eq!(placed.find(2, 0, "f();"), Some((9, 13)));
     }
 
     /// Of two occurrences on a line, the one at the recorded column.
     #[test]
     fn a_repeated_statement_is_the_one_at_its_column() {
-        let placed = Placed::new("f(); f();\n");
+        let placed = Placed::new("f(); f();\n", Columns::Utf16FromOne);
         assert_eq!(placed.find(1, 1, "f();"), Some((0, 4)));
         assert_eq!(placed.find(1, 6, "f();"), Some((5, 9)));
+        // The space before the second is passed over, as a trimmed range's.
         assert_eq!(placed.find(1, 5, "f();"), Some((5, 9)));
+        assert_eq!(placed.find(1, 2, "f();"), None);
+    }
+
+    /// A branch recorded by a name or a part is placed at its start, with no
+    /// extent; one recorded by its source spans it.
+    #[test]
+    fn a_branch_without_its_source_is_placed_at_its_start() {
+        let placed = Placed::new("  try { a(); } catch { b(); }\n", Columns::Utf16FromOne);
+        let at = json!({ "line": 1, "column": 2 });
+        assert_eq!(
+            placed.branch("f.js", 1, 3, "try / catch").unwrap(),
+            json!({ "start": at, "end": at })
+        );
+        assert_eq!(
+            placed.branch("f.js", 1, 3, "try { a(); }").unwrap(),
+            json!({ "start": at, "end": { "line": 1, "column": 14 } })
+        );
+        assert!(
+            placed
+                .branch("f.js", 2, 3, "try")
+                .unwrap_err()
+                .starts_with("f.js:2 no longer holds")
+        );
     }
 
     /// Source the line no longer holds is not placed, and the export says
     /// which file and line to measure again rather than guessing.
     #[test]
     fn source_no_longer_in_the_file_is_not_placed() {
-        let placed = Placed::new("a();\nb();\n");
+        let placed = Placed::new("a();\nb();\n", Columns::Utf16FromOne);
         assert_eq!(placed.find(1, 1, "b();"), None);
         assert_eq!(placed.find(3, 1, "b();"), None);
+        assert_eq!(placed.find(1, 9, "b();"), None);
+        assert_eq!(placed.find(1, 0, "a();"), None);
         assert_eq!(placed.find(1, 1, ""), None);
         let mut changed = sources();
         changed.insert("src/a & b.ts".into(), "export function run() {}\n".into());

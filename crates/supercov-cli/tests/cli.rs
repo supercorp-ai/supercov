@@ -828,6 +828,8 @@ fn reports_carry_the_same_view_in_every_format() {
         file["f"],
         serde_json::json!({ "0": 1, "1": 1, "2": 0, "3": 0 })
     );
+    // `describe`'s arrow has no name, and is named as Istanbul names one.
+    assert_eq!(file["fnMap"]["3"]["name"], "(anonymous_3)");
     let summary = project
         .supercov(&["runs", "report", "--format", "istanbul-summary"])
         .succeeds();
