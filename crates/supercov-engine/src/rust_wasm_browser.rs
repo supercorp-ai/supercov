@@ -145,8 +145,108 @@ pub(crate) fn browser_from(
 #[derive(Debug)]
 pub struct BrowserReader {
     address: SocketAddr,
-    driver: Child,
+    driver: Arc<Driver>,
     stop: Arc<AtomicBool>,
+}
+
+/// The chromedriver requests are passed to, started again on another port
+/// when it stops answering.
+#[derive(Debug)]
+struct Driver {
+    chromedriver: PathBuf,
+    arguments: Vec<String>,
+    patience: Duration,
+    running: std::sync::Mutex<(Child, SocketAddr)>,
+}
+
+impl Driver {
+    /// A driver started on a port of its own and answering on it: one that
+    /// ended, or whose port another server answers, is started again on
+    /// another, `DRIVER_ATTEMPTS` times in all.
+    fn launch(
+        chromedriver: &Path,
+        arguments: &[String],
+        patience: Duration,
+    ) -> Result<(Child, SocketAddr), String> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let port = crate::rust_worker::free_port()?;
+            let mut driver = Command::new(chromedriver)
+                .args(arguments)
+                .arg(format!("--port={port}"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .launch()
+                .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
+            let upstream = SocketAddr::from(([127, 0, 0, 1], port));
+            match answered(&mut driver, upstream, patience) {
+                Answer::Ready => return Ok((driver, upstream)),
+                Answer::Silent => {
+                    stop(&mut driver);
+                    return Err(format!("{} never listened", chromedriver.display()));
+                }
+                Answer::Lost(why) => {
+                    stop(&mut driver);
+                    if attempts == DRIVER_ATTEMPTS {
+                        return Err(format!("{} {why}", chromedriver.display()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn stop(driver: &mut Child) {
+    let _ = driver.kill();
+    let _ = driver.wait();
+}
+
+/// Where the proxy passes a request: the driver answering now, and another
+/// in place of one that has stopped answering.
+trait Upstream: Send + Sync {
+    fn address(&self) -> SocketAddr;
+    /// How long a session may take to be created before the driver is
+    /// taken to have stopped answering.
+    fn patience(&self) -> Duration {
+        SESSION_PATIENCE
+    }
+    /// The driver in place of the one at `silent`, started again unless
+    /// another request has done so already; none when none starts.
+    fn restart(&self, silent: SocketAddr) -> Option<SocketAddr>;
+}
+
+/// A session Chrome has not answered for this long is not coming: the
+/// runner gives up on it at 60 seconds, which leaves time for another driver
+/// to start and to be asked again. A Chrome starting under load answers in
+/// seconds.
+const SESSION_PATIENCE: Duration = Duration::from_secs(25);
+
+impl Upstream for Driver {
+    fn address(&self) -> SocketAddr {
+        self.running.lock().expect("no request panics holding it").1
+    }
+
+    fn restart(&self, silent: SocketAddr) -> Option<SocketAddr> {
+        let mut running = self.running.lock().expect("no request panics holding it");
+        if running.1 == silent {
+            stop(&mut running.0);
+            *running = Driver::launch(&self.chromedriver, &self.arguments, self.patience).ok()?;
+        }
+        Some(running.1)
+    }
+}
+
+/// A driver that is never started again: the one address.
+impl Upstream for SocketAddr {
+    fn address(&self) -> SocketAddr {
+        *self
+    }
+
+    fn restart(&self, _: SocketAddr) -> Option<SocketAddr> {
+        None
+    }
 }
 
 impl BrowserReader {
@@ -163,7 +263,8 @@ impl BrowserReader {
     /// back to it until the runner's 60 seconds ran out. A port is the
     /// driver's once the driver started on it says so: one taken meanwhile by
     /// another server, or one the driver could not listen on, is given up for
-    /// another.
+    /// another. A driver that stops answering is started again in the same
+    /// way (see [`answer`]).
     fn start_within(
         chromedriver: &Path,
         arguments: &[String],
@@ -177,35 +278,14 @@ impl BrowserReader {
         listener
             .set_nonblocking(true)
             .expect("a listener can be made not to block");
-        let mut attempts = 0;
-        let (driver, upstream) = loop {
-            attempts += 1;
-            let port = crate::rust_worker::free_port()?;
-            let mut driver = Command::new(chromedriver)
-                .args(arguments)
-                .arg(format!("--port={port}"))
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .launch()
-                .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
-            let upstream = SocketAddr::from(([127, 0, 0, 1], port));
-            match answered(&mut driver, upstream, patience) {
-                Answer::Ready => break (driver, upstream),
-                Answer::Silent => {
-                    let _ = driver.kill();
-                    let _ = driver.wait();
-                    return Err(format!("{} never listened", chromedriver.display()));
-                }
-                Answer::Lost(why) => {
-                    let _ = driver.kill();
-                    let _ = driver.wait();
-                    if attempts == DRIVER_ATTEMPTS {
-                        return Err(format!("{} {why}", chromedriver.display()));
-                    }
-                }
-            }
-        };
+        let running = Driver::launch(chromedriver, arguments, patience)?;
+        let driver = Arc::new(Driver {
+            chromedriver: chromedriver.to_owned(),
+            arguments: arguments.to_vec(),
+            patience,
+            running: std::sync::Mutex::new(running),
+        });
+        let upstream = Arc::clone(&driver);
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let token = token.to_owned();
@@ -220,8 +300,9 @@ impl BrowserReader {
                             // non-blocking mode on macOS.
                             let _ = stream.set_nonblocking(false);
                             let token = token.clone();
+                            let upstream = Arc::clone(&upstream);
                             std::thread::spawn(move || {
-                                let _ = relay(stream, upstream, &token);
+                                let _ = relay(stream, &*upstream, &token);
                             });
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -254,8 +335,14 @@ impl BrowserReader {
 impl Drop for BrowserReader {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = self.driver.kill();
-        let _ = self.driver.wait();
+        stop(
+            &mut self
+                .driver
+                .running
+                .lock()
+                .expect("no request panics holding it")
+                .0,
+        );
     }
 }
 
@@ -377,9 +464,20 @@ fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 
 /// One request to chromedriver; its status and body, chunked or not.
 fn call(upstream: SocketAddr, method: &str, path: &str, body: &[u8]) -> Option<(u16, Vec<u8>)> {
+    call_within(upstream, method, path, body, Duration::from_secs(120))
+}
+
+/// [`call`], waiting at most `patience` for each read of the answer.
+fn call_within(
+    upstream: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    patience: Duration,
+) -> Option<(u16, Vec<u8>)> {
     let stream = TcpStream::connect(upstream).ok()?;
     // A connected socket takes a timeout: only an unconnected one refuses.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = stream.set_read_timeout(Some(patience));
     exchange(stream, upstream, method, path, body)
 }
 
@@ -442,7 +540,7 @@ fn read_response(reader: &mut impl BufRead) -> Option<(u16, Vec<u8>)> {
 
 static REGIONS: AtomicU64 = AtomicU64::new(0);
 
-fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
+fn relay(stream: TcpStream, upstream: &dyn Upstream, token: &str) -> Option<()> {
     let reader = BufReader::new(stream.try_clone().expect("a socket can be cloned"));
     answer(reader, stream, upstream, token)
 }
@@ -452,7 +550,7 @@ fn relay(stream: TcpStream, upstream: SocketAddr, token: &str) -> Option<()> {
 fn answer(
     mut reader: impl BufRead,
     mut writer: impl Write,
-    upstream: SocketAddr,
+    upstream: &dyn Upstream,
     token: &str,
 ) -> Option<()> {
     let request = read_request(&mut reader)?;
@@ -479,9 +577,32 @@ fn answer(
     if request.method == "DELETE"
         && let Some(id) = &session
     {
-        take_regions(upstream, id, &evidence, token);
+        take_regions(upstream.address(), id, &evidence, token);
     }
-    let (status, body) = call(upstream, &request.method, &webdriver, &request.body)?;
+    let (status, body) = if request.method == "POST" && webdriver == "/session" {
+        // A driver that answers no new session has stopped answering at
+        // all: one started again in its place is asked once more. Chrome's
+        // driver did that now and then under load, and the runner failed
+        // every test of the run on `POST /session timed out`.
+        let silent = upstream.address();
+        match call_within(
+            silent,
+            "POST",
+            "/session",
+            &request.body,
+            upstream.patience(),
+        ) {
+            Some(answer) => answer,
+            None => call(upstream.restart(silent)?, "POST", "/session", &request.body)?,
+        }
+    } else {
+        call(
+            upstream.address(),
+            &request.method,
+            &webdriver,
+            &request.body,
+        )?
+    };
     if request.method == "POST"
         && webdriver == "/session"
         && status == 200
@@ -497,7 +618,7 @@ fn answer(
             "params": {"source": REGISTRY},
         });
         let _ = call(
-            upstream,
+            upstream.address(),
             "POST",
             &format!("/session/{id}/goog/cdp/execute"),
             install.to_string().as_bytes(),
@@ -885,7 +1006,7 @@ mod tests {
             )
             .unwrap();
             let (stream, _) = proxy.accept().unwrap();
-            relay(stream, address, token).unwrap();
+            relay(stream, &address, token).unwrap();
             read_response(&mut BufReader::new(client)).unwrap()
         };
         assert_eq!(ask("POST", "/session", "{}").0, 200);
@@ -927,7 +1048,7 @@ mod tests {
             let mut client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
             write!(client, "GET {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
             let (stream, _) = proxy.accept().unwrap();
-            relay(stream, address, token)
+            relay(stream, &address, token)
         };
         assert!(raw("/status").is_none());
         assert!(raw("/e/ff/status").is_none());
@@ -938,7 +1059,7 @@ mod tests {
             let client = TcpStream::connect(proxy.local_addr().unwrap()).unwrap();
             client.shutdown(std::net::Shutdown::Both).unwrap();
             let (stream, _) = proxy.accept().unwrap();
-            assert!(relay(stream, address, token).is_none());
+            assert!(relay(stream, &address, token).is_none());
         }
         let gone = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -951,7 +1072,7 @@ mod tests {
         )
         .unwrap();
         let (stream, _) = proxy.accept().unwrap();
-        assert!(relay(stream, gone, token).is_none());
+        assert!(relay(stream, &gone, token).is_none());
         // A client that is gone by the time the answer is written is
         // written nothing more.
         struct Gone;
@@ -964,7 +1085,7 @@ mod tests {
             }
         }
         let request = format!("GET /e/{hex}/status HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
-        assert!(answer(request.as_bytes(), Gone, address, token).is_none());
+        assert!(answer(request.as_bytes(), Gone, &address, token).is_none());
         let written = std::fs::read_dir(&evidence)
             .unwrap()
             .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
@@ -1103,5 +1224,129 @@ mod tests {
         let (reader, starts) = started_with("close", Duration::from_millis(1500));
         assert!(reader.unwrap_err().ends_with("never listened"));
         assert_eq!(starts, "1");
+    }
+
+    /// A driver whose session never comes is started again, and asked
+    /// once more; one that cannot be started again leaves the runner
+    /// without an answer, as the silent one did.
+    #[test]
+    fn a_session_the_driver_never_answers_is_asked_of_another() {
+        use std::net::TcpListener;
+        // Takes each request and never answers it.
+        let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+        let silent_address = silent.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in silent.incoming() {
+                held.push(stream.unwrap());
+            }
+        });
+        // Answers a session, and whatever follows it.
+        let answering = TcpListener::bind("127.0.0.1:0").unwrap();
+        let answering_address = answering.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in answering.incoming() {
+                let mut stream = stream.unwrap();
+                let request =
+                    read_request(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method, request.path));
+                let body = json!({"value": {"sessionId": "s9"}}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        struct Replaced {
+            now: std::sync::Mutex<SocketAddr>,
+            next: Option<SocketAddr>,
+        }
+        impl Upstream for Replaced {
+            fn address(&self) -> SocketAddr {
+                *self.now.lock().unwrap()
+            }
+            fn patience(&self) -> Duration {
+                Duration::from_millis(300)
+            }
+            fn restart(&self, _: SocketAddr) -> Option<SocketAddr> {
+                let next = self.next?;
+                *self.now.lock().unwrap() = next;
+                Some(next)
+            }
+        }
+        let session = "POST /e/2f/session HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}";
+        let ask = |upstream: &Replaced| {
+            let mut written = Vec::new();
+            answer(session.as_bytes(), &mut written, upstream, "0123456789ab").map(|()| written)
+        };
+        let replaced = Replaced {
+            now: std::sync::Mutex::new(silent_address),
+            next: Some(answering_address),
+        };
+        let written = String::from_utf8(ask(&replaced).unwrap()).unwrap();
+        assert!(written.starts_with("HTTP/1.1 200 OK"), "{written}");
+        assert!(
+            written.ends_with(r#"{"value":{"sessionId":"s9"}}"#),
+            "{written}"
+        );
+        // The new driver is asked from then on: the session's page script
+        // is installed there.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["POST /session", "POST /session/s9/goog/cdp/execute"]
+        );
+        let stranded = Replaced {
+            now: std::sync::Mutex::new(silent_address),
+            next: None,
+        };
+        assert!(ask(&stranded).is_none());
+        // Nor does one started again that no longer listens by the time it
+        // is asked.
+        let gone = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let refused = Replaced {
+            now: std::sync::Mutex::new(silent_address),
+            next: Some(gone),
+        };
+        assert!(ask(&refused).is_none());
+        // A fixed address is never replaced.
+        assert_eq!(silent_address.restart(silent_address), None);
+        assert_eq!(silent_address.patience(), SESSION_PATIENCE);
+    }
+
+    /// A driver started again is a new process on a new port; one already
+    /// replaced by another request is not replaced twice, and one that
+    /// cannot be started again is given up.
+    #[test]
+    fn a_driver_is_started_again_once_per_silence() {
+        let (directory, arguments) = stand_in("ready,ready,exit");
+        let reader = BrowserReader::start_within(
+            Path::new("node"),
+            &arguments,
+            "0123456789ab",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        let first = reader.driver.address();
+        let second = reader.driver.restart(first).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(ready(second), Some(true));
+        // Silent at the first address, already replaced: the same driver.
+        assert_eq!(reader.driver.restart(first), Some(second));
+        let starts = || std::fs::read_to_string(directory.join("started")).unwrap();
+        assert_eq!(starts(), "2");
+        // Every start after this one ends before it listens.
+        assert_eq!(reader.driver.restart(second), None);
+        assert_eq!(starts(), "5");
+        drop(reader);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
