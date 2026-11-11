@@ -353,9 +353,11 @@ fn javascript_archive_entries(
         contents: serde_json::to_vec(&declaration).expect("plain data serializes"),
     });
     let mut parsed = crate::coverage_report::ParsedResults::default();
-    for (path, result) in paths.into_iter().zip(results) {
-        parsed.entry(path).or_default().push(result);
-    }
+    // A result at least: the command's, where no test wrote one.
+    paths
+        .into_iter()
+        .zip(results)
+        .for_each(|(path, result)| parsed.entry(path).or_default().push(result));
     Ok((entries, parsed))
 }
 
