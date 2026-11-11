@@ -477,19 +477,6 @@ fn write_authored(
     atomic_write(&path, source.as_bytes())
 }
 
-/// `file`'s authored copy, written the first time it is kept.
-fn keep_authored(
-    workspace: &Path,
-    authored: &mut BTreeSet<String>,
-    file: &str,
-    source: &str,
-) -> Result<(), JavascriptFrontendError> {
-    if authored.insert(file.to_owned()) {
-        write_authored(workspace, file, source)?;
-    }
-    Ok(())
-}
-
 fn prepend_bun_adapter(preload: Option<&mut toml_edit::Item>, adapter: &str) -> bool {
     let Some(preload) = preload else {
         return false;
@@ -546,7 +533,9 @@ fn configure_bun_preloads(
             .strip_prefix(workspace)
             .expect("configuration walked inside workspace");
         let file = relative.to_string_lossy().replace('\\', "/");
-        keep_authored(workspace, authored, &file, &source)?;
+        // Each config is walked once, before any source is kept.
+        write_authored(workspace, &file, &source)?;
+        authored.insert(file);
         atomic_write(&path, document.to_string().as_bytes())?;
     }
     Ok(())
@@ -1301,28 +1290,28 @@ fn next_bundled_sources(workspace: &Path, files: &[String]) -> BTreeSet<String> 
     let mut bundled = BTreeSet::new();
     for file in files {
         let path = Path::new(file);
-        let mut directory = path.parent();
-        while let Some(current) = directory {
-            let next = *manifests.entry(current.to_path_buf()).or_insert_with(|| {
-                std::fs::read_to_string(workspace.join(current).join("package.json"))
-                    .ok()
-                    .map(|text| {
-                        serde_json::from_str(&text).is_ok_and(|manifest| {
-                            crate::source_discovery::depends_on_next(&manifest)
+        // The nearest directory with a manifest, and whether it is a Next
+        // app's; none when no directory up to the project's has one.
+        let nearest = path.ancestors().skip(1).find_map(|current| {
+            manifests
+                .entry(current.to_path_buf())
+                .or_insert_with(|| {
+                    std::fs::read_to_string(workspace.join(current).join("package.json"))
+                        .ok()
+                        .map(|text| {
+                            serde_json::from_str(&text).is_ok_and(|manifest| {
+                                crate::source_discovery::depends_on_next(&manifest)
+                            })
                         })
-                    })
-            });
-            if let Some(next) = next {
-                if next
-                    && !path
-                        .strip_prefix(current)
-                        .is_ok_and(|below| below.starts_with("public"))
-                {
-                    bundled.insert(file.clone());
-                }
-                break;
-            }
-            directory = current.parent();
+                })
+                .map(|next| (current, next))
+        });
+        if let Some((app, true)) = nearest
+            && !path
+                .strip_prefix(app)
+                .is_ok_and(|below| below.starts_with("public"))
+        {
+            bundled.insert(file.clone());
         }
     }
     bundled
@@ -2088,16 +2077,18 @@ pub fn prepare_javascript_frontend(
         for value in output.coverage_limitations {
             limitations.insert(value.id.clone(), value);
         }
-        if let Some(table) = output.probe_table {
-            probe_tables.insert(
-                table.key,
-                crate::coverage_report::ProbeTableIds {
-                    points: table.points,
-                    decisions: table.decisions,
-                    follows: table.follows,
-                },
-            );
-        }
+        // Only analysis leaves a source without one.
+        let table = output
+            .probe_table
+            .expect("an instrumented source carries its probe table");
+        probe_tables.insert(
+            table.key,
+            crate::coverage_report::ProbeTableIds {
+                points: table.points,
+                decisions: table.decisions,
+                follows: table.follows,
+            },
+        );
     }
     account(&SETUP.sources_ns, sources_started);
     write_vitest_commands(&generated)?;
@@ -2265,8 +2256,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:472",
-            "javascript-source-path#javascript_frontend.rs:1886",
-            "javascript-source-path#javascript_frontend.rs:1816",
+            "javascript-source-path#javascript_frontend.rs:1875",
+            "javascript-source-path#javascript_frontend.rs:1805",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2377,7 +2368,7 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:529",
+            "fs.read_to_string#javascript_frontend.rs:516",
             "javascript-source-path#javascript_frontend.rs:472",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
@@ -3767,5 +3758,126 @@ mod tests {
                 "unsafe source path: ../a.js",
             ]
         );
+    }
+
+    /// A Next.js app under Playwright, a copy prepared the way a run
+    /// prepares it.
+    fn next_app() -> (PathBuf, PathBuf, CoverageProject) {
+        let source_root = temporary("next-source");
+        let workspace = temporary("next-workspace");
+        let files = [
+            (
+                "package.json",
+                "{\"type\":\"module\",\"dependencies\":{\"next\":\"15.0.0\"}}\n",
+            ),
+            ("playwright.config.ts", "export default {};\n"),
+            (
+                "app/page.js",
+                "import{one}from\"./one.mjs\"\nexport const page = () => one();\n",
+            ),
+            ("app/one.mjs", "export const one = () => 1;\n"),
+            ("app/legacy.cjs", "module.exports = (a) => (a ? 1 : 0);\n"),
+            ("app/plain.js", "globalThis.plain = (a) => (a ? 1 : 0);\n"),
+            ("app/empty.js", ""),
+            (
+                "app/checked.mjs",
+                "import assert from \"node:assert\";\nexport const checked = (a) => {\n  assert.ok(a);\n  return a;\n};\n",
+            ),
+            (
+                "public/sw.js",
+                "self.addEventListener(\"fetch\", () => {});\n",
+            ),
+            ("tools/package.json", "{}\n"),
+            (
+                "web/package.json",
+                "{\"dependencies\":{\"next\":\"15.0.0\"}}\n",
+            ),
+            ("web/public/worker.mjs", "export const work = () => 1;\n"),
+            ("web/lib/util.mjs", "export const util = () => 1;\n"),
+            ("tools/build.mjs", "export const build = () => 1;\n"),
+            (
+                "tests/app.spec.ts",
+                "import { test } from \"@playwright/test\";\ntest(\"loads\", async () => {});\n",
+            ),
+        ];
+        for root in [&source_root, &workspace] {
+            for (path, text) in files {
+                let path = root.join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, text).unwrap();
+            }
+        }
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        // Roots named whole, so a served `public/` is among the sources.
+        let environment = BTreeMap::from([(
+            crate::source_discovery::SOURCE_ROOTS_VARIABLE.to_owned(),
+            "app,web,tools".to_owned(),
+        )]);
+        let project = discover_coverage_project(
+            &source_root,
+            &environment,
+            &["npx".into(), "playwright".into(), "test".into()],
+        )
+        .unwrap();
+        (source_root, workspace, project)
+    }
+
+    /// The ES modules Next.js bundles import the one shared browser
+    /// runtime: by extension, or by an `import` or `export` line, however
+    /// it is spaced. A CommonJS script, a script of neither, an empty file,
+    /// a file Next serves as it is from `public/`, and one outside any Next
+    /// app carry their own. A source that also makes assertions is kept as
+    /// written once.
+    #[test]
+    fn the_modules_next_bundles_share_one_browser_runtime() {
+        let (source_root, workspace, project) = next_app();
+        assert!(
+            project
+                .source_files
+                .contains(&"web/public/worker.mjs".to_owned()),
+            "{:?}",
+            project.source_files
+        );
+        prepare_javascript_frontend(&workspace, &project, "collector", "cache").unwrap();
+        let shared = |file: &str| {
+            fs::read_to_string(workspace.join(file))
+                .unwrap()
+                .contains(SHARED_BROWSER_RUNTIME)
+        };
+        for file in [
+            "app/page.js",
+            "app/one.mjs",
+            "app/checked.mjs",
+            "web/lib/util.mjs",
+        ] {
+            assert!(shared(file), "{file}");
+        }
+        for file in [
+            "app/legacy.cjs",
+            "app/plain.js",
+            "app/empty.js",
+            "tools/build.mjs",
+            "web/public/worker.mjs",
+        ] {
+            assert!(!shared(file), "{file}");
+        }
+        assert!(rewritten_files(&workspace).contains(&"app/checked.mjs".to_owned()));
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+        // The shared runtime failing to be written stops the preparation,
+        // naming it, wherever among the files written it falls.
+        let failed = (1..120).find_map(|n| {
+            let (source_root, workspace, project) = next_app();
+            let prepared = crate::fault::during(&format!("fs.rename@{n}"), || {
+                prepare_javascript_frontend(&workspace, &project, "collector", "cache")
+            });
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(workspace);
+            prepared
+                .err()
+                .map(|error| error.to_string())
+                .filter(|error| error.contains(SHARED_BROWSER_RUNTIME))
+        });
+        assert!(failed.is_some());
     }
 }

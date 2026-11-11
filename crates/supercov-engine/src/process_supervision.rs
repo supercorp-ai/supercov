@@ -2435,6 +2435,8 @@ mod tests {
         assert!(is("sub/run.sh"));
         assert!(is("./sub/run.sh"));
         assert!(!is("bin/data"));
+        // A directory, however its mode reads, is no program.
+        assert!(!is("./sub"));
         assert!(is(&root.join("bin/tool").to_string_lossy()));
         // A bare name is never looked for in the working directory, unless
         // PATH has an empty entry, which stands for it.

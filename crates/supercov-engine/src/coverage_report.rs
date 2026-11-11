@@ -3651,7 +3651,7 @@ fn archive_request_from<D>(
     // A file's records are together and share its scope: the result they
     // join is looked up when the scope changes.
     let mut last: Option<(ExecutionScope, usize)> = None;
-    let mut seen = FastMap::<usize, FastMap<u64, usize>>::default();
+    let mut seen = FastMap::<usize, FastMap<u64, Vec<usize>>>::default();
     for record in scoped_records {
         let Some(scope) = &record.scope else { continue };
         let index = match &last {
@@ -3666,24 +3666,22 @@ fn archive_request_from<D>(
         };
         let server = &mut raw_results[index].server;
         let known = seen.entry(index).or_insert_with(|| {
-            let mut known = FastMap::<u64, usize>::default();
+            let mut known = FastMap::<u64, Vec<usize>>::default();
             for (position, existing) in server.iter().enumerate() {
-                known.entry(record_hash(existing)).or_insert(position);
+                known
+                    .entry(record_hash(existing))
+                    .or_default()
+                    .push(position);
             }
             known
         });
-        let hash = record_hash(&record);
-        match known.get(&hash) {
-            // The same hash is almost always the same record; when it is
-            // not, every record the result holds is compared.
-            Some(&position) if server[position] == record || server.contains(&record) => {
-                continue;
-            }
-            Some(_) => {}
-            None => {
-                known.insert(hash, server.len());
-            }
+        // The records of one hash are compared in full: the same hash is
+        // almost always the same record, and never taken for it.
+        let positions = known.entry(record_hash(&record)).or_default();
+        if positions.iter().any(|position| server[*position] == record) {
+            continue;
         }
+        positions.push(server.len());
         server.push(record);
     }
 
@@ -3845,11 +3843,12 @@ fn resolve_probe_places(
             .filter(|(_, table)| !table.follows.is_empty())
             .map(|(key, table)| {
                 let mut followers = rustc_hash::FxHashMap::<usize, Vec<&str>>::default();
-                for [place, leader] in &table.follows {
+                // Kept for its follows, so it has one at least.
+                table.follows.iter().for_each(|[place, leader]| {
                     if let Some(id) = table.points.get(*place) {
                         followers.entry(*leader).or_default().push(id);
                     }
-                }
+                });
                 (key.as_str(), followers)
             })
             .collect(),
@@ -3860,8 +3859,9 @@ fn resolve_probe_places(
         .map_or(1, std::num::NonZeroUsize::get)
         .min(raw_results.len().max(1));
     let chunks = std::sync::Mutex::new(raw_results.chunks_mut(64));
+    // One worker at least, as `threads` is.
     std::thread::scope(|scope| {
-        for _ in 0..threads {
+        (0..threads).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let Some(chunk) = chunks.lock().expect("no worker panics holding it").next()
@@ -3871,7 +3871,7 @@ fn resolve_probe_places(
                     chunk.iter_mut().for_each(|raw| places.resolve(raw));
                 }
             });
-        }
+        });
     });
 }
 
@@ -4004,13 +4004,14 @@ impl<'a> ProbePlaces<'a> {
             return;
         }
         let mut merged: Vec<LogicalSnapshot> = Vec::with_capacity(logicals.len());
-        for mut logical in logicals.drain(..) {
+        // One of them resolves, so there is one at least.
+        logicals.drain(..).for_each(|mut logical| {
             if let Some(resolved) = self.id(&logical.id, 'p') {
                 let Some((branch, _)) = resolved
                     .rsplit_once(':')
                     .filter(|(branch, _)| !branch.is_empty())
                 else {
-                    continue;
+                    return;
                 };
                 logical.id = branch.to_owned();
             }
@@ -4024,7 +4025,7 @@ impl<'a> ProbePlaces<'a> {
                 }
                 None => merged.push(logical),
             }
-        }
+        });
         *logicals = merged;
     }
 }
@@ -4190,6 +4191,40 @@ mod tests {
         assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
         let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
         assert!(serde_json::from_str::<RuntimeSnapshot>(stray).is_err());
+        // Columns of no event are no events.
+        let none: RuntimeSnapshot = serde_json::from_str(r#"{"eventColumns":{"types":[],"phases":[],"environments":[],"id":[],"type":[],"phase":[],"environment":[],"t":[]}}"#).unwrap();
+        assert!(none.events.is_empty());
+        // Each column indexes its table, and a timestamp is the sum of the
+        // differences before it: an index past a table, a phase below -1,
+        // or a sum past i64 is refused, by what it is.
+        let one = |t: &str, kind: &str, phase: &str, environment: &str| {
+            format!(
+                r#"{{"eventColumns":{{"types":["hit"],"phases":["p"],"environments":["browser"],"id":["a"],"type":[{kind}],"phase":[{phase}],"environment":[{environment}],"t":[{t}]}}}}"#
+            )
+        };
+        for (text, reason) in [
+            (
+                r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0,0],"phase":[-1,-1],"environment":[0,0],"t":[9223372036854775807,1]}}"#.to_owned(),
+                "an event timestamp overflows",
+            ),
+            (one("1", "1", "-1", "0"), "an event type outside its table"),
+            (one("1", "0", "1", "0"), "an event phase outside its table"),
+            (one("1", "0", "-2", "0"), "an event phase outside its table"),
+            (one("1", "0", "0", "1"), "an event environment outside its table"),
+        ] {
+            let error = serde_json::from_str::<RuntimeSnapshot>(&text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+        }
+        assert_eq!(
+            serde_json::from_str::<RuntimeSnapshot>(&one("1", "0", "0", "0"))
+                .unwrap()
+                .events[0]
+                .phase_id
+                .as_deref(),
+            Some("p")
+        );
     }
     /// No result passes or fails.
     #[test]
@@ -4552,6 +4587,85 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["s1", "d1", "~pk.0"]
         );
+    }
+
+    /// A name that does not read as a table's place, or names no table or a
+    /// place beyond it, stays as written wherever it is: a decision, an event
+    /// of any type, a server record with or without an id, and a module's
+    /// selection outcomes, which merge into their branch's entry.
+    #[test]
+    fn names_no_table_holds_stay_as_written() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec!["f".into(), "or:short".into(), "or:right".into()],
+                decisions: vec!["d1".into()],
+                // A place past the table follows nothing.
+                follows: vec![[9, 0]],
+            },
+        )]);
+        let mut result = raw("a", 0, "passed", &["~pk.x", "~pk.0"]);
+        let names = ["plain", "~pk.0", "~dk", "~dk.x", "~dz.0", "~dk.5", "~dk.0"];
+        let snapshot = &mut result.runtime[0];
+        snapshot.decisions = names
+            .iter()
+            .map(|id| DecisionSnapshot {
+                id: (*id).into(),
+                vectors: Vec::new(),
+            })
+            .collect();
+        snapshot.events = vec![RuntimeEvent {
+            event_type: "assertion".into(),
+            id: "~pk.0".into(),
+            vector: None,
+            timestamp_ms: 1,
+            phase_id: None,
+            environment: "browser".into(),
+        }];
+        let outcome = LogicalVector {
+            right: false,
+            truthy: true,
+        };
+        snapshot.logicals = vec![
+            LogicalSnapshot {
+                id: "~pk.1".into(),
+                vectors: vec![outcome.clone()],
+            },
+            LogicalSnapshot {
+                id: "~pk.2".into(),
+                vectors: Vec::new(),
+            },
+        ];
+        result.server = vec![ServerRecord {
+            record_type: "hit".into(),
+            vector: None,
+            id: None,
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+        }];
+        let mut results = vec![result];
+        resolve_probe_places(&mut results, &tables);
+        let snapshot = &results[0].runtime[0];
+        assert_eq!(snapshot.hits, ["~pk.x", "f"]);
+        assert_eq!(
+            snapshot
+                .decisions
+                .iter()
+                .map(|decision| decision.id.as_str())
+                .collect::<Vec<_>>(),
+            ["plain", "~pk.0", "~dk", "~dk.x", "~dz.0", "~dk.5", "d1"]
+        );
+        assert_eq!(snapshot.events[0].id, "~pk.0");
+        assert_eq!(
+            snapshot.logicals,
+            [LogicalSnapshot {
+                id: "or".into(),
+                vectors: vec![outcome],
+            }]
+        );
+        assert_eq!(results[0].server[0].id, None);
     }
 
     /// A probe dropped for the one before it is hit wherever that one is:
@@ -5960,6 +6074,8 @@ mod tests {
                     "{\"type\":\"hit\",\"id\":\"orphan\",\"scope\":{\"version\":1,",
                     "\"runId\":\"run\",\"workerId\":\"w\",\"testId\":\"gone\",",
                     "\"testKey\":\"gone\",\"retry\":0,\"attemptId\":\"a\"}}\n",
+                    // A request's torn record is counted, its file once.
+                    "{\"type\":\"hit\",\"id\":\"tor\n",
                 )
                 .as_bytes()
                 .to_vec(),
@@ -5989,8 +6105,8 @@ mod tests {
         })
         .expect("a torn evidence line must not fail the whole run");
         let transport = report.view.transport.expect("transport stats");
-        assert_eq!(transport.corrupt_records, 2);
-        assert_eq!(transport.corrupt_files, 2);
+        assert_eq!(transport.corrupt_records, 3);
+        assert_eq!(transport.corrupt_files, 3);
         assert_eq!(transport.background_server_records, 2);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -6017,7 +6133,7 @@ mod tests {
             retry: 0,
             attempt_id: "attempt".into(),
         });
-        let path = archive(vec![
+        let entries = vec![
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: serde_json::to_vec(&manifest).unwrap(),
@@ -6026,16 +6142,26 @@ mod tests {
                 path: "worker/mcdc.json".into(),
                 contents: serde_json::to_vec(&result).unwrap(),
             },
-        ]);
+        ];
+        let path = archive(entries);
+        let request = ArchiveReportRequest {
+            archive_path: path.clone(),
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
+        };
         assert!(matches!(
-            analyze_coverage_archive(&ArchiveReportRequest {
-                archive_path: path.clone(),
-                run_id: "run".into(),
-                generated_at: "time".into(),
-                integrity: None,
-                test_exit_code: ExitCodeInput::Missing,
-                test_filter: None,
-            }),
+            analyze_coverage_archive(&request),
+            Err(ReportError::InvalidArchive(reason))
+                if reason.contains("expected=run actual=other-run")
+        ));
+        // Analysed in memory, as a run analyses its evidence while it is
+        // written, the same evidence is refused the same way.
+        let entries = crate::evidence_archive::read_archive(&path).unwrap();
+        assert!(matches!(
+            analyze_coverage_entries(&request, &entries, None),
             Err(ReportError::InvalidArchive(reason))
                 if reason.contains("expected=run actual=other-run")
         ));
