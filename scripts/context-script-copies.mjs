@@ -19,14 +19,6 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `context-script-copies-${process.pid}-${Date.now()}`);
-const freePort = () => new Promise((done, fail) => {
-  const server = createServer();
-  server.once('error', fail);
-  server.listen(0, '127.0.0.1', () => {
-    const { port } = server.address();
-    server.close(() => done(port));
-  });
-});
 const port = await freePort();
 const tests = 10;
 
@@ -44,6 +36,7 @@ const files = {
   // script registered after it.
   'tests/fixtures.js': `import { test as base } from '@playwright/test';
 import { appendFileSync } from 'node:fs';
+import { freePort } from './free-ports.mjs';
 
 export const test = base.extend({
   shared: [async ({ browser }, use) => {

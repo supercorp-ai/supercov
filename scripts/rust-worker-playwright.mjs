@@ -12,8 +12,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
@@ -22,14 +22,6 @@ const WRANGLER = '4.151.1';
 // As a project has it: the suite's preload reaches `wrangler dev` too.
 const PLAYWRIGHT = JSON.parse(readFileSync(resolve(repository, 'package.json'), 'utf8')).devDependencies['@playwright/test'];
 
-const freePort = () => new Promise((done, fail) => {
-  const server = createServer();
-  server.once('error', fail);
-  server.listen(0, '127.0.0.1', () => {
-    const { port } = server.address();
-    server.close(() => done(port));
-  });
-});
 
 const run = (cwd, command, args, env = {}) => spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, NO_COLOR: '1', CI: '1', ...env } });
 const targets = run(repository, 'rustup', ['target', 'list', '--installed']).stdout ?? '';
@@ -177,11 +169,11 @@ try {
   // A Worker whose windows cannot be listed read none, and with no
   // JavaScript source nothing is published; a window file that cannot be
   // read keeps the run's evidence and says so.
-  const unlisted = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#rust_worker.rs:832' });
+  const unlisted = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#rust_worker.rs:851' });
   assert.notEqual(unlisted.status, 0, unlisted.stderr);
-  assert.ok(unlisted.stderr.includes('test fault at fs (rust_worker.rs:832'), unlisted.stderr);
+  assert.ok(unlisted.stderr.includes('test fault at fs (rust_worker.rs:851'), unlisted.stderr);
   assert.match(unlisted.stderr, /there was nothing to measure, and no run was published/u, unlisted.stderr);
-  const unread = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust_worker.rs:848' });
+  const unread = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust_worker.rs:867' });
   assert.notEqual(unread.status, 0, unread.stderr);
   assert.match(unread.stderr, /Rust Worker server's run could not be published/u, unread.stderr);
   assert.match(unread.stderr, /their evidence is kept at/u, unread.stderr);

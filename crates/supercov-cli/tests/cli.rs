@@ -15755,7 +15755,7 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         // The Worker workspace's inputs walked, and a port found for its
         // inspector.
         ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
-        ("local-listener", "injected fault at local-listener"),
+        ("free-port", "injected fault at free-port"),
     ] {
         let project = Project::cart("worker-server-steps");
         project.write("playwright.config.js", "export default {};\n");

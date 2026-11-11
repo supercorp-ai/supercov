@@ -977,7 +977,7 @@ mod tests {
     /// on, starts nothing.
     #[test]
     fn a_reader_without_its_ports_starts_nothing() {
-        for fault in ["local-listener", "local-listener@2"] {
+        for fault in ["local-listener", "free-port"] {
             let started = crate::fault::during(fault, || {
                 BrowserReader::start_within(
                     Path::new("/nonexistent/chromedriver"),

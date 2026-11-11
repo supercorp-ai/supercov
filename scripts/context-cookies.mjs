@@ -16,20 +16,13 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `context-cookies-${process.pid}-${Date.now()}`);
-const freePort = () => new Promise((done, fail) => {
-  const server = createServer();
-  server.once('error', fail);
-  server.listen(0, '127.0.0.1', () => {
-    const { port } = server.address();
-    server.close(() => done(port));
-  });
-});
 const port = await freePort();
 
 const files = {
   'package.json': '{ "name": "context-cookies", "private": true, "type": "module" }\n',
   'server.mjs': `import { appendFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { freePort } from './free-ports.mjs';
 
 export function answer(path) {
   if (path === '/api/after-clear') {
