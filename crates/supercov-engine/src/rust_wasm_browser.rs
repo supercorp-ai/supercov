@@ -154,15 +154,22 @@ impl BrowserReader {
         Self::start_within(chromedriver, arguments, token, Duration::from_secs(20))
     }
 
-    /// `start`, giving the driver `patience` to listen. A driver that never
+    /// `start`, giving the driver `patience` to answer. A driver that never
     /// does is stopped: left running, it outlived the run.
+    ///
+    /// The proxy's own port is taken first, so the driver's can never be it:
+    /// picked the other way round, the proxy could be given the port the
+    /// driver was about to listen on, and every request it passed on came
+    /// back to it until the runner's 60 seconds ran out. A port is the
+    /// driver's once the driver started on it says so: one taken meanwhile by
+    /// another server, or one the driver could not listen on, is given up for
+    /// another.
     fn start_within(
         chromedriver: &Path,
         arguments: &[String],
         token: &str,
         patience: Duration,
     ) -> Result<Self, String> {
-        let port = crate::rust_worker::free_port()?;
         let listener = crate::rust_worker::local_listener()?;
         let address = listener
             .local_addr()
@@ -170,34 +177,35 @@ impl BrowserReader {
         listener
             .set_nonblocking(true)
             .expect("a listener can be made not to block");
-        let mut driver = Command::new(chromedriver)
-            .args(arguments)
-            .arg(format!("--port={port}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .launch()
-            .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
-        let mut stop_driver = |error: String| {
-            let _ = driver.kill();
-            let _ = driver.wait();
-            error
+        let mut attempts = 0;
+        let (driver, upstream) = loop {
+            attempts += 1;
+            let port = crate::rust_worker::free_port()?;
+            let mut driver = Command::new(chromedriver)
+                .args(arguments)
+                .arg(format!("--port={port}"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .launch()
+                .map_err(|error| format!("could not start {}: {error}", chromedriver.display()))?;
+            let upstream = SocketAddr::from(([127, 0, 0, 1], port));
+            match answered(&mut driver, upstream, patience) {
+                Answer::Ready => break (driver, upstream),
+                Answer::Silent => {
+                    let _ = driver.kill();
+                    let _ = driver.wait();
+                    return Err(format!("{} never listened", chromedriver.display()));
+                }
+                Answer::Lost(why) => {
+                    let _ = driver.kill();
+                    let _ = driver.wait();
+                    if attempts == DRIVER_ATTEMPTS {
+                        return Err(format!("{} {why}", chromedriver.display()));
+                    }
+                }
+            }
         };
-        let upstream = SocketAddr::from(([127, 0, 0, 1], port));
-        let started = Instant::now();
-        // A driver just started listens only after a moment.
-        loop {
-            std::thread::sleep(Duration::from_millis(50));
-            if TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).is_ok() {
-                break;
-            }
-            if started.elapsed() > patience {
-                return Err(stop_driver(format!(
-                    "{} never listened",
-                    chromedriver.display()
-                )));
-            }
-        }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let token = token.to_owned();
@@ -249,6 +257,50 @@ impl Drop for BrowserReader {
         let _ = self.driver.kill();
         let _ = self.driver.wait();
     }
+}
+
+/// Drivers started, each on a port of its own, before Supercov gives up.
+const DRIVER_ATTEMPTS: usize = 3;
+
+/// What a driver just started said on its port.
+enum Answer {
+    /// It answers as a WebDriver ready for sessions.
+    Ready,
+    /// Nothing answered in the time it was given.
+    Silent,
+    /// It ended, or another server answers on its port.
+    Lost(&'static str),
+}
+
+/// Waits up to `patience` for `driver` to answer on `upstream`.
+fn answered(driver: &mut Child, upstream: SocketAddr, patience: Duration) -> Answer {
+    let started = Instant::now();
+    loop {
+        // A driver just started listens only after a moment.
+        std::thread::sleep(Duration::from_millis(50));
+        if !matches!(driver.try_wait(), Ok(None)) {
+            return Answer::Lost("ended before it listened");
+        }
+        match ready(upstream) {
+            Some(true) => return Answer::Ready,
+            Some(false) => return Answer::Lost("found its port answered by another server"),
+            None if started.elapsed() > patience => return Answer::Silent,
+            None => {}
+        }
+    }
+}
+
+/// Whether the server on `upstream` is a WebDriver ready for sessions, by
+/// its `/status`; none when nothing answers there.
+fn ready(upstream: SocketAddr) -> Option<bool> {
+    let stream = TcpStream::connect_timeout(&upstream, Duration::from_millis(100)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let (status, body) = exchange(stream, upstream, "GET", "/status", b"")?;
+    Some(
+        status == 200
+            && serde_json::from_slice::<Value>(&body)
+                .is_ok_and(|answer| answer["value"]["ready"] == Value::Bool(true)),
+    )
 }
 
 struct Request {
@@ -969,5 +1021,87 @@ mod tests {
             "the driver is still running"
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A driver that answers as each start of it is told to: `exit`
+    /// before listening, `close` each connection unanswered, `missing`
+    /// answering 404, `busy` a WebDriver not ready, `ready` one that is.
+    /// Starts after the last take the last.
+    fn stand_in(modes: &str) -> (PathBuf, Vec<String>) {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-stand-in-driver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("driver.js");
+        std::fs::write(
+            &script,
+            "const fs = require('fs'), http = require('http');\n\
+             const [, , counter, modes] = process.argv;\n\
+             const port = Number(process.argv.find((word) => word.startsWith('--port=')).slice(7));\n\
+             let started = 0;\n\
+             try { started = Number(fs.readFileSync(counter, 'utf8')); } catch {}\n\
+             fs.writeFileSync(counter, String(started + 1));\n\
+             const list = modes.split(',');\n\
+             const mode = list[Math.min(started, list.length - 1)];\n\
+             if (mode === 'exit') process.exit(1);\n\
+             http.createServer((request, response) => {\n\
+               if (mode === 'close') return request.socket.destroy();\n\
+               if (mode === 'missing') { response.writeHead(404); return response.end('{}'); }\n\
+               response.writeHead(200, { 'content-type': 'application/json' });\n\
+               response.end(JSON.stringify({ value: { ready: mode === 'ready' } }));\n\
+             }).listen(port, '127.0.0.1');\n",
+        )
+        .unwrap();
+        (
+            directory.clone(),
+            vec![
+                script.to_string_lossy().into_owned(),
+                directory.join("started").to_string_lossy().into_owned(),
+                modes.to_owned(),
+            ],
+        )
+    }
+
+    fn started_with(modes: &str, patience: Duration) -> (Result<BrowserReader, String>, String) {
+        let (directory, arguments) = stand_in(modes);
+        let started =
+            BrowserReader::start_within(Path::new("node"), &arguments, "0123456789ab", patience);
+        let starts = std::fs::read_to_string(directory.join("started")).unwrap_or_default();
+        std::fs::remove_dir_all(directory).unwrap();
+        (started, starts)
+    }
+
+    /// A driver is used once it answers as one ready for sessions. One that
+    /// ended, or whose port another server answers, is started again on
+    /// another port, and given up on after its third start.
+    #[test]
+    fn a_driver_is_used_once_it_answers_ready_and_started_again_when_lost() {
+        let patience = Duration::from_secs(20);
+        let (reader, starts) = started_with("exit,busy,ready", patience);
+        drop(reader.unwrap());
+        assert_eq!(starts, "3");
+        for (modes, said) in [
+            ("exit", "ended before it listened"),
+            ("missing", "found its port answered by another server"),
+        ] {
+            let (reader, starts) = started_with(modes, patience);
+            let error = reader.unwrap_err();
+            assert!(error.ends_with(said), "{modes}: {error}");
+            assert_eq!(starts, "3", "{modes}");
+        }
+    }
+
+    /// A driver that takes each connection and answers none has not
+    /// listened: it is stopped once its time is up.
+    #[test]
+    fn a_driver_that_answers_nothing_has_not_listened() {
+        let (reader, starts) = started_with("close", Duration::from_millis(1500));
+        assert!(reader.unwrap_err().ends_with("never listened"));
+        assert_eq!(starts, "1");
     }
 }
