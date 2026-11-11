@@ -431,10 +431,25 @@ one pass instead of a page at a time.
 ```sh supercov-example
 npx supercov runs report --format lcov --output coverage/lcov.info
 npx supercov runs report --format cobertura --output coverage/cobertura.xml
+npx supercov runs report --format istanbul --output coverage/coverage-final.json
+npx supercov runs report --format istanbul-summary --output coverage/coverage-summary.json
+npx supercov runs report --format clover --output coverage/clover.xml
+npx supercov runs report --format jacoco --output coverage/jacoco.xml
+npx supercov runs report --format sonar --output coverage/sonar.xml
 npx supercov runs report --format html --output coverage/report
 ```
 
-Both are written from the same view `check` and `patch` read, so a viewer,
+| Format | Written as | Read by, for example |
+| --- | --- | --- |
+| `lcov` | an LCOV tracefile | Codecov, Coveralls, Qlty, `genhtml`, editors |
+| `cobertura` | Cobertura XML | GitLab merge requests, Azure DevOps, ReportGenerator |
+| `istanbul` | Istanbul's `coverage-final.json` | tools that read JavaScript coverage by range, such as CRAP gates, and Istanbul's own reporters |
+| `istanbul-summary` | Istanbul's `coverage-summary.json` | pull-request comment Actions for Vitest and Jest, badge generators |
+| `clover` | Clover XML | Qlty, Codecov, Atlassian tools |
+| `jacoco` | JaCoCo XML | GitLab merge requests, SonarQube's Java analysis, Qlty |
+| `sonar` | SonarQube's generic coverage XML | SonarQube and SonarCloud, for any language (`sonar.coverageReportPaths`) |
+
+All are written from the same view `check` and `patch` read, so a viewer,
 hosted service or CI integration sees the totals Supercov enforced. `--kind`,
 `--runner`, `--tag`, `--title` and `--test-file` write the coverage of only
 those tests, from the same run:
@@ -448,9 +463,23 @@ written atomically; an existing file is kept unless you pass `--force`. Without
 `--output` the report goes to stdout and diagnostics to stderr, so a redirect
 captures only the report.
 
-Supercov records that a line ran, not how many times, so `DA:` and `hits` state
-`1` or `0`. They are not execution frequencies, and Supercov will not invent
-one to fill a field.
+Supercov records that a line ran, not how many times, so `DA:`, `hits`,
+Istanbul's counts and Clover's `count` state `1` or `0`. They are not execution
+frequencies, and Supercov will not invent one to fill a field. JaCoCo counts
+bytecode instructions, which Supercov does not measure, so the `jacoco` export
+states each measured line as one instruction, missed or covered. Cobertura,
+Clover, JaCoCo and SonarQube state branches by line; a branch on a line that is
+not itself measured, such as a later line of a statement written across
+several, is stated on the measured line its statement starts on, so their
+branch totals are Supercov's.
+
+The `istanbul` export places every statement, function and branch by its range
+in the source, found in this checkout; its keys are absolute paths, as Istanbul
+writes them. A file changed since the run no longer holds what the run recorded
+there, and the export stops and names it rather than guess where it moved: run
+the tests again. Istanbul records no place for each alternative of a branch, so
+each is placed at its branch. The summary states Supercov's own counts, its
+lines included.
 
 MC/DC conditions are not exported as ordinary branches. A consumer would then
 show condition obligations as branch coverage, which is a different
@@ -459,8 +488,8 @@ each condition with `MCF:` and `MCH:` for a file, so `lcov --mcdc-coverage` and
 `genhtml --mcdc-coverage` show a per-file MC/DC figure from the export alone.
 LCOV counts a condition twice, once for each way it can turn the outcome, and
 Supercov's covered condition is both: hit over found is the run's MC/DC. A
-reader of the older format passes the records over. Cobertura has no such
-record; there the evidence stays in the JSON view and the HTML report. A report
+reader of the older format passes the records over. The other formats have no
+such record; there the evidence stays in the JSON view and the HTML report. A report
 from a failed or stale run is still written, with a warning on stderr — only
 `check` refuses to pass on one.
 

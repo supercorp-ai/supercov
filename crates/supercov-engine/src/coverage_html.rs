@@ -372,6 +372,8 @@ mod tests {
                 functions: Vec::new(),
                 branches: Vec::new(),
                 conditions: Vec::new(),
+                points: Vec::new(),
+                branch_sites: Vec::new(),
             }],
             source_neighbourhoods: BTreeSet::new(),
         }
