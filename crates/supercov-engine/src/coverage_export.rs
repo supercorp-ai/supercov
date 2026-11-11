@@ -673,7 +673,8 @@ pub fn jacoco(view: &RunView, timestamp: u64) -> String {
     }
     for (package, files) in packages {
         let _ = writeln!(out, "  <package name=\"{}\">", xml(package));
-        for file in &files {
+        // A package holds the files that made it, so it is never empty.
+        files.iter().for_each(|file| {
             let name = file.file.rsplit('/').next().unwrap_or(&file.file);
             let class = file
                 .file
@@ -707,8 +708,8 @@ pub fn jacoco(view: &RunView, timestamp: u64) -> String {
                 file.metric(Metric::Functions).counts(),
             );
             out.push_str("    </class>\n");
-        }
-        for file in &files {
+        });
+        files.iter().for_each(|file| {
             let name = file.file.rsplit('/').next().unwrap_or(&file.file);
             let _ = writeln!(out, "    <sourcefile name=\"{}\">", xml(name));
             let branches = branches_by_line(file);
@@ -723,7 +724,7 @@ pub fn jacoco(view: &RunView, timestamp: u64) -> String {
             }
             jacoco_counters(&mut out, "      ", |metric| file.metric(metric).counts());
             out.push_str("    </sourcefile>\n");
-        }
+        });
         let sum = |metric: Metric| {
             files.iter().fold((0, 0), |(covered, total), file| {
                 let (each_covered, each_total) = file.metric(metric).counts();
@@ -793,6 +794,30 @@ mod tests {
         view.files.clear();
         assert_eq!(lcov(&view), "");
         assert!(cobertura(&view, 0).contains("<packages>"));
+        let root = Path::new("/w");
+        assert_eq!(istanbul(&view, root, &BTreeMap::new()).unwrap(), "{}\n");
+        let summary: Value = serde_json::from_str(&istanbul_summary(&view, root)).unwrap();
+        assert_eq!(summary.as_object().unwrap().len(), 1, "only the total");
+        assert!(clover(&view, 0).contains("files=\"0\""));
+        let written = jacoco(&view, 0);
+        assert!(!written.contains("<package"), "{written}");
+        assert!(
+            written.ends_with("<counter type=\"METHOD\" missed=\"0\" covered=\"1\"/>\n</report>\n")
+        );
+        assert_eq!(sonar(&view), "<coverage version=\"1\">\n</coverage>\n");
+    }
+
+    /// A branch whose place no longer holds is refused like a statement's,
+    /// even when every statement still holds.
+    #[test]
+    fn a_branch_the_file_no_longer_holds_is_not_placed() {
+        let mut view = fixture();
+        view.files[0].branch_sites[0].line = 9;
+        let error = istanbul(&view, Path::new("/w"), &sources()).unwrap_err();
+        assert!(
+            error.starts_with("src/a & b.ts:9 no longer holds"),
+            "{error}"
+        );
     }
 
     fn metric(metric: Metric, covered: usize, eligible: usize) -> MetricView {
@@ -999,6 +1024,86 @@ mod tests {
                 .unwrap_err()
                 .starts_with("f.js:2 no longer holds")
         );
+    }
+
+    /// A recorded place the text cannot hold, in each convention, is no
+    /// offset: line 0, a column before the first, one past the line's end, or
+    /// one inside a character. A column just past the last character is the
+    /// line's end, where a frontend records the end of what it measured.
+    #[test]
+    fn a_place_the_line_cannot_hold_has_no_offset() {
+        let text = "\u{e9}\u{1f600}x\nlast";
+        let utf16 = Placed::new(text, Columns::Utf16FromOne);
+        assert_eq!(utf16.offset(0, 1), None);
+        // é is one unit and 😀 two, so unit 2 is inside the emoji.
+        assert_eq!(utf16.offset(1, 3), None);
+        assert_eq!(utf16.offset(1, 4), Some(6));
+        // The line's five units end at its line feed; past that is nothing.
+        assert_eq!(utf16.offset(2, 5), Some(text.len()));
+        assert_eq!(utf16.offset(2, 6), None);
+        let zero = Placed::new(text, Columns::BytesFromZero);
+        assert_eq!(zero.offset(1, 1), None, "inside é");
+        assert_eq!(zero.offset(1, 99), None, "past the line");
+        assert_eq!(zero.offset(1, 6), Some(6));
+        let one = Placed::new(text, Columns::BytesFromOne);
+        assert_eq!(one.offset(1, 0), None);
+        assert_eq!(one.offset(1, 7), Some(6));
+    }
+
+    /// A branch recorded with no source at all is placed at its start, as
+    /// one recorded by a name is.
+    #[test]
+    fn a_branch_with_no_source_has_no_extent() {
+        let placed = Placed::new("a ?? b\n", Columns::Utf16FromOne);
+        let at = json!({ "line": 1, "column": 0 });
+        assert_eq!(
+            placed.branch("f.js", 1, 1, "").unwrap(),
+            json!({ "start": at, "end": at })
+        );
+    }
+
+    /// The kinds Istanbul names differently carry Istanbul's name, which its
+    /// readers key on; the rest keep Supercov's.
+    #[test]
+    fn a_branch_kind_istanbul_names_differently_carries_its_name() {
+        assert_eq!(istanbul_branch_type("logical-value"), "binary-expr");
+        assert_eq!(istanbul_branch_type("default-value"), "default-arg");
+        assert_eq!(istanbul_branch_type("if"), "if");
+        let mut view = fixture();
+        view.files[0].branch_sites[0].kind = "logical-value".into();
+        let parsed: Value =
+            serde_json::from_str(&istanbul(&view, Path::new("/w"), &sources()).unwrap()).unwrap();
+        let file = &parsed[absolute(Path::new("/w"), "src/a & b.ts")];
+        assert_eq!(file["branchMap"]["0"]["type"], json!("binary-expr"));
+    }
+
+    /// A function with no name is named by its place in the map, as Istanbul
+    /// names one, so readers that match functions by name still find it.
+    #[test]
+    fn an_unnamed_function_is_named_as_istanbul_names_one() {
+        let mut view = fixture();
+        view.files[0].points[0].name = None;
+        let parsed: Value =
+            serde_json::from_str(&istanbul(&view, Path::new("/w"), &sources()).unwrap()).unwrap();
+        let file = &parsed[absolute(Path::new("/w"), "src/a & b.ts")];
+        assert_eq!(file["fnMap"]["0"]["name"], json!("(anonymous_0)"));
+    }
+
+    /// A file at the checkout's root is in JaCoCo's default package, and one
+    /// with no extension is its own class name.
+    #[test]
+    fn jacoco_places_a_root_file_in_the_default_package() {
+        let mut view = fixture();
+        view.files[0].file = "Makefile".into();
+        let written = jacoco(&view, 0);
+        for expected in [
+            "<package name=\"\">",
+            "<class name=\"Makefile\" sourcefilename=\"Makefile\">",
+            "<sourcefile name=\"Makefile\">",
+        ] {
+            assert!(written.contains(expected), "{expected}\n{written}");
+        }
+        assert!(clover(&view, 0).contains("<file name=\"Makefile\" path=\"Makefile\">"));
     }
 
     /// Source the line no longer holds is not placed, and the export says
@@ -1368,6 +1473,28 @@ mod tests {
         file.functions.clear();
         file.branches.clear();
         file.conditions.clear();
+        file.points.clear();
+        file.branch_sites.clear();
+        let parsed: Value =
+            serde_json::from_str(&istanbul(&view, Path::new("/w"), &sources()).unwrap()).unwrap();
+        let record = &parsed[absolute(Path::new("/w"), "src/a & b.ts")];
+        for map in ["statementMap", "fnMap", "branchMap", "s", "f", "b"] {
+            assert_eq!(record[map], json!({}), "{map}");
+        }
+        let clover_text = clover(&view, 0);
+        assert!(
+            clover_text.contains("ncloc=\"0\"/>\n    </file>"),
+            "{clover_text}"
+        );
+        let jacoco_text = jacoco(&view, 0);
+        assert!(
+            jacoco_text.contains("<class name=\"src/a &amp; b\" sourcefilename=\"a &amp; b.ts\">\n      <counter type=\"METHOD\" missed=\"0\" covered=\"0\"/>\n    </class>\n    <sourcefile name=\"a &amp; b.ts\">\n      <counter type=\"INSTRUCTION\""),
+            "{jacoco_text}"
+        );
+        assert_eq!(
+            sonar(&view),
+            "<coverage version=\"1\">\n  <file path=\"src/a &amp; b.ts\">\n  </file>\n</coverage>\n"
+        );
         assert_eq!(
             lcov(&view),
             "TN:\nSF:src/a & b.ts\nFNF:0\nFNH:0\nBRF:0\nBRH:0\nLF:0\nLH:0\nend_of_record\n"
