@@ -2081,11 +2081,22 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_secs())
             .unwrap_or(0);
+        // The text of every measured file, for a format that places what it
+        // reports in the source. Text that no longer matches the run would
+        // point at the wrong lines, so the HTML report embeds it only when the
+        // run still describes this checkout; Istanbul places each statement
+        // by finding the source the run recorded, and refuses a file that no
+        // longer holds it.
+        let read_sources = || {
+            view.files
+                .iter()
+                .filter_map(|file| {
+                    let text = fs::read_to_string(root.join(&file.file)).ok()?;
+                    Some((file.file.clone(), text))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         let contents = if format == "html" {
-            // Annotating source that no longer matches the run would point at
-            // the wrong lines, so the text is embedded only when the run still
-            // describes this checkout. Otherwise the report shows line numbers
-            // and says why.
             let (sources, reason) = if view.stale {
                 (
                     std::collections::BTreeMap::new(),
@@ -2095,22 +2106,19 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     ),
                 )
             } else {
-                let sources = view
-                    .files
-                    .iter()
-                    .filter_map(|file| {
-                        let text = fs::read_to_string(root.join(&file.file)).ok()?;
-                        Some((file.file.clone(), text))
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
                 (
-                    sources,
+                    read_sources(),
                     "The file could not be read from this checkout.".to_owned(),
                 )
             };
             supercov_engine::coverage_html::html(&view, &sources, &reason)
         } else {
-            supercov_engine::coverage_export::export(&view, &format, timestamp)?
+            let sources = if supercov_engine::coverage_export::needs_source(&format) {
+                read_sources()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+            supercov_engine::coverage_export::export(&view, &format, timestamp, &root, &sources)?
         };
         match output {
             Some(path) => {
