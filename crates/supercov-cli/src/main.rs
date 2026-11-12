@@ -1712,12 +1712,18 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 /// The files no floor covered because discovery could not tell whether they
 /// are source and nothing loaded them. Said, never failed on: the suite
 /// passes without Supercov, so a gate must not fail for what it cannot tell.
+/// Discovery names those `scope:`; other source-scope limitations, such as a
+/// Rust const context, sit in files that are counted.
 fn uncounted_note(view: &supercov_engine::run_view::RunView) -> String {
     let files = view
         .limitations
         .iter()
         .filter_map(|limitation| serde_json::from_str::<serde_json::Value>(limitation).ok())
-        .filter(|limitation| limitation["kind"] == "source-scope")
+        .filter(|limitation| {
+            limitation["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("scope:"))
+        })
         .filter_map(|limitation| limitation["file"].as_str().map(str::to_owned))
         .collect::<std::collections::BTreeSet<_>>();
     if files.is_empty() {

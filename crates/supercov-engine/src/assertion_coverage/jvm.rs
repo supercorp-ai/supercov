@@ -38,7 +38,7 @@ const OWNED: &str = "a catch, when entry or finally block has its expression";
 fn recovered(source: &str, language: JvmLanguage) -> Tree {
     let mut parser = Parser::new();
     let grammar = match language {
-        JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
+        JvmLanguage::Kotlin => crate::kotlin_grammar::language().into(),
         JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
     };
     parser
