@@ -29,7 +29,11 @@ use std::time::Duration;
 /// child per worker thread, and machines with more cores than this are rare;
 /// a child that finds no free slot is simply not tracked.
 const SLOTS: usize = 512;
-static CHILDREN: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
+/// An empty slot, copied into each: written as a constant, not a `const`
+/// block, so no code here is left for the compiler to run unmeasured.
+#[allow(clippy::declare_interior_mutable_const)]
+const FREE: AtomicU32 = AtomicU32::new(0);
+static CHILDREN: [AtomicU32; SLOTS] = [FREE; SLOTS];
 static GUARDS: AtomicUsize = AtomicUsize::new(0);
 
 /// Send `signal` to every registered child. Safe to call from a signal

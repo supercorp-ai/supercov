@@ -1010,10 +1010,14 @@ pub fn coverage_covers_query_cached(
         .limitations
         .iter()
         // A file left out of scope is left out on every line, not only the
-        // first, where its limitation is recorded.
+        // first, where its limitation is recorded. Such a limitation names no
+        // code, or only the file; one that quotes its code, such as a Rust
+        // const context, is a site in a counted file and stays on its line.
         .filter(|limitation| {
             limitation.file == options.file
-                && (limitation.line == options.line || limitation.kind == "source-scope")
+                && (limitation.line == options.line
+                    || limitation.kind == "source-scope"
+                        && (limitation.source.is_empty() || limitation.source == limitation.file))
         })
         .cloned()
         .map(|limitation| CoverageFileLimitation {
@@ -6003,19 +6007,25 @@ mod tests {
     }
 
     /// A file left out of scope is left out on every line, though its
-    /// limitation is recorded on the first; another line's limitation stays
-    /// on that line.
+    /// limitation is recorded on the first, whether it names no code or only
+    /// the file; another line's limitation stays on that line, and so does a
+    /// source-scope site that quotes its code.
     #[test]
     fn a_scope_limitation_reaches_every_line_of_its_file() {
         let mut request = two_runner_request();
-        for (kind, line) in [("source-scope", 1), ("semantic-safety", 5)] {
+        for (id, kind, line, source) in [
+            ("unnamed", "source-scope", 1, ""),
+            ("named", "source-scope", 1, "src/a/one.js"),
+            ("site", "source-scope", 4, "const C: u8 = { 1 };"),
+            ("safety", "semantic-safety", 5, ""),
+        ] {
             request.manifest.limitations.push(serde_json::json!({
-                "id": kind,
+                "id": id,
                 "kind": kind,
                 "file": "src/a/one.js",
                 "line": line,
                 "column": 1,
-                "source": "",
+                "source": source,
                 "reason": "left out"
             }));
         }
@@ -6040,11 +6050,11 @@ mod tests {
             CoverageCoversData::Line(line) => &line.limitations,
             CoverageCoversData::Anchors(anchors) => &anchors.limitations,
         };
-        let kinds = limitations
+        let ids = limitations
             .iter()
-            .map(|limitation| limitation.kind.as_str())
+            .map(|limitation| limitation.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(kinds, ["source-scope"], "{covers:?}");
+        assert_eq!(ids, ["unnamed", "named"], "{covers:?}");
     }
 
     #[test]

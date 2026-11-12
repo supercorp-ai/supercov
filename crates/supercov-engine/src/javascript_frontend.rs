@@ -105,28 +105,22 @@ struct SetupAccounting {
     cache_ns: AtomicU64,
 }
 
-impl SetupAccounting {
-    const fn new() -> Self {
-        Self {
-            files: AtomicU64::new(0),
-            bytes: AtomicU64::new(0),
-            create_ns: AtomicU64::new(0),
-            write_ns: AtomicU64::new(0),
-            rename_ns: AtomicU64::new(0),
-            directories: AtomicU64::new(0),
-            directory_retries: AtomicU64::new(0),
-            directory_ns: AtomicU64::new(0),
-            runtime_ns: AtomicU64::new(0),
-            config_ns: AtomicU64::new(0),
-            sources_ns: AtomicU64::new(0),
-            instrument_ns: AtomicU64::new(0),
-            assertion_ns: AtomicU64::new(0),
-            cache_ns: AtomicU64::new(0),
-        }
-    }
-}
-
-static SETUP: SetupAccounting = SetupAccounting::new();
+static SETUP: SetupAccounting = SetupAccounting {
+    files: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    create_ns: AtomicU64::new(0),
+    write_ns: AtomicU64::new(0),
+    rename_ns: AtomicU64::new(0),
+    directories: AtomicU64::new(0),
+    directory_retries: AtomicU64::new(0),
+    directory_ns: AtomicU64::new(0),
+    runtime_ns: AtomicU64::new(0),
+    config_ns: AtomicU64::new(0),
+    sources_ns: AtomicU64::new(0),
+    instrument_ns: AtomicU64::new(0),
+    assertion_ns: AtomicU64::new(0),
+    cache_ns: AtomicU64::new(0),
+};
 
 fn account(counter: &AtomicU64, started: Instant) {
     counter.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -2255,9 +2249,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:472",
-            "javascript-source-path#javascript_frontend.rs:1875",
-            "javascript-source-path#javascript_frontend.rs:1805",
+            "javascript-source-path#javascript_frontend.rs:466",
+            "javascript-source-path#javascript_frontend.rs:1869",
+            "javascript-source-path#javascript_frontend.rs:1799",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2368,8 +2362,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:516",
-            "javascript-source-path#javascript_frontend.rs:472",
+            "fs.read_to_string#javascript_frontend.rs:510",
+            "javascript-source-path#javascript_frontend.rs:466",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

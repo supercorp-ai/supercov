@@ -2076,6 +2076,39 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
 }
 
 #[test]
+fn a_closure_in_a_static_is_measured_and_a_const_block_is_declined_in_a_counted_file() {
+    let project = Project::empty("const-contexts");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"contexts\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "use std::sync::LazyLock;\n\npub static WORD: LazyLock<String> = LazyLock::new(|| {\n    let word = \"hi\";\n    word.to_uppercase()\n});\n\npub const LIMIT: u32 = { 2 + 1 };\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn reads_both() {\n        assert_eq!(*super::WORD, \"HI\");\n        assert_eq!(super::LIMIT, 3);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    // The closure runs at run time, and its test ran it.
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:4"])
+        .succeeds();
+    assert!(
+        line.contains("COVERED") && !line.contains("NOT COVERED"),
+        "{line}"
+    );
+    // The const block is the compiler's: declined, so a floor cannot be
+    // judged, and the file holding it is counted, not outside the roots.
+    let check = project.supercov(&["runs", "latest", "check", "--min-lines", "100"]);
+    let out = check.exits(2);
+    assert!(
+        out.contains("lines left 1 obligation(s) unmeasured"),
+        "{out}{}",
+        check.stderr()
+    );
+    assert!(!out.contains("outside the source roots"), "{out}");
+}
+
+#[test]
 fn a_crate_with_no_library_runs_its_tests_and_no_doctests() {
     // A Worker or a plugin: `cargo test` runs its unit tests and, since a
     // cdylib cannot have doctests, none of those. `--doc` alone is Cargo's
@@ -14135,25 +14168,25 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1680",
+            "coverage_query.rs:1684",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2857"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2951@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2843@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3275"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2861"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2955@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2847@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3279"),
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2224@2",
+            "coverage_query.rs:2228@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3812",
+            "coverage_query.rs:3816",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3812@2",
+            "coverage_query.rs:3816@2",
         ),
         (
             vec![
@@ -14166,7 +14199,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3955",
+            "coverage_query.rs:3959",
         ),
         (
             vec![
@@ -14179,15 +14212,15 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:4005",
+            "coverage_query.rs:4009",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3553",
+            "coverage_query.rs:3557",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3561",
+            "coverage_query.rs:3565",
         ),
         // A line's anchors; a file with no decisions under a kind, its gaps
         // read to tell it from a kind no test has.
@@ -14206,7 +14239,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3960",
+            "coverage_query.rs:3964",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -15586,9 +15619,9 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2516 => main.rs:2516",
+            "fs.canonicalize#main.rs:2522 => main.rs:2522",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2018 => javascript_frontend.rs:2018",
+            "fs.read_to_string#javascript_frontend.rs:2012 => javascript_frontend.rs:2012",
         ],
     );
 }
@@ -15687,8 +15720,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
             "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:231 => child_signal_guard.rs:231",
-            "spawn#child_signal_guard.rs:231@2 => child_signal_guard.rs:231",
+            "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
+            "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -15725,7 +15758,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:304 => child_signal_guard.rs:304",
+                "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:603",
@@ -15863,7 +15896,7 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         // The Worker workspace's inputs walked, and a port found for its
         // inspector.
         ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
-        ("local-listener", "injected fault at local-listener"),
+        ("free-port", "injected fault at free-port"),
     ] {
         let project = Project::cart("worker-server-steps");
         project.write("playwright.config.js", "export default {};\n");
@@ -17419,7 +17452,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2297"),
+                refused.contains("coverage_query.rs:2301"),
                 "{fault}: {refused}"
             );
         }
@@ -17660,12 +17693,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:360",
-            "javascript_frontend.rs:360",
+            "fs.read#javascript_frontend.rs:354",
+            "javascript_frontend.rs:354",
         ),
         (
-            "fs.read#javascript_frontend.rs:372",
-            "javascript_frontend.rs:372",
+            "fs.read#javascript_frontend.rs:366",
+            "javascript_frontend.rs:366",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17695,12 +17728,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1807@2",
+            "fs.read_to_string#javascript_frontend.rs:1801@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1807"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -19954,12 +19987,12 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3400",
+            "coverage-index-read#coverage_query.rs:3404",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3400"), "{said}");
+    assert!(fired_at(&said, "coverage_query.rs:3404"), "{said}");
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore

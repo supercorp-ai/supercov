@@ -14,6 +14,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
@@ -39,18 +40,6 @@ function supercov(cwd, args, env = {}) {
     timeout: 240_000,
   });
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
-}
-
-async function freePort() {
-  return new Promise((done, fail) => {
-    const server = createServer();
-    server.unref();
-    server.on('error', fail);
-    server.listen(0, () => {
-      const { port } = server.address();
-      server.close(() => done(port));
-    });
-  });
 }
 
 try {

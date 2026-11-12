@@ -6,9 +6,13 @@ name: Self Coverage
 # jobs, each measured on its own, and the runs merged into one per platform.
 # Linux and macOS compile different code, so each platform is merged on its own.
 #
-# Run it by hand, or add the `self-coverage` label to a pull request: Linux
-# alone, about 25 minutes. The `self-coverage-macos` label, or `macos: true` by
-# hand, measures macOS too; the two platforms differ by a handful of gaps.
+# Every pull request ready for review is measured, again on each push, and
+# fails unless lines, branches and MC/DC are all at 100%: the speed releases
+# that skipped this measurement left 161 gaps on main that nothing reported. A
+# draft is measured when it carries the `self-coverage` label, and on each
+# push while it does: Linux alone, about 40 minutes. The `self-coverage-macos`
+# label, or `macos: true` by hand, measures macOS too; the two platforms
+# differ by a handful of gaps.
 
 on:
   workflow_dispatch:
@@ -18,13 +22,15 @@ on:
         type: boolean
         default: false
   pull_request:
-    types: [labeled]
+    types: [labeled, opened, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: read
 
+# A newer push replaces the measurement of the one before. A label that does
+# not ask for a measurement is a run of its own, so adding one cancels nothing.
 concurrency:
-  group: self-coverage-${{ github.ref }}
+  group: self-coverage-${{ github.ref }}-${{ github.event.action == 'labeled' && !startsWith(github.event.label.name, 'self-coverage') && github.run_id || 'measure' }}
   cancel-in-progress: true
 
 env:
@@ -32,14 +38,20 @@ env:
 
 jobs:
   platforms:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'self-coverage')
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'self-coverage'))
+      || (github.event.action != 'labeled'
+          && (!github.event.pull_request.draft
+              || contains(github.event.pull_request.labels.*.name, 'self-coverage')
+              || contains(github.event.pull_request.labels.*.name, 'self-coverage-macos')))
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.os.outputs.os }}
     steps:
       - id: os
         run: |
-          if [ "${{ inputs.macos }}" = true ] || [ "${{ github.event.label.name }}" = self-coverage-macos ]; then
+          if [ "${{ inputs.macos }}" = true ] || [ "${{ contains(github.event.pull_request.labels.*.name, 'self-coverage-macos') }}" = true ]; then
             echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
           else
             echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
@@ -375,6 +387,7 @@ jobs:
           "$supercov" merge $ids 2>&1 | tee "$out/merge.log"
           merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
           if [ -z "$merged" ]; then echo "the slices did not merge"; exit 1; fi
+          echo "$merged" > "$out/merged-id"
           "$supercov" runs "$merged" > "$out/summary.txt"
           for metric in mcdc lines branches; do
             "$supercov" runs "$merged" gaps --format jsonl --metric "$metric" --limit 0 --output "$out/$metric-gaps.jsonl"
@@ -390,7 +403,15 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: self-coverage-${{ matrix.os }}
           path: ${{ runner.temp }}/out
           retention-days: 30
+      # The gaps are in the artifact above, one file per metric. `check`
+      # compares counts, so 99.995% fails, and it answers 2 rather than pass
+      # when a slice's tests failed or the run no longer matches the commit.
+      - name: Hold Supercov to 100% coverage
+        run: |
+          "$RUNNER_TEMP/self/supercov" runs "$(cat "$RUNNER_TEMP/out/merged-id")" check \
+            --min-lines 100 --min-branches 100 --min-mcdc 100

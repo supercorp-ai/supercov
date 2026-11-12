@@ -351,12 +351,31 @@ pub(crate) fn local_listener() -> Result<TcpListener, String> {
     .map_err(|error| error.to_string())
 }
 
-/// A port nothing listens on now.
+/// A port nothing listens on now, for a server Supercov starts on it.
+///
+/// Drawn at random from 20000-32767, below every system's ephemeral range
+/// (Linux's starts at 32768, macOS's and Windows' at 49152), and bound once
+/// before it is given. A port the system picked (bound to port 0) was handed
+/// out again to whatever asked next before the server bound it -- wrangler's
+/// own servers, an outgoing connection, the proxy in front of Chrome's driver
+/// -- and the server could not listen. Nothing is handed a port from below
+/// that range unless it names one; one another server holds is drawn again.
 pub(crate) fn free_port() -> Result<u16, String> {
-    Ok(local_listener()?
-        .local_addr()
-        .expect("a bound listener has its address")
-        .port())
+    use std::hash::{BuildHasher, Hasher};
+    let mut refused = String::new();
+    for _ in 0..64 {
+        let draw = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        let port = 20_000 + (draw % 12_768) as u16;
+        match crate::fault::io("free-port", std::io::ErrorKind::AddrInUse, || {
+            TcpListener::bind(("127.0.0.1", port))
+        }) {
+            Ok(_) => return Ok(port),
+            Err(error) => refused = error.to_string(),
+        }
+    }
+    Err(format!("no port in 20000-32767 could be bound: {refused}"))
 }
 
 /// The cfg values of wasm32-unknown-unknown, as the crate's own toolchain
@@ -3397,18 +3416,24 @@ mod tests {
             "[build]\ncommand = \"worker-build\"\n",
         )
         .unwrap();
-        let rustc = "spawn#rust_worker.rs:370";
+        let rustc = "spawn#rust_worker.rs:389";
         assert!(crate::fault::during(rustc, || wasm_target_cfg(&package)).is_none());
         assert!(
             crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
         );
         assert_eq!(
-            crate::fault::during("spawn#rust_worker.rs:1844", || cargo_workspace_root(
+            crate::fault::during("spawn#rust_worker.rs:1863", || cargo_workspace_root(
                 &package
             )),
             None
         );
-        assert!(crate::fault::during("local-listener", free_port).is_err());
+        let refused = crate::fault::during("free-port", free_port).unwrap_err();
+        assert!(
+            refused.ends_with("injected fault at free-port"),
+            "{refused}"
+        );
+        // One port refused is drawn again.
+        assert!(crate::fault::during("free-port@1", free_port).is_ok());
         let stop = AtomicBool::new(true);
         assert!(watch_other_workers(&package, &|n| package.join(format!("{n}")), &stop).is_empty());
         assert!(read_windows(&package).unwrap().is_empty());
