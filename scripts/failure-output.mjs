@@ -230,8 +230,12 @@ const languages = {
     // under Supercov had a report for each failed test (`running 1 test`,
     // `2 filtered out`), no line for a test that passed and none of what a
     // failed doctest printed.
+    // A test binary's name ends in its build's hash, and newer Cargo also
+    // keeps it in a directory of that hash (`build/shop/<hash>/out/`): the
+    // hash follows the compiler's flags, which Supercov's differ by.
     const tidy = (line) => line
       .replace(/\(\d+\) panicked/u, 'panicked')
+      .replace(/([\\/]build[\\/][^\\/\s]+[\\/])[0-9a-f]{16}([\\/]out[\\/])/u, '$1HASH$2')
       .replace(/-[0-9a-f]{16}(?:\.exe)?\)$/u, '-HASH)')
       .replace(/finished in [\d.]+s$/u, 'finished');
     // Cargo colours its own lines where it is told to (`CARGO_TERM_COLOR`,

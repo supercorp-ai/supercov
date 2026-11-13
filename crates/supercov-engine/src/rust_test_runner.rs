@@ -177,6 +177,9 @@ struct CargoArtifactProfile {
 #[derive(Debug, Clone)]
 struct TestArtifact {
     executable: PathBuf,
+    /// The binary as Cargo named it, which its line names: resolved, the
+    /// path lost how Cargo spells it (Windows' `build\shop/<hash>\out`).
+    announced: PathBuf,
     name: String,
     kind: String,
     source: String,
@@ -983,6 +986,7 @@ fn build_test_artifacts(
             let (Some(executable), Some(target)) = (message.executable, message.target) else {
                 return Ok(());
             };
+            let announced = executable.clone();
             let executable = fs::canonicalize(&executable)
                 .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
             if !executable.starts_with(&canonical_target)
@@ -1002,6 +1006,7 @@ fn build_test_artifacts(
                 .to_path_buf();
             artifacts.push(TestArtifact {
                 executable,
+                announced,
                 package_directory,
                 name: target.name,
                 kind: if target.kind.iter().any(|kind| kind == "test") {
@@ -1708,10 +1713,12 @@ fn running_line(
         .split('/')
         .collect::<PathBuf>();
     // Supercov builds into a target directory of its own; the binary is named
-    // where Cargo would have put it.
+    // where Cargo would have put it, as Cargo spells it: the parts of Cargo's
+    // path that the resolved one has under the target directory, which on
+    // Windows is spelled another way (`\\?\`) than the path Cargo reports.
     let executable = artifact.executable.strip_prefix(target).map_or_else(
         |_| artifact.executable.clone(),
-        |built| Path::new("target").join(built),
+        |resolved| Path::new("target").join(spelled_as_cargo(resolved, &artifact.announced)),
     );
     format!(
         "{} {}{} ({})",
@@ -1728,6 +1735,23 @@ fn running_line(
         source.display(),
         executable.display()
     )
+}
+
+/// `resolved`, the binary under the target directory, as the end of
+/// `announced` spells it -- Cargo's own path to the same binary -- when it
+/// names the same parts, and as resolved otherwise.
+fn spelled_as_cargo<'a>(resolved: &'a Path, announced: &'a Path) -> &'a Path {
+    let parts = resolved.components().count();
+    let mut spelled = announced.components();
+    for _ in 0..announced.components().count().saturating_sub(parts) {
+        spelled.next();
+    }
+    let spelled = spelled.as_path();
+    if spelled.components().eq(resolved.components()) {
+        spelled
+    } else {
+        resolved
+    }
 }
 
 /// Whether Cargo colours its own lines: as `--color` or `CARGO_TERM_COLOR`
@@ -3715,6 +3739,9 @@ mod tests {
             executable: PathBuf::from(
                 "/work/copy/.supercov/cache/rust-target/debug/deps/shop-0123456789abcdef",
             ),
+            announced: PathBuf::from(
+                "/work/copy/.supercov/cache/rust-target/debug/deps/shop-0123456789abcdef",
+            ),
             name: "shop".into(),
             kind: kind.into(),
             source: source.into(),
@@ -3765,6 +3792,35 @@ mod tests {
                 true,
             )
             .starts_with("\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests ")
+        );
+        // The binary as Cargo named it, not as it resolves: on Windows Cargo
+        // writes `build\shop/<hash>\out`, which a resolved path spells
+        // with one separator.
+        let named = TestArtifact {
+            executable: PathBuf::from(
+                "/work/copy/.supercov/cache/rust-target/debug/build/shop/0123456789abcdef/out/shop-0123456789abcdef",
+            ),
+            announced: PathBuf::from(
+                "/elsewhere/../work/copy/.supercov/cache/rust-target/debug/build/shop/0123456789abcdef/out/shop-0123456789abcdef",
+            ),
+            ..artifact("/work/copy", "src/lib.rs", "unit")
+        };
+        assert_eq!(
+            line(&named),
+            "     Running unittests src/lib.rs (target/debug/build/shop/0123456789abcdef/out/shop-0123456789abcdef)"
+        );
+        // Cargo's spelling where it names the same parts, and the resolved
+        // path where it does not.
+        assert_eq!(
+            spelled_as_cargo(
+                Path::new("debug/build/shop/0123/out/shop"),
+                Path::new("/a/b/target/debug/build/shop/0123/out/shop")
+            ),
+            Path::new("debug/build/shop/0123/out/shop")
+        );
+        assert_eq!(
+            spelled_as_cargo(Path::new("debug/deps/shop"), Path::new("/a/other")),
+            Path::new("debug/deps/shop")
         );
     }
 
