@@ -17184,7 +17184,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1346",
+        "fs.create_dir_all#lifecycle.rs:1364",
         "fs.create_dir_all#javascript_run.rs:741",
         "fs.write#javascript_run.rs:1047",
         "fs.canonicalize#process_supervision.rs:1795",
@@ -17194,7 +17194,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#evidence_archive.rs:483",
         "fs.create_dir_all#javascript_run.rs:1564",
         "fs.create_dir_all#javascript_run.rs:1566",
-        "fs.create_dir_all#lifecycle.rs:1043",
+        "fs.create_dir_all#lifecycle.rs:1055",
         "fs.create_dir_all#javascript_run.rs:1666",
         "fs.create_dir_all#javascript_run.rs:1668",
     ] {
@@ -20570,9 +20570,9 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1673", true),
-        ("fs.read_dir:2#lifecycle.rs:1642", true),
-        ("fs.remove_file#lifecycle.rs:1673", false),
+        ("fs.remove_file:2#lifecycle.rs:1691", true),
+        ("fs.read_dir:2#lifecycle.rs:1660", true),
+        ("fs.remove_file#lifecycle.rs:1691", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);

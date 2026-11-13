@@ -1025,6 +1025,18 @@ pub(crate) fn publish_run_with_fault(
         metadata.supersedes = (!earlier.is_empty()).then_some(earlier);
     }
     let metadata = &metadata;
+    // The query index of the analysis the frontend hands over is worked out
+    // from the analysis alone, so it is begun now, beside the copying and
+    // hashing of the evidence below: it is the last and longest step of
+    // publishing a large run, and only its header needs that digest.
+    let report = archived.report.map(std::sync::Arc::new);
+    let early_sections = report
+        .as_ref()
+        .filter(|_| metadata.merged != Some(true))
+        .map(|report| {
+            let report = std::sync::Arc::clone(report);
+            std::thread::spawn(move || crate::coverage_index::coverage_index_sections(&report))
+        });
     checked_id(&metadata.id)?;
     let destination = root.join(".supercov/runs").join(&metadata.id);
     reject_linked_ancestors(root, &destination, false)?;
@@ -1080,10 +1092,12 @@ pub(crate) fn publish_run_with_fault(
     };
     let analysed = if metadata.merged == Some(true) {
         None
-    } else if archived.report.is_some() {
-        archived.report
+    } else if report.is_some() {
+        report
     } else {
-        crate::run_store::analyze_stored_run(&staged).ok()
+        crate::run_store::analyze_stored_run(&staged)
+            .ok()
+            .map(std::sync::Arc::new)
     };
     let archived_inputs = match archived
         .inputs
@@ -1115,16 +1129,20 @@ pub(crate) fn publish_run_with_fault(
     // they are written side by side: one after another, the spans and the
     // assessment input waited on the index, the last step of a large run.
     let prepared = std::thread::scope(|scope| {
-        let index = analysed.as_ref().map(|report| {
+        let index = analysed.as_deref().map(|report| {
             let derived = &derived;
             // Disposable, like every query index: one that failed to write is
             // rebuilt by the first query. The others are disposable too: the
             // report analyses the evidence when a file is missing.
             [
                 scope.spawn(move || {
-                    if crate::run_store::write_query_index_from(
+                    let sections = early_sections.map_or_else(
+                        || crate::coverage_index::coverage_index_sections(report),
+                        |early| early.join().unwrap_or_else(crate::threads::rethrow),
+                    );
+                    if crate::run_store::write_query_index_with(
                         derived,
-                        report,
+                        sections,
                         (evidence_sha256, copied),
                     )
                     .is_err()
@@ -1156,7 +1174,7 @@ pub(crate) fn publish_run_with_fault(
             root,
             &staging,
             metadata,
-            analysed.as_ref(),
+            analysed.as_deref(),
             archived_inputs,
         );
         for written in index.into_iter().flatten() {
@@ -1706,7 +1724,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1511", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1529", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1731,7 +1749,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1246", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1264", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1739,7 +1757,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1321", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1339", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()
