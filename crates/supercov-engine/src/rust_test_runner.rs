@@ -177,6 +177,9 @@ struct CargoArtifactProfile {
 #[derive(Debug, Clone)]
 struct TestArtifact {
     executable: PathBuf,
+    /// The binary as Cargo named it, which its line names: resolved, the
+    /// path lost how Cargo spells it (Windows' `build\shop/<hash>\out`).
+    announced: PathBuf,
     name: String,
     kind: String,
     source: String,
@@ -983,6 +986,7 @@ fn build_test_artifacts(
             let (Some(executable), Some(target)) = (message.executable, message.target) else {
                 return Ok(());
             };
+            let announced = executable.clone();
             let executable = fs::canonicalize(&executable)
                 .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
             if !executable.starts_with(&canonical_target)
@@ -1002,6 +1006,7 @@ fn build_test_artifacts(
                 .to_path_buf();
             artifacts.push(TestArtifact {
                 executable,
+                announced,
                 package_directory,
                 name: target.name,
                 kind: if target.kind.iter().any(|kind| kind == "test") {
@@ -1708,11 +1713,15 @@ fn running_line(
         .split('/')
         .collect::<PathBuf>();
     // Supercov builds into a target directory of its own; the binary is named
-    // where Cargo would have put it.
-    let executable = artifact.executable.strip_prefix(target).map_or_else(
-        |_| artifact.executable.clone(),
-        |built| Path::new("target").join(built),
-    );
+    // where Cargo would have put it, as Cargo spells it.
+    let executable = artifact
+        .announced
+        .strip_prefix(target)
+        .or_else(|_| artifact.executable.strip_prefix(target))
+        .map_or_else(
+            |_| artifact.executable.clone(),
+            |built| Path::new("target").join(built),
+        );
     format!(
         "{} {}{} ({})",
         if coloured {
@@ -3715,6 +3724,9 @@ mod tests {
             executable: PathBuf::from(
                 "/work/copy/.supercov/cache/rust-target/debug/deps/shop-0123456789abcdef",
             ),
+            announced: PathBuf::from(
+                "/work/copy/.supercov/cache/rust-target/debug/deps/shop-0123456789abcdef",
+            ),
             name: "shop".into(),
             kind: kind.into(),
             source: source.into(),
@@ -3765,6 +3777,20 @@ mod tests {
                 true,
             )
             .starts_with("\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests ")
+        );
+        // The binary as Cargo named it, not as it resolves: on Windows Cargo
+        // writes `build\shop/<hash>\out`, which a resolved path spells
+        // with one separator.
+        let named = TestArtifact {
+            executable: PathBuf::from("/private/work/copy/.supercov/cache/rust-target/x"),
+            announced: PathBuf::from(
+                "/work/copy/.supercov/cache/rust-target/debug/build/shop/0123456789abcdef/out/shop-0123456789abcdef",
+            ),
+            ..artifact("/work/copy", "src/lib.rs", "unit")
+        };
+        assert_eq!(
+            line(&named),
+            "     Running unittests src/lib.rs (target/debug/build/shop/0123456789abcdef/out/shop-0123456789abcdef)"
         );
     }
 

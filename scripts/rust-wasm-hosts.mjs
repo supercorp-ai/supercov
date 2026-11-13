@@ -52,7 +52,7 @@ const hosts = [
     },
     tests: { curved: 'tests/grades.rs::a_curved_score_is_an_a', low: 'tests/grades.rs::a_low_score_fails' },
     // Node's hook that cannot be given (SUPERCOV_TEST_FAULT) fails the run.
-    faults: ['fs.create_dir_all#rust_test_runner.rs:1098', 'fs.write#rust_test_runner.rs:1100'],
+    faults: ['fs.create_dir_all#rust_test_runner.rs:1103', 'fs.write#rust_test_runner.rs:1105'],
   },
   {
     host: 'WASI (wasmtime)',
