@@ -259,13 +259,12 @@ fn page_digests(bytes: &[u8]) -> Vec<u8> {
             .chunks(per_worker * QUERY_INDEX_PAGE_SIZE)
             .zip(digests.chunks_mut(per_worker * 32))
         {
+            // Every worker has a page: its share is never empty.
             scope.spawn(move || {
-                for (page, digest) in pages
+                pages
                     .chunks(QUERY_INDEX_PAGE_SIZE)
                     .zip(digests.chunks_exact_mut(32))
-                {
-                    digest.copy_from_slice(&Sha256::digest(page));
-                }
+                    .for_each(|(page, digest)| digest.copy_from_slice(&Sha256::digest(page)));
             });
         }
     });

@@ -14318,12 +14318,12 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:337", "query_index.rs:337"),
+        ("fs.open#query_index.rs:336", "query_index.rs:336"),
         (
-            "fs.read_exact_from#query_index.rs:337",
-            "query_index.rs:337",
+            "fs.read_exact_from#query_index.rs:336",
+            "query_index.rs:336",
         ),
-        ("fs.open#query_index.rs:354", "query_index.rs:354"),
+        ("fs.open#query_index.rs:353", "query_index.rs:353"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -17438,7 +17438,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:354@2,fs.open#query_index.rs:354@3,fs.read_from#evidence_archive.rs:676",
+        "fs.open#query_index.rs:353@2,fs.open#query_index.rs:353@3,fs.read_from#evidence_archive.rs:676",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:672@2",
     ] {
@@ -19955,12 +19955,12 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:323")],
+        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:322")],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:323 rename)"),
+            .contains("test fault at fs (query_index.rs:322 rename)"),
         "{}",
         ran.stderr()
     );
