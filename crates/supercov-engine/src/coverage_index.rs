@@ -5960,6 +5960,8 @@ mod tests {
             skipped.lines.clear();
             skipped.decisions.clear();
             run.view.tests.insert(0, skipped);
+            // Not every result passed: one was skipped.
+            run.passed_is_whole = false;
             assert!(copies_whole(&run.view, &run.filters.passed));
             let copied = coverage_index_sections(&run).unwrap();
             let built = sections_from::<_, CoverageIndexError>(
