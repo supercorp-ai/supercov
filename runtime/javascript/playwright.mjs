@@ -39,6 +39,8 @@ const adapter = (targetModule === "@playwright/test"
 // run. Every copy keys its state on the page's global, so this copy and one a
 // bundler imports record into the same place. Its locals stay inside a
 // function, out of the page's global scope.
+// DIAGNOSTIC ONLY (never merged): skip parts of the browser work.
+const diagSkip = new Set((process.env.SUPERCOV_DIAG_SKIP ?? "").split(",").filter(Boolean));
 const browserRuntimeSource = readFileSync(new URL("./runtime.mjs", import.meta.url), "utf8");
 const browserRuntimeExport = browserRuntimeSource.lastIndexOf("\nexport {");
 if (/^import\s/m.test(browserRuntimeSource) || browserRuntimeExport < 0)
@@ -925,11 +927,13 @@ class CoveragePhaseController {
         return internally(this.anyOwner(), () => this.activateInBrowserNow(phaseId, documentPhaseId));
     }
     async activateInBrowserNow(phaseId, documentPhaseId) {
+        if (diagSkip.has("activate"))
+            return;
         await Promise.all([
-            timed("activate.contextHeaders", () => Promise.all([...this.contexts]
+            diagSkip.has("cookies") ? undefined : timed("activate.contextHeaders", () => Promise.all([...this.contexts]
                 .filter((context) => !this.adoptedContexts.has(context) && !this.closedContexts.has(context))
                 .map((context) => this.updateContextHeaders(context, phaseId, documentPhaseId)))),
-            this.activateFrames(phaseId),
+            diagSkip.has("frames") ? undefined : this.activateFrames(phaseId),
             this.activateWorkers(phaseId),
             // A context whose headers are not known gets no cookies, so its
             // pages' new documents learn the phase from a script replaced here.
@@ -1201,13 +1205,15 @@ function prepareContext(context) {
         parts.push(browserRuntimePrelude);
         prepared = Promise.resolve(internally(context, () => Promise.all([
             context.addInitScript({ content: separately(parts) }).catch(() => undefined),
-            context.exposeBinding(LEAVING_BINDING, takeLeavingEvidence).catch(() => undefined),
+            diagSkip.has("binding") ? undefined : context.exposeBinding(LEAVING_BINDING, takeLeavingEvidence).catch(() => undefined),
         ]))).catch(() => undefined);
         preparedContexts.set(context, prepared);
     }
     return prepared;
 }
 function readSnapshot(target) {
+    if (diagSkip.has("snapshot"))
+        return Promise.resolve(undefined);
     return target
         .evaluate(() => {
         const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;

@@ -25,75 +25,19 @@ jobs:
     strategy:
       matrix:
         include:
-          - variant: base
-            ref: ${{ github.event.pull_request.base.sha }}
-          - variant: new
-            ref: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ matrix.ref }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: speed-${{ matrix.variant }}
-      # Line tables and symbols, for the diagnostic pass's native profile.
-      - run: cargo build --profile measure -p supercov
-        env:
-          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
-          CARGO_PROFILE_MEASURE_STRIP: none
-      - uses: actions/upload-artifact@v4
-        with:
-          name: supercov-${{ matrix.variant }}
-          path: target/measure/supercov
-          retention-days: 3
-
-  measure:
-    needs: build
-    name: Measure ${{ matrix.label }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - app: bulletproof
-            label: bulletproof
-            node: 22
-            rounds: 3
-            diagnose: 1
-            binaries: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
-          # 170 Playwright tests on one worker, against plain alone: a Supercov
-          # without f8f3d872 cannot build it (its instrumentation.ts guards
-          # Node-only imports with NEXT_RUNTIME). Three rounds for the ratio
-          # on one runner, and the diagnostic pass on another beside it.
+          # DIAGNOSTIC ONLY: which part of the browser work costs Chrome CPU.
           - app: rallly
-            label: rallly
-            node: 24
-            rounds: 3
-            diagnose: 0
-            binaries: new=binaries/supercov-new/supercov
-          # The same on a second runner: runners differ, and the ratio with
-          # them, by more than a change of a few seconds moves it.
-          - app: rallly
-            label: rallly-second
-            node: 24
-            rounds: 3
-            diagnose: 0
-            binaries: new=binaries/supercov-new/supercov
-          # A large Vite app: its Vitest suite and its production build.
-          - app: excalidraw
-            label: excalidraw
-            node: 22
-            rounds: 3
-            diagnose: 1
-            binaries: base=binaries/supercov-base/supercov,new=binaries/supercov-new/supercov
-          - app: rallly
-            label: rallly-diagnose
+            label: ablation-a
             node: 24
             rounds: 1
-            diagnose: 1
-            binaries: new=binaries/supercov-new/supercov
+            diagnose: 0
+            variants: new,skip-activate,skip-cookies,skip-frames
+          - app: rallly
+            label: ablation-b
+            node: 24
+            rounds: 1
+            diagnose: 0
+            variants: new,skip-binding,skip-snapshot
     # Rallly's tests reach Postgres and Mailpit where its .env.test says.
     services:
       postgres:
@@ -123,6 +67,17 @@ jobs:
           pattern: supercov-*
           path: binaries
       - run: chmod +x binaries/*/supercov
+      # Each variant is the new binary with one part of its browser work off.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/wrap"
+          list=""
+          for variant in $(echo "${{ matrix.variants }}" | tr ',' ' '); do
+            skip="${variant#skip-}"; [ "$variant" = new ] && skip=""
+            printf '#!/bin/sh\nSUPERCOV_DIAG_SKIP=%s exec %s "$@"\n' "$skip" "$GITHUB_WORKSPACE/binaries/supercov-new/supercov" > "$RUNNER_TEMP/wrap/$variant"
+            chmod +x "$RUNNER_TEMP/wrap/$variant"
+            list="$list${list:+,}$variant=$RUNNER_TEMP/wrap/$variant"
+          done
+          echo "ABLATION_BINARIES=$list" >> "$GITHUB_ENV"
       # Which machine this was: the ratio moves with it.
       - run: nproc && lscpu | grep -E 'Model name|MHz' | head -3 | tee "$RUNNER_TEMP/machine.txt"
       - run: npx -y playwright@1.49.1 install-deps chromium
@@ -140,7 +95,7 @@ jobs:
           sudo sysctl kernel.perf_event_paranoid=1
       - name: Measure
         env:
-          SUPERCOV_BINARIES: ${{ matrix.binaries }}
+          SUPERCOV_BINARIES: ${{ env.ABLATION_BINARIES }}
           SPEED_APP: ${{ matrix.app }}
           SPEED_ROUNDS: ${{ matrix.rounds }}
           SPEED_REPEAT: 10
