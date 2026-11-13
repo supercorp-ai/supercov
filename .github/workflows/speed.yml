@@ -25,6 +25,38 @@ jobs:
     strategy:
       matrix:
         include:
+          - variant: base
+            ref: ${{ github.event.pull_request.base.sha }}
+          - variant: new
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: speed-${{ matrix.variant }}
+      # Line tables and symbols, for the diagnostic pass's native profile.
+      - run: cargo build --profile measure -p supercov
+        env:
+          CARGO_PROFILE_MEASURE_DEBUG: line-tables-only
+          CARGO_PROFILE_MEASURE_STRIP: none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-${{ matrix.variant }}
+          path: target/measure/supercov
+          retention-days: 3
+
+  measure:
+    needs: build
+    name: Measure ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           # DIAGNOSTIC ONLY: which part of the browser work costs Chrome CPU.
           - app: rallly
             label: ablation-a
