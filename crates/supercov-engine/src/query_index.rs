@@ -246,6 +246,31 @@ fn make_header(
     header
 }
 
+/// Each page's SHA-256, in page order. Pages are digested on every core: a
+/// large run's index is most of a gigabyte, and one core digesting it was
+/// part of the last step of the run.
+fn page_digests(bytes: &[u8]) -> Vec<u8> {
+    let pages = bytes.len().div_ceil(QUERY_INDEX_PAGE_SIZE);
+    let mut digests = vec![0_u8; pages * 32];
+    let workers = std::thread::available_parallelism().map_or(1, usize::from);
+    let per_worker = pages.div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        for (pages, digests) in bytes
+            .chunks(per_worker * QUERY_INDEX_PAGE_SIZE)
+            .zip(digests.chunks_mut(per_worker * 32))
+        {
+            // Every worker has a page: its share is never empty.
+            scope.spawn(move || {
+                pages
+                    .chunks(QUERY_INDEX_PAGE_SIZE)
+                    .zip(digests.chunks_exact_mut(32))
+                    .for_each(|(page, digest)| digest.copy_from_slice(&Sha256::digest(page)));
+            });
+        }
+    });
+    digests
+}
+
 pub fn write_query_index(
     sections: &[QueryIndexSection],
     identity: &QueryIndexIdentity,
@@ -282,11 +307,7 @@ pub fn write_query_index(
         .and_then(|()| {
             descriptors.iter().try_for_each(|descriptor| {
                 let section = by_kind[&descriptor.kind];
-                let digests = section
-                    .bytes
-                    .chunks(QUERY_INDEX_PAGE_SIZE)
-                    .flat_map(Sha256::digest)
-                    .collect::<Vec<_>>();
+                let digests = page_digests(&section.bytes);
                 at(descriptor.offset, &section.bytes)
                     .and_then(|()| at(descriptor.digests_offset, &digests))
             })

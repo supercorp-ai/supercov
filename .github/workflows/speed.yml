@@ -165,4 +165,5 @@ jobs:
             ${{ runner.temp }}/speed/browser-profile-*
             ${{ runner.temp }}/speed/logs/
             ${{ runner.temp }}/speed/results/**/trace.zip
+            ${{ runner.temp }}/speed/evidence-unit/
           retention-days: 7

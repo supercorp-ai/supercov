@@ -16,7 +16,7 @@ use supercov_contracts::EVIDENCE_ARCHIVE_SCHEMA_VERSION;
 
 use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
-    coverage_index::{CoverageIndex, CoverageIndexError, coverage_index_sections},
+    coverage_index::{CoverageIndex, CoverageIndexError},
     coverage_report::{
         ArchiveReportRequest, CoverageReport, ExitCodeInput, ReportError, analyze_coverage_archive,
     },
@@ -1344,16 +1344,18 @@ pub(crate) fn write_assessment_input(run: &StoredRun, report: &CoverageReport) -
     )
 }
 
-/// `evidence_digest` is the run's evidence digest and length, which the
-/// caller has just verified, so the file is not read again to name the index.
-pub(crate) fn write_query_index_from(
+/// The query index of a run's analysis, from its sections (or the reason
+/// they could not be worked out). `evidence_digest` is the run's evidence
+/// digest and length, which the caller has just verified, so the file is not
+/// read again to name the index.
+pub(crate) fn write_query_index_with(
     run: &StoredRun,
-    report: &CoverageReport,
+    sections: Result<Vec<crate::query_index::QueryIndexSection>, CoverageIndexError>,
     evidence_digest: ([u8; 32], u64),
 ) -> Result<(), RunIndexError> {
     let evidence = change_stamp(&run.evidence_path);
     let identity = identity_with(run, evidence_digest, analysis_digest());
-    let sections = coverage_index_sections(report)?;
+    let sections = sections?;
     write_query_index(&sections, &identity, &run.query_index_path)?;
     std::thread::spawn(move || drop(sections));
     record_verified(&run.query_index_path, evidence.as_deref());

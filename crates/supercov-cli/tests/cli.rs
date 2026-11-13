@@ -14318,12 +14318,12 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:315", "query_index.rs:315"),
+        ("fs.open#query_index.rs:336", "query_index.rs:336"),
         (
-            "fs.read_exact_from#query_index.rs:315",
-            "query_index.rs:315",
+            "fs.read_exact_from#query_index.rs:336",
+            "query_index.rs:336",
         ),
-        ("fs.open#query_index.rs:332", "query_index.rs:332"),
+        ("fs.open#query_index.rs:353", "query_index.rs:353"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -17184,7 +17184,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1338",
+        "fs.create_dir_all#lifecycle.rs:1364",
         "fs.create_dir_all#javascript_run.rs:741",
         "fs.write#javascript_run.rs:1047",
         "fs.canonicalize#process_supervision.rs:1795",
@@ -17194,7 +17194,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#evidence_archive.rs:483",
         "fs.create_dir_all#javascript_run.rs:1564",
         "fs.create_dir_all#javascript_run.rs:1566",
-        "fs.create_dir_all#lifecycle.rs:1043",
+        "fs.create_dir_all#lifecycle.rs:1055",
         "fs.create_dir_all#javascript_run.rs:1666",
         "fs.create_dir_all#javascript_run.rs:1668",
     ] {
@@ -17438,7 +17438,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:676",
+        "fs.open#query_index.rs:353@2,fs.open#query_index.rs:353@3,fs.read_from#evidence_archive.rs:676",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:672@2",
     ] {
@@ -19955,12 +19955,12 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:301")],
+        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:322")],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:301 rename)"),
+            .contains("test fault at fs (query_index.rs:322 rename)"),
         "{}",
         ran.stderr()
     );
@@ -20570,9 +20570,9 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1665", true),
-        ("fs.read_dir:2#lifecycle.rs:1634", true),
-        ("fs.remove_file#lifecycle.rs:1665", false),
+        ("fs.remove_file:2#lifecycle.rs:1691", true),
+        ("fs.read_dir:2#lifecycle.rs:1660", true),
+        ("fs.remove_file#lifecycle.rs:1691", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
