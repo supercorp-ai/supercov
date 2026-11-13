@@ -2017,6 +2017,7 @@ pub fn coverage_index_sections(
         ]
         .map(Ok),
         report.passed_is_whole,
+        Some(&report.view),
     )
 }
 
@@ -2030,7 +2031,7 @@ where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
     E: From<CoverageIndexError>,
 {
-    sections_from(views, false)
+    sections_from(views, false, None)
 }
 
 /// [`coverage_index_sections_from`], told whether the passed view is the
@@ -2050,12 +2051,58 @@ where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
     E: From<CoverageIndexError>,
 {
-    sections_from(views, passed_is_whole)
+    sections_from(views, passed_is_whole, None)
+}
+
+/// Where the whole view's own records lie in each section, as (start, end)
+/// byte ranges: its lines, its phases, its decisions' details and metadata
+/// with the anchors and hits of every obligation, and each test's records.
+#[derive(Default)]
+struct WholeBlocks {
+    lines: (usize, usize),
+    phases: (usize, usize),
+    obligations: [(usize, usize); 4],
+    tests: HashMap<String, [(usize, usize); 6]>,
+}
+
+/// Whether `passed` has every obligation, line and phase of the whole view
+/// as it is, and each of its tests as the whole view has it: what a skipped
+/// test that recorded nothing leaves out of a passed view and nothing else.
+/// Those records are then the whole view's, under the passed view's id.
+fn copies_whole(
+    whole: &crate::coverage_report::CoverageView,
+    passed: &crate::coverage_report::CoverageView,
+) -> bool {
+    let tests = whole
+        .tests
+        .iter()
+        .map(|test| (test.id.as_str(), test))
+        .collect::<HashMap<_, _>>();
+    passed.lines == whole.lines
+        && passed.decisions == whole.decisions
+        && passed.branches == whole.branches
+        && passed.points == whole.points
+        && passed.phases == whole.phases
+        && passed
+            .tests
+            .iter()
+            .all(|test| tests.get(test.id.as_str()) == Some(&test))
+}
+
+/// The records in `range` of `records` again at its end, as the passed
+/// view's: every per-view record starts with its view's id.
+fn copy_as_passed(records: &mut Vec<u8>, (start, end): (usize, usize), size: usize) {
+    let at = records.len();
+    records.extend_from_within(start..end);
+    records[at..]
+        .chunks_exact_mut(size)
+        .for_each(|record| record[0] = CoverageViewId::Passed as u8);
 }
 
 fn sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
     passed_is_whole: bool,
+    whole_view: Option<&crate::coverage_report::CoverageView>,
 ) -> Result<Vec<QueryIndexSection>, E>
 where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
@@ -2140,6 +2187,11 @@ where
             )*
         }};
     }
+    // Where the whole view's own records lie, when the whole view is at hand:
+    // a passed view that differs from it only by tests that recorded nothing
+    // (skipped ones, most often) has those records copied rather than built
+    // again (`copies_whole`).
+    let mut blocks: Option<WholeBlocks> = None;
     for item in views {
         let (id, owned) = item?;
         // Written with the whole view's, below.
@@ -2148,6 +2200,11 @@ where
         }
         let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
         let view = owned.borrow();
+        let copied = blocks.as_ref().filter(|_| {
+            id == CoverageViewId::Passed
+                && whole_view.is_some_and(|whole| copies_whole(whole, view))
+        });
+        let mut recorded = WholeBlocks::default();
         check_view(view)?;
         let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
         if id == CoverageViewId::All {
@@ -2189,239 +2246,331 @@ where
         for limitation in &view.limitations {
             limitations.extend_from_slice(&limitation_record(id, limitation, &mut strings));
         }
-        for line in &view.lines {
-            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
-            confidence_records.extend_from_slice(&confidence_record(
-                &line.confidence,
-                &mut strings,
-                &mut relations,
-            )?);
-            line_records.extend_from_slice(&line_record(
-                id,
-                line,
-                confidence_index,
-                &mut strings,
-                &mut relations,
-            ));
-        }
-        for test in &view.tests {
-            test_summaries.extend_from_slice(&test_summary_record(
-                id,
-                test,
-                &mut strings,
-                &mut relations,
-            )?);
-            // Interned by its summary: each record of the test names it by
-            // that number rather than hashing the long id again.
-            let test_string = strings.intern(&test.id);
-            for retry in &test.retries {
-                test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
-            }
-            for attempt in &test.attempts {
-                test_attempts.extend_from_slice(&test_attempt_record(
-                    id,
-                    test_string,
-                    attempt,
-                    &mut strings,
-                ));
-            }
-            for line in &test.lines {
-                test_lines.extend_from_slice(&test_line_record(
-                    id,
-                    test_string,
-                    line,
-                    &mut strings,
-                ));
-            }
-            for hit in &test.hits {
-                test_hits.extend_from_slice(&test_hit_record(id, test_string, hit, &mut strings));
-            }
-            for decision in &test.decisions {
-                let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                for vector in &decision.vectors {
-                    test_vectors.extend_from_slice(&test_vector_record(vector, &mut vector_values));
-                }
-                test_decisions.extend_from_slice(&test_decision_record(
-                    id,
-                    test_string,
-                    &decision.id,
-                    vectors_offset,
-                    decision.vectors.len(),
-                    &mut strings,
-                ));
-            }
-        }
-        for phase in &view.phases {
-            phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings));
-        }
-        for decision in &view.decisions {
-            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
-            confidence_records.extend_from_slice(&confidence_record(
-                &decision.confidence,
-                &mut strings,
-                &mut relations,
-            )?);
-            let observations_offset =
-                decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE;
-            for observation in &decision.vector_observations {
-                let observation_confidence = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+        let at = line_records.len();
+        if let Some(copied) = copied {
+            copy_as_passed(&mut line_records, copied.lines, LINE_RECORD_SIZE);
+        } else {
+            for line in &view.lines {
+                let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
                 confidence_records.extend_from_slice(&confidence_record(
-                    &observation.confidence,
+                    &line.confidence,
                     &mut strings,
                     &mut relations,
                 )?);
-                let vector_index = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                test_vectors.extend_from_slice(&test_vector_record(
-                    &observation.vector,
-                    &mut vector_values,
-                ));
-                decision_vector_observations.extend_from_slice(
-                    &decision_vector_observation_record(
-                        observation,
-                        observation_confidence,
-                        vector_index,
-                        &mut strings,
-                        &mut relations,
-                    ),
-                );
-            }
-            let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
-            // A decision has conditions.
-            decision.conditions.iter().for_each(|condition| {
-                let witness_vectors = if let Some(witness) = &condition.witness {
-                    let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                    test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[0], &mut vector_values));
-                    let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                    test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[1], &mut vector_values));
-                    Some((first, second))
-                } else {
-                    None
-                };
-                decision_conditions.extend_from_slice(&decision_condition_record(
-                    condition,
-                    witness_vectors,
+                line_records.extend_from_slice(&line_record(
+                    id,
+                    line,
+                    confidence_index,
                     &mut strings,
                     &mut relations,
                 ));
-            });
-            decision_details.extend_from_slice(&decision_detail_record(
-                DecisionDetailInput {
-                    view_id: id,
-                    decision,
-                    confidence_index,
-                    observations: (observations_offset, decision.vector_observations.len()),
-                    conditions: (conditions_offset, decision.conditions.len()),
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            decision_metadata.extend_from_slice(&decision_metadata_record(
-                id,
-                decision,
-                &mut strings,
-                &mut relations,
-            ));
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: 0,
-                    id: &decision.meta.id,
-                    file: &decision.meta.file,
-                    line: decision.meta.line,
-                    column: decision.meta.column,
-                    covered: decision.covered,
-                    conditions: Some((
-                        decision
-                            .conditions
-                            .iter()
-                            .filter(|condition| condition.covered)
-                            .count(),
-                        decision.conditions.len(),
-                    )),
-                    tests: &decision.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
+            }
         }
-        for branch in &view.branches {
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: 1,
-                    id: &branch.meta.id,
-                    file: &branch.meta.file,
-                    line: branch.meta.line,
-                    column: branch.meta.column,
-                    covered: branch.covered,
-                    conditions: None,
-                    tests: &[],
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            for alternative in &branch.alternatives {
-                hit_metadata.extend_from_slice(&hit_metadata_record(
-                    HitMetadataInput {
+        recorded.lines = (at, line_records.len());
+        if let Some(copied) = copied {
+            for test in &view.tests {
+                let ranges = &copied.tests[test.id.as_str()];
+                copy_as_passed(&mut test_summaries, ranges[0], TEST_SUMMARY_RECORD_SIZE);
+                copy_as_passed(&mut test_retries, ranges[1], TEST_RETRY_RECORD_SIZE);
+                copy_as_passed(&mut test_attempts, ranges[2], TEST_ATTEMPT_RECORD_SIZE);
+                copy_as_passed(&mut test_lines, ranges[3], TEST_LINE_RECORD_SIZE);
+                copy_as_passed(&mut test_hits, ranges[4], TEST_HIT_RECORD_SIZE);
+                copy_as_passed(&mut test_decisions, ranges[5], TEST_DECISION_RECORD_SIZE);
+            }
+        } else {
+            for test in &view.tests {
+                let at = [
+                    test_summaries.len(),
+                    test_retries.len(),
+                    test_attempts.len(),
+                    test_lines.len(),
+                    test_hits.len(),
+                    test_decisions.len(),
+                ];
+                test_summaries.extend_from_slice(&test_summary_record(
+                    id,
+                    test,
+                    &mut strings,
+                    &mut relations,
+                )?);
+                // Interned by its summary: each record of the test names it by
+                // that number rather than hashing the long id again.
+                let test_string = strings.intern(&test.id);
+                for retry in &test.retries {
+                    test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
+                }
+                for attempt in &test.attempts {
+                    test_attempts.extend_from_slice(&test_attempt_record(
+                        id,
+                        test_string,
+                        attempt,
+                        &mut strings,
+                    ));
+                }
+                for line in &test.lines {
+                    test_lines.extend_from_slice(&test_line_record(
+                        id,
+                        test_string,
+                        line,
+                        &mut strings,
+                    ));
+                }
+                for hit in &test.hits {
+                    test_hits.extend_from_slice(&test_hit_record(
+                        id,
+                        test_string,
+                        hit,
+                        &mut strings,
+                    ));
+                }
+                for decision in &test.decisions {
+                    let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    for vector in &decision.vectors {
+                        test_vectors
+                            .extend_from_slice(&test_vector_record(vector, &mut vector_values));
+                    }
+                    test_decisions.extend_from_slice(&test_decision_record(
+                        id,
+                        test_string,
+                        &decision.id,
+                        vectors_offset,
+                        decision.vectors.len(),
+                        &mut strings,
+                    ));
+                }
+                if whole_view.is_some() {
+                    let end = [
+                        test_summaries.len(),
+                        test_retries.len(),
+                        test_attempts.len(),
+                        test_lines.len(),
+                        test_hits.len(),
+                        test_decisions.len(),
+                    ];
+                    recorded.tests.insert(
+                        test.id.clone(),
+                        std::array::from_fn(|at_| (at[at_], end[at_])),
+                    );
+                }
+            }
+        }
+        let at = phase_summaries.len();
+        if let Some(copied) = copied {
+            copy_as_passed(
+                &mut phase_summaries,
+                copied.phases,
+                PHASE_SUMMARY_RECORD_SIZE,
+            );
+        } else {
+            for phase in &view.phases {
+                phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings));
+            }
+        }
+        recorded.phases = (at, phase_summaries.len());
+        let at = [
+            decision_details.len(),
+            decision_metadata.len(),
+            anchors.len(),
+            hit_metadata.len(),
+        ];
+        if let Some(copied) = copied {
+            copy_as_passed(
+                &mut decision_details,
+                copied.obligations[0],
+                DECISION_DETAIL_RECORD_SIZE,
+            );
+            copy_as_passed(
+                &mut decision_metadata,
+                copied.obligations[1],
+                DECISION_METADATA_RECORD_SIZE,
+            );
+            copy_as_passed(&mut anchors, copied.obligations[2], ANCHOR_RECORD_SIZE);
+            copy_as_passed(
+                &mut hit_metadata,
+                copied.obligations[3],
+                HIT_METADATA_RECORD_SIZE,
+            );
+        } else {
+            for decision in &view.decisions {
+                let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+                confidence_records.extend_from_slice(&confidence_record(
+                    &decision.confidence,
+                    &mut strings,
+                    &mut relations,
+                )?);
+                let observations_offset =
+                    decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE;
+                for observation in &decision.vector_observations {
+                    let observation_confidence = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+                    confidence_records.extend_from_slice(&confidence_record(
+                        &observation.confidence,
+                        &mut strings,
+                        &mut relations,
+                    )?);
+                    let vector_index = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    test_vectors.extend_from_slice(&test_vector_record(
+                        &observation.vector,
+                        &mut vector_values,
+                    ));
+                    decision_vector_observations.extend_from_slice(
+                        &decision_vector_observation_record(
+                            observation,
+                            observation_confidence,
+                            vector_index,
+                            &mut strings,
+                            &mut relations,
+                        ),
+                    );
+                }
+                let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
+                // A decision has conditions.
+                decision.conditions.iter().for_each(|condition| {
+                    let witness_vectors = if let Some(witness) = &condition.witness {
+                        let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                        test_vectors.extend_from_slice(&test_vector_record(
+                            &witness[0],
+                            &mut vector_values,
+                        ));
+                        let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                        test_vectors.extend_from_slice(&test_vector_record(
+                            &witness[1],
+                            &mut vector_values,
+                        ));
+                        Some((first, second))
+                    } else {
+                        None
+                    };
+                    decision_conditions.extend_from_slice(&decision_condition_record(
+                        condition,
+                        witness_vectors,
+                        &mut strings,
+                        &mut relations,
+                    ));
+                });
+                decision_details.extend_from_slice(&decision_detail_record(
+                    DecisionDetailInput {
                         view_id: id,
-                        kind: 2,
-                        id: &alternative.id,
+                        decision,
+                        confidence_index,
+                        observations: (observations_offset, decision.vector_observations.len()),
+                        conditions: (conditions_offset, decision.conditions.len()),
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                decision_metadata.extend_from_slice(&decision_metadata_record(
+                    id,
+                    decision,
+                    &mut strings,
+                    &mut relations,
+                ));
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: 0,
+                        id: &decision.meta.id,
+                        file: &decision.meta.file,
+                        line: decision.meta.line,
+                        column: decision.meta.column,
+                        covered: decision.covered,
+                        conditions: Some((
+                            decision
+                                .conditions
+                                .iter()
+                                .filter(|condition| condition.covered)
+                                .count(),
+                            decision.conditions.len(),
+                        )),
+                        tests: &decision.tests,
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+            }
+            for branch in &view.branches {
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: 1,
+                        id: &branch.meta.id,
                         file: &branch.meta.file,
                         line: branch.meta.line,
                         column: branch.meta.column,
-                        branch_kind: Some(&branch.meta.kind),
-                        label: Some(&branch.meta.id),
-                        alternative: Some(&alternative.label),
-                        source: &branch.meta.source,
-                        tests: &alternative.tests,
+                        covered: branch.covered,
+                        conditions: None,
+                        tests: &[],
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                for alternative in &branch.alternatives {
+                    hit_metadata.extend_from_slice(&hit_metadata_record(
+                        HitMetadataInput {
+                            view_id: id,
+                            kind: 2,
+                            id: &alternative.id,
+                            file: &branch.meta.file,
+                            line: branch.meta.line,
+                            column: branch.meta.column,
+                            branch_kind: Some(&branch.meta.kind),
+                            label: Some(&branch.meta.id),
+                            alternative: Some(&alternative.label),
+                            source: &branch.meta.source,
+                            tests: &alternative.tests,
+                        },
+                        &mut strings,
+                        &mut relations,
+                    ));
+                }
+            }
+            for point in &view.points {
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: match point.meta.kind {
+                            crate::coverage_analysis::PointKind::Statement => 2,
+                            crate::coverage_analysis::PointKind::Function => 3,
+                        },
+                        id: &point.meta.id,
+                        file: &point.meta.file,
+                        line: point.meta.line,
+                        column: point.meta.column,
+                        covered: point.covered,
+                        conditions: None,
+                        tests: &point.tests,
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                hit_metadata.extend_from_slice(&hit_metadata_record(
+                    HitMetadataInput {
+                        view_id: id,
+                        kind: match point.meta.kind {
+                            crate::coverage_analysis::PointKind::Statement => 0,
+                            crate::coverage_analysis::PointKind::Function => 1,
+                        },
+                        id: &point.meta.id,
+                        file: &point.meta.file,
+                        line: point.meta.line,
+                        column: point.meta.column,
+                        branch_kind: None,
+                        label: point.meta.label.as_deref(),
+                        alternative: None,
+                        source: &point.meta.source,
+                        tests: &point.tests,
                     },
                     &mut strings,
                     &mut relations,
                 ));
             }
         }
-        for point in &view.points {
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: match point.meta.kind {
-                        crate::coverage_analysis::PointKind::Statement => 2,
-                        crate::coverage_analysis::PointKind::Function => 3,
-                    },
-                    id: &point.meta.id,
-                    file: &point.meta.file,
-                    line: point.meta.line,
-                    column: point.meta.column,
-                    covered: point.covered,
-                    conditions: None,
-                    tests: &point.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            hit_metadata.extend_from_slice(&hit_metadata_record(
-                HitMetadataInput {
-                    view_id: id,
-                    kind: match point.meta.kind {
-                        crate::coverage_analysis::PointKind::Statement => 0,
-                        crate::coverage_analysis::PointKind::Function => 1,
-                    },
-                    id: &point.meta.id,
-                    file: &point.meta.file,
-                    line: point.meta.line,
-                    column: point.meta.column,
-                    branch_kind: None,
-                    label: point.meta.label.as_deref(),
-                    alternative: None,
-                    source: &point.meta.source,
-                    tests: &point.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
-        }
+        let end = [
+            decision_details.len(),
+            decision_metadata.len(),
+            anchors.len(),
+            hit_metadata.len(),
+        ];
+        recorded.obligations = std::array::from_fn(|at_| (at[at_], end[at_]));
         let unnamed = || CoverageIndexError::InvalidRecord("dimension name");
         for value in &view.coverage_by_kind {
             let name = value.kind.as_deref().ok_or_else(unnamed)?;
@@ -2520,6 +2669,9 @@ where
                     &mut strings,
                 ));
             }
+        }
+        if id == CoverageViewId::All && whole_view.is_some() {
+            blocks = Some(recorded);
         }
         if let Some(starts) = starts
             && passed_is_whole
@@ -5775,6 +5927,7 @@ mod tests {
                 ]
                 .map(Ok),
                 false,
+                None,
             )
             .unwrap();
             let read = |sections: &[QueryIndexSection]| {
@@ -5788,6 +5941,51 @@ mod tests {
             let (copied_read, built_read) = (read(&copied), read(&built));
             assert!(copied_read.contains("Passed summary"), "{copied_read}");
             assert_eq!(copied_read, built_read);
+        }
+    }
+
+    /// A passed view that lacks only a skipped test that recorded nothing
+    /// has the whole view's records copied, each test's by its own, and
+    /// every reader answers as it did when they were built again; a passed
+    /// view whose tests differ otherwise is built again.
+    #[test]
+    fn a_passed_view_without_a_silent_skipped_test_reads_as_when_built_again() {
+        for mut run in [report(), scoped_report(), phased_report()] {
+            run.filters.passed = run.view.clone();
+            let mut skipped = run.view.tests[0].clone();
+            skipped.id = "skipped-test".into();
+            skipped.name = "a skipped test".into();
+            skipped.outcome = "skipped".into();
+            skipped.hits.clear();
+            skipped.lines.clear();
+            skipped.decisions.clear();
+            run.view.tests.insert(0, skipped);
+            assert!(copies_whole(&run.view, &run.filters.passed));
+            let copied = coverage_index_sections(&run).unwrap();
+            let built = sections_from::<_, CoverageIndexError>(
+                [
+                    (CoverageViewId::All, &run.view),
+                    (CoverageViewId::Passed, &run.filters.passed),
+                    (CoverageViewId::Failed, &run.filters.failed),
+                ]
+                .map(Ok),
+                false,
+                None,
+            )
+            .unwrap();
+            let read = |sections: &[QueryIndexSection]| {
+                let root = root();
+                let path = root.join("query-index.v1.bin");
+                write_query_index(sections, &identity(), &path).unwrap();
+                let container = QueryIndex::open(&path, &identity()).unwrap();
+                everything_read(&CoverageIndex::new(&container).unwrap())
+            };
+            let (copied_read, built_read) = (read(&copied), read(&built));
+            assert!(copied_read.contains("Passed summary"), "{copied_read}");
+            assert_eq!(copied_read, built_read);
+            run.filters.passed.tests[0].hits.clear();
+            run.filters.passed.tests[0].hits.push("elsewhere".into());
+            assert!(!copies_whole(&run.view, &run.filters.passed));
         }
     }
 
