@@ -3241,6 +3241,17 @@ fn execute_coverage_query(
         })?;
         request.mutants.diff = Some(diff);
     }
+    if request.command == "mutants" {
+        let saved = mutants_test_command::read_saved(run);
+        if !saved.is_empty() {
+            request.mutants.strong = Some(
+                saved
+                    .into_iter()
+                    .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
+                    .collect(),
+            );
+        }
+    }
     let mut diff_inputs = None;
     {
         let comparison = checkout_comparison(root, run);

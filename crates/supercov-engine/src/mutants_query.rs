@@ -44,6 +44,10 @@ pub struct MutantsOptions {
     /// `--fail-on`: the statuses no mutant asked about may have, for a gate.
     #[serde(default)]
     pub fail_on: Vec<MutantStatus>,
+    /// The strong verdicts `mutants test` saved into the run, by mutant id,
+    /// read by the caller: each `{ status, killedBy, tests, durationMs }`.
+    #[serde(skip)]
+    pub strong: Option<BTreeMap<String, Value>>,
 }
 
 /// `--fail-on`: how many of the mutants asked about have a status the gate
@@ -787,6 +791,25 @@ pub fn coverage_mutants_query(
         }
         None => (None, BTreeMap::new()),
     };
+    // StrykerJS's score over the asked mutants a strong pass gave a verdict:
+    // killed and timed out over those and the survivors and uncovered.
+    let strong_score = options.options.strong.as_ref().and_then(|strong| {
+        let (mut detected, mut total) = (0usize, 0usize);
+        for mutant in &asked {
+            match strong
+                .get(&mutant.id())
+                .and_then(|verdict| verdict["status"].as_str())
+            {
+                Some("killed" | "timeout") => {
+                    detected += 1;
+                    total += 1;
+                }
+                Some("survived" | "no-coverage") => total += 1,
+                _ => {}
+            }
+        }
+        (total > 0).then(|| (detected as f64 / total as f64 * 10_000.0).round() / 10_000.0)
+    });
     let gate = &options.options.fail_on;
     let fail_on = (!gate.is_empty()).then(|| FailOn {
         statuses: gate.clone(),
@@ -813,7 +836,13 @@ pub fn coverage_mutants_query(
         .take(options.limit)
         .map(|mutant| {
             let stryker = statuses.get(&mutant.id()).map(|(_, status)| status.clone());
-            MutantEntry::of(mutant, stryker)
+            let mut entry = MutantEntry::of(mutant, stryker);
+            entry.strong = options
+                .options
+                .strong
+                .as_ref()
+                .and_then(|strong| strong.get(&entry.id).cloned());
+            entry
         })
         .collect::<Vec<_>>();
     let pagination = agent_json::pagination(options.offset, options.limit, page.len(), total);
@@ -854,11 +883,14 @@ pub fn coverage_mutants_query(
                 .map(|mutation| mutation.mutant_set.clone()),
             levels: MutantLevels {
                 weak: mutation.is_some(),
-                strong: false,
+                strong: strong_score.is_some(),
             },
             file,
             line,
-            summary: MutantsSummary::of(counts, untestable),
+            summary: MutantsSummary {
+                mutation_score: strong_score,
+                ..MutantsSummary::of(counts, untestable)
+            },
             note,
             mutants: page,
             stryker,
