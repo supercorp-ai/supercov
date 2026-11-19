@@ -284,6 +284,7 @@ fn create_analyzable_run(
         probe_tables: Default::default(),
     };
     let result = RawTestResult {
+        duration_ms: None,
         span: None,
         test_id: Some("test".into()),
         scope: None,

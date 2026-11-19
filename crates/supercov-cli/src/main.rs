@@ -1539,7 +1539,7 @@ fn changed_lines_against(
 /// modified since it left `base`. The run's recorded commit is compared
 /// with the merge base where the run was measured on a clean checkout;
 /// otherwise the working tree is, with untracked files as added whole.
-fn mutant_diff(
+pub(crate) fn mutant_diff(
     root: &Path,
     base: &str,
     run: &StoredRun,
@@ -3535,6 +3535,12 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         return assertions_command::command(&arguments);
     }
     if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.get(2).is_some_and(|a| a == "test")
+    {
+        return mutants_test_command::command(&arguments);
+    }
+    if command == "runs"
         && arguments.get(1).is_some_and(|a| a == "gaps")
         && arguments.iter().any(|a| a == "--format")
     {
@@ -4181,6 +4187,7 @@ fn instrument_js() -> ExitCode {
 
 // Below the lines tests name by number (main.rs:2475).
 mod mutants_export;
+mod mutants_test_command;
 
 #[cfg(test)]
 mod docs_command_tests {

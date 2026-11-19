@@ -8,6 +8,9 @@ const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
 const activeScopes = new Map();
+// When each test began, for the time it took: the strong pass orders a
+// mutant's tests by it and sets their time limits from it.
+const startedAt = new Map();
 const runtimeGlobal = globalThis;
 const runtime = runtimeGlobal.__SUPERCOV_DIRECT_RUNTIME__ ?? {
     activateCoverageScope: localActivateCoverageScope,
@@ -92,6 +95,7 @@ beforeEach((context) => {
         attemptId: `${testKey}-${retry}`,
     };
     activeScopes.set(task.id, scope);
+    startedAt.set(task.id, performance.now());
     runtime.activateCoverageScope(scope);
     runtime.resetCoverage(testId);
 });
@@ -102,6 +106,8 @@ afterEach((context) => {
         .join("/");
     const scope = activeScopes.get(task.id);
     const retry = scope?.retry ?? task.result?.retryCount ?? 0;
+    const began = startedAt.get(task.id);
+    startedAt.delete(task.id);
     const payload = {
         testId: scope?.testId ?? `vitest:${task.id}`,
         ...(scope ? { scope } : {}),
@@ -110,6 +116,7 @@ afterEach((context) => {
         title: task.name,
         retry,
         status: attemptStatus(task.result?.state),
+        ...(began === undefined ? {} : { durationMs: Math.round(performance.now() - began) }),
         provenance: inferTestProvenance({
             runner: "vitest",
             file: testFile,

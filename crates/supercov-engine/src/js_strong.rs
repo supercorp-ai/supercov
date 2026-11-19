@@ -1,0 +1,382 @@
+//! Strong mutation's plan (`docs/design/strong-mutation.md`): which of a
+//! run's mutants need running, and against which of its tests.
+//!
+//! A test can kill a mutant only if the mutant's value differed somewhere in
+//! that test's own execution: until then, the test runs exactly as it ran
+//! without the mutant. So a mutant's candidates are the tests whose own
+//! evidence, read alone, leaves the mutant `infected` or `unknown` -- the
+//! weak verdict applied one test at a time. Where a test's evidence is not
+//! its own (its attribution is not exact), or the mutant's code ran in work
+//! no test was credited with, the plan takes more tests, never fewer.
+//!
+//! Every exclusion here is a claim that a StrykerJS run would not see that
+//! test kill that mutant. The strong pass is validated against StrykerJS run
+//! with every killer recorded (`disableBail`), and a kill by a test this
+//! plan left out is a soundness violation.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::Serialize;
+
+use crate::coverage_report::{
+    ATTRIBUTION_BY_TIME, ATTRIBUTION_EXACT, ArchiveReportRequest, RawTestResult, ReportError,
+};
+use crate::js_mutant_links::{CandidateMutant, MutantsFile};
+use crate::js_weak_mutation::{Observations, Status, observations, verdict};
+
+/// A test the plan may run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedTest {
+    /// The test's id as its runner's hooks recorded it (`vitest:<id>`).
+    pub id: String,
+    /// Its file, relative to the project root.
+    pub file: Option<String>,
+    /// Its full name (`describe > it`).
+    pub name: String,
+    /// Its title alone.
+    pub title: Option<String>,
+    /// The runner it ran under.
+    pub runner: String,
+    /// How long it took in the measured run, when the runner said.
+    pub duration_ms: Option<u64>,
+}
+
+/// Why a test is one of a mutant's candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CandidateReason {
+    /// Its own evidence shows the mutant's value differed.
+    Infected,
+    /// Its own evidence ran the code and cannot tell.
+    Unknown,
+    /// Its evidence is not its own (run-wide or partial attribution).
+    NotExact,
+    /// The mutant's code ran in work no test was credited with.
+    Unattributed,
+    /// The mutant's code ran while its file's modules loaded: every test of
+    /// the file is a candidate, and the file runs whole.
+    ModuleLoad,
+}
+
+/// One candidate test of a mutant: an index into the plan's tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub test: usize,
+    pub reason: CandidateReason,
+}
+
+/// What the plan says of a mutant without running it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Decided {
+    /// A static rule shows no input can make it differ.
+    Equivalent,
+    /// No test ran its code.
+    NoCoverage,
+    /// No test infected it: none can kill it.
+    Survived,
+}
+
+/// One listed mutant and what the strong pass does with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedMutant {
+    pub id: String,
+    pub file: String,
+    /// Its position in its file's list: the index its switch carries.
+    pub index: usize,
+    pub mutator: String,
+    /// The weak status (`infected`, `unknown`, ...).
+    pub weak: &'static str,
+    /// Set where the plan decides it without running it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided: Option<Decided>,
+    /// The code of why it was decided so (the weak reason's code, or
+    /// `no-passing-candidate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Its candidates, cheapest first: tests with a duration before those
+    /// without, then by name.
+    pub candidates: Vec<Candidate>,
+    /// Test files that must run whole for it (module-load candidates).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub whole_files: Vec<String>,
+}
+
+/// The plan for a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrongPlan {
+    pub mutant_set: String,
+    pub tests: Vec<PlannedTest>,
+    pub mutants: Vec<PlannedMutant>,
+}
+
+/// The plan for a stored run's archive; `None` when the run listed no
+/// mutants.
+pub fn plan_for_archive(request: &ArchiveReportRequest) -> Result<Option<StrongPlan>, ReportError> {
+    let (raw_results, listed) = crate::coverage_report::archive_tests_and_mutants(request)?;
+    Ok(listed.and_then(|listed| plan(&raw_results, listed)))
+}
+
+/// A record's role: one a test's, a module setup's, or the run's
+/// background.
+fn role_of(raw: &RawTestResult) -> &str {
+    raw.role.as_str()
+}
+
+fn passed(raw: &RawTestResult) -> bool {
+    raw.status.as_deref() == Some("passed") && !raw.flaky
+}
+
+fn exact(raw: &RawTestResult) -> bool {
+    raw.attribution == ATTRIBUTION_EXACT || raw.attribution == ATTRIBUTION_BY_TIME
+}
+
+/// One record's own observations, with the run's notes on records that
+/// carry no values applied to it.
+fn own_observations(raw: &RawTestResult, without_values: &HashSet<&String>) -> Observations {
+    let mut seen = observations(std::slice::from_ref(raw));
+    if raw
+        .test_id
+        .as_ref()
+        .is_some_and(|id| without_values.contains(id))
+    {
+        seen.unvalued_hits = seen.hits.clone();
+    }
+    seen
+}
+
+/// Whether the mutant's code is among what `seen` hit: its statement, or
+/// its function where no statement contains it. A mutant with neither
+/// point cannot be narrowed, and counts as hit by anything.
+fn may_reach(mutant: &CandidateMutant, seen: &Observations) -> bool {
+    match (&mutant.statement, &mutant.function) {
+        (Some(statement), _) => seen.hits.contains(statement),
+        (None, Some(function)) => seen.hits.contains(function),
+        (None, None) => true,
+    }
+}
+
+/// Whether `seen` could have infected the mutant: its verdict read from
+/// `seen` alone is `infected` or `unknown`.
+fn could_infect(mutant: &CandidateMutant, seen: &Observations) -> Option<CandidateReason> {
+    if !may_reach(mutant, seen) {
+        return None;
+    }
+    match verdict(mutant, seen).0 {
+        Status::Infected { .. } => Some(CandidateReason::Infected),
+        Status::Unknown => Some(CandidateReason::Unknown),
+        Status::NotReached | Status::NotInfected | Status::Equivalent => None,
+    }
+}
+
+fn weak_name(status: Status) -> &'static str {
+    match status {
+        Status::NotReached => "not-reached",
+        Status::NotInfected => "not-infected",
+        Status::Infected { .. } => "infected",
+        Status::Unknown => "unknown",
+        Status::Equivalent => "equivalent",
+    }
+}
+
+/// The plan: every listed mutant, with what the run decides of it or the
+/// tests it must run against. `None` when the run listed no mutant set.
+pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option<StrongPlan> {
+    let mutant_set = listed.mutant_set.clone()?;
+    let without_values = listed.tests_without_values.iter().collect::<HashSet<_>>();
+
+    // The run as a whole: the weak verdict every mutant has.
+    let mut whole = observations(raw_results);
+    if !without_values.is_empty() {
+        for raw in raw_results.iter().filter(|raw| {
+            raw.test_id
+                .as_ref()
+                .is_some_and(|id| without_values.contains(id))
+        }) {
+            let hits = observations(std::slice::from_ref(raw)).hits;
+            whole.unvalued_hits.extend(hits);
+        }
+    }
+
+    // Tests, one per test id: a test's attempts (retries) are one test, and
+    // it is runnable only where every attempt passed.
+    let mut tests = Vec::<PlannedTest>::new();
+    let mut test_index = HashMap::<String, usize>::new();
+    let mut runnable = Vec::<bool>::new();
+    let mut by_file = BTreeMap::<String, Vec<usize>>::new();
+    for raw in raw_results.iter().filter(|raw| role_of(raw) == "test") {
+        let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
+        let index = *test_index.entry(id.clone()).or_insert_with(|| {
+            tests.push(PlannedTest {
+                id: id.clone(),
+                file: raw.test_file.clone(),
+                name: raw.test.clone(),
+                title: raw.title.clone(),
+                runner: raw.provenance.runner.clone(),
+                duration_ms: None,
+            });
+            runnable.push(true);
+            if let Some(file) = &raw.test_file {
+                by_file
+                    .entry(file.clone())
+                    .or_default()
+                    .push(tests.len() - 1);
+            }
+            tests.len() - 1
+        });
+        runnable[index] &= passed(raw);
+        if let Some(ms) = raw.duration_ms {
+            let duration = &mut tests[index].duration_ms;
+            *duration = Some(duration.map_or(ms, |seen| seen.max(ms)));
+        }
+    }
+
+    // Each record's own observations, and an index from a hit point to the
+    // records that hit it, so a mutant's verdict is read only from the
+    // records that ran its code.
+    struct Seen {
+        record: usize,
+        seen: Observations,
+    }
+    let mut seen = Vec::<Seen>::new();
+    let mut by_point = HashMap::<String, Vec<usize>>::new();
+    let mut unbounded = Vec::<usize>::new();
+    for (record, raw) in raw_results.iter().enumerate() {
+        let own = own_observations(raw, &without_values);
+        let at = seen.len();
+        if role_of(raw) == "test" && !exact(raw) {
+            unbounded.push(at);
+        }
+        for point in &own.hits {
+            by_point.entry(point.clone()).or_default().push(at);
+        }
+        seen.push(Seen { record, seen: own });
+    }
+
+    let mut mutants = Vec::new();
+    for (file, listed_mutants) in &listed.files {
+        for (index, mutant) in listed_mutants.iter().enumerate() {
+            let (status, reason) = verdict(mutant, &whole);
+            let mut planned = PlannedMutant {
+                id: if mutant.id.is_empty() {
+                    format!(
+                        "{file}:{}:{}-{}:{}:{}:{}",
+                        mutant.start.0,
+                        mutant.start.1,
+                        mutant.end.0,
+                        mutant.end.1,
+                        mutant.mutator,
+                        mutant.replacement
+                    )
+                } else {
+                    mutant.id.clone()
+                },
+                file: file.clone(),
+                index,
+                mutator: mutant.mutator.clone(),
+                weak: weak_name(status),
+                decided: None,
+                reason: None,
+                candidates: Vec::new(),
+                whole_files: Vec::new(),
+            };
+            match status {
+                Status::Equivalent => {
+                    planned.decided = Some(Decided::Equivalent);
+                    planned.reason = Some(reason.code.to_owned());
+                }
+                Status::NotReached => {
+                    planned.decided = Some(Decided::NoCoverage);
+                    planned.reason = Some(reason.code.to_owned());
+                }
+                Status::NotInfected => {
+                    planned.decided = Some(Decided::Survived);
+                    planned.reason = Some(reason.code.to_owned());
+                }
+                Status::Infected { .. } | Status::Unknown => {
+                    let mut chosen = BTreeMap::<usize, CandidateReason>::new();
+                    let mut whole_files = HashSet::<String>::new();
+                    let mut take = |test: usize, why: CandidateReason| {
+                        chosen.entry(test).or_insert(why);
+                    };
+                    // The records that ran the mutant's point (or all, for a
+                    // mutant no point contains), and every record whose
+                    // silence proves nothing.
+                    let point = mutant.statement.as_ref().or(mutant.function.as_ref());
+                    let mut records = match point {
+                        Some(point) => by_point.get(point).cloned().unwrap_or_default(),
+                        None => (0..seen.len()).collect(),
+                    };
+                    records.extend(unbounded.iter().copied());
+                    records.sort_unstable();
+                    records.dedup();
+                    for at in records {
+                        let Seen { record, seen: own } = &seen[at];
+                        let raw = &raw_results[*record];
+                        let why = if role_of(raw) == "test" && !exact(raw) {
+                            Some(CandidateReason::NotExact)
+                        } else {
+                            could_infect(mutant, own)
+                        };
+                        let Some(why) = why else { continue };
+                        match role_of(raw) {
+                            "test" => {
+                                let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
+                                if let Some(&test) = test_index.get(&id) {
+                                    take(test, why);
+                                }
+                            }
+                            // A file's module setup: every test of the file.
+                            "setup" => {
+                                if let Some(file) = &raw.test_file {
+                                    whole_files.insert(file.clone());
+                                    for &test in by_file.get(file).into_iter().flatten() {
+                                        take(test, CandidateReason::ModuleLoad);
+                                    }
+                                }
+                            }
+                            // Work no test was credited with: any test of the
+                            // run may have caused it.
+                            _ => {
+                                for test in 0..tests.len() {
+                                    take(test, CandidateReason::Unattributed);
+                                }
+                            }
+                        }
+                    }
+                    let mut candidates = chosen
+                        .into_iter()
+                        .filter(|(test, _)| runnable[*test])
+                        .map(|(test, reason)| Candidate { test, reason })
+                        .collect::<Vec<_>>();
+                    candidates.sort_by(|a, b| {
+                        let (ta, tb) = (&tests[a.test], &tests[b.test]);
+                        (ta.duration_ms.is_none(), ta.duration_ms, &ta.name).cmp(&(
+                            tb.duration_ms.is_none(),
+                            tb.duration_ms,
+                            &tb.name,
+                        ))
+                    });
+                    if candidates.is_empty() {
+                        planned.decided = Some(Decided::Survived);
+                        planned.reason = Some("no-passing-candidate".into());
+                    }
+                    let mut whole_files = whole_files.into_iter().collect::<Vec<_>>();
+                    whole_files.sort();
+                    planned.candidates = candidates;
+                    planned.whole_files = whole_files;
+                }
+            }
+            mutants.push(planned);
+        }
+    }
+    Some(StrongPlan {
+        mutant_set,
+        tests,
+        mutants,
+    })
+}

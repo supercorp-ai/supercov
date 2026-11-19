@@ -161,9 +161,9 @@ try {
 
   // The Worker run that cannot be published -- its work directory not
   // made -- ends the run, saying where, and keeps its evidence.
-  const unpublished = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.create_dir_all#rust_wasm_evidence.rs:375' });
+  const unpublished = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.create_dir_all#rust_wasm_evidence.rs:377' });
   assert.notEqual(unpublished.status, 0, unpublished.stderr);
-  assert.ok(unpublished.stderr.includes('test fault at fs (rust_wasm_evidence.rs:375'), unpublished.stderr);
+  assert.ok(unpublished.stderr.includes('test fault at fs (rust_wasm_evidence.rs:377'), unpublished.stderr);
   assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
 
   // A Worker whose windows cannot be listed read none, and with no

@@ -280,6 +280,7 @@ fn javascript_archive_entries(
             _ => "failed",
         };
         let command_result = RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(format!("command:{run_id}")),
             scope: None,
@@ -2357,6 +2358,7 @@ mod tests {
         observed: bool,
     ) -> RawTestResult {
         RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: test_id.map(str::to_owned),
             scope: scope.map(|(worker, test, retry)| ExecutionScope {

@@ -304,6 +304,7 @@ pub(crate) fn run_nextest(
             &attempt_id,
         )?;
         results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {

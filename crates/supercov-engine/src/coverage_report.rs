@@ -486,6 +486,11 @@ pub struct RawTestResult {
     /// its own has no need of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<[i64; 2]>,
+    /// How long the test took, in milliseconds, as its runner measured it:
+    /// the strong pass orders a mutant's tests by it and sets their time
+    /// limits from it. Nothing else reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 fn default_test_role() -> String {
@@ -3695,13 +3700,39 @@ pub fn archive_request(
     ),
     ReportError,
 > {
-    archive_request_from(request, None, |visit| {
+    archive_request_from(request, None, false, |visit| {
         crate::evidence_archive::read_archive_each(
             Path::new(&request.archive_path),
             |_| true,
             visit,
         )
     })
+    .map(|(frontend, normalized, transport, digest, mutation, _)| {
+        (frontend, normalized, transport, digest, mutation)
+    })
+}
+
+/// A stored run's tests and the mutants it listed, for the strong pass to
+/// plan from: each test's records as the views read them (server work
+/// credited, places resolved), and every listed mutant with its links.
+/// `None` for the mutants when the run listed none.
+pub(crate) fn archive_tests_and_mutants(
+    request: &ArchiveReportRequest,
+) -> Result<
+    (
+        Vec<RawTestResult>,
+        Option<crate::js_mutant_links::MutantsFile>,
+    ),
+    ReportError,
+> {
+    let (_, normalized, _, _, _, listed) = archive_request_from(request, None, true, |visit| {
+        crate::evidence_archive::read_archive_each(
+            Path::new(&request.archive_path),
+            |_| true,
+            visit,
+        )
+    })?;
+    Ok((normalized.raw_results, listed))
 }
 
 /// A run's evidence, still in memory as the archive is written from it, as
@@ -3714,8 +3745,11 @@ pub fn analyze_coverage_entries(
     parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
     let (_, normalized, transport, (), mutation) =
-        archive_request_from(request, parsed, |mut visit| {
+        archive_request_from(request, parsed, false, |mut visit| {
             entries.iter().cloned().try_for_each(&mut visit)
+        })
+        .map(|(frontend, normalized, transport, digest, mutation, _)| {
+            (frontend, normalized, transport, digest, mutation)
         })?;
     finish_archive_analysis(normalized, transport, mutation)
 }
@@ -3730,6 +3764,7 @@ pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 fn archive_request_from<D>(
     request: &ArchiveReportRequest,
     mut parsed: Option<ParsedResults>,
+    keep_listed: bool,
     read: impl FnOnce(
         &mut dyn FnMut(
             EvidenceArchiveEntry,
@@ -3742,6 +3777,7 @@ fn archive_request_from<D>(
         TransportStats,
         D,
         Option<crate::coverage_index::MutationResults>,
+        Option<crate::js_mutant_links::MutantsFile>,
     ),
     ReportError,
 > {
@@ -3922,6 +3958,7 @@ fn archive_request_from<D>(
     background.records.clone_from(&background_records);
     if had_background {
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(format!("background:{}", request.run_id)),
             scope: None,
@@ -4015,6 +4052,7 @@ fn archive_request_from<D>(
         .find(|entry| entry.path == "mutants.json")
         .map(parse_entry::<crate::js_mutant_links::MutantsFile>)
         .transpose()?;
+    let kept = if keep_listed { listed.clone() } else { None };
     let mutation = crate::js_weak_mutation::results(&raw_results, listed);
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
@@ -4031,7 +4069,7 @@ fn archive_request_from<D>(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    Ok((frontend, normalized, transport, digest, mutation))
+    Ok((frontend, normalized, transport, digest, mutation, kept))
 }
 
 /// Evidence that names a probe by its module's table and place -- a module
@@ -4659,6 +4697,7 @@ mod tests {
 
     fn raw(id: &str, retry: usize, status: &str, hits: &[&str]) -> RawTestResult {
         RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(id.into()),
             scope: None,
@@ -5024,6 +5063,7 @@ mod tests {
     #[test]
     fn a_filter_keeps_the_setup_of_the_files_it_picks_and_nothing_else() {
         let in_file = |id: &str, role: &str, file: &str| RawTestResult {
+            duration_ms: None,
             span: None,
             role: role.into(),
             test_file: Some(file.into()),

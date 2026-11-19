@@ -612,6 +612,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
                 ));
             }
             let record = RawTestResult {
+                duration_ms: None,
                 test_id: Some(test_id),
                 scope: None,
                 test: name.clone(),

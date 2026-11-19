@@ -4922,6 +4922,7 @@ mod tests {
                 probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some("test".into()),
                 scope: None,
@@ -5247,6 +5248,7 @@ mod tests {
                 probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some("unstarted".into()),
                 scope: None,

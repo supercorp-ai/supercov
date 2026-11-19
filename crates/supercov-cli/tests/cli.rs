@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1170")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1171")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1170"),
+        seen.contains("test fault at fs (javascript_run.rs:1171"),
         "{seen}"
     );
 }
@@ -1143,23 +1143,23 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:672"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
     // So is a file's source asked of a store that cannot be listed.
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "source", "src/cart.js"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:672"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:672")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:673")],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1385,7 +1385,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:672",
+            "fs.read_dir#run_store.rs:673",
             "Cannot read local coverage runs",
         ),
         (
@@ -11114,11 +11114,11 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673@2")],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:672"), "{said}");
+    assert!(fired_at(&said, "run_store.rs:673"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -14273,7 +14273,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
         )
         .exits(2);
     assert!(
@@ -14406,7 +14406,7 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:618", "run_store.rs:618"),
+        ("fs.symlink_metadata#run_store.rs:619", "run_store.rs:619"),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -14634,12 +14634,12 @@ fn a_merged_doctest_harness_must_report_what_its_listing_and_arguments_select() 
         "unrecorded",
         &[("merged", listed), ("merged.out", a)],
         &["--test", "src/lib.rs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:930")],
+        &[("SUPERCOV_TEST_FAULT", "fs.write#rust_owned_doctests.rs:931")],
     );
     let said = ran.stderr();
     assert_ne!(ran.code(), 0, "{said}");
     assert!(
-        said.contains("test fault at fs (rust_owned_doctests.rs:930"),
+        said.contains("test fault at fs (rust_owned_doctests.rs:931"),
         "{said}"
     );
     // A harness that failed may have stopped short: it is not held to its
@@ -14853,11 +14853,11 @@ fn the_doctest_runtool_records_each_binary_rustdoc_hands_it() {
         "named",
         "bin/doctest",
         &[("doctest.out", "\nrunning 0 tests\n")],
-        "fs.write#rust_owned_doctests.rs:1264",
+        "fs.write#rust_owned_doctests.rs:1265",
     );
     let output = ran.exits(101);
     assert!(
-        output.contains("test fault at fs (rust_owned_doctests.rs:1264"),
+        output.contains("test fault at fs (rust_owned_doctests.rs:1265"),
         "{output}"
     );
     // A merged harness whose children's records went missing reports its
@@ -15781,7 +15781,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
-                "__nextest-runner/spawn#rust_owned_nextest.rs:603",
+                "__nextest-runner/spawn#rust_owned_nextest.rs:604",
                 "__nextest-runner/fs.read@1",
                 "__nextest-runner/fs.create_dir_all@1",
                 "__nextest-runner/fs.create_dir_all@2",
@@ -16707,7 +16707,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:672",
+        "fs.read_dir#run_store.rs:673",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -17205,18 +17205,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1364",
-        "fs.create_dir_all#javascript_run.rs:741",
-        "fs.write#javascript_run.rs:1047",
+        "fs.create_dir_all#javascript_run.rs:742",
+        "fs.write#javascript_run.rs:1048",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1118",
-        "fs.create_dir_all#javascript_run.rs:1289",
+        "fs.create_dir_all#javascript_run.rs:1119",
+        "fs.create_dir_all#javascript_run.rs:1290",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1564",
-        "fs.create_dir_all#javascript_run.rs:1566",
+        "fs.create_dir_all#javascript_run.rs:1565",
+        "fs.create_dir_all#javascript_run.rs:1567",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1666",
-        "fs.create_dir_all#javascript_run.rs:1668",
+        "fs.create_dir_all#javascript_run.rs:1667",
+        "fs.create_dir_all#javascript_run.rs:1669",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17461,7 +17461,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // that cannot be read.
         "fs.open#query_index.rs:353@2,fs.open#query_index.rs:353@3,fs.read_from#evidence_archive.rs:676",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:672@2",
+        "fs.read_dir#run_store.rs:673@2",
     ] {
         let refused = project
             .supercov_with(
@@ -17522,7 +17522,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:676",
+            "fs.read#run_store.rs:1320,fs.read_from#evidence_archive.rs:676",
         )],
     );
     assert!(
@@ -18775,43 +18775,43 @@ fn a_doctest_runtool_step_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1188",
-            "rust_owned_doctests.rs:1188",
+            "fs.create_dir_all#rust_owned_doctests.rs:1189",
+            "rust_owned_doctests.rs:1189",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1193",
-            "rust_owned_doctests.rs:1193",
+            "spawn#rust_owned_doctests.rs:1194",
+            "rust_owned_doctests.rs:1194",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1201",
-            "rust_owned_doctests.rs:1201",
+            "fs.read#rust_owned_doctests.rs:1202",
+            "rust_owned_doctests.rs:1202",
         ),
         (
             "2024",
-            "fs.read#rust_owned_doctests.rs:1212",
-            "rust_owned_doctests.rs:1212",
+            "fs.read#rust_owned_doctests.rs:1213",
+            "rust_owned_doctests.rs:1213",
         ),
         (
             "2024",
-            "fs.create_dir_all#rust_owned_doctests.rs:1157",
-            "rust_owned_doctests.rs:1157",
+            "fs.create_dir_all#rust_owned_doctests.rs:1158",
+            "rust_owned_doctests.rs:1158",
         ),
         (
             "2024",
-            "fs.write#rust_owned_doctests.rs:1247",
-            "rust_owned_doctests.rs:1247",
+            "fs.write#rust_owned_doctests.rs:1248",
+            "rust_owned_doctests.rs:1248",
         ),
         (
             "2021",
-            "spawn#rust_owned_doctests.rs:1257",
-            "rust_owned_doctests.rs:1257",
+            "spawn#rust_owned_doctests.rs:1258",
+            "rust_owned_doctests.rs:1258",
         ),
         (
             "2024",
-            "spawn#rust_owned_doctests.rs:1170",
-            "rust_owned_doctests.rs:1170",
+            "spawn#rust_owned_doctests.rs:1171",
+            "rust_owned_doctests.rs:1171",
         ),
     ] {
         let project = Project::empty("doctest-runtool-steps");
@@ -19840,10 +19840,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:672"));
+    assert!(fired_at(&unlisted.stderr(), "run_store.rs:673"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,
@@ -20069,11 +20069,11 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     project.supercov(&["merge", &first, &second]).succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "files"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:672@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673@2")],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:672 read_dir)"),
+            .contains("test fault at fs (run_store.rs:673 read_dir)"),
         "{}",
         ran.stderr()
     );
@@ -20090,13 +20090,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
     for (edition, fault, place) in [
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:819@1"),
-            "rust_owned_doctests.rs:819",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:820@1"),
+            "rust_owned_doctests.rs:820",
         ),
         (
             "2024",
-            format!("{stand_in}spawn#rust_owned_doctests.rs:819@2"),
-            "rust_owned_doctests.rs:819",
+            format!("{stand_in}spawn#rust_owned_doctests.rs:820@2"),
+            "rust_owned_doctests.rs:820",
         ),
         (
             "2021",
@@ -20105,8 +20105,8 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         ),
         (
             "2024",
-            format!("{stand_in}fs.read#rust_owned_doctests.rs:1103@1"),
-            "rust_owned_doctests.rs:1103",
+            format!("{stand_in}fs.read#rust_owned_doctests.rs:1104@1"),
+            "rust_owned_doctests.rs:1104",
         ),
         // The stand-in's own path, and the merged harness runner's: each
         // resolves itself first.
@@ -20123,13 +20123,13 @@ fn a_doctest_stand_ins_rustdoc_or_a_package_record_that_fails_is_named() {
         // The merged harness's order, and a child's record, read back.
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1201".to_owned(),
-            "rust_owned_doctests.rs:1201",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1202".to_owned(),
+            "rust_owned_doctests.rs:1202",
         ),
         (
             "2024",
-            "__doctest-runner/fs.read#rust_owned_doctests.rs:1212".to_owned(),
-            "rust_owned_doctests.rs:1212",
+            "__doctest-runner/fs.read#rust_owned_doctests.rs:1213".to_owned(),
+            "rust_owned_doctests.rs:1213",
         ),
     ] {
         let project = Project::empty("doctest-stand-in-steps");
@@ -21360,4 +21360,58 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
     assert_eq!(left_in_copy(""), 0);
     // The prune stops there: that source and those after it stay.
     assert!(left_in_copy("fs.rename#workspace.rs:2226") > 0);
+}
+
+/// `mutants test --plan`: a mutant no test infected is decided without
+/// running, one no test reached has no coverage, and an infected one runs
+/// against the tests that infected it, and no other.
+#[cfg(unix)]
+#[test]
+fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it() {
+    let project = mutants_project("strong-plan");
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    let tests = reply["tests"].as_array().unwrap();
+    let name = |index: &serde_json::Value| {
+        tests[index.as_u64().unwrap() as usize]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let mutants = reply["mutants"].as_array().unwrap();
+    let find = |id: &str| {
+        mutants
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {reply}"))
+    };
+    // `sum >= 50` to `sum > 50`: the tests use 80 and 10, never 50.
+    let boundary = find("src/cart.js:2:7-2:16:EqualityOperator:>");
+    assert_eq!(boundary["decided"], "survived", "{boundary}");
+    assert_eq!(boundary["candidates"], serde_json::json!([]));
+    // `refund` is never called.
+    let refund = find("src/cart.js:13:10-13:19:ConditionalExpression:true");
+    assert_eq!(refund["decided"], "no-coverage", "{refund}");
+    // `name.trim()` to `name`: only the label test gives it a padded name.
+    let trim = find("src/cart.js:9:10-9:21:MethodExpression:removed");
+    assert!(trim["decided"].is_null(), "{trim}");
+    let candidates = trim["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| name(&candidate["test"]))
+        .collect::<Vec<_>>();
+    assert_eq!(candidates, ["cart > labels"], "{trim}");
+    // `sum >= 50` always true: only the test it changes runs it.
+    let always = find("src/cart.js:2:7-2:16:ConditionalExpression:true");
+    let candidates = always["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| name(&candidate["test"]))
+        .collect::<Vec<_>>();
+    assert_eq!(candidates, ["cart > charges small orders"], "{always}");
+    assert_eq!(reply["summary"]["mutants"], 15);
 }

@@ -314,11 +314,11 @@ test('a test that reaches no server', async () => {
   // finished, the evidence cleared, the run's state written, the first run
   // finished -- that fails ends the run, saying where.
   for (const [fault, place] of [
-    ['fs.symlink_metadata#javascript_run.rs:1401', 'javascript_run.rs:1401'],
-    ['fs.symlink_metadata#javascript_run.rs:1417', 'javascript_run.rs:1417'],
-    ['fs.symlink_metadata#javascript_run.rs:1419', 'javascript_run.rs:1419'],
-    ['fs.read#javascript_run.rs:1445', 'javascript_run.rs:1445'],
-    ['fs.symlink_metadata#javascript_run.rs:1457', 'javascript_run.rs:1457'],
+    ['fs.symlink_metadata#javascript_run.rs:1402', 'javascript_run.rs:1402'],
+    ['fs.symlink_metadata#javascript_run.rs:1418', 'javascript_run.rs:1418'],
+    ['fs.symlink_metadata#javascript_run.rs:1420', 'javascript_run.rs:1420'],
+    ['fs.read#javascript_run.rs:1446', 'javascript_run.rs:1446'],
+    ['fs.symlink_metadata#javascript_run.rs:1458', 'javascript_run.rs:1458'],
   ]) {
     const failed = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'both.config.js', '-g', 'both servers answer'], { SUPERCOV_TEST_FAULT: fault });
     assert.notEqual(failed.status, 0, `${fault}: ${failed.stdout}${failed.stderr}`);

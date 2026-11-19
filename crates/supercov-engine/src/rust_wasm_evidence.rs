@@ -225,6 +225,7 @@ pub(crate) fn publish(
             .map_err(|error| error.to_string())?;
             let test_id = format!("{}::{}", test.file, test.test_id);
             raw_results.push(RawTestResult {
+                duration_ms: None,
                 test_id: Some(test_id.clone()),
                 scope: Some(ExecutionScope {
                     version: 1,
@@ -275,6 +276,7 @@ pub(crate) fn publish(
                 .map_err(|error| error.to_string())?;
         let test_id = "rust::background".to_owned();
         raw_results.push(RawTestResult {
+            duration_ms: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,
