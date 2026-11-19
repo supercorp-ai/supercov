@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.28.0
+
+**Added**
+
+- `runs report --format` writes five more formats other tools read: `istanbul` (Istanbul's `coverage-final.json`), `istanbul-summary` (its `coverage-summary.json`), `clover`, `jacoco` and `sonar` (SonarQube's generic coverage XML). A tool that reads Istanbul's file, such as fallow's CRAP gate, now reads a Supercov run of any language it measures, Bun's tests included ([#226](https://github.com/supercorp-ai/supercov/issues/226)). Each was checked against its readers: `istanbul-lib-coverage` and `istanbul-reports`, fallow, SonarQube, Qlty and JaCoCo's DTD all read Supercov's own totals.
+- Istanbul's file places each statement, function and branch by the source the run recorded, counted in each language's own columns. A file changed since the run is refused, naming the line, rather than placed wrong. Counts are `1` or `0`: Supercov records whether code ran, not how often. JaCoCo has no bytecode here, so a measured line counts as one instruction.
+
+**Fixed**
+
+- Cobertura's export left out branches on a line Supercov does not measure on its own, such as a later line of a statement written across several, or a default in a signature that spans lines, so its branch totals fell short of Supercov's. They are stated on the line where their statement starts, as in the new line formats.
+- A Rust test compiled to wasm and run in Chrome (`wasm-pack test --headless --chrome`) could fail with `webdriver POST /session timed out after 60.0s` when Chrome's driver stopped answering. A driver that gives no session within 25 seconds is now started again on a new port and asked once more, within the runner's 60.
+- The ports Supercov gives the servers it starts, Chrome's driver and a Worker's inspector, could be taken by another process before the server listened on them, and `wrangler dev` failed with `Address already in use`. They are drawn from below the range the system hands out by itself and checked free before use, and the proxy in front of Chrome's driver can no longer share a port with it.
+- A Rust closure written in a `static`, a `const` or a `const fn`, such as the one `LazyLock::new(|| ..)` takes, runs when it is called, but was declined as compile-time code and left unmeasured. It is measured now, with what it holds; only the code the compiler evaluates stays declined.
+- `check` said a Rust file holding a const context or a macro such as `json!` was outside the source roots and not counted, and the line view showed every line of such a file as `PARTIAL`. Those files are counted: the note now names only files discovery left out, and a site's limitation stays on its own line.
+
+**Contributors**
+
+- [@Fidasek009](https://github.com/Fidasek009)
+
 ## 4.27.0
 
 **Changed**

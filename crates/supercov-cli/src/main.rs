@@ -1807,12 +1807,18 @@ fn coverage_patch_command(arguments: &[String]) -> ExitCode {
 /// The files no floor covered because discovery could not tell whether they
 /// are source and nothing loaded them. Said, never failed on: the suite
 /// passes without Supercov, so a gate must not fail for what it cannot tell.
+/// Discovery names those `scope:`; other source-scope limitations, such as a
+/// Rust const context, sit in files that are counted.
 fn uncounted_note(view: &supercov_engine::run_view::RunView) -> String {
     let files = view
         .limitations
         .iter()
         .filter_map(|limitation| serde_json::from_str::<serde_json::Value>(limitation).ok())
-        .filter(|limitation| limitation["kind"] == "source-scope")
+        .filter(|limitation| {
+            limitation["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("scope:"))
+        })
         .filter_map(|limitation| limitation["file"].as_str().map(str::to_owned))
         .collect::<std::collections::BTreeSet<_>>();
     if files.is_empty() {
@@ -2176,11 +2182,22 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_secs())
             .unwrap_or(0);
+        // The text of every measured file, for a format that places what it
+        // reports in the source. Text that no longer matches the run would
+        // point at the wrong lines, so the HTML report embeds it only when the
+        // run still describes this checkout; Istanbul places each statement
+        // by finding the source the run recorded, and refuses a file that no
+        // longer holds it.
+        let read_sources = || {
+            view.files
+                .iter()
+                .filter_map(|file| {
+                    let text = fs::read_to_string(root.join(&file.file)).ok()?;
+                    Some((file.file.clone(), text))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         let contents = if format == "html" {
-            // Annotating source that no longer matches the run would point at
-            // the wrong lines, so the text is embedded only when the run still
-            // describes this checkout. Otherwise the report shows line numbers
-            // and says why.
             let (sources, reason) = if view.stale {
                 (
                     std::collections::BTreeMap::new(),
@@ -2190,22 +2207,19 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     ),
                 )
             } else {
-                let sources = view
-                    .files
-                    .iter()
-                    .filter_map(|file| {
-                        let text = fs::read_to_string(root.join(&file.file)).ok()?;
-                        Some((file.file.clone(), text))
-                    })
-                    .collect::<std::collections::BTreeMap<_, _>>();
                 (
-                    sources,
+                    read_sources(),
                     "The file could not be read from this checkout.".to_owned(),
                 )
             };
             supercov_engine::coverage_html::html(&view, &sources, &reason)
         } else {
-            supercov_engine::coverage_export::export(&view, &format, timestamp)?
+            let sources = if supercov_engine::coverage_export::needs_source(&format) {
+                read_sources()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+            supercov_engine::coverage_export::export(&view, &format, timestamp, &root, &sources)?
         };
         match output {
             Some(path) => {

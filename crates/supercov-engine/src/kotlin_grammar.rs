@@ -8,4 +8,8 @@ unsafe extern "C" {
 }
 
 /// The grammar, for a tree-sitter parser.
-pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_kotlin) };
+pub fn language() -> LanguageFn {
+    // SAFETY: the vendored parser defines `tree_sitter_kotlin` as
+    // tree-sitter's generator writes it.
+    unsafe { LanguageFn::from_raw(tree_sitter_kotlin) }
+}

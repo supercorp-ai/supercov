@@ -13,19 +13,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 // Inside the repository, so the suite finds its Playwright.
 const root = resolve(repository, 'target', `mock-reach-${process.pid}-${Date.now()}`);
-const freePort = () => new Promise((done, fail) => {
-  const server = createServer();
-  server.once('error', fail);
-  server.listen(0, '127.0.0.1', () => {
-    const { port } = server.address();
-    server.close(() => done(port));
-  });
-});
 const pay = await freePort();
 const mail = await freePort();
 

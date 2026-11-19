@@ -189,6 +189,29 @@ pub struct BranchRecord {
     pub taken: bool,
 }
 
+/// A statement or a function as the frontend recorded it: where it starts,
+/// in the frontend's own column convention, and the source it spans, which
+/// places its end exactly once it is found in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointSite {
+    pub function: bool,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub name: Option<String>,
+    pub covered: bool,
+}
+
+/// A branch as the frontend recorded it, with each alternative's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchSite {
+    pub kind: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub taken: Vec<bool>,
+}
+
 /// One condition of a decision: where the decision is, which of its
 /// conditions this is, and whether its independent effect was shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +244,14 @@ pub struct FileView {
     /// the rest.
     #[serde(skip)]
     pub conditions: Vec<ConditionRecord>,
+    /// Every statement and function where the frontend recorded it, with the
+    /// source it spans, for an export that places each one by its range.
+    #[serde(skip)]
+    pub points: Vec<PointSite>,
+    /// Every branch where the frontend recorded it, with the source it spans
+    /// and whether each of its alternatives was taken.
+    #[serde(skip)]
+    pub branch_sites: Vec<BranchSite>,
 }
 
 impl FileView {
@@ -346,6 +377,8 @@ fn empty_file(file: &str) -> FileView {
         functions: Vec::new(),
         branches: Vec::new(),
         conditions: Vec::new(),
+        points: Vec::new(),
+        branch_sites: Vec::new(),
     }
 }
 
@@ -372,6 +405,17 @@ pub fn build(
         let entry = files
             .entry(branch.meta.file.clone())
             .or_insert_with(|| empty_file(&branch.meta.file));
+        entry.branch_sites.push(BranchSite {
+            kind: branch.meta.kind.clone(),
+            line: branch.meta.line,
+            column: branch.meta.column,
+            source: branch.meta.source.clone(),
+            taken: branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.covered)
+                .collect(),
+        });
         for (index, alternative) in branch.alternatives.iter().enumerate() {
             if !alternative.covered {
                 entry.missing_branches.push(Location {
@@ -388,24 +432,32 @@ pub fn build(
         }
     }
     for point in &view.points {
-        if point.meta.kind != crate::coverage_analysis::PointKind::Function {
-            continue;
-        }
         // A view folds every point, declined ones too, into its lines, so
         // the point's file is already here.
-        files
+        let file = files
             .get_mut(&point.meta.file)
-            .expect("a view's lines hold every point's file")
-            .functions
-            .push(FunctionRecord {
-                line: point.meta.line,
-                name: point
-                    .meta
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| format!("{}:{}", point.meta.line, point.meta.column)),
-                covered: point.covered,
-            });
+            .expect("a view's lines hold every point's file");
+        let function = point.meta.kind == crate::coverage_analysis::PointKind::Function;
+        file.points.push(PointSite {
+            function,
+            line: point.meta.line,
+            column: point.meta.column,
+            source: point.meta.source.clone(),
+            name: point.meta.label.clone(),
+            covered: point.covered,
+        });
+        if !function {
+            continue;
+        }
+        file.functions.push(FunctionRecord {
+            line: point.meta.line,
+            name: point
+                .meta
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", point.meta.line, point.meta.column)),
+            covered: point.covered,
+        });
     }
     for decision in &view.decisions {
         let entry = files
@@ -446,6 +498,12 @@ pub fn build(
             .sort_by_key(|record| (record.line, record.block, record.index));
         file.conditions
             .sort_by_key(|record| (record.line, record.column, record.index));
+        file.points.sort_by(|a, b| {
+            (a.line, a.column, a.function, &a.source)
+                .cmp(&(b.line, b.column, b.function, &b.source))
+        });
+        file.branch_sites
+            .sort_by(|a, b| (a.line, a.column, &a.kind).cmp(&(b.line, b.column, &b.kind)));
         built.push(file);
     }
     let source_neighbourhoods = built
@@ -789,6 +847,8 @@ mod tests {
                 functions: Vec::new(),
                 branches: Vec::new(),
                 conditions: Vec::new(),
+                points: Vec::new(),
+                branch_sites: Vec::new(),
             },
             FileView {
                 file: "src/b.ts".into(),
@@ -805,6 +865,8 @@ mod tests {
                 functions: Vec::new(),
                 branches: Vec::new(),
                 conditions: Vec::new(),
+                points: Vec::new(),
+                branch_sites: Vec::new(),
             },
         ];
         let outcome = check(

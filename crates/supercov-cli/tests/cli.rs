@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:675",
+                "fs.read_from#evidence_archive.rs:676",
             )],
         )
         .exits(2);
@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1168")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1170")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1168"),
+        seen.contains("test fault at fs (javascript_run.rs:1170"),
         "{seen}"
     );
 }
@@ -796,6 +796,114 @@ fn reports_carry_the_same_view_in_every_format() {
             "filename=\"src/cart.js\"",
         ],
     );
+    // Istanbul places what it reports by range, found in the checkout: the
+    // cart's `shipping` returns 15 or 5 on line 14, which no test reached.
+    let istanbul: serde_json::Value = serde_json::from_str(
+        &project
+            .supercov(&["runs", "report", "--format", "istanbul"])
+            .succeeds(),
+    )
+    .unwrap();
+    // Keyed as Node writes a path: on Windows without the verbatim prefix
+    // the test's own root carries.
+    let cart = project.root.join("src").join("cart.js");
+    let cart = cart.to_string_lossy();
+    let cart = cart.strip_prefix(r"\\?\").unwrap_or(&cart);
+    let file = &istanbul[cart];
+    assert_eq!(file["path"], cart);
+    let statements = file["statementMap"].as_object().unwrap();
+    let missed = statements
+        .iter()
+        .filter(|(key, _)| file["s"][key.as_str()] == 0)
+        .map(|(_, range)| range.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        missed,
+        [
+            serde_json::json!({ "start": { "line": 14, "column": 4 }, "end": { "line": 14, "column": 28 } }),
+            serde_json::json!({ "start": { "line": 20, "column": 2 }, "end": { "line": 20, "column": 51 } }),
+        ]
+    );
+    assert_eq!(
+        file["fnMap"]["1"]["loc"],
+        serde_json::json!({ "start": { "line": 12, "column": 7 }, "end": { "line": 17, "column": 1 } })
+    );
+    assert_eq!(
+        file["f"],
+        serde_json::json!({ "0": 1, "1": 1, "2": 0, "3": 0 })
+    );
+    // `describe`'s arrow has no name, and is named as Istanbul names one.
+    assert_eq!(file["fnMap"]["3"]["name"], "(anonymous_3)");
+    let summary = project
+        .supercov(&["runs", "report", "--format", "istanbul-summary"])
+        .succeeds();
+    contains_all(
+        &summary,
+        &[
+            "\"total\":{\"lines\":{\"total\":13,\"covered\":10,\"skipped\":0,\"pct\":76.92}",
+            "\"statements\":{\"total\":10,\"covered\":8,\"skipped\":0,\"pct\":80.0}",
+            "\"functions\":{\"total\":4,\"covered\":2,\"skipped\":0,\"pct\":50.0}",
+            "\"branches\":{\"total\":8,\"covered\":4,\"skipped\":0,\"pct\":50.0}",
+        ],
+    );
+    let clover = project
+        .supercov(&["runs", "report", "--format", "clover"])
+        .succeeds();
+    contains_all(
+        &clover,
+        &[
+            "statements=\"10\" coveredstatements=\"8\" conditionals=\"8\" coveredconditionals=\"4\" methods=\"4\" coveredmethods=\"2\"",
+            "<file name=\"cart.js\" path=\"src/cart.js\">",
+            "<line num=\"14\" count=\"0\" type=\"cond\" truecount=\"0\" falsecount=\"2\"/>",
+        ],
+    );
+    let jacoco = project
+        .supercov(&["runs", "report", "--format", "jacoco"])
+        .succeeds();
+    contains_all(
+        &jacoco,
+        &[
+            "<package name=\"src\">",
+            "<sourcefile name=\"cart.js\">",
+            "<line nr=\"14\" mi=\"1\" ci=\"0\" mb=\"2\" cb=\"0\"/>",
+            "<counter type=\"LINE\" missed=\"3\" covered=\"10\"/>",
+            "<counter type=\"BRANCH\" missed=\"4\" covered=\"4\"/>",
+        ],
+    );
+    let sonar = project
+        .supercov(&["runs", "report", "--format", "sonar"])
+        .succeeds();
+    contains_all(
+        &sonar,
+        &[
+            "<file path=\"src/cart.js\">",
+            "<lineToCover lineNumber=\"14\" covered=\"false\" branchesToCover=\"2\" coveredBranches=\"0\"/>",
+        ],
+    );
+    // A file that no longer holds what the run recorded is not placed by a
+    // guess: Istanbul refuses it, and the formats that state lines still
+    // write.
+    project.edit(
+        "src/cart.js",
+        "    return express ? 15 : 5;",
+        "    return 9;",
+    );
+    let refused = project
+        .supercov(&["runs", "report", "--format", "istanbul"])
+        .exits(2);
+    // `shipping` spans the changed line, and comes first.
+    assert!(
+        refused.contains("src/cart.js:12 no longer holds"),
+        "{refused}"
+    );
+    project
+        .supercov(&["runs", "report", "--format", "sonar"])
+        .succeeds();
+    project.edit(
+        "src/cart.js",
+        "    return 9;",
+        "    return express ? 15 : 5;",
+    );
 
     let written = project.root.join("coverage/lcov.info");
     project
@@ -904,12 +1012,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:675",
+            "fs.read_from#evidence_archive.rs:676",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:675"), "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:676"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1281,7 +1389,7 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:675",
+            "fs.read_from#evidence_archive.rs:676",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -1777,7 +1885,7 @@ fn every_subcommand_explains_itself_and_names_a_mistake() {
         (vec!["runs", "patch", "--help"], "patch --base <ref>"),
         (
             vec!["runs", "report", "--help"],
-            "--format lcov|cobertura|html",
+            "--format lcov|cobertura|istanbul|istanbul-summary|clover|jacoco|sonar|html",
         ),
         (
             vec!["merge", "--help"],
@@ -1965,6 +2073,39 @@ fn a_platform_gated_item_counts_only_where_it_compiles() {
         .collect::<Vec<_>>();
     assert_eq!(lines, [16, 17], "{gaps}");
     assert!(!lines.contains(&absent));
+}
+
+#[test]
+fn a_closure_in_a_static_is_measured_and_a_const_block_is_declined_in_a_counted_file() {
+    let project = Project::empty("const-contexts");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"contexts\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "use std::sync::LazyLock;\n\npub static WORD: LazyLock<String> = LazyLock::new(|| {\n    let word = \"hi\";\n    word.to_uppercase()\n});\n\npub const LIMIT: u32 = { 2 + 1 };\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn reads_both() {\n        assert_eq!(*super::WORD, \"HI\");\n        assert_eq!(super::LIMIT, 3);\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    // The closure runs at run time, and its test ran it.
+    let line = project
+        .supercov(&["runs", "latest", "line", "src/lib.rs:4"])
+        .succeeds();
+    assert!(
+        line.contains("COVERED") && !line.contains("NOT COVERED"),
+        "{line}"
+    );
+    // The const block is the compiler's: declined, so a floor cannot be
+    // judged, and the file holding it is counted, not outside the roots.
+    let check = project.supercov(&["runs", "latest", "check", "--min-lines", "100"]);
+    let out = check.exits(2);
+    assert!(
+        out.contains("lines left 1 obligation(s) unmeasured"),
+        "{out}{}",
+        check.stderr()
+    );
+    assert!(!out.contains("outside the source roots"), "{out}");
 }
 
 #[test]
@@ -6714,7 +6855,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695=50")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696=50")],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -8029,7 +8170,7 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:695")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696")],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -13461,7 +13602,7 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:695=50",
+        "fs.open#evidence_archive.rs:696=50",
         "fs.open#source_manifest.rs:359@2",
     ] {
         let unjudged = project
@@ -14047,25 +14188,25 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     for (command, place) in [
         (
             vec!["runs", "latest", "decision", "src/cart.js:3"],
-            "coverage_query.rs:1680",
+            "coverage_query.rs:1684",
         ),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2857"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2951@2"),
-        (vec!["diff", &older, "latest"], "coverage_query.rs:2843@2"),
-        (vec!["runs", "latest", "summary"], "coverage_query.rs:3275"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2861"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2955@2"),
+        (vec!["diff", &older, "latest"], "coverage_query.rs:2847@2"),
+        (vec!["runs", "latest", "summary"], "coverage_query.rs:3279"),
         // Every file's details, the scope read last of all.
         (
             vec!["runs", "latest", "gaps", "--format", "jsonl"],
-            "coverage_query.rs:2224@2",
+            "coverage_query.rs:2228@2",
         ),
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3812",
+            "coverage_query.rs:3816",
         ),
         // The dimensions read again, by runner.
         (
             vec!["runs", "latest", "summary", "--kind", "unit"],
-            "coverage_query.rs:3812@2",
+            "coverage_query.rs:3816@2",
         ),
         (
             vec![
@@ -14078,7 +14219,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3955",
+            "coverage_query.rs:3959",
         ),
         (
             vec![
@@ -14091,15 +14232,15 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:4005",
+            "coverage_query.rs:4009",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3553",
+            "coverage_query.rs:3557",
         ),
         (
             vec!["runs", "latest", "files", "--group", "dir"],
-            "coverage_query.rs:3561",
+            "coverage_query.rs:3565",
         ),
         // A line's anchors; a file with no decisions under a kind, its gaps
         // read to tell it from a kind no test has.
@@ -14118,7 +14259,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
                 "--kind",
                 "unit",
             ],
-            "coverage_query.rs:3960",
+            "coverage_query.rs:3964",
         ),
     ] {
         let fault = format!("coverage-index-read#{place}");
@@ -14197,12 +14338,12 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:315", "query_index.rs:315"),
+        ("fs.open#query_index.rs:336", "query_index.rs:336"),
         (
-            "fs.read_exact_from#query_index.rs:315",
-            "query_index.rs:315",
+            "fs.read_exact_from#query_index.rs:336",
+            "query_index.rs:336",
         ),
-        ("fs.open#query_index.rs:332", "query_index.rs:332"),
+        ("fs.open#query_index.rs:353", "query_index.rs:353"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -15498,9 +15639,9 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2603 => main.rs:2603",
+            "fs.canonicalize#main.rs:2617 => main.rs:2617",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
+            "fs.read_to_string#javascript_frontend.rs:2012 => javascript_frontend.rs:2012",
         ],
     );
 }
@@ -15599,8 +15740,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
             "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:231 => child_signal_guard.rs:231",
-            "spawn#child_signal_guard.rs:231@2 => child_signal_guard.rs:231",
+            "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
+            "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -15637,7 +15778,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:304 => child_signal_guard.rs:304",
+                "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:603",
@@ -15775,7 +15916,7 @@ fn a_browser_suite_whose_rust_worker_cannot_be_prepared_says_so() {
         // The Worker workspace's inputs walked, and a port found for its
         // inspector.
         ("fs.read_dir#rust_run.rs:88", "rust_run.rs:88"),
-        ("local-listener", "injected fault at local-listener"),
+        ("free-port", "injected fault at free-port"),
     ] {
         let project = Project::cart("worker-server-steps");
         project.write("playwright.config.js", "export default {};\n");
@@ -17063,19 +17204,19 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1338",
-        "fs.create_dir_all#javascript_run.rs:739",
-        "fs.write#javascript_run.rs:1045",
+        "fs.create_dir_all#lifecycle.rs:1364",
+        "fs.create_dir_all#javascript_run.rs:741",
+        "fs.write#javascript_run.rs:1047",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1116",
-        "fs.create_dir_all#javascript_run.rs:1287",
+        "fs.create_dir_all#javascript_run.rs:1118",
+        "fs.create_dir_all#javascript_run.rs:1289",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1562",
         "fs.create_dir_all#javascript_run.rs:1564",
-        "fs.create_dir_all#lifecycle.rs:1043",
-        "fs.create_dir_all#javascript_run.rs:1664",
+        "fs.create_dir_all#javascript_run.rs:1566",
+        "fs.create_dir_all#lifecycle.rs:1055",
         "fs.create_dir_all#javascript_run.rs:1666",
+        "fs.create_dir_all#javascript_run.rs:1668",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17318,7 +17459,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:332@2,fs.open#query_index.rs:332@3,fs.read_from#evidence_archive.rs:675",
+        "fs.open#query_index.rs:353@2,fs.open#query_index.rs:353@3,fs.read_from#evidence_archive.rs:676",
         // The runs listed again for the details.
         "fs.read_dir#run_store.rs:672@2",
     ] {
@@ -17332,7 +17473,7 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         // The index read the file details make first.
         if fault.starts_with("coverage-index-read") {
             assert!(
-                refused.contains("coverage_query.rs:2297"),
+                refused.contains("coverage_query.rs:2301"),
                 "{fault}: {refused}"
             );
         }
@@ -17381,11 +17522,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:675",
+            "fs.read#run_store.rs:1319,fs.read_from#evidence_archive.rs:676",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:675"),
+        fired_at(&spanless.stderr(), "evidence_archive.rs:676"),
         "{}",
         spanless.stderr()
     );
@@ -17573,12 +17714,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:360",
-            "javascript_frontend.rs:360",
+            "fs.read#javascript_frontend.rs:354",
+            "javascript_frontend.rs:354",
         ),
         (
-            "fs.read#javascript_frontend.rs:372",
-            "javascript_frontend.rs:372",
+            "fs.read#javascript_frontend.rs:366",
+            "javascript_frontend.rs:366",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17608,12 +17749,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1818@2",
+            "fs.read_to_string#javascript_frontend.rs:1801@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1818"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -19835,12 +19976,12 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:301")],
+        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:322")],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:301 rename)"),
+            .contains("test fault at fs (query_index.rs:322 rename)"),
         "{}",
         ran.stderr()
     );
@@ -19867,12 +20008,12 @@ fn a_summary_whose_unclassified_source_cannot_be_read_is_refused() {
         &["runs", "latest"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#coverage_query.rs:3400",
+            "coverage-index-read#coverage_query.rs:3404",
         )],
     );
     let said = format!("{}{}", refused.stdout(), refused.stderr());
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "coverage_query.rs:3400"), "{said}");
+    assert!(fired_at(&said, "coverage_query.rs:3404"), "{said}");
 }
 
 /// A record the run's evidence holds that is no JSON -- a process that tore
@@ -21131,4 +21272,92 @@ fn mutants_under_node_test_are_decided_from_the_values_its_records_carry() {
         }),
         "{statuses:?}"
     );
+}
+
+/// A test that writes a file of the run's own name into the run's evidence
+/// directory -- the declaration beside the evidence -- does not get it into
+/// the archive under that name: the run stops and names the file.
+#[test]
+fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
+    let project = Project::cart("evidence-collision");
+    project.write(
+        "test/collide.test.js",
+        "import test from 'node:test';\nimport { mkdirSync, writeFileSync } from 'node:fs';\ntest('writes beside the evidence', () => {\n  const directory = `.supercov/evidence/${process.env.SUPERCOV_RUN_ID}`;\n  mkdirSync(directory, { recursive: true });\n  writeFileSync(`${directory}/frontend.json`, '{}');\n});\n",
+    );
+    let ran = project.supercov(&["--", "node", "--test"]);
+    let said = ran.stderr();
+    assert_ne!(ran.code(), 0, "{said}");
+    assert!(
+        said.contains("duplicate Supercov evidence archive path: frontend.json"),
+        "{said}"
+    );
+}
+
+/// The workspace a run replaces is swept from the trash while the tests run.
+/// A part of it already gone -- removed by hand meanwhile, its listing or
+/// itself -- is as swept as one removed here, and the trash is left empty; a
+/// part that cannot be removed leaves the rest of that tree in the trash, for
+/// a later sweep.
+#[test]
+fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
+    for (fault, emptied) in [
+        ("fs.remove_file:2#lifecycle.rs:1691", true),
+        ("fs.read_dir:2#lifecycle.rs:1660", true),
+        ("fs.remove_file#lifecycle.rs:1691", false),
+    ] {
+        let project = Project::cart("sweep");
+        assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{fault}: {said}");
+        let place = &fault[fault.find('#').unwrap() + 1..];
+        assert!(fired_at(&said, place), "{fault}: {said}");
+        let trash = project.root.join(".supercov/.trash");
+        let left = std::fs::read_dir(&trash)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name != ".deleter.lock")
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(left == 0, emptied, "{fault}: {left} left");
+    }
+}
+
+/// A run prunes the sources from its workspace copy into the trash as it
+/// ends, best effort: when one cannot be moved there the prune stops, what
+/// it had not moved stays in the copy, which the next run copies over, and
+/// the run is not failed for it.
+#[test]
+fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
+    let left_in_copy = |fault: &str| {
+        let project = Project::cart("prune");
+        let ran =
+            project.supercov_with(&["--", "node", "--test"], &[("SUPERCOV_TEST_FAULT", fault)]);
+        let said = ran.stderr();
+        assert_eq!(ran.code(), 0, "{said}");
+        assert_eq!(
+            fired_at(&said, "workspace.rs:2226"),
+            !fault.is_empty(),
+            "{said}"
+        );
+        let copies = project.root.join(".supercov/workspaces/workspace");
+        std::fs::read_dir(&copies)
+            .unwrap()
+            .map(|copy| copy.unwrap().path())
+            .filter(|copy| copy.is_dir())
+            .map(|copy| {
+                std::fs::read_dir(copy)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name != "node_modules" && name != ".supercov")
+                    .count()
+            })
+            .sum::<usize>()
+    };
+    assert_eq!(left_in_copy(""), 0);
+    // The prune stops there: that source and those after it stay.
+    assert!(left_in_copy("fs.rename#workspace.rs:2226") > 0);
 }

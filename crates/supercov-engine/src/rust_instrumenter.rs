@@ -247,27 +247,47 @@ fn valid_runtime_path(path: &str) -> bool {
 /// generic arguments and const parameter defaults, so matching it covers all
 /// four. The remaining case is an array repeat expression, `[value; count]`,
 /// where only the count after the semicolon is const-evaluated.
-/// Report whether the source's doc comments contain a fenced code block.
 ///
-/// rustdoc turns fenced blocks in `///`, `//!` and `#[doc]` text into doctest
-/// crates. The scan is line-based and deliberately coarse: a fence inside a
-/// doc comment declares the limitation even when the fence is `ignore`d, which
-/// over-declares the unmeasured surface rather than ever under-declaring it.
+/// The walk stops at the nearest function or closure: a body runs when it is
+/// called, at run time, even one written inside a `static`, a `const` or a
+/// `const fn` -- `static X: LazyLock<T> = LazyLock::new(|| ..)` is the
+/// common case. Only a `const fn`'s own body, or a `const` closure's, is
+/// evaluated by the compiler.
 fn in_const_context(node: &ra_ap_syntax::SyntaxNode) -> bool {
-    let start = node.text_range().start();
-    node.ancestors().any(|ancestor| {
-        ast::Fn::cast(ancestor.clone()).is_some_and(|function| function.const_token().is_some())
-            || ast::BlockExpr::cast(ancestor.clone())
+    let range = node.text_range();
+    node.ancestors()
+        .find_map(|ancestor| {
+            if let Some(function) = ast::Fn::cast(ancestor.clone()) {
+                return Some(function.const_token().is_some());
+            }
+            if let Some(closure) = ast::ClosureExpr::cast(ancestor.clone()) {
+                let runs = closure.const_token().is_none()
+                    && closure
+                        .body()
+                        .is_some_and(|body| body.syntax().text_range().contains_range(range));
+                return runs.then_some(false);
+            }
+            let evaluated = ast::BlockExpr::cast(ancestor.clone())
                 .is_some_and(|block| block.const_token().is_some())
-            || ast::Const::can_cast(ancestor.kind())
-            || ast::Static::can_cast(ancestor.kind())
-            || ast::ConstArg::can_cast(ancestor.kind())
-            || ast::ArrayExpr::cast(ancestor).is_some_and(|array| {
-                array
-                    .semicolon_token()
-                    .is_some_and(|semicolon| start >= semicolon.text_range().end())
-            })
-    })
+                || ast::Const::can_cast(ancestor.kind())
+                || ast::Static::can_cast(ancestor.kind())
+                || ast::ConstArg::can_cast(ancestor.kind())
+                || ast::ArrayExpr::cast(ancestor).is_some_and(|array| {
+                    array
+                        .semicolon_token()
+                        .is_some_and(|semicolon| range.start() >= semicolon.text_range().end())
+                });
+            evaluated.then_some(true)
+        })
+        .unwrap_or(false)
+}
+
+/// Where a node's own probe goes: a closure's is in its body, anything
+/// else's at the node.
+fn probed_at(node: &ra_ap_syntax::SyntaxNode) -> ra_ap_syntax::SyntaxNode {
+    ast::ClosureExpr::cast(node.clone())
+        .and_then(|closure| closure.body())
+        .map_or_else(|| node.clone(), |body| body.syntax().clone())
 }
 
 /// Report whether this node sits inside a `GlobalAlloc` implementation.
@@ -1133,6 +1153,12 @@ impl<'a> RustObligationCollector<'a> {
                 PointKind::Function,
                 Some("<closure>".into()),
             );
+            // Its entry is probed in its body, so the body decides whether
+            // it can be: a closure written in a static runs at run time.
+            self.obligation_ranges
+                .last_mut()
+                .expect("a point records its range")
+                .1 = probed_at(closure.syntax()).text_range();
         }
 
         for expression in root.descendants().filter_map(ast::IfExpr::cast) {
@@ -1294,7 +1320,7 @@ impl<'a> RustObligationCollector<'a> {
         };
         if let Some(node) = root
             .descendants()
-            .find(|node| bears_obligation(node) && in_const_context(node))
+            .find(|node| bears_obligation(node) && in_const_context(&probed_at(node)))
         {
             self.site_limitation(
                 "rust-const-context-not-instrumented",
@@ -6051,7 +6077,7 @@ pub fn documented(value: i32) -> i32 {
             "    let v = o?;\n",
             "    Some(v)\n",
             "}\n",
-            "const C: fn() -> u8 = || 1;\n",
+            "const C: fn() -> u8 = const || 1;\n",
             "const _: () = assert!(f(1) == 0);\n",
         );
         let instrumented =
@@ -6061,6 +6087,82 @@ pub fn documented(value: i32) -> i32 {
             limitation_kinds(&instrumented.manifest)
                 .contains("rust-const-context-not-instrumented")
         );
+    }
+
+    /// A closure or a function written inside a static, a const or a `const
+    /// fn` runs when it is called, so it is probed like any other; the code
+    /// around it is still the compiler's.
+    #[test]
+    fn a_body_inside_a_const_context_runs_and_is_probed() {
+        let source = concat!(
+            "static A: std::sync::LazyLock<u8> = std::sync::LazyLock::new(|| { let x = 1; x });\n",
+            "const B: fn() -> u8 = || 2;\n",
+            "const C: u8 = { fn inner() -> u8 { 3 } 3 };\n",
+            "pub const fn d() -> fn() -> u8 { || 4 }\n",
+        );
+        let instrumented =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let manifest = &instrumented.manifest;
+        let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        // In source order.
+        let measured = |line: usize, kind: PointKind| {
+            manifest
+                .points
+                .iter()
+                .filter(|point| point.line == line && point.kind == kind)
+                .map(|point| (point.column, !declined.contains(&point.id)))
+                .collect::<BTreeMap<_, _>>()
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        // The closures and `inner` are measured, and what they hold.
+        assert_eq!(measured(1, PointKind::Function), [true]);
+        assert_eq!(measured(1, PointKind::Statement), [true, true]);
+        assert_eq!(measured(2, PointKind::Function), [true]);
+        assert_eq!(measured(4, PointKind::Function), [true]);
+        // `C`'s own block is the compiler's; `inner`'s body is not.
+        assert_eq!(measured(3, PointKind::Function), [true]);
+        assert_eq!(measured(3, PointKind::Statement), [true, false]);
+        // `d`'s body is the closure, the compiler's to evaluate.
+        assert!(
+            instrumented
+                .code
+                .contains("pub const fn d() -> fn() -> u8 { || {"),
+            "{}",
+            instrumented.code
+        );
+        // The const context is declared where the compiler's code is, never
+        // at a closure that runs.
+        let lines = manifest
+            .limitations
+            .iter()
+            .filter(|limitation| limitation["kind"] == "source-scope")
+            .map(|limitation| limitation["line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [4], "{:?}", manifest.limitations);
+    }
+
+    /// The walk decides by the nearest body: a closure's parameters belong to
+    /// the code around it.
+    #[test]
+    fn a_closure_s_parameters_are_where_it_is_written() {
+        let parsed = SourceFile::parse(
+            "static A: fn([u8; 1]) = |x: [u8; 1]| {};\nfn f() { let g = |y: u8| y; }\n",
+            Edition::Edition2024,
+        )
+        .tree();
+        let pattern = |name: &str| {
+            parsed
+                .syntax()
+                .descendants()
+                .filter_map(ast::IdentPat::cast)
+                .find(|pattern| pattern.syntax().text() == name)
+                .unwrap()
+                .syntax()
+                .clone()
+        };
+        assert!(in_const_context(&pattern("x")));
+        assert!(!in_const_context(&pattern("y")));
     }
 
     #[test]

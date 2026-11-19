@@ -7,10 +7,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { freePort } from './free-ports.mjs';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = (process.env.SUPERCOV_BINARY ?? resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`));
@@ -23,14 +23,7 @@ const project = resolve(temporary, 'project');
 // then serves on the next port up without saying so, and Playwright waits on
 // the first until it gives up ("Timed out waiting 60000ms from
 // config.webServer"). `--strictPort` makes that an error instead.
-const port = await new Promise((settle, refuse) => {
-  const probe = createServer();
-  probe.once('error', refuse);
-  probe.listen(0, '127.0.0.1', () => {
-    const { port: free } = probe.address();
-    probe.close(() => settle(free));
-  });
-});
+const port = await freePort();
 
 function rust(command, request) {
   const result = spawnSync(binary, [command], {

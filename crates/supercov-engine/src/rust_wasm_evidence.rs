@@ -847,8 +847,8 @@ mod tests {
         for fault in [
             "report-request",
             "fs.create_dir_all@1",
-            "fs.rename#evidence_archive.rs:510",
-            "fs.rename#lifecycle.rs:1185",
+            "fs.rename#evidence_archive.rs:511",
+            "fs.rename#lifecycle.rs:1211",
         ] {
             let attempt = fresh();
             assert!(

@@ -346,6 +346,15 @@ function suiteRun(round, variant, suite, binary) {
   // flakes the samples count are no reason to stop measuring.
   const id = latest.run ?? latest.id ?? latest.runId;
   assert.ok(id, `${variant} ${suite.name} published no run`);
+  // The newest binary's first unit run, kept as it was published: its
+  // evidence, published again by `publish_profile`, profiles Supercov's
+  // post-run work on a real suite away from CI.
+  if (round === 1 && suite.name === 'unit' && variant === binaries.at(-1).name) {
+    const kept = join(output, 'evidence-unit');
+    mkdirSync(kept, { recursive: true });
+    for (const name of ['run.json', 'evidence.raw.gz'])
+      copyFileSync(join(project, '.supercov/runs', id, name), join(kept, name));
+  }
   return id;
 }
 

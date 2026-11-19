@@ -2552,9 +2552,9 @@ fn relink_around(_root: &Path, workspace: &Path) {
 /// Git never reads it: the directories above it are ignored already. Best
 /// effort, and outside the counted filesystem calls: nothing depends on it.
 fn let_copy_be_scanned(workspace: &Path) {
-    let Some(copy) = copy_directory_of(workspace).filter(|copy| copy != workspace) else {
-        return;
-    };
+    // A workspace is its project's layout below one of the store's copies.
+    let copy =
+        copy_directory_of(workspace).expect("a workspace lies below a copy directory in the store");
     let ignore = copy.join(".gitignore");
     if std::fs::symlink_metadata(&ignore).is_err() {
         let _ = std::fs::write(&ignore, "!*\n");

@@ -2030,12 +2030,12 @@ struct TestTraits<'t> {
 }
 
 impl<'t> TestTraits<'t> {
-    fn of(test: &'t MutableTest) -> Self {
+    fn of(role: &str, runner: &'t str, kind: &'t str) -> Self {
         Self {
-            setup: test.role == "setup",
-            background: test.role == "background",
-            runner: &test.provenance.runner,
-            kind: &test.provenance.kind,
+            setup: role == "setup",
+            background: role == "background",
+            runner,
+            kind,
         }
     }
 }
@@ -2582,20 +2582,41 @@ fn create_coverage_view_with_model(
     // up once per number rather than once per mention: a run's points and
     // lines mention tests millions of times, and each lookup hashed an id.
     // A relation numbers only the tests and phases registered above.
-    let test_traits = tests_by_hit
+    // Owned, so the stages below can each take what they consume -- the
+    // tests, the phases -- while all of them read these.
+    let test_roles = tests_by_hit
         .names
         .iter()
-        .map(|name| TestTraits::of(&tests_by_id[name]))
+        .map(|name| {
+            let test = &tests_by_id[name];
+            (
+                test.role.clone(),
+                test.provenance.runner.clone(),
+                test.provenance.kind.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let test_traits = test_roles
+        .iter()
+        .map(|(role, runner, kind)| TestTraits::of(role, runner, kind))
         .collect::<Vec<_>>();
     let phase_kind = |relation: &Relation| {
         relation
             .names
             .iter()
-            .map(|name| phases_by_id[name].phase.kind.as_str())
+            .map(|name| phases_by_id[name].phase.kind.clone())
             .collect::<Vec<_>>()
     };
-    let phase_kinds = phase_kind(&phases_by_hit);
-    let explicit_kinds = phase_kind(&explicit_phases_by_hit);
+    let phase_kind_names = phase_kind(&phases_by_hit);
+    let explicit_kind_names = phase_kind(&explicit_phases_by_hit);
+    let phase_kinds = phase_kind_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let explicit_kinds = explicit_kind_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let confidence = |tests: &Reached, phases: &Reached, explicit: &Reached| {
         confidence_from(
             tests,
@@ -2616,131 +2637,6 @@ fn create_coverage_view_with_model(
         .iter()
         .map(|branch| branch.id.as_str())
         .collect::<HashSet<_>>();
-    let mut outcome_branches = Vec::new();
-    let mut decisions = Vec::with_capacity(decision_metadata.len());
-    for meta in decision_metadata {
-        let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
-        let outcome_id = format!("{}:outcome", meta.id);
-        if !declared_branches.contains(outcome_id.as_str()) {
-            let alternatives = [true, false]
-                .into_iter()
-                .map(|outcome| {
-                    let (mut tests, mut phases, mut explicit) =
-                        (Vec::new(), Vec::new(), Vec::new());
-                    for observation in mutable
-                        .iter()
-                        .filter(|observation| observation.vector.outcome == outcome)
-                    {
-                        tests.extend(&observation.tests);
-                        phases.extend(&observation.phases);
-                        explicit.extend(&observation.explicit_phases);
-                    }
-                    let tests = tests_by_hit.reached(tests);
-                    let phases = phases_by_hit.reached(phases);
-                    let explicit = explicit_phases_by_hit.reached(explicit);
-                    AlternativeResult {
-                        id: format!("{outcome_id}:{outcome}"),
-                        label: outcome.to_string(),
-                        covered: !tests.names.is_empty(),
-                        confidence: confidence(&tests, &phases, &explicit),
-                        tests: tests.names,
-                        phases: phases.names,
-                    }
-                })
-                .collect::<Vec<_>>();
-            outcome_branches.push(BranchResult {
-                covered: alternatives.iter().all(|alternative| alternative.covered),
-                meta: BranchMeta {
-                    id: outcome_id,
-                    kind: meta.kind.clone(),
-                    file: meta.file.clone(),
-                    line: meta.line,
-                    column: meta.column,
-                    source: meta.source.clone(),
-                    alternatives: alternatives
-                        .iter()
-                        .map(|alternative| BranchAlternativeMeta {
-                            id: alternative.id.clone(),
-                            label: alternative.label.clone(),
-                        })
-                        .collect(),
-                },
-                alternatives,
-            });
-        }
-        let mut observations = Vec::with_capacity(mutable.len());
-        let mut observed_phases = Vec::new();
-        let mut observed_explicit = Vec::new();
-        for observation in mutable {
-            let tests = tests_by_hit.reached(observation.tests);
-            let phases = phases_by_hit.reached(observation.phases);
-            let explicit = explicit_phases_by_hit.reached(observation.explicit_phases);
-            observed_phases.extend(&phases.numbers);
-            observed_explicit.extend(&explicit.numbers);
-            observations.push(VectorObservation {
-                vector: observation.vector,
-                confidence: confidence(&tests, &phases, &explicit),
-                tests: tests.names,
-                phases: phases.names,
-                explicit_phases: explicit.names,
-            });
-        }
-        let vectors = observations
-            .iter()
-            .map(|observation| observation.vector.clone())
-            .collect::<Vec<_>>();
-        let witnesses =
-            find_witnesses_for_conditions(&vectors, meta.conditions.len()).map_err(|error| {
-                ReportError::DecisionAnalysis {
-                    decision_id: meta.id.clone(),
-                    error,
-                }
-            })?;
-        let conditions = meta
-            .conditions
-            .iter()
-            .enumerate()
-            .map(|(index, source)| {
-                let witness = witnesses[index].map(|witness| {
-                    [
-                        vectors[witness.first].clone(),
-                        vectors[witness.second].clone(),
-                    ]
-                });
-                let witness_tests = witnesses[index].map(|witness| {
-                    [
-                        observations[witness.first].tests.clone(),
-                        observations[witness.second].tests.clone(),
-                    ]
-                });
-                ConditionResult {
-                    index,
-                    source: source.clone(),
-                    covered: witness.is_some(),
-                    witness,
-                    witness_tests,
-                }
-            })
-            .collect::<Vec<_>>();
-        let decision_tests =
-            tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
-        let decision_confidence = confidence(
-            &decision_tests,
-            &phases_by_hit.reached(observed_phases),
-            &explicit_phases_by_hit.reached(observed_explicit),
-        );
-        decisions.push(DecisionResult {
-            executed: !vectors.is_empty(),
-            covered: conditions.iter().all(|condition| condition.covered),
-            meta,
-            vectors,
-            vector_observations: observations,
-            conditions,
-            tests: decision_tests.names,
-            confidence: decision_confidence,
-        });
-    }
-
     // Each point's hit number, and where it sits as (file rank, line): a
     // line, test or phase gathers points by these numbers, in the order the
     // `SourceLine`s they stand for sort in, and each point's id and file are
@@ -2780,128 +2676,6 @@ fn create_coverage_view_with_model(
         line,
     };
 
-    let points = manifest
-        .points
-        .iter()
-        .cloned()
-        .zip(&point_hits)
-        .map(|(meta, hit)| {
-            let hit = *hit;
-            let tests = tests_by_hit.of(hit);
-            let phases = phases_by_hit.of(hit);
-            let explicit = explicit_phases_by_hit.of(hit);
-            PointResult {
-                measured: !declined.contains(&meta.id),
-                covered: !tests.numbers.is_empty(),
-                confidence: confidence(tests, phases, explicit),
-                meta,
-                tests: tests.names.clone(),
-                phases: phases.names.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let branches = manifest
-        .branches
-        .iter()
-        .cloned()
-        .map(|mut meta| {
-            // A declined outcome leaves the denominator; the others stay.
-            meta.alternatives
-                .retain(|alternative| !declined.contains(&alternative.id));
-            let alternatives = meta
-                .alternatives
-                .iter()
-                .map(|alternative| {
-                    let hit = hit_ids.numbers.get(alternative.id.as_str()).copied();
-                    let tests = tests_by_hit.of(hit);
-                    let phases = phases_by_hit.of(hit);
-                    let explicit = explicit_phases_by_hit.of(hit);
-                    AlternativeResult {
-                        id: alternative.id.clone(),
-                        label: alternative.label.clone(),
-                        covered: !tests.numbers.is_empty(),
-                        tests: tests.names.clone(),
-                        phases: phases.names.clone(),
-                        confidence: confidence(tests, phases, explicit),
-                    }
-                })
-                .collect::<Vec<_>>();
-            BranchResult {
-                covered: alternatives.iter().all(|alternative| alternative.covered),
-                meta,
-                alternatives,
-            }
-        })
-        .chain(outcome_branches)
-        .collect::<Vec<_>>();
-
-    // Obligations the frontend declined to measure leave the covered/uncovered
-    // denominator entirely. Counting them as uncovered would report a
-    // measurement gap as a coverage gap — a wrong number, and wrong numbers get
-    // trusted. They are reported separately instead, alongside the share of
-    // obligations that were measured exactly.
-    // Lines are folded from every point, declined ones included, so a file
-    // Supercov could not measure still has addressable lines to report a
-    // limitation against. Only what was measured decides the line's state and
-    // whether it counts. A line gathers its points' test and phase numbers,
-    // which sort and deduplicate as numbers.
-    let mut line_aggregates = BTreeMap::<(u32, usize), LineAggregate>::new();
-    for ((point, location), hit) in points.iter().zip(&point_locations).zip(&point_hits) {
-        let aggregate = line_aggregates.entry(*location).or_default();
-        if declined.contains(&point.meta.id) {
-            continue;
-        }
-        aggregate.measured = true;
-        aggregate.covered |= point.covered;
-        aggregate.tests.extend(&tests_by_hit.of(*hit).numbers);
-        aggregate.phases.extend(&phases_by_hit.of(*hit).numbers);
-        aggregate
-            .explicit_phases
-            .extend(&explicit_phases_by_hit.of(*hit).numbers);
-    }
-    let lines = line_aggregates
-        .into_iter()
-        .map(|(location, aggregate)| {
-            let LineAggregate {
-                covered,
-                measured,
-                tests,
-                phases,
-                explicit_phases,
-            } = aggregate;
-            let tests = tests_by_hit.reached(tests);
-            let phases = phases_by_hit.reached(phases);
-            let explicit = explicit_phases_by_hit.reached(explicit_phases);
-            let traits = tests
-                .numbers
-                .iter()
-                .map(|number| &test_traits[*number as usize])
-                .collect::<Vec<_>>();
-            let runners = traits
-                .iter()
-                .map(|traits| traits.runner)
-                .collect::<BTreeSet<_>>();
-            let kinds = traits
-                .iter()
-                .map(|traits| traits.kind)
-                .collect::<BTreeSet<_>>();
-            LineResult {
-                file: point_files[location.0 as usize].to_string(),
-                line: location.1,
-                covered,
-                measured,
-                confidence: confidence(&tests, &phases, &explicit),
-                tests: tests.names,
-                runners: runners.iter().map(|runner| (*runner).to_owned()).collect(),
-                exclusive_kind: (kinds.len() == 1).then(|| (*kinds.first().unwrap()).to_owned()),
-                phases: phases.names,
-                kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
-            }
-        })
-        .collect::<Vec<_>>();
-    drop(test_traits);
-
     // Where each hit sits, by hit number, as (file rank, line): a test's or
     // phase's lines sort and deduplicate as numbers, in the order the
     // `SourceLine`s they stand for sort in.
@@ -2921,117 +2695,410 @@ fn create_coverage_view_with_model(
         located.dedup();
         located
     };
-    test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
-    // Each test's lines as numbers, for its file's lines.
-    let mut test_locations = Vec::with_capacity(test_order.len());
-    let tests = test_order
-        .into_iter()
-        .map(|id| {
-            let test = tests_by_id.remove(&id).expect("test order references test");
-            let outcome = test_outcome(&test);
-            let hits = hit_ids.distinct_by(test.hits, &hit_ranks);
-            let located = lines_of(&hits);
-            let lines = located.iter().copied().map(source_line).collect();
-            test_locations.push(located);
-            TestCoverageResult {
-                id: test.id,
-                name: test.name,
-                file: test.file,
-                title: test.title,
-                retries: test.retries.into_iter().collect(),
-                attempts: test.attempts.into_values().collect(),
-                outcome,
-                provenance: test.provenance,
-                role: test.role,
-                attribution: test.attribution,
-                hits: hit_ids.names_of(&hits),
-                decisions: test
-                    .decisions
+    // What each obligation, line, test and phase records is worked out in
+    // stages that read what was gathered above and nothing another stage
+    // writes, so they run side by side: one after another they were most of
+    // a large run's analysis, on one core.
+    let (tests_by_hit, phases_by_hit, explicit_phases_by_hit) =
+        (&tests_by_hit, &phases_by_hit, &explicit_phases_by_hit);
+    let (declined, declared_branches, hit_ids) = (&declined, &declared_branches, &hit_ids);
+    let hit_ranks = &hit_ranks;
+    let decide = move || -> Result<(Vec<DecisionResult>, Vec<BranchResult>), ReportError> {
+        let (mut vectors_by_decision, mut tests_by_decision) =
+            (vectors_by_decision, tests_by_decision);
+        let mut outcome_branches = Vec::new();
+        let mut decisions = Vec::with_capacity(decision_metadata.len());
+        for meta in decision_metadata {
+            let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
+            let outcome_id = format!("{}:outcome", meta.id);
+            if !declared_branches.contains(outcome_id.as_str()) {
+                let alternatives = [true, false]
                     .into_iter()
-                    .map(|(id, vectors)| TestDecisionResult {
-                        id,
-                        vectors: vectors.values,
+                    .map(|outcome| {
+                        let (mut tests, mut phases, mut explicit) =
+                            (Vec::new(), Vec::new(), Vec::new());
+                        for observation in mutable
+                            .iter()
+                            .filter(|observation| observation.vector.outcome == outcome)
+                        {
+                            tests.extend(&observation.tests);
+                            phases.extend(&observation.phases);
+                            explicit.extend(&observation.explicit_phases);
+                        }
+                        let tests = tests_by_hit.reached(tests);
+                        let phases = phases_by_hit.reached(phases);
+                        let explicit = explicit_phases_by_hit.reached(explicit);
+                        AlternativeResult {
+                            id: format!("{outcome_id}:{outcome}"),
+                            label: outcome.to_string(),
+                            covered: !tests.names.is_empty(),
+                            confidence: confidence(&tests, &phases, &explicit),
+                            tests: tests.names,
+                            phases: phases.names,
+                        }
                     })
-                    .collect(),
-                lines,
+                    .collect::<Vec<_>>();
+                outcome_branches.push(BranchResult {
+                    covered: alternatives.iter().all(|alternative| alternative.covered),
+                    meta: BranchMeta {
+                        id: outcome_id,
+                        kind: meta.kind.clone(),
+                        file: meta.file.clone(),
+                        line: meta.line,
+                        column: meta.column,
+                        source: meta.source.clone(),
+                        alternatives: alternatives
+                            .iter()
+                            .map(|alternative| BranchAlternativeMeta {
+                                id: alternative.id.clone(),
+                                label: alternative.label.clone(),
+                            })
+                            .collect(),
+                    },
+                    alternatives,
+                });
             }
-        })
-        .collect::<Vec<_>>();
+            let mut observations = Vec::with_capacity(mutable.len());
+            let mut observed_phases = Vec::new();
+            let mut observed_explicit = Vec::new();
+            for observation in mutable {
+                let tests = tests_by_hit.reached(observation.tests);
+                let phases = phases_by_hit.reached(observation.phases);
+                let explicit = explicit_phases_by_hit.reached(observation.explicit_phases);
+                observed_phases.extend(&phases.numbers);
+                observed_explicit.extend(&explicit.numbers);
+                observations.push(VectorObservation {
+                    vector: observation.vector,
+                    confidence: confidence(&tests, &phases, &explicit),
+                    tests: tests.names,
+                    phases: phases.names,
+                    explicit_phases: explicit.names,
+                });
+            }
+            let vectors = observations
+                .iter()
+                .map(|observation| observation.vector.clone())
+                .collect::<Vec<_>>();
+            let witnesses = find_witnesses_for_conditions(&vectors, meta.conditions.len())
+                .map_err(|error| ReportError::DecisionAnalysis {
+                    decision_id: meta.id.clone(),
+                    error,
+                })?;
+            let conditions = meta
+                .conditions
+                .iter()
+                .enumerate()
+                .map(|(index, source)| {
+                    let witness = witnesses[index].map(|witness| {
+                        [
+                            vectors[witness.first].clone(),
+                            vectors[witness.second].clone(),
+                        ]
+                    });
+                    let witness_tests = witnesses[index].map(|witness| {
+                        [
+                            observations[witness.first].tests.clone(),
+                            observations[witness.second].tests.clone(),
+                        ]
+                    });
+                    ConditionResult {
+                        index,
+                        source: source.clone(),
+                        covered: witness.is_some(),
+                        witness,
+                        witness_tests,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let decision_tests =
+                tests_by_hit.reached(tests_by_decision.remove(&meta.id).unwrap_or_default());
+            let decision_confidence = confidence(
+                &decision_tests,
+                &phases_by_hit.reached(observed_phases),
+                &explicit_phases_by_hit.reached(observed_explicit),
+            );
+            decisions.push(DecisionResult {
+                executed: !vectors.is_empty(),
+                covered: conditions.iter().all(|condition| condition.covered),
+                meta,
+                vectors,
+                vector_observations: observations,
+                conditions,
+                tests: decision_tests.names,
+                confidence: decision_confidence,
+            });
+        }
 
-    let mut test_files = BTreeMap::<
-        String,
-        (
-            BTreeSet<String>,
-            BTreeSet<String>,
-            BTreeSet<String>,
-            Vec<(u32, usize)>,
-        ),
-    >::new();
-    for (test, located) in tests.iter().zip(test_locations) {
-        let aggregate = test_files
-            .entry(
-                test.file
-                    .clone()
-                    .unwrap_or_else(|| "(unknown test file)".into()),
+        Ok((decisions, outcome_branches))
+    };
+    let measure = || {
+        let points = manifest
+            .points
+            .iter()
+            .cloned()
+            .zip(&point_hits)
+            .map(|(meta, hit)| {
+                let hit = *hit;
+                let tests = tests_by_hit.of(hit);
+                let phases = phases_by_hit.of(hit);
+                let explicit = explicit_phases_by_hit.of(hit);
+                PointResult {
+                    measured: !declined.contains(&meta.id),
+                    covered: !tests.numbers.is_empty(),
+                    confidence: confidence(tests, phases, explicit),
+                    meta,
+                    tests: tests.names.clone(),
+                    phases: phases.names.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let branches = manifest
+            .branches
+            .iter()
+            .cloned()
+            .map(|mut meta| {
+                // A declined outcome leaves the denominator; the others stay.
+                meta.alternatives
+                    .retain(|alternative| !declined.contains(&alternative.id));
+                let alternatives = meta
+                    .alternatives
+                    .iter()
+                    .map(|alternative| {
+                        let hit = hit_ids.numbers.get(alternative.id.as_str()).copied();
+                        let tests = tests_by_hit.of(hit);
+                        let phases = phases_by_hit.of(hit);
+                        let explicit = explicit_phases_by_hit.of(hit);
+                        AlternativeResult {
+                            id: alternative.id.clone(),
+                            label: alternative.label.clone(),
+                            covered: !tests.numbers.is_empty(),
+                            tests: tests.names.clone(),
+                            phases: phases.names.clone(),
+                            confidence: confidence(tests, phases, explicit),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                BranchResult {
+                    covered: alternatives.iter().all(|alternative| alternative.covered),
+                    meta,
+                    alternatives,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        (points, branches)
+    };
+    let fold = || {
+        // Obligations the frontend declined to measure leave the covered/uncovered
+        // denominator entirely. Counting them as uncovered would report a
+        // measurement gap as a coverage gap — a wrong number, and wrong numbers get
+        // trusted. They are reported separately instead, alongside the share of
+        // obligations that were measured exactly.
+        // Lines are folded from every point, declined ones included, so a file
+        // Supercov could not measure still has addressable lines to report a
+        // limitation against. Only what was measured decides the line's state and
+        // whether it counts. A line gathers its points' test and phase numbers,
+        // which sort and deduplicate as numbers.
+        let mut line_aggregates = BTreeMap::<(u32, usize), LineAggregate>::new();
+        for ((point, location), hit) in manifest
+            .points
+            .iter()
+            .zip(&point_locations)
+            .zip(&point_hits)
+        {
+            let aggregate = line_aggregates.entry(*location).or_default();
+            if declined.contains(&point.id) {
+                continue;
+            }
+            aggregate.measured = true;
+            // What the point's result says of it: some test reached it.
+            aggregate.covered |= !tests_by_hit.of(*hit).numbers.is_empty();
+            aggregate.tests.extend(&tests_by_hit.of(*hit).numbers);
+            aggregate.phases.extend(&phases_by_hit.of(*hit).numbers);
+            aggregate
+                .explicit_phases
+                .extend(&explicit_phases_by_hit.of(*hit).numbers);
+        }
+        line_aggregates
+            .into_iter()
+            .map(|(location, aggregate)| {
+                let LineAggregate {
+                    covered,
+                    measured,
+                    tests,
+                    phases,
+                    explicit_phases,
+                } = aggregate;
+                let tests = tests_by_hit.reached(tests);
+                let phases = phases_by_hit.reached(phases);
+                let explicit = explicit_phases_by_hit.reached(explicit_phases);
+                let traits = tests
+                    .numbers
+                    .iter()
+                    .map(|number| &test_traits[*number as usize])
+                    .collect::<Vec<_>>();
+                let runners = traits
+                    .iter()
+                    .map(|traits| traits.runner)
+                    .collect::<BTreeSet<_>>();
+                let kinds = traits
+                    .iter()
+                    .map(|traits| traits.kind)
+                    .collect::<BTreeSet<_>>();
+                LineResult {
+                    file: point_files[location.0 as usize].to_string(),
+                    line: location.1,
+                    covered,
+                    measured,
+                    confidence: confidence(&tests, &phases, &explicit),
+                    tests: tests.names,
+                    runners: runners.iter().map(|runner| (*runner).to_owned()).collect(),
+                    exclusive_kind: (kinds.len() == 1)
+                        .then(|| (*kinds.first().unwrap()).to_owned()),
+                    phases: phases.names,
+                    kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let gather_tests = move || {
+        let mut test_order = test_order;
+        let mut tests_by_id = tests_by_id;
+        test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
+        // Each test's lines as numbers, for its file's lines.
+        let mut test_locations = Vec::with_capacity(test_order.len());
+        let tests = test_order
+            .into_iter()
+            .map(|id| {
+                let test = tests_by_id.remove(&id).expect("test order references test");
+                let outcome = test_outcome(&test);
+                let hits = hit_ids.distinct_by(test.hits, hit_ranks);
+                let located = lines_of(&hits);
+                let lines = located.iter().copied().map(source_line).collect();
+                test_locations.push(located);
+                TestCoverageResult {
+                    id: test.id,
+                    name: test.name,
+                    file: test.file,
+                    title: test.title,
+                    retries: test.retries.into_iter().collect(),
+                    attempts: test.attempts.into_values().collect(),
+                    outcome,
+                    provenance: test.provenance,
+                    role: test.role,
+                    attribution: test.attribution,
+                    hits: hit_ids.names_of(&hits),
+                    decisions: test
+                        .decisions
+                        .into_iter()
+                        .map(|(id, vectors)| TestDecisionResult {
+                            id,
+                            vectors: vectors.values,
+                        })
+                        .collect(),
+                    lines,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut test_files = BTreeMap::<
+            String,
+            (
+                BTreeSet<String>,
+                BTreeSet<String>,
+                BTreeSet<String>,
+                Vec<(u32, usize)>,
+            ),
+        >::new();
+        for (test, located) in tests.iter().zip(test_locations) {
+            let aggregate = test_files
+                .entry(
+                    test.file
+                        .clone()
+                        .unwrap_or_else(|| "(unknown test file)".into()),
+                )
+                .or_default();
+            aggregate.0.insert(test.id.clone());
+            aggregate.1.insert(test.provenance.runner.clone());
+            aggregate.2.insert(test.provenance.kind.clone());
+            aggregate.3.extend(located);
+        }
+        let test_files = test_files
+            .into_iter()
+            .map(|(file, (tests, runners, kinds, mut lines))| {
+                lines.sort_unstable();
+                lines.dedup();
+                TestFileResult {
+                    file,
+                    tests: sorted(&tests),
+                    runners: sorted(&runners),
+                    kinds: sorted(&kinds),
+                    lines: lines.into_iter().map(source_line).collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        (tests, test_files)
+    };
+    let gather_phases = move || {
+        let mut phases = phases_by_id.into_values().collect::<Vec<_>>();
+        phases.sort_by(|left, right| {
+            left.phase
+                .started_at_ms
+                .cmp(&right.phase.started_at_ms)
+                .then(left.phase.id.cmp(&right.phase.id))
+        });
+        phases
+            .into_iter()
+            .map(|phase| {
+                let hits = hit_ids.distinct_by(phase.hits, hit_ranks);
+                let lines = lines_of(&hits).into_iter().map(source_line).collect();
+                PhaseResult {
+                    phase: phase.phase,
+                    test: phase.test,
+                    hits: hit_ids.names_of(&hits),
+                    decisions: phase
+                        .decisions
+                        .into_iter()
+                        .map(|(id, vectors)| TestDecisionResult {
+                            id,
+                            vectors: vectors.values,
+                        })
+                        .collect(),
+                    lines,
+                    browser_events: phase.browser_events,
+                    server_events: phase.server_events,
+                    explicit_events: phase.explicit_events,
+                    inferred_events: phase.inferred_events,
+                    explicit_browser_events: phase.explicit_browser_events,
+                    inferred_browser_events: phase.inferred_browser_events,
+                    explicit_server_events: phase.explicit_server_events,
+                    inferred_server_events: phase.inferred_server_events,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let (decided, (points, branches), lines, (tests, test_files), phases) =
+        std::thread::scope(|scope| {
+            let decided = scope.spawn(decide);
+            let measured = scope.spawn(measure);
+            let folded = scope.spawn(fold);
+            let phases = scope.spawn(gather_phases);
+            let tests = gather_tests();
+            (
+                decided.join().unwrap_or_else(crate::threads::rethrow),
+                measured.join().unwrap_or_else(crate::threads::rethrow),
+                folded.join().unwrap_or_else(crate::threads::rethrow),
+                tests,
+                phases.join().unwrap_or_else(crate::threads::rethrow),
             )
-            .or_default();
-        aggregate.0.insert(test.id.clone());
-        aggregate.1.insert(test.provenance.runner.clone());
-        aggregate.2.insert(test.provenance.kind.clone());
-        aggregate.3.extend(located);
-    }
-    let test_files = test_files
+        });
+    let (decisions, outcome_branches) = decided?;
+    let branches = branches
         .into_iter()
-        .map(|(file, (tests, runners, kinds, mut lines))| {
-            lines.sort_unstable();
-            lines.dedup();
-            TestFileResult {
-                file,
-                tests: sorted(&tests),
-                runners: sorted(&runners),
-                kinds: sorted(&kinds),
-                lines: lines.into_iter().map(source_line).collect(),
-            }
-        })
+        .chain(outcome_branches)
         .collect::<Vec<_>>();
-
-    let mut phases = phases_by_id.into_values().collect::<Vec<_>>();
-    phases.sort_by(|left, right| {
-        left.phase
-            .started_at_ms
-            .cmp(&right.phase.started_at_ms)
-            .then(left.phase.id.cmp(&right.phase.id))
-    });
-    let phases = phases
-        .into_iter()
-        .map(|phase| {
-            let hits = hit_ids.distinct_by(phase.hits, &hit_ranks);
-            let lines = lines_of(&hits).into_iter().map(source_line).collect();
-            PhaseResult {
-                phase: phase.phase,
-                test: phase.test,
-                hits: hit_ids.names_of(&hits),
-                decisions: phase
-                    .decisions
-                    .into_iter()
-                    .map(|(id, vectors)| TestDecisionResult {
-                        id,
-                        vectors: vectors.values,
-                    })
-                    .collect(),
-                lines,
-                browser_events: phase.browser_events,
-                server_events: phase.server_events,
-                explicit_events: phase.explicit_events,
-                inferred_events: phase.inferred_events,
-                explicit_browser_events: phase.explicit_browser_events,
-                inferred_browser_events: phase.inferred_browser_events,
-                explicit_server_events: phase.explicit_server_events,
-                inferred_server_events: phase.inferred_server_events,
-            }
-        })
-        .collect::<Vec<_>>();
-
     let total_obligations = decisions.len() + points.len() + branches.len();
     let (decisions, points, branches) = if declined.is_empty() {
         (decisions, points, branches)
@@ -3789,7 +3856,7 @@ fn archive_request_from<D>(
     // A file's records are together and share its scope: the result they
     // join is looked up when the scope changes.
     let mut last: Option<(ExecutionScope, usize)> = None;
-    let mut seen = FastMap::<usize, FastMap<u64, usize>>::default();
+    let mut seen = FastMap::<usize, FastMap<u64, Vec<usize>>>::default();
     for record in scoped_records {
         let Some(scope) = &record.scope else { continue };
         let index = match &last {
@@ -3804,24 +3871,22 @@ fn archive_request_from<D>(
         };
         let server = &mut raw_results[index].server;
         let known = seen.entry(index).or_insert_with(|| {
-            let mut known = FastMap::<u64, usize>::default();
+            let mut known = FastMap::<u64, Vec<usize>>::default();
             for (position, existing) in server.iter().enumerate() {
-                known.entry(record_hash(existing)).or_insert(position);
+                known
+                    .entry(record_hash(existing))
+                    .or_default()
+                    .push(position);
             }
             known
         });
-        let hash = record_hash(&record);
-        match known.get(&hash) {
-            // The same hash is almost always the same record; when it is
-            // not, every record the result holds is compared.
-            Some(&position) if server[position] == record || server.contains(&record) => {
-                continue;
-            }
-            Some(_) => {}
-            None => {
-                known.insert(hash, server.len());
-            }
+        // The records of one hash are compared in full: the same hash is
+        // almost always the same record, and never taken for it.
+        let positions = known.entry(record_hash(&record)).or_default();
+        if positions.iter().any(|position| server[*position] == record) {
+            continue;
         }
+        positions.push(server.len());
         server.push(record);
     }
 
@@ -3991,11 +4056,12 @@ fn resolve_probe_places(
             .filter(|(_, table)| !table.follows.is_empty())
             .map(|(key, table)| {
                 let mut followers = rustc_hash::FxHashMap::<usize, Vec<&str>>::default();
-                for [place, leader] in &table.follows {
+                // Kept for its follows, so it has one at least.
+                table.follows.iter().for_each(|[place, leader]| {
                     if let Some(id) = table.points.get(*place) {
                         followers.entry(*leader).or_default().push(id);
                     }
-                }
+                });
                 (key.as_str(), followers)
             })
             .collect(),
@@ -4006,8 +4072,9 @@ fn resolve_probe_places(
         .map_or(1, std::num::NonZeroUsize::get)
         .min(raw_results.len().max(1));
     let chunks = std::sync::Mutex::new(raw_results.chunks_mut(64));
+    // One worker at least, as `threads` is.
     std::thread::scope(|scope| {
-        for _ in 0..threads {
+        (0..threads).for_each(|_| {
             scope.spawn(|| {
                 loop {
                     let Some(chunk) = chunks.lock().expect("no worker panics holding it").next()
@@ -4017,7 +4084,7 @@ fn resolve_probe_places(
                     chunk.iter_mut().for_each(|raw| places.resolve(raw));
                 }
             });
-        }
+        });
     });
 }
 
@@ -4150,13 +4217,14 @@ impl<'a> ProbePlaces<'a> {
             return;
         }
         let mut merged: Vec<LogicalSnapshot> = Vec::with_capacity(logicals.len());
-        for mut logical in logicals.drain(..) {
+        // One of them resolves, so there is one at least.
+        logicals.drain(..).for_each(|mut logical| {
             if let Some(resolved) = self.id(&logical.id, 'p') {
                 let Some((branch, _)) = resolved
                     .rsplit_once(':')
                     .filter(|(branch, _)| !branch.is_empty())
                 else {
-                    continue;
+                    return;
                 };
                 logical.id = branch.to_owned();
             }
@@ -4170,7 +4238,7 @@ impl<'a> ProbePlaces<'a> {
                 }
                 None => merged.push(logical),
             }
-        }
+        });
         *logicals = merged;
     }
 }
@@ -4350,6 +4418,40 @@ mod tests {
         assert!(serde_json::from_str::<RuntimeSnapshot>(uneven).is_err());
         let stray = r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1],"vector":{"3":{"values":[true],"outcome":true}}}}"#;
         assert!(serde_json::from_str::<RuntimeSnapshot>(stray).is_err());
+        // Columns of no event are no events.
+        let none: RuntimeSnapshot = serde_json::from_str(r#"{"eventColumns":{"types":[],"phases":[],"environments":[],"id":[],"type":[],"phase":[],"environment":[],"t":[]}}"#).unwrap();
+        assert!(none.events.is_empty());
+        // Each column indexes its table, and a timestamp is the sum of the
+        // differences before it: an index past a table, a phase below -1,
+        // or a sum past i64 is refused, by what it is.
+        let one = |t: &str, kind: &str, phase: &str, environment: &str| {
+            format!(
+                r#"{{"eventColumns":{{"types":["hit"],"phases":["p"],"environments":["browser"],"id":["a"],"type":[{kind}],"phase":[{phase}],"environment":[{environment}],"t":[{t}]}}}}"#
+            )
+        };
+        for (text, reason) in [
+            (
+                r#"{"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a","b"],"type":[0,0],"phase":[-1,-1],"environment":[0,0],"t":[9223372036854775807,1]}}"#.to_owned(),
+                "an event timestamp overflows",
+            ),
+            (one("1", "1", "-1", "0"), "an event type outside its table"),
+            (one("1", "0", "1", "0"), "an event phase outside its table"),
+            (one("1", "0", "-2", "0"), "an event phase outside its table"),
+            (one("1", "0", "0", "1"), "an event environment outside its table"),
+        ] {
+            let error = serde_json::from_str::<RuntimeSnapshot>(&text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+        }
+        assert_eq!(
+            serde_json::from_str::<RuntimeSnapshot>(&one("1", "0", "0", "0"))
+                .unwrap()
+                .events[0]
+                .phase_id
+                .as_deref(),
+            Some("p")
+        );
     }
     /// No result passes or fails.
     #[test]
@@ -4770,6 +4872,86 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["s1", "d1", "~pk.0"]
         );
+    }
+
+    /// A name that does not read as a table's place, or names no table or a
+    /// place beyond it, stays as written wherever it is: a decision, an event
+    /// of any type, a server record with or without an id, and a module's
+    /// selection outcomes, which merge into their branch's entry.
+    #[test]
+    fn names_no_table_holds_stay_as_written() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec!["f".into(), "or:short".into(), "or:right".into()],
+                decisions: vec!["d1".into()],
+                // A place past the table follows nothing.
+                follows: vec![[9, 0]],
+            },
+        )]);
+        let mut result = raw("a", 0, "passed", &["~pk.x", "~pk.0"]);
+        let names = ["plain", "~pk.0", "~dk", "~dk.x", "~dz.0", "~dk.5", "~dk.0"];
+        let snapshot = &mut result.runtime[0];
+        snapshot.decisions = names
+            .iter()
+            .map(|id| DecisionSnapshot {
+                id: (*id).into(),
+                vectors: Vec::new(),
+            })
+            .collect();
+        snapshot.events = vec![RuntimeEvent {
+            event_type: "assertion".into(),
+            id: "~pk.0".into(),
+            vector: None,
+            timestamp_ms: 1,
+            phase_id: None,
+            environment: "browser".into(),
+        }];
+        let outcome = LogicalVector {
+            right: false,
+            truthy: true,
+        };
+        snapshot.logicals = vec![
+            LogicalSnapshot {
+                id: "~pk.1".into(),
+                vectors: vec![outcome.clone()],
+            },
+            LogicalSnapshot {
+                id: "~pk.2".into(),
+                vectors: Vec::new(),
+            },
+        ];
+        result.server = vec![ServerRecord {
+            record_type: "hit".into(),
+            vector: None,
+            id: None,
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+            outcome: None,
+        }];
+        let mut results = vec![result];
+        resolve_probe_places(&mut results, &tables);
+        let snapshot = &results[0].runtime[0];
+        assert_eq!(snapshot.hits, ["~pk.x", "f"]);
+        assert_eq!(
+            snapshot
+                .decisions
+                .iter()
+                .map(|decision| decision.id.as_str())
+                .collect::<Vec<_>>(),
+            ["plain", "~pk.0", "~dk", "~dk.x", "~dz.0", "~dk.5", "d1"]
+        );
+        assert_eq!(snapshot.events[0].id, "~pk.0");
+        assert_eq!(
+            snapshot.logicals,
+            [LogicalSnapshot {
+                id: "or".into(),
+                vectors: vec![outcome],
+            }]
+        );
+        assert_eq!(results[0].server[0].id, None);
     }
 
     /// A probe dropped for the one before it is hit wherever that one is:
@@ -6184,6 +6366,8 @@ mod tests {
                     "{\"type\":\"hit\",\"id\":\"orphan\",\"scope\":{\"version\":1,",
                     "\"runId\":\"run\",\"workerId\":\"w\",\"testId\":\"gone\",",
                     "\"testKey\":\"gone\",\"retry\":0,\"attemptId\":\"a\"}}\n",
+                    // A request's torn record is counted, its file once.
+                    "{\"type\":\"hit\",\"id\":\"tor\n",
                 )
                 .as_bytes()
                 .to_vec(),
@@ -6213,8 +6397,8 @@ mod tests {
         })
         .expect("a torn evidence line must not fail the whole run");
         let transport = report.view.transport.expect("transport stats");
-        assert_eq!(transport.corrupt_records, 2);
-        assert_eq!(transport.corrupt_files, 2);
+        assert_eq!(transport.corrupt_records, 3);
+        assert_eq!(transport.corrupt_files, 3);
         assert_eq!(transport.background_server_records, 2);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -6241,7 +6425,7 @@ mod tests {
             retry: 0,
             attempt_id: "attempt".into(),
         });
-        let path = archive(vec![
+        let entries = vec![
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: serde_json::to_vec(&manifest).unwrap(),
@@ -6250,16 +6434,26 @@ mod tests {
                 path: "worker/mcdc.json".into(),
                 contents: serde_json::to_vec(&result).unwrap(),
             },
-        ]);
+        ];
+        let path = archive(entries);
+        let request = ArchiveReportRequest {
+            archive_path: path.clone(),
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
+        };
         assert!(matches!(
-            analyze_coverage_archive(&ArchiveReportRequest {
-                archive_path: path.clone(),
-                run_id: "run".into(),
-                generated_at: "time".into(),
-                integrity: None,
-                test_exit_code: ExitCodeInput::Missing,
-                test_filter: None,
-            }),
+            analyze_coverage_archive(&request),
+            Err(ReportError::InvalidArchive(reason))
+                if reason.contains("expected=run actual=other-run")
+        ));
+        // Analysed in memory, as a run analyses its evidence while it is
+        // written, the same evidence is refused the same way.
+        let entries = crate::evidence_archive::read_archive(&path).unwrap();
+        assert!(matches!(
+            analyze_coverage_entries(&request, &entries, None),
             Err(ReportError::InvalidArchive(reason))
                 if reason.contains("expected=run actual=other-run")
         ));

@@ -50,7 +50,7 @@ pub fn parse(
     let mut parser = Parser::new();
     let grammar = match language {
         JvmLanguage::Java => tree_sitter_java::LANGUAGE.into(),
-        JvmLanguage::Kotlin => crate::kotlin_grammar::LANGUAGE.into(),
+        JvmLanguage::Kotlin => crate::kotlin_grammar::language().into(),
     };
     parser
         .set_language(&grammar)
