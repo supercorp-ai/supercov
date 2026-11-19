@@ -73,6 +73,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "vitest.mjs",
     "vitestBrowser.mjs",
     "vitestReporter.mjs",
+    "vitestStrong.mjs",
+    "vitestStrongReporter.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -1437,6 +1439,12 @@ fn write_vitest_config(
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
+         import SupercovStrongReporter from './node_modules/vitestStrongReporter.mjs';\n\
+         // Strong mutation (`supercov runs <id> mutants test`): the strong\n\
+         // setup file switches each test file's mutant on, and the strong\n\
+         // reporter runs the plan in rounds instead of one run.\n\
+         const supercovStrong = Boolean(process.env.SUPERCOV_STRONG_PLAN);\n\
+         const supercovNodeSetup = supercovStrong ? 'vitestStrong.mjs' : 'vitest.mjs';\n\
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
@@ -1447,7 +1455,7 @@ fn write_vitest_config(
          const supercovSetupFile = (config) =>\n\
            supercovBrowserMode(config)\n\
              ? '.supercov/node_modules/vitestBrowser.mjs'\n\
-             : '.supercov/node_modules/vitest.mjs';\n\
+             : `.supercov/node_modules/${{supercovNodeSetup}}`;\n\
          // Evidence leaves the browser over Vitest's own command channel, so\n\
          // the command is registered only for the mode that uses it.\n\
          const supercovBrowserTest = (config) =>\n\
@@ -1458,7 +1466,7 @@ fn write_vitest_config(
          // environment after Vitest has loaded file/glob/inline configs and\n\
          // applied --project, preserving the runner's own config semantics.\n\
          const configureProjects = (projects) => {{\n\
-           const nodeSetup = resolve(process.cwd(), '.supercov/node_modules/vitest.mjs');\n\
+           const nodeSetup = resolve(process.cwd(), `.supercov/node_modules/${{supercovNodeSetup}}`);\n\
            const browserSetup = resolve(process.cwd(), '.supercov/node_modules/vitestBrowser.mjs');\n\
            for (const project of projects ?? []) {{\n\
              const test = project.config;\n\
@@ -1498,7 +1506,9 @@ fn write_vitest_config(
            supercovSkipCoverageThresholds(config.test?.coverage);\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
-           config.test.reporters = configuredReporters\n\
+           config.test.reporters = supercovStrong\n\
+             ? [new SupercovStrongReporter(configureProjects)]\n\
+             : configuredReporters\n\
              ? [...(Array.isArray(configuredReporters) ? configuredReporters : [configuredReporters]), new SupercovVitestReporter(configureProjects)]\n\
              : ['default', new SupercovVitestReporter(configureProjects)];\n\
            return config;\n\
@@ -2280,9 +2290,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:466",
-            "javascript-source-path#javascript_frontend.rs:1869",
-            "javascript-source-path#javascript_frontend.rs:1799",
+            "javascript-source-path#javascript_frontend.rs:472",
+            "javascript-source-path#javascript_frontend.rs:1899",
+            "javascript-source-path#javascript_frontend.rs:1829",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2393,8 +2403,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:510",
-            "javascript-source-path#javascript_frontend.rs:466",
+            "fs.read_to_string#javascript_frontend.rs:516",
+            "javascript-source-path#javascript_frontend.rs:472",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

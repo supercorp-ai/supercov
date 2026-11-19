@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1171")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1194")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1171"),
+        seen.contains("test fault at fs (javascript_run.rs:1194"),
         "{seen}"
     );
 }
@@ -15641,7 +15641,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2617 => main.rs:2617",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2012 => javascript_frontend.rs:2012",
+            "fs.read_to_string#javascript_frontend.rs:2022 => javascript_frontend.rs:2022",
         ],
     );
 }
@@ -17205,18 +17205,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1364",
-        "fs.create_dir_all#javascript_run.rs:742",
-        "fs.write#javascript_run.rs:1048",
+        "fs.create_dir_all#javascript_run.rs:755",
+        "fs.write#javascript_run.rs:1071",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1119",
-        "fs.create_dir_all#javascript_run.rs:1290",
+        "fs.create_dir_all#javascript_run.rs:1142",
+        "fs.create_dir_all#javascript_run.rs:1324",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1565",
-        "fs.create_dir_all#javascript_run.rs:1567",
+        "fs.create_dir_all#javascript_run.rs:1599",
+        "fs.create_dir_all#javascript_run.rs:1601",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1667",
-        "fs.create_dir_all#javascript_run.rs:1669",
+        "fs.create_dir_all#javascript_run.rs:1701",
+        "fs.create_dir_all#javascript_run.rs:1703",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17714,12 +17714,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:354",
-            "javascript_frontend.rs:354",
+            "fs.read#javascript_frontend.rs:356",
+            "javascript_frontend.rs:356",
         ),
         (
-            "fs.read#javascript_frontend.rs:366",
-            "javascript_frontend.rs:366",
+            "fs.read#javascript_frontend.rs:368",
+            "javascript_frontend.rs:368",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17749,12 +17749,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1801@2",
+            "fs.read_to_string#javascript_frontend.rs:1811@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1811"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 

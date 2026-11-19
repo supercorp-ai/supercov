@@ -2622,6 +2622,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
         run_id: Some(run_id),
         started_at: Some(started_at),
         watchdog_program,
+        strong: None,
     };
     let mut diagnostics = supercov_engine::fault::diagnostics();
     let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);

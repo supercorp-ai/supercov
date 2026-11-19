@@ -104,10 +104,14 @@ pub fn command(args: &[String]) -> ExitCode {
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
         let mut plan = run_plan(run)?;
         narrow(&mut plan, &root, run, &options)?;
+        let saved = read_saved(run);
+        // A second pass over the same run runs only what has no verdict.
+        plan.mutants
+            .retain(|mutant| !saved.contains_key(&mutant.id));
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
-        Err("`mutants test` runs mutants once its runner is in place; `--plan` shows what it would run".into())
+        execute(&root, run, plan, saved, &options)
     })();
     match result {
         Ok(data) => {
@@ -227,6 +231,23 @@ fn plan_json(run: &StoredRun, plan: &StrongPlan) -> Value {
 
 fn plan_text(data: &Value) -> String {
     let summary = &data["summary"];
+    if !summary["killed"].is_null() {
+        let score = summary["mutationScore"]
+            .as_f64()
+            .map_or("-".to_owned(), |score| format!("{:.1}%", score * 100.0));
+        return format!(
+            "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n  ran {} mutant(s) in {} ms\n",
+            data["run"].as_str().unwrap_or(""),
+            summary["killed"],
+            summary["timeout"],
+            summary["survived"],
+            summary["noCoverage"],
+            summary["equivalent"],
+            summary["error"],
+            summary["ran"],
+            summary["durationMs"],
+        );
+    }
     format!(
         "Strong mutation plan for {}: {} mutants\n  to run        {} (at most {} test runs)\n  survived      {} (no test infected them)\n  no coverage   {}\n  equivalent    {}\n",
         data["run"].as_str().unwrap_or(""),
@@ -240,9 +261,169 @@ fn plan_text(data: &Value) -> String {
 }
 
 /// Where a run's strong verdicts are saved.
-#[allow(dead_code)]
 pub(crate) fn results_path(run: &StoredRun) -> PathBuf {
     run.directory.join("strong-mutation.json")
+}
+
+/// One mutant's strong verdict, as saved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Verdict {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
+    #[serde(default)]
+    pub tests: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The run's saved verdicts, by mutant id; empty when none were saved.
+pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, Verdict> {
+    std::fs::read(results_path(run))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| serde_json::from_value(value["mutants"].clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The mutation score StrykerJS reports: killed and timed out over all
+/// that are not equivalent or errors.
+fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> {
+    let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
+    let detected = count("killed") + count("timeout");
+    let total = detected + count("survived") + count("no-coverage");
+    (total > 0).then(|| detected as f64 / total as f64)
+}
+
+/// Runs the plan's mutants and saves every verdict into the run.
+fn execute(
+    root: &Path,
+    run: &StoredRun,
+    plan: StrongPlan,
+    mut saved: std::collections::BTreeMap<String, Verdict>,
+    options: &Options,
+) -> Result<Value, String> {
+    use supercov_engine::js_strong::Decided;
+    let started = std::time::Instant::now();
+    // Decided without running.
+    for mutant in &plan.mutants {
+        let status = match mutant.decided {
+            Some(Decided::Survived) => "survived",
+            Some(Decided::NoCoverage) => "no-coverage",
+            Some(Decided::Equivalent) => "equivalent",
+            None => continue,
+        };
+        saved.insert(
+            mutant.id.clone(),
+            Verdict {
+                status: status.into(),
+                killed_by: None,
+                tests: 0,
+                duration_ms: 0,
+                reason: mutant.reason.clone(),
+            },
+        );
+    }
+    let to_run = plan.mutants.iter().filter(|m| m.decided.is_none()).count();
+    let mut command_exit = None;
+    if to_run > 0 {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let work = root
+            .join(".supercov/strong")
+            .join(format!("{}-{nonce}", run.id));
+        std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+        let plan_path = work.join("plan.json");
+        let results = work.join("results.jsonl");
+        std::fs::write(
+            &plan_path,
+            serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+        let command = options
+            .command
+            .clone()
+            .unwrap_or_else(|| run.metadata.command.clone());
+        if command.is_empty() {
+            return Err("the run recorded no command: give one after --".into());
+        }
+        let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
+            root: root.to_owned(),
+            command,
+            run_id: Some(format!("strong-{nonce}")),
+            started_at: None,
+            watchdog_program: std::env::current_exe()
+                .ok()
+                .and_then(|path| std::fs::canonicalize(path).ok()),
+            strong: Some(supercov_engine::javascript_run::StrongRun {
+                plan: plan_path,
+                results: results.clone(),
+            }),
+        };
+        let mut diagnostics = std::io::stderr();
+        let exit =
+            supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
+                .map_err(|error| error.to_string())?;
+        command_exit = Some(exit);
+        let text = std::fs::read_to_string(&results).unwrap_or_default();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(id) = record["id"].as_str() else {
+                continue;
+            };
+            if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
+                saved.insert(id.to_owned(), verdict);
+            }
+        }
+        // A mutant the driver gave no verdict did not run to its end.
+        for mutant in plan.mutants.iter().filter(|m| m.decided.is_none()) {
+            saved.entry(mutant.id.clone()).or_insert_with(|| Verdict {
+                status: "error".into(),
+                killed_by: None,
+                tests: 0,
+                duration_ms: 0,
+                reason: Some(format!(
+                    "the command ended (exit {exit}) before this mutant's verdict"
+                )),
+            });
+        }
+    }
+    let document = json!({
+        "schemaVersion": 1,
+        "run": run.id,
+        "mutantSet": plan.mutant_set,
+        "mutants": saved,
+    });
+    let path = results_path(run);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let count = |status: &str| saved.values().filter(|v| v.status == status).count();
+    Ok(json!({
+        "run": run.id,
+        "mutantSet": plan.mutant_set,
+        "summary": {
+            "mutants": saved.len(),
+            "ran": to_run,
+            "killed": count("killed"),
+            "timeout": count("timeout"),
+            "survived": count("survived"),
+            "noCoverage": count("no-coverage"),
+            "equivalent": count("equivalent"),
+            "error": count("error"),
+            "mutationScore": score(&saved),
+            "durationMs": started.elapsed().as_millis() as u64,
+            "commandExitCode": command_exit,
+        },
+    }))
 }
 
 #[cfg(test)]

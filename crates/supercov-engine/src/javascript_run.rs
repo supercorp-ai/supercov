@@ -51,6 +51,19 @@ pub struct DirectJavascriptRunRequest {
     pub started_at: Option<String>,
     #[serde(skip)]
     pub watchdog_program: Option<PathBuf>,
+    /// Strong mutation (`docs/design/strong-mutation.md`): run the command
+    /// over a copy with every mutant behind a switch, driven by the plan, and
+    /// publish no run. `None` for an ordinary run.
+    #[serde(skip)]
+    pub strong: Option<StrongRun>,
+}
+
+/// What a strong pass hands the command: the plan the driver runs, and where
+/// it writes each mutant's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongRun {
+    pub plan: PathBuf,
+    pub results: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -562,10 +575,10 @@ fn javascript_integrity_for_project(
 
 /// Execute one JavaScript suite with every language-neutral stage owned by
 /// Rust. Target-language runtime and runner adapters remain generated shims.
-pub fn run_direct_javascript(
+fn run_javascript(
     request: &DirectJavascriptRunRequest,
     diagnostics: &mut dyn std::io::Write,
-) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
+) -> Result<Finished, DirectJavascriptRunError> {
     if request.command.is_empty() {
         return Err(DirectJavascriptRunError::Failed(
             "test command must not be empty".into(),
@@ -961,6 +974,16 @@ pub fn run_direct_javascript(
         "SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(),
         project.playwright_test_export.clone(),
     );
+    if let Some(strong) = &request.strong {
+        overrides.insert(
+            "SUPERCOV_STRONG_PLAN".into(),
+            strong.plan.display().to_string(),
+        );
+        overrides.insert(
+            "SUPERCOV_STRONG_RESULTS".into(),
+            strong.results.display().to_string(),
+        );
+    }
     overrides.insert(
         "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
         "./.supercov/node_modules/playwright.mjs".into(),
@@ -1183,6 +1206,17 @@ pub fn run_direct_javascript(
                 evidence_publication_ms: 0.0,
             },
             total_ms: rounded_millisecond(elapsed_ms(total_started)),
+        });
+    }
+    // A strong pass publishes no run and leaves the working tree alone: its
+    // verdicts are in the results file the driver wrote.
+    if request.strong.is_some() {
+        update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
+            .map_err(|error| error.to_string())?;
+        cleanup.mark_terminal();
+        let _ = remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&run_id));
+        return Ok(Finished::Strong {
+            exit_code: execution.exit_code,
         });
     }
     // Leave the real working tree as the command alone would have: updated
@@ -1457,7 +1491,7 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
-        return Ok(DirectJavascriptRunResult {
+        return Ok(Finished::Run(DirectJavascriptRunResult {
             run_id,
             run_directory,
             workspace,
@@ -1467,7 +1501,7 @@ pub fn run_direct_javascript(
             metadata,
             server_runs,
             unrun_build: project.unrun_build.clone(),
-        });
+        }));
     }
     let archive_path = root
         .join(".supercov/work")
@@ -1668,7 +1702,7 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
     cleanup.mark_terminal();
-    Ok(DirectJavascriptRunResult {
+    Ok(Finished::Run(DirectJavascriptRunResult {
         run_id,
         run_directory,
         workspace,
@@ -1683,7 +1717,7 @@ pub fn run_direct_javascript(
         } else {
             project.unrun_build.clone()
         },
-    })
+    }))
 }
 
 /// Where JavaScript builds write their output: none is source, and the copy
@@ -2596,5 +2630,44 @@ mod tests {
             .map(|runner| runner["runner"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(runners, ["background", "vitest"]);
+    }
+}
+
+/// How a run ended: published, or a strong pass's command finished.
+enum Finished {
+    Run(DirectJavascriptRunResult),
+    Strong { exit_code: i32 },
+}
+
+pub fn run_direct_javascript(
+    request: &DirectJavascriptRunRequest,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
+    match run_javascript(request, diagnostics)? {
+        Finished::Run(result) => Ok(result),
+        Finished::Strong { .. } => Err(DirectJavascriptRunError::Failed(
+            "a strong pass ran where a run was asked for".into(),
+        )),
+    }
+}
+
+/// A strong pass (`supercov runs <id> mutants test`): the command over a copy
+/// with every listed mutant behind a switch, the driver running the plan.
+/// Publishes no run; the verdicts are in `strong.results`. Returns the
+/// command's exit code.
+pub fn run_strong_javascript(
+    request: &DirectJavascriptRunRequest,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<i32, DirectJavascriptRunError> {
+    if request.strong.is_none() {
+        return Err(DirectJavascriptRunError::Failed(
+            "a strong pass needs its plan".into(),
+        ));
+    }
+    match run_javascript(request, diagnostics)? {
+        Finished::Strong { exit_code } => Ok(exit_code),
+        Finished::Run(_) => Err(DirectJavascriptRunError::Failed(
+            "a strong pass published a run".into(),
+        )),
     }
 }

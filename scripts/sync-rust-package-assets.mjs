@@ -82,6 +82,8 @@ const mappings = [
     "jestReporter.mjs",
     "jestRuntime.cjs",
     "vitestReporter.mjs",
+    "vitestStrong.mjs",
+    "vitestStrongReporter.mjs",
   ]),
   ...runtimeFiles("python", [
     "sitecustomize.py",
