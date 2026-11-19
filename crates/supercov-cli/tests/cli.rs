@@ -21415,3 +21415,88 @@ fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it(
     assert_eq!(candidates, ["cart > charges small orders"], "{always}");
     assert_eq!(reply["summary"]["mutants"], 15);
 }
+
+/// A Vitest project like `mutants_project`'s, with the repository's
+/// node_modules.
+#[cfg(unix)]
+fn vitest_mutants_project(label: &str) -> Project {
+    let project = Project::empty(label);
+    project.write(
+        "package.json",
+        r#"{ "name": "mutants", "type": "module", "scripts": { "test": "vitest run" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/cart.js",
+        "export function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  return sum > 100 ? sum * 0.9 : sum;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("mutants");
+    project
+}
+
+/// `mutants test` over a Vitest run: each mutant the tests infected runs
+/// against the tests that infected it, and the verdicts are StrykerJS's:
+/// killed where a test fails, survived where none can, no coverage where
+/// none ran it. `mutants` then shows them and the mutation score.
+#[cfg(unix)]
+#[test]
+fn mutants_test_kills_and_keeps_what_the_vitest_tests_can_and_cannot_tell() {
+    let project = vitest_mutants_project("strong-vitest");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let summary = &reply["summary"];
+    assert_eq!(summary["mutants"], 15, "{reply}");
+    assert_eq!(summary["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let strong = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]
+            .clone()
+    };
+    // No test gives `shipping` 50: `>=` to `>` survives, decided unrun.
+    assert_eq!(
+        strong("src/cart.js:2:7-2:16:EqualityOperator:>")["status"],
+        "survived"
+    );
+    assert_eq!(
+        strong("src/cart.js:13:10-13:19:ConditionalExpression:true")["status"],
+        "no-coverage"
+    );
+    let trim = strong("src/cart.js:9:10-9:21:MethodExpression:removed");
+    assert_eq!(trim["status"], "killed", "{trim}");
+    let always = strong("src/cart.js:2:7-2:16:ConditionalExpression:true");
+    assert_eq!(always["status"], "killed", "{always}");
+    let lower = strong("src/cart.js:9:10-9:35:MethodExpression:toLowerCase");
+    assert_eq!(lower["status"], "killed", "{lower}");
+    // 8 infected mutants all killed; 1 survived; 6 not covered.
+    assert_eq!(summary["killed"], 8, "{reply}");
+    assert_eq!(summary["survived"], 1, "{reply}");
+    assert_eq!(summary["noCoverage"], 6, "{reply}");
+    assert_eq!(listed["data"]["summary"]["mutationScore"], 0.5333);
+    assert_eq!(listed["data"]["levels"]["strong"], true);
+    // A second pass has nothing left to run.
+    let again = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(again["summary"]["ran"], 0, "{again}");
+    assert_eq!(again["summary"]["killed"], 8, "{again}");
+}

@@ -87,10 +87,12 @@ export default class SupercovStrongReporter {
             return;
         const original = vitest.runFiles.bind(vitest);
         vitest.runFiles = async (specs) => {
-            await drive(vitest, original, specs, JSON.parse(readFileSync(planPath, "utf8")), resultsPath);
+            const last = await drive(vitest, original, specs, JSON.parse(readFileSync(planPath, "utf8")), resultsPath);
             // A killed mutant fails its test, and that is the point: the
             // command's exit code is the pass's, not the rounds'.
             process.exitCode = 0;
+            // Vitest 3 and later read what the run gave back.
+            return last ?? { testModules: [], unhandledErrors: [] };
         };
     }
 }
@@ -101,6 +103,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
     const tests = plan.tests;
     const started = Date.now();
+    let last;
 
     // Each mutant to run: its candidates grouped by test file, the cheapest
     // file first.
@@ -152,7 +155,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             files[file] = { tests: [...entry.tests], wholeFile: entry.whole };
         provide(vitest, { root, files });
         setTestTimeout(vitest, 60_000);
-        await runFiles([...union.keys()].map((file) => specOf.get(file)), false);
+        last = await runFiles([...union.keys()].map((file) => specOf.get(file)), false);
         for (const fileTask of vitest.state.getFiles([...union.keys()].map((file) => specOf.get(file).moduleId))) {
             const file = toRelative(root, fileTask.filepath);
             if (fileTask.result?.state === "fail" && !collectTests(fileTask).some((t) => t.result?.state === "fail"))
@@ -199,7 +202,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         provide(vitest, { root, files });
         setTestTimeout(vitest, Math.ceil(limit));
         const roundSpecs = Object.keys(files).map((file) => specOf.get(file));
-        await runFiles(roundSpecs, false);
+        last = await runFiles(roundSpecs, false);
         const results = new Map(vitest.state
             .getFiles(roundSpecs.map((spec) => spec.moduleId))
             .map((fileTask) => [toRelative(root, fileTask.filepath), fileTask]));
@@ -239,4 +242,5 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
     }
     write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime });
+    return last;
 }
