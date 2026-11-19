@@ -2290,9 +2290,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:472",
-            "javascript-source-path#javascript_frontend.rs:1899",
-            "javascript-source-path#javascript_frontend.rs:1829",
+            "javascript-source-path#javascript_frontend.rs:468",
+            "javascript-source-path#javascript_frontend.rs:1879",
+            "javascript-source-path#javascript_frontend.rs:1809",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2403,8 +2403,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:516",
-            "javascript-source-path#javascript_frontend.rs:472",
+            "fs.read_to_string#javascript_frontend.rs:512",
+            "javascript-source-path#javascript_frontend.rs:468",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
@@ -2826,7 +2826,7 @@ mod tests {
         let config = fs::read_to_string(path).unwrap();
         assert!(config.contains("config?.test?.browser?.enabled"));
         assert!(config.contains("'.supercov/node_modules/vitestBrowser.mjs'"));
-        assert!(config.contains("'.supercov/node_modules/vitest.mjs'"));
+        assert!(config.contains("`.supercov/node_modules/${supercovNodeSetup}`"));
         // The command exists only for the mode that uses it.
         assert!(config.contains("browser: { commands: supercovBrowserCommands(process.cwd()) }"));
         assert!(config.contains("...supercovBrowserTest(loaded?.config)"));
