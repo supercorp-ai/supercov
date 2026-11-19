@@ -30,7 +30,16 @@ Options:
   --plan            print what would run, and run nothing
   --file <path>     only this source file's mutants (repeatable)
   --diff <base>     only the mutants on lines the change since <base> touched
+  --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
+                    no-coverage or error (accepted mutants excepted)
+  --critical <glob> source files where every mutant must be killed or
+                    accepted (repeatable); a survivor there fails the command
   --json            the answer as JSON
+
+Accepted mutants: supercov.accepted.json at the project root, a list of
+{ \"id\": <mutant id>, \"reason\": <why no test can tell it apart> }. An
+accepted mutant still runs; it is shown as accepted and never fails the
+command. An entry whose mutant is killed or gone is listed as stale.
   -- <command>      run this command instead of the run's own
 ";
 
@@ -40,8 +49,12 @@ struct Options {
     json: bool,
     files: Vec<String>,
     diff: Option<String>,
+    fail_on: Vec<String>,
+    critical: Vec<String>,
     command: Option<Vec<String>>,
 }
+
+const UNDETECTED: &[&str] = &["survived", "timeout", "no-coverage", "error"];
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut options = Options::default();
@@ -65,6 +78,27 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .filter(|base| !base.is_empty())
                     .ok_or("--diff needs a base revision")?;
                 options.diff = Some(base.clone());
+            }
+            "--fail-on" => {
+                index += 1;
+                let list = args.get(index).ok_or("--fail-on needs statuses")?;
+                for status in list.split(',').filter(|s| !s.is_empty()) {
+                    if !UNDETECTED.contains(&status) {
+                        return Err(format!(
+                            "--fail-on takes {}, not {status}",
+                            UNDETECTED.join(", ")
+                        ));
+                    }
+                    options.fail_on.push(status.to_owned());
+                }
+            }
+            "--critical" => {
+                index += 1;
+                let glob = args
+                    .get(index)
+                    .filter(|glob| !glob.is_empty())
+                    .ok_or("--critical needs a glob")?;
+                options.critical.push(glob.clone());
             }
             "--" => {
                 let command = args[index + 1..].to_vec();
@@ -105,13 +139,21 @@ pub fn command(args: &[String]) -> ExitCode {
         let mut plan = run_plan(run)?;
         narrow(&mut plan, &root, run, &options)?;
         let saved = read_saved(run);
+        let asked = plan
+            .mutants
+            .iter()
+            .map(|mutant| (mutant.id.clone(), mutant.file.clone()))
+            .collect::<Vec<_>>();
         // A second pass over the same run runs only what has no verdict.
         plan.mutants
             .retain(|mutant| !saved.contains_key(&mutant.id));
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
-        execute(&root, run, plan, saved, &options)
+        let mut data = execute(&root, run, plan, saved, &options)?;
+        let verdicts = read_saved(run);
+        data["gate"] = gate(&root, &asked, &verdicts, &options)?;
+        Ok(data)
     })();
     match result {
         Ok(data) => {
@@ -119,8 +161,13 @@ pub fn command(args: &[String]) -> ExitCode {
                 println!("{}", serde_json::to_string(&data).expect("JSON"));
             } else {
                 print!("{}", plan_text(&data));
+                print!("{}", gate_text(&data["gate"]));
             }
-            ExitCode::SUCCESS
+            if data["gate"]["failed"].as_bool() == Some(true) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(message) => {
             if options.json {
@@ -258,6 +305,128 @@ fn plan_text(data: &Value) -> String {
         summary["decided"]["noCoverage"],
         summary["decided"]["equivalent"],
     )
+}
+
+/// `supercov.accepted.json`: mutants a person judged equivalent, by id,
+/// with the reason.
+fn read_accepted(root: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let path = root.join("supercov.accepted.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(Default::default());
+    };
+    let entries = serde_json::from_slice::<Vec<Value>>(&bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut accepted = std::collections::BTreeMap::new();
+    for entry in entries {
+        let id = entry["id"]
+            .as_str()
+            .ok_or_else(|| format!("{}: an entry has no id", path.display()))?;
+        let reason = entry["reason"].as_str().unwrap_or("").trim();
+        if reason.is_empty() {
+            return Err(format!(
+                "{}: {id} is accepted without a reason; say why no test can tell it apart",
+                path.display()
+            ));
+        }
+        accepted.insert(id.to_owned(), reason.to_owned());
+    }
+    Ok(accepted)
+}
+
+/// Whether `file` matches a `--critical` glob (`*` within a segment, `**`
+/// across them).
+fn critical(file: &str, globs: &[String]) -> bool {
+    fn matches(pattern: &[u8], text: &[u8]) -> bool {
+        match (pattern.first(), text.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) if pattern.get(1) == Some(&b'*') => {
+                let rest = pattern[2..].strip_prefix(b"/").unwrap_or(&pattern[2..]);
+                (0..=text.len()).any(|at| matches(rest, &text[at..]))
+            }
+            (Some(b'*'), _) => {
+                matches(&pattern[1..], text)
+                    || (!text.is_empty() && text[0] != b'/' && matches(pattern, &text[1..]))
+            }
+            (Some(&p), Some(&t)) if p == b'?' && t != b'/' || p == t => {
+                matches(&pattern[1..], &text[1..])
+            }
+            _ => false,
+        }
+    }
+    globs
+        .iter()
+        .any(|glob| matches(glob.as_bytes(), file.as_bytes()))
+}
+
+/// The gate over the mutants asked about.
+fn gate(
+    root: &Path,
+    asked: &[(String, String)],
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+    options: &Options,
+) -> Result<Value, String> {
+    let accepted = read_accepted(root)?;
+    let mut failing = Vec::new();
+    let mut accepted_shown = Vec::new();
+    for (id, file) in asked {
+        let Some(verdict) = verdicts.get(id) else {
+            continue;
+        };
+        if !UNDETECTED.contains(&verdict.status.as_str()) {
+            continue;
+        }
+        if let Some(reason) = accepted.get(id) {
+            accepted_shown.push(json!({"id": id, "status": verdict.status, "reason": reason}));
+            continue;
+        }
+        let in_critical = critical(file, &options.critical);
+        if in_critical || options.fail_on.contains(&verdict.status) {
+            failing.push(json!({
+                "id": id,
+                "status": verdict.status,
+                "critical": in_critical,
+                "reason": verdict.reason,
+            }));
+        }
+    }
+    let stale = accepted
+        .keys()
+        .filter(|id| {
+            verdicts
+                .get(*id)
+                .is_none_or(|verdict| !UNDETECTED.contains(&verdict.status.as_str()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "failed": !failing.is_empty(),
+        "failing": failing,
+        "accepted": accepted_shown,
+        "staleAccepted": stale,
+    }))
+}
+
+fn gate_text(gate: &Value) -> String {
+    let mut text = String::new();
+    for entry in gate["failing"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "  {} {}{}\n",
+            entry["status"].as_str().unwrap_or(""),
+            entry["id"].as_str().unwrap_or(""),
+            if entry["critical"].as_bool() == Some(true) {
+                " (critical)"
+            } else {
+                ""
+            }
+        ));
+    }
+    let stale = gate["staleAccepted"].as_array().map_or(0, Vec::len);
+    if stale > 0 {
+        text.push_str(&format!(
+            "  {stale} accepted mutant(s) in supercov.accepted.json are killed or gone: remove them\n"
+        ));
+    }
+    text
 }
 
 /// Where a run's strong verdicts are saved.
@@ -431,6 +600,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn critical_globs_match_paths() {
+        let globs = ["src/auth/**".to_owned(), "lib/*.ts".to_owned()];
+        assert!(critical("src/auth/login.ts", &globs));
+        assert!(critical("src/auth/deep/x.ts", &globs));
+        assert!(critical("lib/money.ts", &globs));
+        assert!(!critical("lib/deep/money.ts", &globs));
+        assert!(!critical("src/other.ts", &globs));
+    }
+
+    #[test]
     fn a_span_s_lines_are_read_from_an_id_whose_file_has_colons() {
         assert_eq!(span_lines("src/a.ts:3:9-5:2:EqualityOperator:<="), (3, 5));
         assert_eq!(
@@ -447,6 +626,7 @@ mod tests {
         .map(String::from);
         let options = parse(&args).unwrap();
         assert!(options.plan);
+        assert!(parse(&["--fail-on".into(), "killed".into()]).is_err());
         assert_eq!(options.files, ["a.ts"]);
         assert_eq!(options.diff.as_deref(), Some("main"));
         assert_eq!(options.command.unwrap(), ["npx", "vitest"]);
