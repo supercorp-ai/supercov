@@ -3761,6 +3761,7 @@ pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 
 /// `archive_request`, from entries `read` hands to the visitor in the
 /// archive's order.
+#[allow(clippy::type_complexity)]
 fn archive_request_from<D>(
     request: &ArchiveReportRequest,
     mut parsed: Option<ParsedResults>,

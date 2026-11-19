@@ -1491,7 +1491,7 @@ fn run_javascript(
         .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
-        return Ok(Finished::Run(DirectJavascriptRunResult {
+        return Ok(Finished::Run(Box::new(DirectJavascriptRunResult {
             run_id,
             run_directory,
             workspace,
@@ -1501,7 +1501,7 @@ fn run_javascript(
             metadata,
             server_runs,
             unrun_build: project.unrun_build.clone(),
-        }));
+        })));
     }
     let archive_path = root
         .join(".supercov/work")
@@ -1702,7 +1702,7 @@ fn run_javascript(
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
     cleanup.mark_terminal();
-    Ok(Finished::Run(DirectJavascriptRunResult {
+    Ok(Finished::Run(Box::new(DirectJavascriptRunResult {
         run_id,
         run_directory,
         workspace,
@@ -1717,7 +1717,7 @@ fn run_javascript(
         } else {
             project.unrun_build.clone()
         },
-    }))
+    })))
 }
 
 /// Where JavaScript builds write their output: none is source, and the copy
@@ -2635,7 +2635,7 @@ mod tests {
 
 /// How a run ended: published, or a strong pass's command finished.
 enum Finished {
-    Run(DirectJavascriptRunResult),
+    Run(Box<DirectJavascriptRunResult>),
     Strong { exit_code: i32 },
 }
 
@@ -2644,7 +2644,7 @@ pub fn run_direct_javascript(
     diagnostics: &mut dyn std::io::Write,
 ) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
     match run_javascript(request, diagnostics)? {
-        Finished::Run(result) => Ok(result),
+        Finished::Run(result) => Ok(*result),
         Finished::Strong { .. } => Err(DirectJavascriptRunError::Failed(
             "a strong pass ran where a run was asked for".into(),
         )),
