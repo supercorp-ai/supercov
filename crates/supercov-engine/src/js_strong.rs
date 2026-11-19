@@ -103,6 +103,9 @@ pub struct PlannedMutant {
     /// Test files that must run whole for it (module-load candidates).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub whole_files: Vec<String>,
+    /// How many tests ran its code: what a pass by coverage alone would run
+    /// it against. The candidates are those of them that infected it.
+    pub covering: usize,
 }
 
 /// The plan for a run.
@@ -283,6 +286,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 reason: None,
                 candidates: Vec::new(),
                 whole_files: Vec::new(),
+                covering: 0,
             };
             match status {
                 Status::Equivalent => {
@@ -314,9 +318,17 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     records.extend(unbounded.iter().copied());
                     records.sort_unstable();
                     records.dedup();
+                    let mut covering = HashSet::<usize>::new();
                     for at in records {
                         let Seen { record, seen: own } = &seen[at];
                         let raw = &raw_results[*record];
+                        if role_of(raw) == "test"
+                            && may_reach(mutant, own)
+                            && let Some(&test) = test_index
+                                .get(&raw.test_id.clone().unwrap_or_else(|| raw.test.clone()))
+                        {
+                            covering.insert(test);
+                        }
                         let why = if role_of(raw) == "test" && !exact(raw) {
                             Some(CandidateReason::NotExact)
                         } else {
@@ -369,6 +381,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     whole_files.sort();
                     planned.candidates = candidates;
                     planned.whole_files = whole_files;
+                    planned.covering = covering.len();
                 }
             }
             mutants.push(planned);
