@@ -1,6 +1,6 @@
 # Mutation benchmark 2026-11-20
 
-CI runs: 7918046463203622, 6816238857423170, 8402334254856692, 6506939654971330, 7095666567225085, 7210302856247792, 8297132922154682, 6783811573326500, 6615399405765448, 6892707219384574, 4982353503892003.
+CI runs: 7918046463203622, 6816238857423170, 8402334254856692, 6506939654971330, 7095666567225085, 7210302856247792, 8297132922154682, 6783811573326500, 4574534097087808, 8528048117638039, 6898820936997587, 4982353503892003.
 
 StrykerJS 10.1.1, mizchi/mutator 0.5.0, Node 24. Statuses: K Killed, T Timeout, S Survived, NC NoCoverage, RE RuntimeError, CE CompileError, I Ignored, P Pending. Score = (K+T) / (K+T+S+NC). Sharded runs: wall and CPU seconds are summed over the shards.
 
@@ -69,29 +69,29 @@ Cold: `supercov -- <test command>` (measure: per-test coverage and weak mutation
 
 | project | measure s | strong s | total s | StrykerJS cold s | mutants | statuses | score | joined to truth | score on joined (Supercov / truth) | soundness violations | extra kills | PR: measure / diff s, mutants run of the diff, statuses |
 |---|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---|
-| defu | 0.9 | 1.9 | 2.8 | 3.4 | 103 | K87 S16 | 84.5 | 103 (Supercov only 0, StrykerJS only 0) | 84.5 / 84.5 (103) | 0 | 0 | 1.2 / 0.9, 6 of 6, K6 T0 S0 NC0 |
-| scule | 1.1 | 1.6 | 2.7 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | 1.0 / 0.8, 1 of 1, K1 T0 S0 NC0 |
-| scule (own-vitest) | 1.5 | 2.7 | 4.2 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | 1.3 / 1.0, 1 of 1, K1 T0 S0 NC0 |
-| cookie-es | 0.9 | 10.8 | 11.8 | 10.4 | 691 | K573 S84 T32 NC2 | 87.5 | 691 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (691) | 0 | 0 | 0.7 / 0.9, 6 of 6, K4 T0 S2 NC0 |
-| pathe | 3.5 | 10.3 | 13.8 | 10.8 | 490 | K425 S60 T4 NC1 | 87.5 | 490 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (488) | 0 | 0 | 3.3 / 1.5, 9 of 9, K7 T0 S2 NC0 |
-| ufo | 1.1 | 24.4 | 25.5 | 16.9 | 926 | K753 S141 NC21 T11 | 82.5 | 926 (Supercov only 0, StrykerJS only 85) | 82.5 / 82.5 (926) | 0 | 0 | 1.1 / 1.4, 17 of 18, K16 T0 S2 NC0 |
-| hono | 9.4 | 1210.7 (6 shards, slowest 212.0) | 1220.1 | 258.5 | 4295 | K3632 S498 T87 NC78 | 86.6 | 4292 (Supercov only 3, StrykerJS only 185) | 86.6 / 86.6 (4290) | 7 (0 after diagnosis) | 5 (5 diagnosed false) | 9.0 / 23.3, 11 of 11, K11 T0 S0 NC0 |
-| trpc | 22.4 | 9127.7 (32 shards, slowest 395.8) | 9150.1 | 2782.3 | 2688 | K1868 S490 T198 NC119 RE13 | 77.2 | 2664 (Supercov only 24, StrykerJS only 7) | 77.0 / 77.1 (2646) | 2 (0 after diagnosis) | 0 | 22.9 / 7.7, 1 of 1, K1 T0 S0 NC0 |
+| defu | 1.1 | 2.0 | 3.1 | 3.4 | 103 | K87 S16 | 84.5 | 103 (Supercov only 0, StrykerJS only 0) | 84.5 / 84.5 (103) | 0 | 0 | 1.2 / 0.9, 6 of 6, K6 T0 S0 NC0 |
+| scule | 0.9 | 1.6 | 2.5 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | 1.0 / 0.8, 1 of 1, K1 T0 S0 NC0 |
+| scule (own-vitest) | 1.4 | 2.8 | 4.3 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | 1.3 / 1.0, 1 of 1, K1 T0 S0 NC0 |
+| cookie-es | 1.2 | 11.3 | 12.6 | 10.4 | 691 | K573 S84 T32 NC2 | 87.5 | 691 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (691) | 0 | 0 | 0.7 / 0.9, 6 of 6, K4 T0 S2 NC0 |
+| pathe | 3.0 | 10.6 | 13.6 | 10.8 | 490 | K425 S60 T4 NC1 | 87.5 | 490 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (488) | 0 | 0 | 3.3 / 1.5, 9 of 9, K7 T0 S2 NC0 |
+| ufo | 1.1 | 27.0 | 28.1 | 16.9 | 926 | K753 S141 NC21 T11 | 82.5 | 926 (Supercov only 0, StrykerJS only 85) | 82.5 / 82.5 (926) | 0 | 0 | 1.1 / 1.4, 17 of 18, K16 T0 S2 NC0 |
+| hono | 9.2 | 1442.8 (6 shards, slowest 279.4) | 1452.0 | 258.5 | 4295 | K3620 S506 T91 NC78 | 86.4 | 4292 (Supercov only 3, StrykerJS only 185) | 86.4 / 86.6 (4290) | 10 (0 after diagnosis) | 0 | 9.0 / 23.3, 11 of 11, K11 T0 S0 NC0 |
+| trpc | 22.7 | 9735.8 (32 shards, slowest 401.7) | 9758.5 | 2782.3 | 2688 | K1858 S490 T208 NC119 RE13 | 77.2 | 2664 (Supercov only 24, StrykerJS only 7) | 77.0 / 77.1 (2646) | 2 (0 after diagnosis) | 0 | 22.9 / 7.7, 1 of 1, K1 T0 S0 NC0 |
 
 ### Where Supercov's time goes
 
 Strong pass per mutant = strong-pass wall (CPU) seconds over the mutants it ran (not-infected, not-reached and equivalent mutants are decided without running). StrykerJS per mutant = its cold mutant phase over its mutants, for scale.
 
-| project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) |
-|---|---:|---:|---:|---:|---|---:|---|
-| defu | 0.4 | 0.9 | 1.9 | 99 | 19 / 138 | 17 | 1 (0) |
-| scule | 0.3 | 1.1 | 1.6 | 77 | 21 / 121 | 17 | 1 (0) |
-| scule (own-vitest) | 0.3 | 1.5 | 2.7 | 77 | 35 / 286 | 17 | 1 (0) |
-| cookie-es | 0.4 | 0.9 | 10.8 | 663 | 16 / 144 | 12 | 1 (0) |
-| pathe | 2.6 | 3.5 | 10.3 | 473 | 22 / 198 | 17 | 1 (0) |
-| ufo | 0.4 | 1.1 | 24.4 | 871 | 28 / 212 | 14 | 1 (0) |
-| hono | 6.6 | 9.4 | 1210.7 | 4095 | 296 / 941 | 51 | 6 (0) |
-| trpc | 20.6 | 22.4 | 9127.7 | 2438 | 3744 / 11935 | 755 | 35 (3), resumed in 23, 25, 5 |
+| project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) | kills confirmed without the mutant / overturned |
+|---|---:|---:|---:|---:|---|---:|---|---|
+| defu | 0.4 | 1.1 | 2.0 | 99 | 20 / 149 | 17 | 1 (0) | 9 / 0 |
+| scule | 0.3 | 0.9 | 1.6 | 77 | 21 / 147 | 17 | 1 (0) | 20 / 0 |
+| scule (own-vitest) | 0.3 | 1.4 | 2.8 | 77 | 37 / 317 | 17 | 1 (0) | 20 / 0 |
+| cookie-es | 0.4 | 1.2 | 11.3 | 663 | 17 / 165 | 12 | 1 (0) | 122 / 0 |
+| pathe | 2.6 | 3.0 | 10.6 | 473 | 22 / 223 | 17 | 1 (0) | 102 / 0 |
+| ufo | 0.4 | 1.1 | 27.0 | 871 | 31 / 256 | 14 | 1 (0) | 163 / 0 |
+| hono | 6.6 | 9.2 | 1442.8 | 4095 | 352 / 1038 | 51 | 6 (0) | 2155 / 17 |
+| trpc | 20.6 | 22.7 | 9735.8 | 2438 | 3993 / 12521 | 755 | 35 (3), resumed in 23, 25, 5 | 1248 / 0 |
 
 ### Verdicts across strong-pass settings
 
@@ -111,8 +111,8 @@ StrykerJS's ground truth runs static mutants (no `ignoreStatic`); Supercov switc
 | cookie-es | 0 | – | – |
 | pathe | 62 | K48 S14 | K46 S14 RE2 |
 | ufo | 5 | S5 | S5 |
-| hono | 320 | K299 S20 T1 | K269 T26 S24 RE1 |
-| trpc | 399 | K290 S87 T20 RE2 | K212 T92 S87 RE8 |
+| hono | 320 | K295 S24 T1 | K269 T26 S24 RE1 |
+| trpc | 399 | K291 S87 T19 RE2 | K212 T92 S87 RE8 |
 
 ### Every disagreement with the ground truth
 
@@ -123,15 +123,13 @@ A soundness violation is a mutant the ground truth detects (Killed or Timeout) t
 - hono, soundness violation (ground-truth artifact): `src/utils/html.ts:63:9-63:14:EqualityOperator:<=`: Supercov Survived (weak: not-infected, operands-never-equal), "operands-never-equal"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)
 - hono, soundness violation (ground-truth artifact): `src/utils/html.ts:76:9-76:30:ConditionalExpression:true`: Supercov Survived (weak: infected, opposite-value), "`typeof r === 'object'` was false at least once"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)
 - hono, soundness violation (ground-truth artifact): `src/utils/html.ts:81:16-81:37:ConditionalExpression:true`: Supercov Survived (weak: infected, opposite-value), "`typeof r === 'object'` was false at least once"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)
+- hono, soundness violation (ground-truth artifact): `src/utils/html.ts:82:9-82:30:ConditionalExpression:true`: Supercov Survived (weak: infected, opposite-value), "`typeof r === 'object'` was false at least once"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill
+- hono, soundness violation (ground-truth artifact): `src/utils/html.ts:100:21-103:4:BlockStatement:{}`: Supercov Survived (weak: infected, statement-ran), "the statement around it ran (a proxy: removing it may change nothing)"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill
 - hono, soundness violation (ground-truth artifact): `src/utils/html.ts:161:9-161:61:ConditionalExpression:true`: Supercov Survived (weak: infected, opposite-value), "`(str as string | Promise<string>) instanceof Promise` was false at least once"; ground truth Killed; ground truth killed by 1 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)
+- hono, soundness violation (ground-truth artifact): `src/utils/html.ts:185:7-185:24:ConditionalExpression:false`: Supercov Survived (weak: infected, opposite-value), "`preserveCallbacks` was true at least once"; ground truth Killed; ground truth killed by 4 (`src/jsx/streaming.test.tsx > Streaming > use() > render to stream`, `src/jsx/components.test.tsx > ErrorBoundary > streaming > no error`, `src/jsx/components.test.tsx > ErrorBoundary > streaming > with StreamingContext`, `src/jsx/components.test.tsx > ErrorBoundary > streaming > error with StreamingContext`). Diagnosed: does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill
 - hono, soundness violation (ground-truth artifact): `src/utils/jwt/jwt.ts:156:77-156:94:EqualityOperator:<=`: Supercov Survived (weak: not-infected, operands-never-equal), "`now` never equal to `payload.iat`"; ground truth Killed; ground truth killed by 5 (`src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (none)`, `src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (wrong - string)`, `src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (wrong - RegExp)`, `src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (correct - string)`, `src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (correct - RegExp)`). Diagnosed: StrykerJS's covering set leaves out the test that restores real timers, so JwtTokenIssuedAt's fake clock (never restored) leaks into the JwtTokenIssuer tests; that subset kills it, the whole file passes (diag/hono-order.sh)
-- hono, extra kill (Supercov false kill) (static): `src/router/smart-router/router.ts:14:9-14:22:ConditionalExpression:false`: Supercov Killed (weak: infected, opposite-value), "`!this.#routes` was true at least once"; ground truth Survived. Diagnosed: supercov-false-kill: Supercov ran 'Should be a read-only' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)
-- hono, extra kill (Supercov false kill): `src/utils/html.ts:83:64-83:66:ArrayDeclaration:["Stryker was here"]`: Supercov Killed (weak: infected, reached), "the code ran, and this replacement differs wherever it is evaluated"; ground truth NoCoverage. Diagnosed: supercov-false-kill: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-extra.sh); cause not found
-- hono, extra kill (Supercov false kill) (static): `src/utils/html.ts:100:7-100:19:ConditionalExpression:false`: Supercov Killed (weak: infected, opposite-value), "`match === -1` was true at least once"; ground truth Survived. Diagnosed: supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)
-- hono, extra kill (Supercov false kill) (static): `src/utils/html.ts:100:17-100:19:UnaryOperator:+`: Supercov Killed (weak: unknown, no-rule), "no rule decides UnaryOperator mutants yet"; ground truth Survived. Diagnosed: supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)
-- hono, extra kill (Supercov false kill) (static): `src/utils/html.ts:157:7-157:30:ConditionalExpression:true`: Supercov Killed (weak: infected, opposite-value), "`typeof str === 'object'` was false at least once"; ground truth Survived. Diagnosed: supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)
 - trpc, soundness violation (ground truth: flaky kill): `packages/server/src/unstable-core-do-not-import/http/contentType.ts:109:7-110:39:LogicalOperator:||`: Supercov Survived (weak: infected, operands-differ), "one operand was true and the other false"; ground truth Killed; ground truth killed by 1 (`packages/tests/server/httpSubscriptionLink.test.ts > iterable event with bad yield`). Diagnosed: flaky: only the ground truth kills it, with one test (httpSubscriptionLink.test.ts > iterable event with bad yield); StrykerJS's cold run and mutator call it survived
-- trpc, soundness violation (ground-truth artifact): `packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false`: Supercov Survived (weak: infected, opposite-value), "`result.done` was true at least once"; ground truth Timeout. Diagnosed: StrykerJS's Timeout is its hit-limit heuristic ('Hit limit reached (8224/4100)': 100 times the 41 dry-run evaluations); with plain Vitest the mutant's tests pass, about twice as slow, after about 45,000 evaluations of the line against 8 without it (diag/trpc-withping.sh)
+- trpc, soundness violation (StrykerJS hit-limit heuristic; Supercov: survived, by design): `packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false`: Supercov Survived (weak: infected, opposite-value), "`result.done` was true at least once"; ground truth Timeout. Diagnosed: by-design: StrykerJS hit-limit heuristic (Supercov: survived, by design). StrykerJS reports 'Hit limit reached (8224/4100)': 100 times the 41 dry-run evaluations; with plain Vitest the mutant's tests pass, about twice as slow, after about 45,000 evaluations of the line against 8 without it (diag/trpc-withping.sh)
 
 ## Notes and errors
 

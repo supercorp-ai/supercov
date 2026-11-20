@@ -131,13 +131,32 @@ candidates and no mutant; a file where that fails runs whole from then on, and
 only a test that fails with the whole file and no mutant is no kill. A file
 that does not finish without a mutant is reported, its mutants `error`.
 
+A mutant's copy runs only its own candidates, a subset of that union, and a
+test can still lean on one the subset left out. A kill counts at once where
+the file's baseline ran the same tests before the killing one (or the copy ran
+the file whole and so did its baseline). Any other kill is confirmed: the tests
+the copy ran up to and including the failing one run again with no mutant
+(tests after it cannot change it, so many mutants share one confirmation).
+Where the test fails that way too, the kill is no kill and the mutant runs
+again with its file whole. The pass summary counts `confirmations` and
+`overturned`. On the public benchmark this removed every false kill of this
+kind (hono: 17 overturned of 2,155 confirmed) at 5-20% of strong-pass time.
+
 ## Timeouts and runaway loops
 
 A mutant's test gets `factor × its measured duration + constant` (defaults
-1.5× and 5 s, as StrykerJS). A mutant switch counts its evaluations; past
-`max(1,000, 10 × the hits seen without the mutant)` it throws a timeout
-error, so a loop the mutant made endless ends in the file's worker rather
-than hanging it. A test that runs out of time is run once more with twice
+1.5× and 5 s, as StrykerJS). A mutant switch counts its evaluations; past a
+fixed limit (1,000,000 per copy) it throws a timeout error, so a loop the
+mutant made endless ends in the file's worker rather than hanging it. Where
+the code under test catches that error and carries on, the limit having been
+reached still makes the mutant a `timeout`.
+
+This differs from StrykerJS on purpose. StrykerJS also calls a mutant
+`Timeout` once it is evaluated more than 100 times as often as in its dry
+run, though every test passes and nothing hangs; a timeout counts as
+detected, so the suite gets credit no assertion earned (tRPC's
+`withPing.ts:37`: about 45,000 evaluations against 8, 37 of 37 tests pass).
+Supercov calls such a mutant `survived`: no test tells it apart. A test that runs out of time is run once more with twice
 the budget before it counts as `timeout`. An error no test catches (work a
 test left running, a rejected promise nobody awaited) is the mutant's where
 the file raised none without it: a kill, or a `timeout` where it is the

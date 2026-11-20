@@ -9,8 +9,9 @@
     "7210302856247792",
     "8297132922154682",
     "6783811573326500",
-    "6615399405765448",
-    "6892707219384574",
+    "4574534097087808",
+    "8528048117638039",
+    "6898820936997587",
     "4982353503892003"
   ],
   "tools": {
@@ -70,7 +71,7 @@
         "supercov-cold": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "10.33.4",
           "vitest": "4.1.6",
@@ -127,11 +128,11 @@
           "tests": 0.403
         },
         "supercov-cold": {
-          "clone": 0.202,
-          "pnpm-setup": 1.341,
-          "install": 1.042,
-          "tool-install": 4.843,
-          "tests": 0.366
+          "clone": 0.255,
+          "pnpm-setup": 1.543,
+          "install": 1.101,
+          "tool-install": 3.704,
+          "tests": 0.371
         },
         "truth": {
           "clone": 0.179,
@@ -293,16 +294,16 @@
       "supercov": {
         "cold": {
           "shards": 1,
-          "measureS": 0.943,
+          "measureS": 1.071,
           "measureCpuS": 0.73,
-          "measureRssMiB": 152,
+          "measureRssMiB": 151,
           "measureExitCodes": [
             0
           ],
-          "strongS": 1.88,
-          "strongCpuS": 13.69,
-          "slowestStrongS": 1.884,
-          "totalS": 2.82,
+          "strongS": 2.01,
+          "strongCpuS": 14.78,
+          "slowestStrongS": 2.006,
+          "totalS": 3.08,
           "strongExitCodes": [
             0
           ],
@@ -319,15 +320,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8446601941747572,
-              "durationMs": 1853,
+              "durationMs": 1976,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 1572,
+                  "durationMs": 1693,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 9,
+                  "overturned": 0
                 }
               ]
             }
@@ -335,6 +338,8 @@
           "ran": 99,
           "passes": 1,
           "stalledPasses": 0,
+          "confirmations": 9,
+          "overturned": 0,
           "shardsWithResumedPasses": [],
           "mutants": 103,
           "statuses": {
@@ -342,8 +347,8 @@
             "Survived": 16
           },
           "score": 84.47,
-          "strongMsPerMutantRun": 19,
-          "strongCpuMsPerMutantRun": 138
+          "strongMsPerMutantRun": 20,
+          "strongCpuMsPerMutantRun": 149
         },
         "vsTruth": {
           "joined": 103,
@@ -625,7 +630,7 @@
         "supercov-cold": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "9.0.6",
           "vitest": "5.1.1",
@@ -634,7 +639,7 @@
         "supercov-cold:own-vitest": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "9.0.6",
           "vitest": "1.5.3",
@@ -707,20 +712,20 @@
           "tests": 0.35
         },
         "supercov-cold": {
-          "clone": 0.242,
-          "pnpm-setup": 1.259,
-          "install": 1.225,
-          "tool-install": 3.602,
-          "vitest-plugins-remove": 0.784,
-          "vitest-upgrade": 1.158,
-          "tests": 0.349
+          "clone": 0.21,
+          "pnpm-setup": 1.206,
+          "install": 1.289,
+          "tool-install": 3.318,
+          "vitest-plugins-remove": 0.715,
+          "vitest-upgrade": 1.103,
+          "tests": 0.312
         },
         "supercov-cold:own-vitest": {
-          "clone": 0.229,
-          "pnpm-setup": 1.418,
-          "install": 1.195,
-          "tool-install": 3.618,
-          "tests": 0.716
+          "clone": 0.239,
+          "pnpm-setup": 1.495,
+          "install": 1.167,
+          "tool-install": 4.373,
+          "tests": 0.523
         },
         "truth": {
           "clone": 0.202,
@@ -882,16 +887,16 @@
       "supercov": {
         "cold": {
           "shards": 1,
-          "measureS": 1.115,
-          "measureCpuS": 0.62,
-          "measureRssMiB": 231,
+          "measureS": 0.897,
+          "measureCpuS": 0.61,
+          "measureRssMiB": 229,
           "measureExitCodes": [
             0
           ],
-          "strongS": 1.61,
-          "strongCpuS": 9.29,
-          "slowestStrongS": 1.608,
-          "totalS": 2.73,
+          "strongS": 1.63,
+          "strongCpuS": 11.31,
+          "slowestStrongS": 1.629,
+          "totalS": 2.53,
           "strongExitCodes": [
             0
           ],
@@ -908,15 +913,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.9358974358974359,
-              "durationMs": 1573,
+              "durationMs": 1598,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 1289,
+                  "durationMs": 1336,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 20,
+                  "overturned": 0
                 }
               ]
             }
@@ -924,6 +931,8 @@
           "ran": 77,
           "passes": 1,
           "stalledPasses": 0,
+          "confirmations": 20,
+          "overturned": 0,
           "shardsWithResumedPasses": [],
           "mutants": 78,
           "statuses": {
@@ -932,7 +941,7 @@
           },
           "score": 93.59,
           "strongMsPerMutantRun": 21,
-          "strongCpuMsPerMutantRun": 121
+          "strongCpuMsPerMutantRun": 147
         },
         "vsTruth": {
           "joined": 78,
@@ -995,16 +1004,16 @@
           "own-vitest": {
             "cold": {
               "shards": 1,
-              "measureS": 1.468,
-              "measureCpuS": 2.73,
-              "measureRssMiB": 484,
+              "measureS": 1.406,
+              "measureCpuS": 2.47,
+              "measureRssMiB": 478,
               "measureExitCodes": [
                 0
               ],
-              "strongS": 2.72,
-              "strongCpuS": 22,
-              "slowestStrongS": 2.722,
-              "totalS": 4.19,
+              "strongS": 2.84,
+              "strongCpuS": 24.38,
+              "slowestStrongS": 2.84,
+              "totalS": 4.25,
               "strongExitCodes": [
                 0
               ],
@@ -1021,15 +1030,17 @@
                   "equivalent": 0,
                   "error": 0,
                   "mutationScore": 0.9358974358974359,
-                  "durationMs": 2689,
+                  "durationMs": 2807,
                   "commandExitCode": 0,
                   "passes": [
                     {
                       "summary": true,
-                      "durationMs": 2305,
+                      "durationMs": 2442,
                       "isolated": true,
                       "stalled": false,
-                      "left": 0
+                      "left": 0,
+                      "confirmations": 20,
+                      "overturned": 0
                     }
                   ]
                 }
@@ -1037,6 +1048,8 @@
               "ran": 77,
               "passes": 1,
               "stalledPasses": 0,
+              "confirmations": 20,
+              "overturned": 0,
               "shardsWithResumedPasses": [],
               "mutants": 78,
               "statuses": {
@@ -1044,8 +1057,8 @@
                 "Killed": 73
               },
               "score": 93.59,
-              "strongMsPerMutantRun": 35,
-              "strongCpuMsPerMutantRun": 286
+              "strongMsPerMutantRun": 37,
+              "strongCpuMsPerMutantRun": 317
             },
             "vsTruth": {
               "joined": 78,
@@ -1323,7 +1336,7 @@
         "supercov-cold": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "10.33.0",
           "vitest": "4.1.2",
@@ -1380,11 +1393,11 @@
           "tests": 0.392
         },
         "supercov-cold": {
-          "clone": 0.23,
-          "pnpm-setup": 1.288,
-          "install": 1.121,
-          "tool-install": 3.486,
-          "tests": 0.371
+          "clone": 0.253,
+          "pnpm-setup": 1.447,
+          "install": 1.029,
+          "tool-install": 3.795,
+          "tests": 0.38
         },
         "truth": {
           "clone": 0.289,
@@ -1547,16 +1560,16 @@
       "supercov": {
         "cold": {
           "shards": 1,
-          "measureS": 0.95,
+          "measureS": 1.233,
           "measureCpuS": 1.21,
-          "measureRssMiB": 145,
+          "measureRssMiB": 144,
           "measureExitCodes": [
             0
           ],
-          "strongS": 10.84,
-          "strongCpuS": 95.31,
-          "slowestStrongS": 10.837,
-          "totalS": 11.79,
+          "strongS": 11.32,
+          "strongCpuS": 109.34,
+          "slowestStrongS": 11.325,
+          "totalS": 12.55,
           "strongExitCodes": [
             0
           ],
@@ -1573,15 +1586,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8755426917510853,
-              "durationMs": 10771,
+              "durationMs": 11260,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 10472,
+                  "durationMs": 10960,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 122,
+                  "overturned": 0
                 }
               ]
             }
@@ -1589,6 +1604,8 @@
           "ran": 663,
           "passes": 1,
           "stalledPasses": 0,
+          "confirmations": 122,
+          "overturned": 0,
           "shardsWithResumedPasses": [],
           "mutants": 691,
           "statuses": {
@@ -1598,8 +1615,8 @@
             "NoCoverage": 2
           },
           "score": 87.55,
-          "strongMsPerMutantRun": 16,
-          "strongCpuMsPerMutantRun": 144
+          "strongMsPerMutantRun": 17,
+          "strongCpuMsPerMutantRun": 165
         },
         "vsTruth": {
           "joined": 691,
@@ -1873,7 +1890,7 @@
         "supercov-cold": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "11.10.0",
           "vitest": "4.1.9",
@@ -1930,11 +1947,11 @@
           "tests": 2.581
         },
         "supercov-cold": {
-          "clone": 0.205,
-          "pnpm-setup": 1.649,
-          "install": 1.076,
-          "tool-install": 3.638,
-          "tests": 2.609
+          "clone": 0.18,
+          "pnpm-setup": 1.394,
+          "install": 1.06,
+          "tool-install": 4.035,
+          "tests": 2.392
         },
         "truth": {
           "clone": 0.281,
@@ -2099,16 +2116,16 @@
       "supercov": {
         "cold": {
           "shards": 1,
-          "measureS": 3.469,
-          "measureCpuS": 3.55,
-          "measureRssMiB": 312,
+          "measureS": 3.047,
+          "measureCpuS": 3.54,
+          "measureRssMiB": 294,
           "measureExitCodes": [
             0
           ],
-          "strongS": 10.28,
-          "strongCpuS": 93.54,
-          "slowestStrongS": 10.283,
-          "totalS": 13.75,
+          "strongS": 10.55,
+          "strongCpuS": 105.43,
+          "slowestStrongS": 10.554,
+          "totalS": 13.6,
           "strongExitCodes": [
             0
           ],
@@ -2125,15 +2142,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8755102040816326,
-              "durationMs": 10149,
+              "durationMs": 10430,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 9822,
+                  "durationMs": 10123,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 102,
+                  "overturned": 0
                 }
               ]
             }
@@ -2141,6 +2160,8 @@
           "ran": 473,
           "passes": 1,
           "stalledPasses": 0,
+          "confirmations": 102,
+          "overturned": 0,
           "shardsWithResumedPasses": [],
           "mutants": 490,
           "statuses": {
@@ -2151,7 +2172,7 @@
           },
           "score": 87.55,
           "strongMsPerMutantRun": 22,
-          "strongCpuMsPerMutantRun": 198
+          "strongCpuMsPerMutantRun": 223
         },
         "vsTruth": {
           "joined": 490,
@@ -2438,7 +2459,7 @@
         "supercov-cold": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "10.33.2",
           "vitest": "4.1.5",
@@ -2495,11 +2516,11 @@
           "tests": 0.405
         },
         "supercov-cold": {
-          "clone": 0.243,
-          "pnpm-setup": 1.202,
-          "install": 0.927,
-          "tool-install": 3.826,
-          "tests": 0.418
+          "clone": 0.225,
+          "pnpm-setup": 1.371,
+          "install": 0.866,
+          "tool-install": 3.528,
+          "tests": 0.433
         },
         "truth": {
           "clone": 0.273,
@@ -2662,16 +2683,16 @@
       "supercov": {
         "cold": {
           "shards": 1,
-          "measureS": 1.096,
-          "measureCpuS": 2.78,
-          "measureRssMiB": 175,
+          "measureS": 1.126,
+          "measureCpuS": 2.91,
+          "measureRssMiB": 172,
           "measureExitCodes": [
             0
           ],
-          "strongS": 24.38,
-          "strongCpuS": 184.61,
-          "slowestStrongS": 24.384,
-          "totalS": 25.48,
+          "strongS": 26.97,
+          "strongCpuS": 223.13,
+          "slowestStrongS": 26.974,
+          "totalS": 28.1,
           "strongExitCodes": [
             0
           ],
@@ -2688,15 +2709,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8250539956803455,
-              "durationMs": 24282,
+              "durationMs": 26871,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 23939,
+                  "durationMs": 26532,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 163,
+                  "overturned": 0
                 }
               ]
             }
@@ -2704,6 +2727,8 @@
           "ran": 871,
           "passes": 1,
           "stalledPasses": 0,
+          "confirmations": 163,
+          "overturned": 0,
           "shardsWithResumedPasses": [],
           "mutants": 926,
           "statuses": {
@@ -2713,8 +2738,8 @@
             "Timeout": 11
           },
           "score": 82.51,
-          "strongMsPerMutantRun": 28,
-          "strongCpuMsPerMutantRun": 212
+          "strongMsPerMutantRun": 31,
+          "strongCpuMsPerMutantRun": 256
         },
         "vsTruth": {
           "joined": 926,
@@ -2995,7 +3020,7 @@
         "supercov-cold:1": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3004,7 +3029,7 @@
         "supercov-cold:2": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3013,7 +3038,7 @@
         "supercov-cold:3": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3022,7 +3047,7 @@
         "supercov-cold:4": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3031,7 +3056,7 @@
         "supercov-cold:5": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3040,7 +3065,7 @@
         "supercov-cold:6": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -3128,41 +3153,41 @@
           "tests": 6.586
         },
         "supercov-cold:1": {
-          "clone": 0.475,
-          "pnpm-setup": 1.608,
-          "install": 0.633,
-          "tool-install": 4.58,
-          "tests": 6.511
+          "clone": 0.444,
+          "pnpm-setup": 1.658,
+          "install": 0.692,
+          "tool-install": 3.499,
+          "tests": 6.519
         },
         "supercov-cold:2": {
-          "clone": 0.436,
-          "pnpm-setup": 1.454,
-          "install": 0.761,
-          "tool-install": 3.46
+          "clone": 0.45,
+          "pnpm-setup": 1.593,
+          "install": 0.731,
+          "tool-install": 3.395
         },
         "supercov-cold:3": {
-          "clone": 0.463,
-          "pnpm-setup": 1.745,
-          "install": 0.659,
-          "tool-install": 3.55
+          "clone": 0.43,
+          "pnpm-setup": 1.486,
+          "install": 0.663,
+          "tool-install": 3.472
         },
         "supercov-cold:4": {
-          "clone": 0.447,
-          "pnpm-setup": 1.392,
-          "install": 0.707,
-          "tool-install": 4.005
+          "clone": 0.449,
+          "pnpm-setup": 1.763,
+          "install": 0.763,
+          "tool-install": 3.325
         },
         "supercov-cold:5": {
-          "clone": 0.47,
-          "pnpm-setup": 1.506,
-          "install": 0.706,
-          "tool-install": 3.729
+          "clone": 0.44,
+          "pnpm-setup": 2.269,
+          "install": 0.717,
+          "tool-install": 3.989
         },
         "supercov-cold:6": {
-          "clone": 0.401,
-          "pnpm-setup": 1.489,
-          "install": 0.723,
-          "tool-install": 3.873
+          "clone": 0.491,
+          "pnpm-setup": 1.698,
+          "install": 0.651,
+          "tool-install": 3.7
         },
         "truth:s1": {
           "clone": 0.46,
@@ -3539,9 +3564,9 @@
       "supercov": {
         "cold": {
           "shards": 6,
-          "measureS": 9.366,
-          "measureCpuS": 36.77,
-          "measureRssMiB": 1217,
+          "measureS": 9.24,
+          "measureCpuS": 36.34,
+          "measureRssMiB": 1233,
           "measureExitCodes": [
             0,
             0,
@@ -3550,10 +3575,10 @@
             0,
             0
           ],
-          "strongS": 1210.73,
-          "strongCpuS": 3851.74,
-          "slowestStrongS": 212.049,
-          "totalS": 1220.1,
+          "strongS": 1442.8,
+          "strongCpuS": 4248.93,
+          "slowestStrongS": 279.369,
+          "totalS": 1452.04,
           "strongExitCodes": [
             0,
             0,
@@ -3568,66 +3593,72 @@
             {
               "mutants": 883,
               "ran": 683,
-              "killed": 614,
+              "killed": 612,
               "timeout": 14,
-              "survived": 177,
+              "survived": 179,
               "noCoverage": 78,
               "equivalent": 0,
               "error": 0,
-              "mutationScore": 0.711211778029445,
-              "durationMs": 190494,
+              "mutationScore": 0.7089467723669309,
+              "durationMs": 237552,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 189961,
+                  "durationMs": 237008,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 375,
+                  "overturned": 3
                 }
               ]
             },
             {
               "mutants": 683,
               "ran": 683,
-              "killed": 598,
-              "timeout": 17,
-              "survived": 68,
+              "killed": 595,
+              "timeout": 18,
+              "survived": 70,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
-              "mutationScore": 0.9004392386530015,
-              "durationMs": 193373,
+              "mutationScore": 0.8975109809663251,
+              "durationMs": 240903,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 192831,
+                  "durationMs": 240367,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 345,
+                  "overturned": 4
                 }
               ]
             },
             {
               "mutants": 683,
               "ran": 683,
-              "killed": 601,
+              "killed": 599,
               "timeout": 15,
-              "survived": 67,
+              "survived": 69,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
-              "mutationScore": 0.9019033674963397,
-              "durationMs": 199104,
+              "mutationScore": 0.8989751098096632,
+              "durationMs": 229207,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 198581,
+                  "durationMs": 228677,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 325,
+                  "overturned": 3
                 }
               ]
             },
@@ -3641,59 +3672,65 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.9193548387096774,
-              "durationMs": 205787,
+              "durationMs": 203005,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 205221,
+                  "durationMs": 202472,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 365,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 682,
               "ran": 682,
-              "killed": 594,
+              "killed": 593,
               "timeout": 18,
-              "survived": 70,
+              "survived": 71,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
-              "mutationScore": 0.8973607038123167,
-              "durationMs": 181980,
+              "mutationScore": 0.8958944281524927,
+              "durationMs": 222726,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 181436,
+                  "durationMs": 222193,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 382,
+                  "overturned": 4
                 }
               ]
             },
             {
               "mutants": 682,
               "ran": 682,
-              "killed": 607,
-              "timeout": 14,
-              "survived": 61,
+              "killed": 603,
+              "timeout": 17,
+              "survived": 62,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
-              "mutationScore": 0.9105571847507331,
-              "durationMs": 204116,
+              "mutationScore": 0.9090909090909091,
+              "durationMs": 273493,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 203547,
+                  "durationMs": 272956,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 363,
+                  "overturned": 3
                 }
               ]
             }
@@ -3701,17 +3738,19 @@
           "ran": 4095,
           "passes": 6,
           "stalledPasses": 0,
+          "confirmations": 2155,
+          "overturned": 17,
           "shardsWithResumedPasses": [],
           "mutants": 4295,
           "statuses": {
-            "Killed": 3632,
-            "Survived": 498,
-            "Timeout": 87,
+            "Killed": 3620,
+            "Survived": 506,
+            "Timeout": 91,
             "NoCoverage": 78
           },
-          "score": 86.59,
-          "strongMsPerMutantRun": 296,
-          "strongCpuMsPerMutantRun": 941
+          "score": 86.4,
+          "strongMsPerMutantRun": 352,
+          "strongCpuMsPerMutantRun": 1038
         },
         "vsTruth": {
           "joined": 4292,
@@ -3725,7 +3764,7 @@
           },
           "ambiguous": 0,
           "compared": 4290,
-          "scoreSupercov": 86.57,
+          "scoreSupercov": 86.39,
           "scoreTruth": 86.62,
           "notCompared": {
             "Killed / RuntimeError": 2
@@ -3812,6 +3851,38 @@
               "replacement": "true"
             },
             {
+              "id": "src/utils/html.ts:82:9-82:30:ConditionalExpression:true",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`typeof r === 'object'` was false at least once",
+              "original": "typeof r === 'object'",
+              "replacement": "true"
+            },
+            {
+              "id": "src/utils/html.ts:100:21-103:4:BlockStatement:{}",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "statement-ran",
+              "reason": "the statement around it ran (a proxy: removing it may change nothing)",
+              "original": "{ buffer[0] += str return }",
+              "replacement": "{}"
+            },
+            {
               "id": "src/utils/html.ts:161:9-161:61:ConditionalExpression:true",
               "supercov": "Survived",
               "truth": "Killed",
@@ -3826,6 +3897,25 @@
               "reason": "`(str as string | Promise<string>) instanceof Promise` was false at least once",
               "original": "(str as string | Promise<string>) instanceof Promise",
               "replacement": "true"
+            },
+            {
+              "id": "src/utils/html.ts:185:7-185:24:ConditionalExpression:false",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream",
+                "src/jsx/components.test.tsx > ErrorBoundary > streaming > no error",
+                "src/jsx/components.test.tsx > ErrorBoundary > streaming > with StreamingContext",
+                "src/jsx/components.test.tsx > ErrorBoundary > streaming > error with StreamingContext"
+              ],
+              "truthKillerCount": 4,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`preserveCallbacks` was true at least once",
+              "original": "preserveCallbacks",
+              "replacement": "false"
             },
             {
               "id": "src/utils/jwt/jwt.ts:156:77-156:94:EqualityOperator:<=",
@@ -3848,93 +3938,12 @@
               "replacement": "now <= payload.iat"
             }
           ],
-          "extraKills": [
-            {
-              "id": "src/router/smart-router/router.ts:14:9-14:22:ConditionalExpression:false",
-              "supercov": "Killed",
-              "truth": "Survived",
-              "static": true,
-              "truthKillers": [],
-              "truthKillerCount": 0,
-              "supercovKilledBy": [
-                "vitest:-1282846912_39_4"
-              ],
-              "weak": "infected",
-              "weakCode": "opposite-value",
-              "reason": "`!this.#routes` was true at least once",
-              "original": "!this.#routes",
-              "replacement": "false"
-            },
-            {
-              "id": "src/utils/html.ts:83:64-83:66:ArrayDeclaration:[\"Stryker was here\"]",
-              "supercov": "Killed",
-              "truth": "NoCoverage",
-              "static": false,
-              "truthKillers": [],
-              "truthKillerCount": 0,
-              "supercovKilledBy": [
-                "vitest:685104812_0_29_1"
-              ],
-              "weak": "infected",
-              "weakCode": "reached",
-              "reason": "the code ran, and this replacement differs wherever it is evaluated",
-              "original": "[]",
-              "replacement": "[\"Stryker was here\"]"
-            },
-            {
-              "id": "src/utils/html.ts:100:7-100:19:ConditionalExpression:false",
-              "supercov": "Killed",
-              "truth": "Survived",
-              "static": true,
-              "truthKillers": [],
-              "truthKillerCount": 0,
-              "supercovKilledBy": [
-                "vitest:-2022380970_0_4_0"
-              ],
-              "weak": "infected",
-              "weakCode": "opposite-value",
-              "reason": "`match === -1` was true at least once",
-              "original": "match === -1",
-              "replacement": "false"
-            },
-            {
-              "id": "src/utils/html.ts:100:17-100:19:UnaryOperator:+",
-              "supercov": "Killed",
-              "truth": "Survived",
-              "static": true,
-              "truthKillers": [],
-              "truthKillerCount": 0,
-              "supercovKilledBy": [
-                "vitest:-2022380970_0_4_0"
-              ],
-              "weak": "unknown",
-              "weakCode": "no-rule",
-              "reason": "no rule decides UnaryOperator mutants yet",
-              "original": "-1",
-              "replacement": "+1"
-            },
-            {
-              "id": "src/utils/html.ts:157:7-157:30:ConditionalExpression:true",
-              "supercov": "Killed",
-              "truth": "Survived",
-              "static": true,
-              "truthKillers": [],
-              "truthKillerCount": 0,
-              "supercovKilledBy": [
-                "vitest:-2022380970_0_4_0"
-              ],
-              "weak": "infected",
-              "weakCode": "opposite-value",
-              "reason": "`typeof str === 'object'` was false at least once",
-              "original": "typeof str === 'object'",
-              "replacement": "true"
-            }
-          ],
+          "extraKills": [],
           "static": {
             "joined": 320,
             "supercovStatuses": {
-              "Killed": 299,
-              "Survived": 20,
+              "Killed": 295,
+              "Survived": 24,
               "Timeout": 1
             },
             "truthStatuses": {
@@ -4306,7 +4315,7 @@
         "supercov-cold:1": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4315,7 +4324,7 @@
         "supercov-cold:10": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4324,7 +4333,7 @@
         "supercov-cold:11": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4333,7 +4342,7 @@
         "supercov-cold:12": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4342,7 +4351,7 @@
         "supercov-cold:13": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4351,7 +4360,7 @@
         "supercov-cold:14": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4360,7 +4369,7 @@
         "supercov-cold:15": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4369,7 +4378,7 @@
         "supercov-cold:16": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4378,7 +4387,7 @@
         "supercov-cold:17": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4387,7 +4396,7 @@
         "supercov-cold:18": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4396,7 +4405,7 @@
         "supercov-cold:19": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4405,7 +4414,7 @@
         "supercov-cold:2": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4414,7 +4423,7 @@
         "supercov-cold:20": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4423,7 +4432,7 @@
         "supercov-cold:21": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4432,7 +4441,7 @@
         "supercov-cold:22": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4441,7 +4450,7 @@
         "supercov-cold:23": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4450,7 +4459,7 @@
         "supercov-cold:24": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4459,7 +4468,7 @@
         "supercov-cold:25": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4468,7 +4477,7 @@
         "supercov-cold:26": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4477,7 +4486,7 @@
         "supercov-cold:27": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4486,7 +4495,7 @@
         "supercov-cold:28": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4495,7 +4504,7 @@
         "supercov-cold:29": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4504,7 +4513,7 @@
         "supercov-cold:3": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4513,7 +4522,7 @@
         "supercov-cold:30": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4522,7 +4531,7 @@
         "supercov-cold:31": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4531,7 +4540,7 @@
         "supercov-cold:32": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4540,7 +4549,7 @@
         "supercov-cold:4": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4549,7 +4558,7 @@
         "supercov-cold:5": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4558,7 +4567,7 @@
         "supercov-cold:6": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4567,7 +4576,7 @@
         "supercov-cold:7": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4576,7 +4585,7 @@
         "supercov-cold:8": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4585,7 +4594,7 @@
         "supercov-cold:9": {
           "supercovWrapper": "4.28.0",
           "supercov": "supercov 4.28.0 (rust contract v1)",
-          "supercovBinaryKey": "f155046dc49afc31",
+          "supercovBinaryKey": "dcb4c21223a29dde",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -4967,197 +4976,197 @@
           "tool-install": 9.472
         },
         "supercov-cold:1": {
-          "clone": 0.723,
-          "pnpm-setup": 1.428,
-          "install": 4.048,
-          "tool-install": 3.729,
-          "tests": 21.013
+          "clone": 0.681,
+          "pnpm-setup": 1.959,
+          "install": 3.995,
+          "tool-install": 3.835,
+          "tests": 20.873
         },
         "supercov-cold:10": {
-          "clone": 0.655,
-          "pnpm-setup": 1.615,
-          "install": 3.901,
-          "tool-install": 3.474
+          "clone": 0.701,
+          "pnpm-setup": 1.67,
+          "install": 3.808,
+          "tool-install": 3.237
         },
         "supercov-cold:11": {
-          "clone": 0.63,
-          "pnpm-setup": 1.339,
-          "install": 3.932,
-          "tool-install": 3.889
+          "clone": 0.745,
+          "pnpm-setup": 1.49,
+          "install": 3.894,
+          "tool-install": 3.717
         },
         "supercov-cold:12": {
-          "clone": 0.695,
-          "pnpm-setup": 1.662,
-          "install": 3.783,
-          "tool-install": 3.697
+          "clone": 0.707,
+          "pnpm-setup": 1.878,
+          "install": 3.942,
+          "tool-install": 3.503
         },
         "supercov-cold:13": {
-          "clone": 0.657,
-          "pnpm-setup": 1.449,
-          "install": 3.86,
-          "tool-install": 3.59
+          "clone": 0.663,
+          "pnpm-setup": 1.542,
+          "install": 3.926,
+          "tool-install": 3.357
         },
         "supercov-cold:14": {
-          "clone": 0.683,
-          "pnpm-setup": 1.605,
-          "install": 3.997,
-          "tool-install": 3.562
+          "clone": 0.7,
+          "pnpm-setup": 1.725,
+          "install": 3.936,
+          "tool-install": 3.643
         },
         "supercov-cold:15": {
-          "clone": 0.718,
-          "pnpm-setup": 1.49,
-          "install": 3.869,
-          "tool-install": 3.797
+          "clone": 0.634,
+          "pnpm-setup": 1.595,
+          "install": 3.68,
+          "tool-install": 3.218
         },
         "supercov-cold:16": {
-          "clone": 0.68,
-          "pnpm-setup": 1.612,
-          "install": 3.892,
-          "tool-install": 3.876
+          "clone": 0.718,
+          "pnpm-setup": 1.511,
+          "install": 4.099,
+          "tool-install": 3.991
         },
         "supercov-cold:17": {
-          "clone": 0.728,
-          "pnpm-setup": 1.374,
-          "install": 3.83,
-          "tool-install": 3.703
+          "clone": 0.764,
+          "pnpm-setup": 1.406,
+          "install": 3.758,
+          "tool-install": 3.367
         },
         "supercov-cold:18": {
-          "clone": 0.652,
-          "pnpm-setup": 1.561,
-          "install": 4.114,
-          "tool-install": 3.66
+          "clone": 0.655,
+          "pnpm-setup": 1.695,
+          "install": 3.911,
+          "tool-install": 3.569
         },
         "supercov-cold:19": {
-          "clone": 0.665,
-          "pnpm-setup": 1.829,
-          "install": 4.032,
-          "tool-install": 3.934
+          "clone": 0.693,
+          "pnpm-setup": 2.142,
+          "install": 3.944,
+          "tool-install": 3.182
         },
         "supercov-cold:2": {
-          "clone": 0.67,
-          "pnpm-setup": 1.771,
-          "install": 3.962,
-          "tool-install": 3.609
+          "clone": 0.797,
+          "pnpm-setup": 1.42,
+          "install": 3.896,
+          "tool-install": 3.593
         },
         "supercov-cold:20": {
-          "clone": 0.631,
-          "pnpm-setup": 1.562,
-          "install": 3.767,
-          "tool-install": 3.837
+          "clone": 0.742,
+          "pnpm-setup": 1.443,
+          "install": 3.809,
+          "tool-install": 3.49
         },
         "supercov-cold:21": {
-          "clone": 0.673,
-          "pnpm-setup": 1.804,
-          "install": 4.171,
-          "tool-install": 3.571
+          "clone": 0.689,
+          "pnpm-setup": 1.541,
+          "install": 3.993,
+          "tool-install": 3.539
         },
         "supercov-cold:22": {
-          "clone": 0.716,
-          "pnpm-setup": 1.742,
-          "install": 4.023,
-          "tool-install": 3.448
-        },
-        "supercov-cold:23": {
-          "clone": 1.733,
-          "pnpm-setup": 1.903,
-          "install": 3.891,
-          "tool-install": 4.084
-        },
-        "supercov-cold:24": {
-          "clone": 0.635,
-          "pnpm-setup": 1.367,
-          "install": 3.995,
-          "tool-install": 3.377
-        },
-        "supercov-cold:25": {
-          "clone": 0.654,
-          "pnpm-setup": 1.435,
-          "install": 4.026,
-          "tool-install": 4.337
-        },
-        "supercov-cold:26": {
-          "clone": 0.712,
-          "pnpm-setup": 1.355,
-          "install": 3.955,
-          "tool-install": 3.829
-        },
-        "supercov-cold:27": {
-          "clone": 0.747,
-          "pnpm-setup": 1.518,
-          "install": 4.099,
-          "tool-install": 3.343
-        },
-        "supercov-cold:28": {
-          "clone": 0.645,
-          "pnpm-setup": 1.813,
-          "install": 4.029,
-          "tool-install": 4.144
-        },
-        "supercov-cold:29": {
-          "clone": 0.714,
-          "pnpm-setup": 1.495,
-          "install": 3.83,
-          "tool-install": 3.398
-        },
-        "supercov-cold:3": {
-          "clone": 0.643,
-          "pnpm-setup": 1.34,
-          "install": 3.787,
-          "tool-install": 3.916
-        },
-        "supercov-cold:30": {
-          "clone": 0.681,
-          "pnpm-setup": 1.684,
-          "install": 3.792,
-          "tool-install": 3.275
-        },
-        "supercov-cold:31": {
-          "clone": 0.611,
-          "pnpm-setup": 1.338,
-          "install": 3.763,
-          "tool-install": 3.786
-        },
-        "supercov-cold:32": {
-          "clone": 0.66,
-          "pnpm-setup": 1.784,
-          "install": 4.038,
-          "tool-install": 3.662
-        },
-        "supercov-cold:4": {
-          "clone": 0.631,
-          "pnpm-setup": 1.57,
-          "install": 4.153,
-          "tool-install": 4.499
-        },
-        "supercov-cold:5": {
-          "clone": 0.693,
-          "pnpm-setup": 1.508,
-          "install": 3.813,
-          "tool-install": 3.599
-        },
-        "supercov-cold:6": {
-          "clone": 0.652,
-          "pnpm-setup": 1.827,
-          "install": 4.133,
-          "tool-install": 3.63
-        },
-        "supercov-cold:7": {
-          "clone": 0.691,
-          "pnpm-setup": 1.379,
-          "install": 3.831,
-          "tool-install": 4.105
-        },
-        "supercov-cold:8": {
-          "clone": 0.277,
-          "pnpm-setup": 1.715,
-          "install": 4.047,
-          "tool-install": 3.343
-        },
-        "supercov-cold:9": {
           "clone": 0.668,
           "pnpm-setup": 1.624,
-          "install": 4.03,
-          "tool-install": 4.68
+          "install": 3.831,
+          "tool-install": 3.475
+        },
+        "supercov-cold:23": {
+          "clone": 0.725,
+          "pnpm-setup": 1.354,
+          "install": 3.887,
+          "tool-install": 3.54
+        },
+        "supercov-cold:24": {
+          "clone": 0.673,
+          "pnpm-setup": 1.69,
+          "install": 3.822,
+          "tool-install": 4.021
+        },
+        "supercov-cold:25": {
+          "clone": 0.766,
+          "pnpm-setup": 1.583,
+          "install": 3.975,
+          "tool-install": 3.541
+        },
+        "supercov-cold:26": {
+          "clone": 0.631,
+          "pnpm-setup": 1.693,
+          "install": 4.036,
+          "tool-install": 3.662
+        },
+        "supercov-cold:27": {
+          "clone": 0.655,
+          "pnpm-setup": 1.524,
+          "install": 4.097,
+          "tool-install": 3.524
+        },
+        "supercov-cold:28": {
+          "clone": 0.672,
+          "pnpm-setup": 1.837,
+          "install": 4.073,
+          "tool-install": 4.29
+        },
+        "supercov-cold:29": {
+          "clone": 0.738,
+          "pnpm-setup": 1.535,
+          "install": 4.013,
+          "tool-install": 3.484
+        },
+        "supercov-cold:3": {
+          "clone": 0.687,
+          "pnpm-setup": 1.68,
+          "install": 3.912,
+          "tool-install": 3.494
+        },
+        "supercov-cold:30": {
+          "clone": 0.734,
+          "pnpm-setup": 1.653,
+          "install": 3.993,
+          "tool-install": 3.957
+        },
+        "supercov-cold:31": {
+          "clone": 0.655,
+          "pnpm-setup": 1.904,
+          "install": 4.44,
+          "tool-install": 3.388
+        },
+        "supercov-cold:32": {
+          "clone": 0.749,
+          "pnpm-setup": 1.918,
+          "install": 3.81,
+          "tool-install": 3.186
+        },
+        "supercov-cold:4": {
+          "clone": 0.644,
+          "pnpm-setup": 1.307,
+          "install": 3.754,
+          "tool-install": 3.694
+        },
+        "supercov-cold:5": {
+          "clone": 0.647,
+          "pnpm-setup": 2.146,
+          "install": 4.043,
+          "tool-install": 3.451
+        },
+        "supercov-cold:6": {
+          "clone": 0.633,
+          "pnpm-setup": 1.682,
+          "install": 3.838,
+          "tool-install": 3.48
+        },
+        "supercov-cold:7": {
+          "clone": 0.63,
+          "pnpm-setup": 1.78,
+          "install": 3.821,
+          "tool-install": 3.739
+        },
+        "supercov-cold:8": {
+          "clone": 0.664,
+          "pnpm-setup": 1.599,
+          "install": 3.905,
+          "tool-install": 3.386
+        },
+        "supercov-cold:9": {
+          "clone": 0.677,
+          "pnpm-setup": 1.871,
+          "install": 4.036,
+          "tool-install": 3.397
         },
         "truth:s1": {
           "clone": 0.718,
@@ -6957,9 +6966,9 @@
       "supercov": {
         "cold": {
           "shards": 32,
-          "measureS": 22.4,
-          "measureCpuS": 86.87,
-          "measureRssMiB": 711,
+          "measureS": 22.721,
+          "measureCpuS": 85.34,
+          "measureRssMiB": 720,
           "measureExitCodes": [
             0,
             0,
@@ -6994,10 +7003,10 @@
             0,
             0
           ],
-          "strongS": 9127.71,
-          "strongCpuS": 29097.11,
-          "slowestStrongS": 395.829,
-          "totalS": 9150.11,
+          "strongS": 9735.78,
+          "strongCpuS": 30525.08,
+          "slowestStrongS": 401.651,
+          "totalS": 9758.5,
           "strongExitCodes": [
             0,
             0,
@@ -7038,44 +7047,96 @@
             {
               "mutants": 327,
               "ran": 77,
-              "killed": 65,
-              "timeout": 8,
+              "killed": 64,
+              "timeout": 9,
               "survived": 135,
               "noCoverage": 119,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.22324159021406728,
-              "durationMs": 234987,
+              "durationMs": 257821,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 234424,
+                  "durationMs": 257270,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 33,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 60,
-              "timeout": 5,
+              "killed": 59,
+              "timeout": 6,
               "survived": 11,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8552631578947368,
-              "durationMs": 281871,
+              "durationMs": 325592,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 281306,
+                  "durationMs": 325029,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 48,
+                  "overturned": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 52,
+              "timeout": 7,
+              "survived": 16,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.7866666666666666,
+              "durationMs": 337555,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 336978,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0,
+                  "confirmations": 42,
+                  "overturned": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 59,
+              "timeout": 5,
+              "survived": 12,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8421052631578947,
+              "durationMs": 321968,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 321417,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0,
+                  "confirmations": 39,
+                  "overturned": 0
                 }
               ]
             },
@@ -7083,87 +7144,47 @@
               "mutants": 76,
               "ran": 76,
               "killed": 53,
-              "timeout": 6,
-              "survived": 16,
-              "noCoverage": 0,
-              "equivalent": 0,
-              "error": 1,
-              "mutationScore": 0.7866666666666666,
-              "durationMs": 326622,
-              "commandExitCode": 0,
-              "passes": [
-                {
-                  "summary": true,
-                  "durationMs": 326045,
-                  "isolated": true,
-                  "stalled": false,
-                  "left": 0
-                }
-              ]
-            },
-            {
-              "mutants": 76,
-              "ran": 76,
-              "killed": 61,
-              "timeout": 3,
-              "survived": 12,
-              "noCoverage": 0,
-              "equivalent": 0,
-              "error": 0,
-              "mutationScore": 0.8421052631578947,
-              "durationMs": 316131,
-              "commandExitCode": 0,
-              "passes": [
-                {
-                  "summary": true,
-                  "durationMs": 315568,
-                  "isolated": true,
-                  "stalled": false,
-                  "left": 0
-                }
-              ]
-            },
-            {
-              "mutants": 76,
-              "ran": 76,
-              "killed": 55,
-              "timeout": 6,
+              "timeout": 8,
               "survived": 15,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8026315789473685,
-              "durationMs": 342594,
+              "durationMs": 360895,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 342042,
+                  "durationMs": 360334,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 35,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 60,
-              "timeout": 6,
+              "killed": 59,
+              "timeout": 7,
               "survived": 10,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.868421052631579,
-              "durationMs": 274341,
+              "durationMs": 249384,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 273790,
+                  "durationMs": 248831,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 31,
+                  "overturned": 0
                 }
               ]
             },
@@ -7177,37 +7198,41 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8026315789473685,
-              "durationMs": 225745,
+              "durationMs": 236913,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 225187,
+                  "durationMs": 236351,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 32,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 64,
-              "timeout": 4,
+              "killed": 65,
+              "timeout": 3,
               "survived": 8,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8947368421052632,
-              "durationMs": 219658,
+              "durationMs": 268670,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 219107,
+                  "durationMs": 268128,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 38,
+                  "overturned": 0
                 }
               ]
             },
@@ -7221,15 +7246,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8421052631578947,
-              "durationMs": 304387,
+              "durationMs": 337858,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 303826,
+                  "durationMs": 337301,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 34,
+                  "overturned": 0
                 }
               ]
             },
@@ -7243,15 +7270,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8157894736842105,
-              "durationMs": 392736,
+              "durationMs": 396408,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 392147,
+                  "durationMs": 395855,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 27,
+                  "overturned": 0
                 }
               ]
             },
@@ -7265,15 +7294,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8289473684210527,
-              "durationMs": 301478,
+              "durationMs": 292369,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 300918,
+                  "durationMs": 291825,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 26,
+                  "overturned": 0
                 }
               ]
             },
@@ -7287,59 +7318,65 @@
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.8947368421052632,
-              "durationMs": 300885,
+              "durationMs": 311049,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 300317,
+                  "durationMs": 310487,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 49,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 52,
-              "timeout": 5,
+              "killed": 51,
+              "timeout": 6,
               "survived": 18,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.76,
-              "durationMs": 321276,
+              "durationMs": 334444,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 320705,
+                  "durationMs": 333873,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 30,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 61,
-              "timeout": 4,
+              "killed": 62,
+              "timeout": 3,
               "survived": 11,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8552631578947368,
-              "durationMs": 198957,
+              "durationMs": 229605,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 198389,
+                  "durationMs": 229051,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 36,
+                  "overturned": 0
                 }
               ]
             },
@@ -7353,66 +7390,74 @@
               "equivalent": 0,
               "error": 2,
               "mutationScore": 0.8783783783783784,
-              "durationMs": 291423,
+              "durationMs": 291632,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 290865,
+                  "durationMs": 291078,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 54,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 57,
-              "timeout": 11,
+              "killed": 56,
+              "timeout": 12,
               "survived": 8,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8947368421052632,
-              "durationMs": 360361,
+              "durationMs": 398785,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 282063,
+                  "durationMs": 299427,
                   "isolated": true,
                   "stalled": true,
-                  "left": 10
+                  "left": 16,
+                  "confirmations": 39,
+                  "overturned": 0
                 },
                 {
                   "summary": true,
-                  "durationMs": 77248,
+                  "durationMs": 98315,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 9,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 59,
-              "timeout": 5,
+              "killed": 58,
+              "timeout": 6,
               "survived": 11,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.8533333333333334,
-              "durationMs": 260175,
+              "durationMs": 272771,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 259606,
+                  "durationMs": 272210,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 39,
+                  "overturned": 0
                 }
               ]
             },
@@ -7426,22 +7471,26 @@
               "equivalent": 0,
               "error": 2,
               "mutationScore": 0.7837837837837838,
-              "durationMs": 331783,
+              "durationMs": 347512,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 249004,
+                  "durationMs": 257036,
                   "isolated": true,
                   "stalled": true,
-                  "left": 18
+                  "left": 20,
+                  "confirmations": 28,
+                  "overturned": 0
                 },
                 {
                   "summary": true,
-                  "durationMs": 81742,
+                  "durationMs": 89422,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 12,
+                  "overturned": 0
                 }
               ]
             },
@@ -7455,15 +7504,17 @@
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.8266666666666667,
-              "durationMs": 257720,
+              "durationMs": 277438,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 257164,
+                  "durationMs": 276870,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 35,
+                  "overturned": 0
                 }
               ]
             },
@@ -7477,15 +7528,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8421052631578947,
-              "durationMs": 295173,
+              "durationMs": 320261,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 294615,
+                  "durationMs": 319708,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 46,
+                  "overturned": 0
                 }
               ]
             },
@@ -7499,37 +7552,41 @@
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.8666666666666667,
-              "durationMs": 251775,
+              "durationMs": 284078,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 251221,
+                  "durationMs": 283532,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 40,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 64,
-              "timeout": 5,
+              "killed": 63,
+              "timeout": 6,
               "survived": 5,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 2,
               "mutationScore": 0.9324324324324325,
-              "durationMs": 229056,
+              "durationMs": 255954,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 228476,
+                  "durationMs": 255409,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 40,
+                  "overturned": 0
                 }
               ]
             },
@@ -7543,15 +7600,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8311688311688312,
-              "durationMs": 235148,
+              "durationMs": 242935,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 234588,
+                  "durationMs": 242384,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 34,
+                  "overturned": 0
                 }
               ]
             },
@@ -7565,15 +7624,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.868421052631579,
-              "durationMs": 246110,
+              "durationMs": 272984,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 245536,
+                  "durationMs": 272434,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 37,
+                  "overturned": 0
                 }
               ]
             },
@@ -7587,15 +7648,17 @@
               "equivalent": 0,
               "error": 1,
               "mutationScore": 0.9066666666666666,
-              "durationMs": 293621,
+              "durationMs": 295075,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 293070,
+                  "durationMs": 294520,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 42,
+                  "overturned": 0
                 }
               ]
             },
@@ -7609,15 +7672,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.9078947368421053,
-              "durationMs": 244024,
+              "durationMs": 279291,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 243455,
+                  "durationMs": 278742,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 54,
+                  "overturned": 0
                 }
               ]
             },
@@ -7631,15 +7696,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8571428571428571,
-              "durationMs": 262017,
+              "durationMs": 274477,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 261450,
+                  "durationMs": 273922,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 37,
+                  "overturned": 0
                 }
               ]
             },
@@ -7653,44 +7720,50 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8701298701298701,
-              "durationMs": 366391,
+              "durationMs": 397016,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 174656,
+                  "durationMs": 183601,
                   "isolated": true,
                   "stalled": true,
-                  "left": 30
+                  "left": 44,
+                  "confirmations": 32,
+                  "overturned": 0
                 },
                 {
                   "summary": true,
-                  "durationMs": 190644,
+                  "durationMs": 212341,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 21,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 77,
               "ran": 77,
-              "killed": 58,
-              "timeout": 5,
+              "killed": 57,
+              "timeout": 6,
               "survived": 14,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8181818181818182,
-              "durationMs": 255333,
+              "durationMs": 303139,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 254770,
+                  "durationMs": 302578,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 35,
+                  "overturned": 0
                 }
               ]
             },
@@ -7704,15 +7777,17 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.868421052631579,
-              "durationMs": 262217,
+              "durationMs": 294342,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 261653,
+                  "durationMs": 293779,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 39,
+                  "overturned": 0
                 }
               ]
             },
@@ -7726,37 +7801,41 @@
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8421052631578947,
-              "durationMs": 210908,
+              "durationMs": 225354,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 210350,
+                  "durationMs": 224801,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 38,
+                  "overturned": 0
                 }
               ]
             },
             {
               "mutants": 76,
               "ran": 76,
-              "killed": 56,
-              "timeout": 6,
+              "killed": 57,
+              "timeout": 5,
               "survived": 14,
               "noCoverage": 0,
               "equivalent": 0,
               "error": 0,
               "mutationScore": 0.8157894736842105,
-              "durationMs": 340296,
+              "durationMs": 349847,
               "commandExitCode": 0,
               "passes": [
                 {
                   "summary": true,
-                  "durationMs": 339747,
+                  "durationMs": 349295,
                   "isolated": true,
                   "stalled": false,
-                  "left": 0
+                  "left": 0,
+                  "confirmations": 37,
+                  "overturned": 0
                 }
               ]
             }
@@ -7764,6 +7843,8 @@
           "ran": 2438,
           "passes": 35,
           "stalledPasses": 3,
+          "confirmations": 1248,
+          "overturned": 0,
           "shardsWithResumedPasses": [
             "23",
             "25",
@@ -7771,15 +7852,15 @@
           ],
           "mutants": 2688,
           "statuses": {
-            "Killed": 1868,
-            "Timeout": 198,
+            "Killed": 1858,
+            "Timeout": 208,
             "Survived": 490,
             "NoCoverage": 119,
             "RuntimeError": 13
           },
           "score": 77.23,
-          "strongMsPerMutantRun": 3744,
-          "strongCpuMsPerMutantRun": 11935
+          "strongMsPerMutantRun": 3993,
+          "strongCpuMsPerMutantRun": 12521
         },
         "vsTruth": {
           "joined": 2664,
@@ -7839,10 +7920,10 @@
           "static": {
             "joined": 399,
             "supercovStatuses": {
-              "Killed": 290,
+              "Killed": 291,
               "Survived": 87,
               "RuntimeError": 2,
-              "Timeout": 20
+              "Timeout": 19
             },
             "truthStatuses": {
               "Killed": 212,

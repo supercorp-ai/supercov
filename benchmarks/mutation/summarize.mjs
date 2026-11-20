@@ -362,6 +362,8 @@ function supercovSummary(coldJobs, prJob, truth) {
       ran: strongs.reduce((a, p) => a + (p.reply?.ran ?? 0), 0),
       passes: strongs.reduce((a, p) => a + (p.reply?.passes?.length ?? 0), 0),
       stalledPasses: strongs.reduce((a, p) => a + (p.reply?.passes ?? []).filter((x) => x.stalled).length, 0),
+      confirmations: strongs.reduce((a, p) => a + (p.reply?.passes ?? []).reduce((b, x) => b + (x.confirmations ?? 0), 0), 0),
+      overturned: strongs.reduce((a, p) => a + (p.reply?.passes ?? []).reduce((b, x) => b + (x.overturned ?? 0), 0), 0),
       shardsWithResumedPasses: strongs.filter((p) => (p.reply?.passes?.length ?? 0) > 1).map((p) => p.shard ?? 'all'),
       ...scTally(mutants),
     };
@@ -678,8 +680,8 @@ function supercovMarkdown(s) {
   L.push('');
   L.push('### Where Supercov\'s time goes', '');
   L.push('Strong pass per mutant = strong-pass wall (CPU) seconds over the mutants it ran (not-infected, not-reached and equivalent mutants are decided without running). StrykerJS per mutant = its cold mutant phase over its mutants, for scale.', '');
-  L.push('| project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) |');
-  L.push('|---|---:|---:|---:|---:|---|---:|---|');
+  L.push('| project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) | kills confirmed without the mutant / overturned |');
+  L.push('|---|---:|---:|---:|---:|---|---:|---|---|');
   for (const [name, sc] of rows) {
     const p = s.projects[name.split(' ')[0]];
     const c = sc.cold;
@@ -687,7 +689,7 @@ function supercovMarkdown(s) {
     const st = p.cold.stryker;
     const stMutants = st?.stages?.mutantsS ?? null;
     const perStryker = st?.mutants && stMutants != null ? Math.round((1000 * stMutants) / st.mutants) : st?.shards ? Math.round((1000 * st.shards.reduce((a, x) => a + (x.stages?.mutantsS ?? 0), 0)) / st.mutants) : null;
-    L.push(`| ${name} | ${fmt(p.plainTests.strykerVitest?.wallS ?? p.plainTests.mutatorVitest?.wallS)} | ${fmt(c.measureS)} | ${fmt(c.strongS)} | ${c.ran} | ${c.strongMsPerMutantRun ?? '–'} / ${c.strongCpuMsPerMutantRun ?? '–'} | ${perStryker ?? '–'} | ${c.passes} (${c.stalledPasses})${c.shardsWithResumedPasses.length ? `, resumed in ${c.shardsWithResumedPasses.join(', ')}` : ''} |`);
+    L.push(`| ${name} | ${fmt(p.plainTests.strykerVitest?.wallS ?? p.plainTests.mutatorVitest?.wallS)} | ${fmt(c.measureS)} | ${fmt(c.strongS)} | ${c.ran} | ${c.strongMsPerMutantRun ?? '–'} / ${c.strongCpuMsPerMutantRun ?? '–'} | ${perStryker ?? '–'} | ${c.passes} (${c.stalledPasses})${c.shardsWithResumedPasses.length ? `, resumed in ${c.shardsWithResumedPasses.join(', ')}` : ''} | ${c.confirmations} / ${c.overturned} |`);
   }
   L.push('');
   const across = projects.filter(([, p]) => p.supercov.verdictsAcrossVariants);
@@ -719,7 +721,7 @@ function supercovMarkdown(s) {
         any = true;
         const killers = d.truthKillerCount ? `; ground truth killed by ${d.truthKillerCount} (${d.truthKillers.map((k) => `\`${k}\``).join(', ')}${d.truthKillerCount > d.truthKillers.length ? ', ...' : ''})` : '';
         const artifact = corpus.projects.find((x) => x.name === name.split(' ')[0])?.groundTruthArtifacts?.[d.id];
-        const artifactLabel = !artifact ? '' : artifact.startsWith('flaky') ? ' (ground truth: flaky kill)' : artifact.startsWith('supercov-false-kill') ? ' (Supercov false kill)' : ' (ground-truth artifact)';
+        const artifactLabel = !artifact ? '' : artifact.startsWith('by-design') ? ' (StrykerJS hit-limit heuristic; Supercov: survived, by design)' : artifact.startsWith('flaky') ? ' (ground truth: flaky kill)' : artifact.startsWith('supercov-false-kill') ? ' (Supercov false kill)' : ' (ground-truth artifact)';
         L.push(`- ${name}, ${kind}${artifactLabel}${d.static ? ' (static)' : ''}: \`${d.id}\`: Supercov ${d.supercov}${d.weakCode ? ` (weak: ${d.weak}, ${d.weakCode})` : ''}${d.reason ? `, "${String(d.reason).slice(0, 160)}"` : ''}; ground truth ${d.truth}${killers}${d.note ? `; ${d.note}` : ''}${artifact ? `. Diagnosed: ${artifact}` : ''}`);
       }
     }

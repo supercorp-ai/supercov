@@ -230,7 +230,10 @@
         "src/utils/html.ts:100:7-100:19:ConditionalExpression:false": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
         "src/utils/html.ts:100:17-100:19:UnaryOperator:+": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
         "src/utils/html.ts:157:7-157:30:ConditionalExpression:true": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
-        "src/utils/html.ts:83:64-83:66:ArrayDeclaration:[\"Stryker was here\"]": "supercov-false-kill: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-extra.sh); cause not found"
+        "src/utils/html.ts:83:64-83:66:ArrayDeclaration:[\"Stryker was here\"]": "supercov-false-kill: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-extra.sh); cause not found",
+        "src/utils/html.ts:82:9-82:30:ConditionalExpression:true": "does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill",
+        "src/utils/html.ts:100:21-103:4:BlockStatement:{}": "does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill",
+        "src/utils/html.ts:185:7-185:24:ConditionalExpression:false": "does not reproduce outside StrykerJS: applied by hand, the mutant passes its killing tests alone, their files and the whole suite (diag/hono-overturned.sh); Supercov killed it with an order-dependent test before af7340e5 and now overturns that kill"
       },
       "supercovShardsNote": "6 ways: with 3, every shard's strong pass ran past the job budget with the binary of 4a0647f5"
     },
@@ -646,7 +649,7 @@
       "supercovShardsNote": "32 ways: with 24 (binary of fdbdc8d4) six shards ran out of time, three of them in a hung fork worker",
       "groundTruthArtifacts": {
         "packages/server/src/unstable-core-do-not-import/http/contentType.ts:109:7-110:39:LogicalOperator:||": "flaky: only the ground truth kills it, with one test (httpSubscriptionLink.test.ts > iterable event with bad yield); StrykerJS's cold run and mutator call it survived",
-        "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false": "StrykerJS's Timeout is its hit-limit heuristic ('Hit limit reached (8224/4100)': 100 times the 41 dry-run evaluations); with plain Vitest the mutant's tests pass, about twice as slow, after about 45,000 evaluations of the line against 8 without it (diag/trpc-withping.sh)"
+        "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false": "by-design: StrykerJS hit-limit heuristic (Supercov: survived, by design). StrykerJS reports 'Hit limit reached (8224/4100)': 100 times the 41 dry-run evaluations; with plain Vitest the mutant's tests pass, about twice as slow, after about 45,000 evaluations of the line against 8 without it (diag/trpc-withping.sh)"
       },
       "supercovNote": "the binary of 8342afac 'killed' 189 tRPC mutants with the reason 'the test file did not finish', 105 of them false (survived or NoCoverage in the ground truth); with 6049a02f none of the 62 remaining such verdicts disagrees with the ground truth"
     }
