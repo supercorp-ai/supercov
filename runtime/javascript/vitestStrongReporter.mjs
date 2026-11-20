@@ -19,6 +19,12 @@ import { relative, sep } from "node:path";
 
 const TIMEOUT_FACTOR = 1.5;
 const TIMEOUT_CONSTANT_MS = 5_000;
+// A mutant's first attempt gets a short limit: a round ends when its slowest
+// copy does, so one mutant that hangs a test would hold every worker for the
+// whole limit. A copy that passes the short limit runs again with the full
+// one (twice StrykerJS's), in a round of such retries only, and is a timeout
+// only if it passes that too: the short limit costs a retry, never a verdict.
+const FIRST_ATTEMPT_CONSTANT_MS = 1_000;
 const HIT_LIMIT_FLOOR = 1_000;
 
 function toRelative(root, file) {
@@ -499,12 +505,19 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             check.running = true;
             checks.push({ key, check });
         }
+        // A file whose baseline did not finish runs no mutant.
+        for (const job of pending)
+            job.waiting = job.waiting.filter((group) => !baselineFailed.has(`${group.file}#file`));
+        // Retries wait for a round of their own, after every first attempt.
+        const retrying = !checks.length && !pending.some((job) => job.waiting.some((group) => !group.retried));
         for (const job of pending) {
             if (round.length + checks.length >= perRound)
                 break;
             for (const group of [...job.waiting]) {
                 if (round.length + checks.length >= perRound || (oneAtATime && round.length + checks.length))
                     break;
+                if (Boolean(group.retried) !== retrying)
+                    continue;
                 if (baselineFailed.has(`${group.file}#file`)) {
                     job.waiting.splice(job.waiting.indexOf(group), 1);
                     continue;
@@ -521,7 +534,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const assignments = round.map(({ job, group }) => {
             const chosen = withPredecessors(group, group.tests.filter((id) => !baselineFailed.has(id)));
             const budget = Math.max(...chosen.map((id) => durationOf.get(id) ?? 1_000), 1_000);
-            limit = Math.max(limit, (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * (group.retried ? 2 : 1));
+            limit = Math.max(limit, group.retried
+                ? (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2
+                : budget * TIMEOUT_FACTOR + FIRST_ATTEMPT_CONSTANT_MS);
             if (!job.started)
                 job.started = Date.now();
             return {
