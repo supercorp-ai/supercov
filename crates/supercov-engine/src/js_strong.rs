@@ -109,6 +109,15 @@ pub struct PlannedMutant {
     /// How many tests ran its code: what a pass by coverage alone would run
     /// it against. The candidates are those of them that infected it.
     pub covering: usize,
+    /// The statement and function points its reach is read from, for
+    /// whoever checks a plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    /// How many records of each role ran its function point.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub function_hit_by: BTreeMap<String, usize>,
 }
 
 /// The plan for a run.
@@ -199,7 +208,30 @@ fn may_reach(mutant: &CandidateMutant, seen: &Observations) -> bool {
 
 /// Whether `seen` could have infected the mutant: its verdict read from
 /// `seen` alone is `infected` or `unknown`.
-fn could_infect(mutant: &CandidateMutant, seen: &Observations) -> Option<CandidateReason> {
+fn could_infect(
+    mutant: &CandidateMutant,
+    seen: &Observations,
+    whole: &Observations,
+) -> Option<CandidateReason> {
+    // A method's body is reached when its function runs, though the
+    // statement around the function (the export of the object it is on)
+    // ran once, when the module loaded, in whichever test loaded it first.
+    // Where this test ran the function and the run ran the statement, the
+    // statement counts as run here: it only ever adds a candidate.
+    let widened;
+    let seen = match (&mutant.statement, &mutant.function) {
+        (Some(statement), Some(function))
+            if seen.hits.contains(function)
+                && !seen.hits.contains(statement)
+                && whole.hits.contains(statement) =>
+        {
+            let mut copy = seen.clone();
+            copy.hits.insert(statement.clone());
+            widened = copy;
+            &widened
+        }
+        _ => seen,
+    };
     if !may_reach(mutant, seen) {
         return None;
     }
@@ -341,7 +373,16 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 candidates: Vec::new(),
                 whole_files: Vec::new(),
                 covering: 0,
+                statement: mutant.statement.clone(),
+                function: mutant.function.clone(),
+                function_hit_by: BTreeMap::new(),
             };
+            if let Some(function) = &mutant.function {
+                for at in by_point.get(function).into_iter().flatten() {
+                    let role = role_of(&raw_results[seen[*at].record]).to_owned();
+                    *planned.function_hit_by.entry(role).or_default() += 1;
+                }
+            }
             match status {
                 Status::Equivalent => {
                     planned.decided = Some(Decided::Equivalent);
@@ -378,7 +419,11 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         let Seen { record, seen: own } = &seen[at];
                         let raw = &raw_results[*record];
                         if role_of(raw) == "test"
-                            && may_reach(mutant, own)
+                            && (may_reach(mutant, own)
+                                || mutant
+                                    .function
+                                    .as_ref()
+                                    .is_some_and(|function| own.hits.contains(function)))
                             && let Some(&test) = test_index
                                 .get(&raw.test_id.clone().unwrap_or_else(|| raw.test.clone()))
                         {
@@ -387,7 +432,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         let why = if role_of(raw) == "test" && !exact(raw) {
                             Some(CandidateReason::NotExact)
                         } else {
-                            could_infect(mutant, own)
+                            could_infect(mutant, own, &whole)
                         };
                         let Some(why) = why else { continue };
                         match role_of(raw) {
@@ -395,6 +440,18 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                 let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
                                 if let Some(&test) = test_index.get(&id) {
                                     take(test, why);
+                                }
+                                // Module-level code a test ran (a module it
+                                // loaded first): the module keeps what it
+                                // made for every later test of the file, which
+                                // runs none of that code again.
+                                if mutant.function.is_none()
+                                    && let Some(file) = &raw.test_file
+                                {
+                                    whole_files.insert(file.clone());
+                                    for &test in by_file.get(file).into_iter().flatten() {
+                                        take(test, CandidateReason::ModuleLoad);
+                                    }
                                 }
                             }
                             // A file's module setup: every test of the file.
