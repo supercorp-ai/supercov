@@ -114,31 +114,35 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     catch {
         listed = {};
     }
+    // A mutant's switch, by its id in the copy's list: the index the copy
+    // gave it, or why it has none.
+    const idOf = (file, entry) => entry.id ||
+        `${file}:${entry.start?.[0]}:${entry.start?.[1]}-${entry.end?.[0]}:${entry.end?.[1]}:${entry.mutator}:${entry.replacement}`;
+    const indexes = new Map();
+    for (const [file, entries] of Object.entries(listed)) {
+        entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
+    }
     const placed = (mutant) => {
-        const entry = listed[mutant.file]?.[mutant.index];
-        if (!entry)
-            return "the copy lists no such mutant: the source changed since the run";
-        const [, , start, end] = /:(\d+:\d+)-(\d+:\d+):/.exec(mutant.id) ?? [];
-        const same = entry.mutator === mutant.mutator &&
-            (!start || `${entry.start?.[0]}:${entry.start?.[1]}` === start.replace(/^(\d+):/, "$1:")) ;
-        if (!same)
-            return "the copy's mutant at this index is another: the source changed since the run";
-        if (entry.unplaceable)
-            return `no switch could be placed (${entry.unplaceable})`;
-        return undefined;
+        const found = indexes.get(mutant.id);
+        if (!found)
+            return { error: "the copy lists no such mutant: the source changed since the run" };
+        if (found.entry.unplaceable)
+            return { error: `no switch could be placed (${found.entry.unplaceable})` };
+        return { index: found.index };
     };
 
     // Each mutant to run: its candidates grouped by test file, the cheapest
     // file first.
     const pending = [];
-    for (const mutant of plan.mutants) {
+    for (let mutant of plan.mutants) {
         if (mutant.decided)
             continue;
-        const unplaced = placed(mutant);
-        if (unplaced) {
-            write({ id: mutant.id, status: "error", reason: unplaced, tests: 0, durationMs: 0 });
+        const switchOf = placed(mutant);
+        if (switchOf.error) {
+            write({ id: mutant.id, status: "error", reason: switchOf.error, tests: 0, durationMs: 0 });
             continue;
         }
+        mutant = { ...mutant, index: switchOf.index };
         const byFile = new Map();
         for (const candidate of mutant.candidates) {
             const test = tests[candidate.test];

@@ -457,8 +457,11 @@ function coverageSnapshotColumns() {
   const decisions = decisionSnapshot();
   const hits = [...state.hits];
   const logicals = logicalSnapshot();
+  // The comparisons go with the columns as with the objects: a snapshot
+  // without them reads as if no comparison ran.
+  const comparisons = state.comparisons.size ? { comparisons: comparisonSnapshot() } : {};
   if (log.id.length === 0)
-    return { decisions, hits, events: [], logicals };
+    return { decisions, hits, events: [], logicals, ...comparisons };
   const tables = { types: /* @__PURE__ */ new Map(), phases: /* @__PURE__ */ new Map(), environments: /* @__PURE__ */ new Map() };
   const index = (table, value) => {
     let found = table.get(value);
@@ -493,6 +496,7 @@ function coverageSnapshotColumns() {
     decisions,
     hits,
     logicals,
+    ...comparisons,
     eventColumns: {
       types: [...tables.types.keys()],
       phases: [...tables.phases.keys()],
