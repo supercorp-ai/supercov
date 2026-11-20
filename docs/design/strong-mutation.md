@@ -271,8 +271,18 @@ timers: `background`), at a server module's top level (`module-level`), or
 for a request that named no test, credited by time (`by-time`). Such a
 mutant gets no row: the engine starts the command again for it, alone, with
 `SUPERCOV_ACTIVE_MUTANT` set in every process and only its candidate tests,
-and its verdict's reason says so. The same runs the timeouts' second try and
-every verdict a canary puts in doubt.
+and its verdict's reason says so; a mutant that keeps the server from
+starting is `killed`. Work for a request that named no test while no test
+ran (a web server's readiness check) is not such work: it ran with no mutant,
+as every request runs with its own, and leaving it out keeps every handler's
+mutant from running alone. That is the one place the pass trusts that a
+request's work does not reach the tests' through shared state without a
+canary to check it.
+
+Also run alone, but switched on by their attempts only (so a server whose
+every answer the mutant breaks still starts): a timeout's second try, every
+verdict a canary puts in doubt, and every mutant whose rows did not all run
+or ended after an error outside any test (a shared server that exited).
 
 **Canaries.** Every pass puts rows with no mutant among the mutated ones (in
 the middle and at the end of the busiest files' rows). A canary is a test
