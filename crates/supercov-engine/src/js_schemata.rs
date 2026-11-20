@@ -372,8 +372,15 @@ impl<'a> Planner<'_, 'a> {
         let kind = self.stack[index];
         match kind {
             AstKind::ParenthesizedExpression(_) | AstKind::ChainExpression(_) => return None,
-            AstKind::FunctionBody(_) => {
-                return (!self.concise_body(index)).then_some(PlaceKind::FunctionBody);
+            AstKind::FunctionBody(body) => {
+                // A function declared at the top of a body is the
+                // function's; inside the switch's block it would be the
+                // block's, and clash with a `var` of its name.
+                let declares = body
+                    .statements
+                    .iter()
+                    .any(|statement| matches!(statement, Statement::FunctionDeclaration(_)));
+                return (!self.concise_body(index) && !declares).then_some(PlaceKind::FunctionBody);
             }
             AstKind::SwitchCase(case) => {
                 let lexical = case.consequent.iter().any(|statement| {
@@ -1936,6 +1943,28 @@ mod tests {
         reparses(&output, "src/d.js");
         assert!(output.code.contains("[\"f\"]"), "{}", output.code);
         assert!(!output.code.contains("[\"g\"]"), "{}", output.code);
+    }
+
+    /// A body that declares a function at its top is not wrapped: the
+    /// function would become its block's.
+    #[test]
+    fn a_body_declaring_a_function_is_not_wrapped() {
+        let output = strong(
+            "export function f() {\n  var g = 1;\n  function g() {}\n  return g + 1;\n}\n(h) = function () {};\n",
+            "src/e.js",
+        );
+        reparses(&output, "src/e.js");
+        let body = output
+            .mutants
+            .iter()
+            .find(|mutant| mutant.mutator == "BlockStatement" && mutant.original.contains("var g"))
+            .unwrap();
+        assert!(body.unplaceable.is_some(), "{body:#?}");
+        assert!(
+            output.code.contains("parenthesizedAssignmentValue"),
+            "{}",
+            output.code
+        );
     }
 
     /// Where no ancestor can be wrapped without changing the program, the

@@ -5268,6 +5268,7 @@ impl<'a> InfectionProbeTransformer<'a, '_> {
 struct AssignmentNameSafetyTransformer<'a> {
     ast: AstBuilder<'a>,
     parenthesized_assignment_value: String,
+    used: bool,
 }
 
 impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
@@ -5282,6 +5283,7 @@ impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
         {
             return;
         }
+        self.used = true;
         let right = assignment.right.take_in(self.ast.allocator);
         assignment.right = self.ast.expression_call(
             Span::default(),
@@ -5877,6 +5879,7 @@ fn instrument_candidate_with_binding(
     let mut assignment_name_safety = AssignmentNameSafetyTransformer {
         ast,
         parenthesized_assignment_value: parenthesized_assignment_value.clone(),
+        used: false,
     };
     assignment_name_safety.visit_program(&mut parsed.program);
     let point_indices = point_analysis
@@ -6473,6 +6476,7 @@ fn instrument_strong<'a>(
     let mut names = CandidateNames::within(source, &namespace);
     let record = names.allocate("__supercovStrong");
     let strong_slot = names.allocate("__supercovStrongSlot");
+    let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
@@ -6509,7 +6513,22 @@ fn instrument_strong<'a>(
         mutant.unplaceable = strong.unplaceable.map(str::to_owned);
     }
     let ast = AstBuilder::new(allocator);
+    // `(f) = function () {}` names nothing, and printing drops the
+    // parentheses: the value keeps its own name, as a measured file's does.
+    // Where a switch took the value's place, it names nothing already.
+    let mut assignment_name_safety = AssignmentNameSafetyTransformer {
+        ast,
+        parenthesized_assignment_value: parenthesized_assignment_value.clone(),
+        used: false,
+    };
+    assignment_name_safety.visit_program(program);
     let mut runtime_imports = vec![("mcdcBegin", &mcdc_begin)];
+    if assignment_name_safety.used {
+        runtime_imports.push((
+            "parenthesizedAssignmentValue",
+            &parenthesized_assignment_value,
+        ));
+    }
     if switched {
         let slot = ast.expression_call(
             Span::default(),
@@ -6574,7 +6593,7 @@ fn instrument_strong<'a>(
             probe_file_v2,
             probe_clock_v2,
             probe_hits_v2,
-            parenthesized_assignment_value: String::new(),
+            parenthesized_assignment_value,
             with_request_phase: String::new(),
             optional_select_v2: String::new(),
             select_short_v2: String::new(),
