@@ -173,6 +173,7 @@ function runtimePrelude(transformed) {
     assignV2: "function(site,current,value){return value;}",
     methodV2: "function(site,receiver){return receiver;}",
     valueV2: "function(site,value){return value;}",
+    strongSlot: "function(){return {a:-1,h:function(){}};}",
   };
   if (!importMatch) {
     const implementations = globalMatches.map(([, , imported]) => {
