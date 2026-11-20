@@ -323,6 +323,7 @@ impl<'a> Visit<'a> for Slots {
 }
 
 struct Planner<'p, 'a> {
+    source: &'p str,
     mutants: &'p [LedgerMutant],
     pending: HashMap<(u32, u32), Vec<usize>>,
     slots: Slots,
@@ -504,8 +505,16 @@ impl<'a> Planner<'_, 'a> {
                         | AssignmentOperator::LogicalNullish
                 ) && within(assignment.right.span()) =>
             {
+                // `(f) = function () {}` names nothing: a parenthesized
+                // target is not an identifier reference to the grammar.
+                let before = self
+                    .source
+                    .get(assignment.span.start as usize..assignment.left.span().start as usize)
+                    .unwrap_or_default();
                 match &assignment.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+                    AssignmentTarget::AssignmentTargetIdentifier(id) if !before.contains('(') => {
+                        Some(id.name.to_string())
+                    }
                     _ => None,
                 }
             }
@@ -659,6 +668,7 @@ impl<'a> Visit<'a> for Planner<'_, 'a> {
 
 fn plans<'a>(
     program: &oxc_ast::ast::Program<'a>,
+    source: &str,
     mutants: &[LedgerMutant],
     kept: &HashSet<(u32, u32)>,
 ) -> Vec<MutantPlan> {
@@ -672,6 +682,7 @@ fn plans<'a>(
             .push(index);
     }
     let mut planner = Planner {
+        source,
         mutants,
         pending,
         slots,
@@ -1680,7 +1691,7 @@ pub(crate) fn place<'a>(
     record: &str,
     kept: &HashSet<(u32, u32)>,
 ) -> Vec<StrongMutant> {
-    let plans = plans(program, mutants, kept);
+    let plans = plans(program, program.source_text, mutants, kept);
     let mut places = HashMap::<PlaceKey, Vec<usize>>::new();
     for (index, plan) in plans.iter().enumerate() {
         if let Ok(placement) = &plan.placement {
@@ -1912,6 +1923,19 @@ mod tests {
         let serialized = serde_json::to_value(mutant(arrow)).unwrap();
         assert_eq!(serialized["static"], true, "{serialized}");
         assert!(serialized.get("unplaceable").is_none());
+    }
+
+    /// A wrapped anonymous function keeps the name its place gives it, and
+    /// gets none where its place gives none.
+    #[test]
+    fn a_wrapped_function_is_named_only_where_its_place_names_it() {
+        let output = strong(
+            "let f, g;\nf = (x) => x + 1;\n(g) = (x) => x - 1;\n",
+            "src/d.js",
+        );
+        reparses(&output, "src/d.js");
+        assert!(output.code.contains("[\"f\"]"), "{}", output.code);
+        assert!(!output.code.contains("[\"g\"]"), "{}", output.code);
     }
 
     /// Where no ancestor can be wrapped without changing the program, the

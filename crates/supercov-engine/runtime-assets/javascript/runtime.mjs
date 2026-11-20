@@ -2669,7 +2669,7 @@ function mutantHitCount() {
   return strongState().hits;
 }
 function isMutantTimeout(error) {
-  return error instanceof MutantTimeoutError || error?.code === "SUPERCOV_MUTANT_TIMEOUT";
+  return error instanceof MutantTimeoutError || error != null && error.code === "SUPERCOV_MUTANT_TIMEOUT";
 }
 const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype;
 const probeBuiltins = {
