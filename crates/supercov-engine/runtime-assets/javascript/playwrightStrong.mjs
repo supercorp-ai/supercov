@@ -73,43 +73,35 @@ function budgetOf(durations, factor = 1) {
 }
 
 /**
- * How the measured run ran its tests side by side, from their spans: the
- * most it ran at once (the strong pass runs no more workers), and the files
- * whose tests never overlapped (a project that runs a file's tests one at a
- * time, perhaps because they share a server's state: the strong pass runs
- * that file's repetitions one at a time too).
+ * The files whose tests the measured run never ran side by side, from their
+ * spans: a project that runs a file's tests one at a time (not
+ * `fullyParallel`), perhaps because they share a server's state. The strong
+ * pass runs those files' repetitions one test at a time too; its workers
+ * are the project's own.
  */
-function measuredConcurrency(plan, tests) {
-    const spans = plan.tests.filter((test) => tests[test.id] && Array.isArray(test.span));
-    const events = spans.flatMap((test) => [[test.span[0], 1], [test.span[1], -1]]);
-    // An end before a start at the same moment: touching is not overlapping.
-    events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    let running = 0;
-    let most = 0;
-    for (const [, step] of events) {
-        running += step;
-        most = Math.max(most, running);
-    }
+function serialFilesOf(plan, tests) {
     const byFile = new Map();
-    for (const test of spans) {
+    for (const test of plan.tests) {
+        if (!tests[test.id] || !Array.isArray(test.span))
+            continue;
         const file = tests[test.id].file;
         if (!byFile.has(file))
             byFile.set(file, []);
         byFile.get(file).push(test.span);
     }
-    const serialFiles = [];
+    const serialFiles = new Set();
     for (const [file, fileSpans] of byFile) {
         fileSpans.sort((a, b) => a[0] - b[0]);
         if (fileSpans.every((span, at) => at === 0 || fileSpans[at - 1][1] <= span[0]))
-            serialFiles.push(file);
+            serialFiles.add(file);
     }
-    // Files the measured run gave no span to are not known to run in
+    // A file the measured run gave no span to is not known to run in
     // parallel: one at a time.
     for (const { file } of Object.values(tests)) {
-        if (!byFile.has(file) && !serialFiles.includes(file))
-            serialFiles.push(file);
+        if (!byFile.has(file))
+            serialFiles.add(file);
     }
-    return { workers: Math.max(1, most), serialFiles: serialFiles.sort() };
+    return [...serialFiles].sort();
 }
 
 /** A mutant's rows: one per file its tests are in, each with its tests there. */
@@ -144,7 +136,8 @@ function buildRows(pass, root) {
         if (test.runner === "playwright" && test.file)
             tests[test.id] = { file: test.file, durationMs: test.durationMs ?? null };
     });
-    const concurrency = measuredConcurrency(plan, tests);
+    // `workers` set only where the pass runs one test at a time.
+    const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests) };
     if (pass.restart) {
         const job = readJson(pass.restart);
         const files = {};
@@ -267,8 +260,8 @@ export function loadRows(pass) {
 /**
  * The generated config in strong mode: every test repeated once per row,
  * no retries (a retry would be a repetition of its own), no failure limit
- * (a killed mutant fails a test), no more workers than the measured run ran
- * tests at once, and the strong reporter alone.
+ * (a killed mutant fails a test), the project's own workers (one in a
+ * serial pass), and the strong reporter alone.
  */
 export function strongConfig(normalized, root, reporterPath) {
     const pass = strongPass();
@@ -284,14 +277,13 @@ export function strongConfig(normalized, root, reporterPath) {
     }
     const repeatEach = Math.max(1, ...Object.values(rows.files).map((fileRows) => fileRows.length));
     const strongProject = (project) => ({ ...project, repeatEach, retries: 0 });
-    const configured = typeof normalized.workers === "number" ? normalized.workers : Infinity;
     return {
         ...normalized,
         ...(Array.isArray(normalized.projects) ? { projects: normalized.projects.map(strongProject) } : {}),
         repeatEach,
         retries: 0,
         maxFailures: 0,
-        workers: Math.max(1, Math.min(configured, rows.concurrency.workers)),
+        ...(rows.concurrency.workers ? { workers: rows.concurrency.workers } : {}),
         // The strong reporter alone: `mutants test --json` owns stdout.
         reporter: [[reporterPath]],
     };
@@ -396,7 +388,7 @@ export async function strongClaim(testInfo) {
     const killed = () => row.kind === "mutant" && existsSync(`${pass.round}/killed/${key(row.id)}`);
     if (killed())
         return null;
-    const lock = rows.concurrency.workers > 1 && rows.concurrency.serialFiles.includes(test.file)
+    const lock = rows.concurrency.workers !== 1 && rows.concurrency.serialFiles.includes(test.file)
         ? await lockFile(pass, test.file)
         : undefined;
     if (killed()) {

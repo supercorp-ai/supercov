@@ -21707,9 +21707,8 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         serde_json::json!([]),
         "{context}"
     );
-    // No more workers than the measured run ran tests at once: one per
-    // file, its tests one after another.
-    assert_eq!(main["workers"], 2, "{main}\n{context}");
+    // The files the measured run ran one test at a time run so here too.
+    assert_eq!(main["serialFiles"], 2, "{main}\n{context}");
     // One server process served two workers' attempts, each with a mutant
     // of its own.
     let log = std::fs::read_to_string(&served).unwrap_or_default();
