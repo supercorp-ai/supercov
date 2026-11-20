@@ -20594,6 +20594,7 @@ fn mutants_project(label: &str) -> Project {
 }
 
 /// Each mutant's status in a `mutants --json` reply, by id.
+#[cfg(unix)]
 fn mutant_statuses(reply: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
     reply["data"]["mutants"]
         .as_array()
