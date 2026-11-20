@@ -14,6 +14,9 @@ const WHY = {
     "timeout-retry": "a test ran out of time with it switched on, and ran again alone with twice the time",
     "canary": "a canary failed in the server it shared",
     "unfinished": "not every candidate test ran in the shared pass",
+    "confirm": "a test killed it beside other mutants' attempts",
+    "stage": "its likeliest killer let it live",
+    "rest": "its first test let it live, and its other candidates ran one at a time",
 };
 // Outcomes that ended this long before a pass's first error outside any
 // test (a server that exited) are trusted; later ones may be its doing.
@@ -88,12 +91,22 @@ export default class SupercovPlaywrightStrongReporter {
     onError(error) {
         // Outside any test: a web server that exited, a global setup that
         // threw. The first one's time and words.
-        this.globalError ??= { at: Date.now(), message: String(error?.message ?? error).split("\n")[0] };
+        this.globalError ??= { at: Date.now(), message: firstWords(error?.message ?? error) };
     }
     onTestEnd(test, result) {
         if (!this.pass)
             return;
-        this.statuses.set(test.id, result.status);
+        // Why it failed, and whether only the test's time ran out: a test
+        // that timed out while an assertion or an action was failing failed
+        // on its own.
+        const errors = result.errors ?? [];
+        const timeoutOnly = errors.length > 0 && errors.every((error) => TEST_TIMEOUT.test(stripAnsi(error?.message ?? "")));
+        const reported = errors.find((error) => !TEST_TIMEOUT.test(stripAnsi(error?.message ?? ""))) ?? errors[0];
+        this.statuses.set(test.id, {
+            status: result.status,
+            timeoutOnly,
+            message: reported ? firstWords(reported.message ?? reported.value) : undefined,
+        });
         const found = this.rowOf(test);
         if (!found)
             return;
@@ -116,6 +129,7 @@ export default class SupercovPlaywrightStrongReporter {
     }
     finish() {
         const { pass, rows } = this;
+        const kind = rows.kind;
         const write = (record) => appendFileSync(pass.resultsPath, `${JSON.stringify(record)}\n`);
         for (const record of rows.immediate)
             write(record);
@@ -140,10 +154,22 @@ export default class SupercovPlaywrightStrongReporter {
                 }
             }
         }
+        // Every attempt that ran with a mutant: a kill beside another's is
+        // confirmed alone before it counts.
+        const mutated = [];
+        for (const repetition of Object.keys(this.repetitions)) {
+            const attempt = this.attempt(repetition);
+            if (attempt && attempt.mutant !== "-")
+                mutated.push({ ...attempt, repetition, endedAt: attempt.endedAt ?? Date.now() });
+        }
+        const beside = (repetition, attempt) => mutated.some((other) => other.repetition !== repetition &&
+            other.mutant !== attempt.mutant &&
+            other.startedAt < (attempt.endedAt ?? Date.now()) &&
+            attempt.startedAt < other.endedAt);
         // Each repetition's outcome.
         const outcomeOf = (original, index, mutant) => {
             const repetition = this.byOriginal.get(`${original}\0${index}`);
-            const status = repetition && this.statuses.get(repetition);
+            const ended = repetition && this.statuses.get(repetition);
             const attempt = repetition && this.attempt(repetition);
             if (!attempt) {
                 if (baselineFailed.has(original))
@@ -153,20 +179,25 @@ export default class SupercovPlaywrightStrongReporter {
             const ranAway = attempt.pageTimeout === true ||
                 (attempt.attemptId && timedOut.has(attempt.attemptId)) ||
                 (mutant && timedOutAnywhere.has(mutant));
-            const base = { startedAt: attempt.startedAt, endedAt: attempt.endedAt ?? Date.now() };
+            const base = {
+                startedAt: attempt.startedAt,
+                endedAt: attempt.endedAt ?? Date.now(),
+                message: ended?.message,
+                beside: beside(repetition, attempt),
+            };
             if (ranAway)
                 return { ...base, kind: "hit-limit" };
-            if (status === "passed")
+            if (ended?.status === "passed")
                 return { ...base, kind: "passed" };
-            if (status === "timedOut")
+            if (ended?.status === "timedOut" && ended.timeoutOnly)
                 return { ...base, kind: "timed-out" };
-            if (status === "failed" || status === "interrupted")
+            if (ended?.status === "failed" || ended?.status === "interrupted" || ended?.status === "timedOut")
                 return { ...base, kind: "failed" };
             return { kind: "unrun" };
         };
         // Each mutant's repetitions, in every file it has a row in, and the
         // canaries'.
-        const mutants = new Map();
+        const outcomes = new Map();
         const canaries = [];
         for (const fileRows of Object.values(rows.files)) {
             fileRows.forEach((row, index) => {
@@ -178,112 +209,169 @@ export default class SupercovPlaywrightStrongReporter {
                         canaries.push(outcome);
                         continue;
                     }
-                    if (!mutants.has(row.id))
-                        mutants.set(row.id, { row, tests: [], outcomes: [] });
-                    const entry = mutants.get(row.id);
-                    entry.tests.push(original);
-                    entry.outcomes.push(outcome);
+                    if (!outcomes.has(row.id))
+                        outcomes.set(row.id, []);
+                    outcomes.get(row.id).push(outcome);
                 }
             });
         }
-        const restarts = [];
-        const restart = (id, mutant, tests, reason, budgetFactor = 1) => {
+        // What runs next: one mutant alone (with the server started with
+        // it, where a server ran its code outside any request), a further
+        // pass of survivors' other candidates, and a serial pass, one test
+        // at a time, for kills to confirm, timeouts' second tries and what
+        // did not finish.
+        const alone = [];
+        const stage = [];
+        const serial = [];
+        const next = (entry, reason, tests, budgetFactor = 1, later = []) => {
             const runnable = tests.filter((test) => !baselineFailed.has(test));
-            if (!runnable.length) {
-                write({ id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
+            const rest = later.filter((test) => !baselineFailed.has(test));
+            if (!runnable.length && !rest.length) {
+                write({ id: entry.id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
                 return;
             }
-            // Only what a server ran outside any request needs the mutant on in
-            // every process from its start; the rest run alone with their
-            // attempts' own mutant, so a server whose every answer the mutant
-            // breaks still starts.
-            const everywhere = ["background", "module-level", "by-time"].includes(reason);
-            restarts.push({ id, mutant, tests: runnable, reason, budgetFactor, everywhere });
+            const job = runnable.length
+                ? { id: entry.id, mutant: entry.mutant, tests: runnable, rest, reason, budgetFactor }
+                : { id: entry.id, mutant: entry.mutant, tests: rest, rest: [], reason, budgetFactor };
+            if (EVERYWHERE.includes(reason) || reason === "canary")
+                alone.push(job);
+            else if (reason === "stage")
+                stage.push(job);
+            else
+                serial.push(job);
         };
-        // A canary that failed: every mutant that ran before it ended is run
-        // again, one mutant per server start.
-        const failedCanaries = canaries.filter((canary) => canary.kind === "failed" || canary.kind === "timed-out" || canary.kind === "hit-limit");
+        const failedCanaries = canaries.filter((canary) => ["failed", "timed-out", "hit-limit"].includes(canary.kind));
         const doubtUntil = failedCanaries.length
             ? Math.max(...failedCanaries.map((canary) => canary.endedAt))
             : -Infinity;
         // After an error outside any test (the shared server exited), what
-        // ended later may be its doing: such a mutant runs again alone.
+        // ended later may be its doing.
         const trustedUntil = this.globalError ? this.globalError.at - ERROR_MARGIN_MS : Infinity;
-        let perRequest = 0;
-        for (const [id, { row, tests, outcomes }] of mutants) {
-            const ran = outcomes.filter((outcome) => outcome.startedAt !== undefined);
-            if (!rows.job && ran.some((outcome) => outcome.startedAt <= doubtUntil)) {
-                restart(id, row.mutant, tests, "canary");
+        let decided = 0;
+        let confirming = 0;
+        for (const [id, entry] of Object.entries(rows.entries)) {
+            const own = outcomes.get(id) ?? [];
+            const ran = own.filter((outcome) => outcome.startedAt !== undefined);
+            const all = [...entry.tests, ...(entry.rest ?? [])];
+            if (kind === "main" && ran.some((outcome) => outcome.startedAt <= doubtUntil)) {
+                next(entry, "canary", all);
                 continue;
             }
-            if (!rows.job) {
-                const trusted = outcomes.filter((outcome) => outcome.startedAt === undefined || outcome.endedAt < trustedUntil);
-                const killedBefore = trusted.some((outcome) => outcome.kind === "failed" || outcome.kind === "hit-limit");
-                if (!killedBefore && outcomes.some((outcome) => outcome.kind === "unrun" || (outcome.endedAt !== undefined && outcome.endedAt >= trustedUntil))) {
-                    restart(id, row.mutant, tests, "unfinished");
-                    continue;
-                }
-            }
-            perRequest += 1;
-            const verdict = this.verdict(id, row, outcomes, tests, restart);
+            const verdict = this.verdict(entry, own, all, trustedUntil, next);
+            if (verdict === "confirm")
+                confirming += 1;
+            if (!verdict || verdict === "confirm")
+                continue;
+            decided += 1;
             const durationMs = ran.length
                 ? Math.max(...ran.map((outcome) => outcome.endedAt)) - Math.min(...ran.map((outcome) => outcome.startedAt))
                 : 0;
-            if (verdict)
-                write({ id, ...verdict, tests: ran.length, durationMs });
+            write({ id, ...verdict, tests: ran.length, durationMs });
         }
         for (const job of rows.restarts)
-            restart(job.id, job.mutant, job.tests, job.reason);
-        for (const job of restarts)
-            write({ restart: job });
+            next(job, job.reason, job.tests);
+        // A serial pass that decided nothing would only ask for its
+        // unfinished mutants again.
+        if (kind === "serial" && !decided) {
+            for (const job of serial.filter((job) => job.reason === "unfinished"))
+                write({ id: job.id, status: "error", reason: "its tests did not finish, run one at a time", tests: 0, durationMs: 0 });
+            serial.splice(0, serial.length, ...serial.filter((job) => job.reason !== "unfinished"));
+        }
+        for (const job of alone)
+            write({ restart: { kind: "alone", everywhere: EVERYWHERE.includes(job.reason), reason: job.reason, mutants: [job], otherRunners: rows.otherRunners } });
+        if (stage.length)
+            write({ restart: { kind: "stage", reason: "stage", mutants: stage, otherRunners: rows.otherRunners } });
+        if (serial.length)
+            write({ restart: { kind: "serial", reason: [...new Set(serial.map((job) => job.reason))].join(", "), mutants: serial, otherRunners: rows.otherRunners } });
         write({
             summary: true,
             runner: "playwright",
             pass: pass.name,
+            kind,
+            ...(rows.concurrency.workers ? { workers: rows.concurrency.workers } : {}),
+            serialFiles: rows.concurrency.serialFiles.length,
             ...(this.globalError ? { error: this.globalError.message } : {}),
             durationMs: Date.now() - this.started,
-            mutants: perRequest,
-            restarts: restarts.length,
+            decided,
+            confirming,
+            next: { alone: alone.length, stage: stage.length, serial: serial.length },
             canaries: {
                 ran: canaries.filter((canary) => canary.startedAt !== undefined).length,
                 failed: failedCanaries.map((canary) => canary.test),
             },
         });
     }
-    /** A mutant's verdict from its repetitions, or `undefined` once it is sent to run again alone. */
-    verdict(id, row, outcomes, tests, restart) {
+    /**
+     * A mutant's verdict from its repetitions in this pass; `undefined` when
+     * it was sent on to another pass, `"confirm"` when a kill beside other
+     * mutants' attempts is to be confirmed one test at a time.
+     */
+    verdict(entry, outcomes, all, trustedUntil, next) {
         const { rows } = this;
-        const job = rows.job;
-        const alone = job
-            ? `; ran alone${job.everywhere ? ", with the server started with it switched on" : ""}: ${WHY[job.reason] ?? job.reason}`
-            : "";
-        const killer = outcomes.find((outcome) => outcome.kind === "failed");
+        const kind = rows.kind;
+        const shared = kind === "main" || kind === "stage";
+        const reason = entry.reason ?? (kind === "main" ? undefined : rows.job?.reason);
+        const after = kind === "alone"
+            ? `; ran alone${EVERYWHERE.includes(reason) ? ", with the server started with it switched on" : ""}: ${WHY[reason] ?? reason}`
+            : kind === "serial"
+                ? `; ran one test at a time: ${WHY[reason] ?? reason}`
+                : "";
+        const trusted = (outcome) => !shared || (!outcome.beside && outcome.endedAt < trustedUntil);
+        const failed = outcomes.filter((outcome) => outcome.kind === "failed");
+        const killer = failed.find(trusted);
         if (killer)
-            return { status: "killed", killedBy: killer.test, ...(alone ? { reason: alone.slice(2) } : {}) };
+            return { status: "killed", killedBy: killer.test, reason: `${killer.message ?? "the test failed"}${after}` };
         const ranAway = outcomes.find((outcome) => outcome.kind === "hit-limit");
         if (ranAway)
-            return { status: "timeout", killedBy: ranAway.test, reason: `evaluated past its hit limit${alone}` };
+            return { status: "timeout", killedBy: ranAway.test, reason: `evaluated past its hit limit${after}` };
+        if (failed.length) {
+            // Its killing test ran beside other mutants' attempts (or after
+            // the shared server failed): that test first, alone, then the rest.
+            const first = failed[0].test;
+            next(entry, failed.some((outcome) => outcome.beside) ? "confirm" : "unfinished", [first], 1, all.filter((test) => test !== first));
+            return "confirm";
+        }
         const slow = outcomes.find((outcome) => outcome.kind === "timed-out");
         if (slow) {
-            if (!job) {
-                restart(id, row.mutant, tests, "timeout-retry", 2);
+            if (shared) {
+                next(entry, "timeout-retry", all, 2);
                 return undefined;
             }
-            return { status: "timeout", killedBy: slow.test, reason: `ran out of time${alone}` };
+            return { status: "timeout", killedBy: slow.test, reason: `ran out of time${after}` };
         }
-        // Run alone, and the command failed outside any test (the server
-        // it started with the mutant exited): the mutant broke the app.
-        if (job && this.globalError && !outcomes.every((outcome) => outcome.kind === "passed"))
-            return { status: "killed", reason: `the command failed with it switched on (${this.globalError.message})${alone}` };
-        const unrun = outcomes.filter((outcome) => outcome.kind === "unrun");
-        if (unrun.length)
-            return { status: "error", reason: `${unrun.length} of its candidate test(s) did not run${alone}` };
-        if (outcomes.every((outcome) => outcome.kind === "baseline-failed"))
+        const unrun = outcomes.filter((outcome) => outcome.kind === "unrun" || (shared && outcome.endedAt !== undefined && outcome.endedAt >= trustedUntil));
+        if (unrun.length) {
+            // Alone, the command failed outside any test: the mutant broke the
+            // app (a server that would not start with it).
+            if (kind === "alone" && this.globalError)
+                return { status: "killed", reason: `the command failed with it switched on (${this.globalError.message})${after}` };
+            next(entry, "unfinished", all);
+            return undefined;
+        }
+        if (outcomes.length && outcomes.every((outcome) => outcome.kind === "baseline-failed"))
             return { status: "error", reason: "its candidate tests fail without any mutant" };
-        const others = rows.otherRunners[id];
+        // Its likeliest killer let it live: its other candidates next, side
+        // by side after the main pass, one at a time after a serial one.
+        if (entry.rest?.length && kind !== "stage") {
+            next(entry, kind === "main" ? "stage" : "rest", entry.rest);
+            return undefined;
+        }
+        const others = rows.otherRunners[entry.id];
         if (others)
             return { status: "error", reason: `no Playwright test killed it, and its other candidates ran under ${others.join(", ")}, which this pass does not run` };
-        return { status: "survived", ...(alone ? { reason: alone.slice(2) } : {}) };
+        return { status: "survived", ...(after ? { reason: after.slice(2) } : {}) };
     }
 }
 
+const TEST_TIMEOUT = /Test timeout of \d+ms exceeded/;
+const EVERYWHERE = ["background", "module-level", "by-time"];
+
+function stripAnsi(text) {
+    return String(text).replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+/** An error's message, on one line, short enough to keep. */
+function firstWords(message) {
+    const text = stripAnsi(message ?? "").replace(/\s+/g, " ").trim();
+    return text.length > 300 ? `${text.slice(0, 299)}…` : text;
+}

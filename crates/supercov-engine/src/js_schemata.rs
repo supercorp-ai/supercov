@@ -73,6 +73,43 @@ pub(crate) const NO_PLACEABLE_ANCESTOR: &str = "no-placeable-ancestor";
 pub(crate) const FUNCTION_SOURCE: &str = "function-source";
 pub(crate) const WITH_STATEMENT: &str = "with-statement";
 pub(crate) const NODE_NOT_FOUND: &str = "node-not-found";
+pub(crate) const NEXT_SEGMENT_CONFIG: &str = "next-segment-config";
+
+/// The exports Next.js reads from a route's source without running it (its
+/// route segment config, and a middleware's or a Pages API route's
+/// `config`): a switch there is code where Next.js wants a literal, and the
+/// build refuses it ("needs to be a static string"). StrykerJS has no
+/// ignorer for them; the strong pass leaves their values as written and
+/// reports their mutants unplaceable.
+const NEXT_SEGMENT_EXPORTS: &[&str] = &[
+    "dynamic",
+    "dynamicParams",
+    "revalidate",
+    "fetchCache",
+    "runtime",
+    "preferredRegion",
+    "maxDuration",
+    "experimental_ppr",
+];
+
+/// The static exports Next.js reads from `file`: the segment config in
+/// any file (a route's, or one a route re-exports from), and `config`
+/// where Next.js reads it, in middleware or a proxy and under `pages/`.
+fn next_static_exports(file: &str) -> Vec<&'static str> {
+    let mut names = NEXT_SEGMENT_EXPORTS.to_vec();
+    let stem = file
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('.').next())
+        .unwrap_or("");
+    if matches!(stem, "middleware" | "proxy")
+        || file.starts_with("pages/")
+        || file.contains("/pages/")
+    {
+        names.push("config");
+    }
+    names
+}
 
 /// What strong mode says of one listed mutant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +366,8 @@ struct Planner<'p, 'a> {
     slots: Slots,
     /// Functions the instrumenter keeps as written, by span.
     kept: &'p HashSet<(u32, u32)>,
+    /// Exported names whose values Next.js reads without running them.
+    static_exports: &'p [&'static str],
     stack: Vec<AstKind<'a>>,
     plans: Vec<Option<MutantPlan>>,
 }
@@ -595,7 +634,36 @@ impl<'a> Planner<'_, 'a> {
         })
     }
 
+    /// Whether the node at `index` is in the value of an exported `const`
+    /// Next.js reads without running it, outside any function.
+    fn in_static_export(&self, index: usize) -> bool {
+        (0..index).any(|at| {
+            let AstKind::VariableDeclarator(declarator) = self.stack[at] else {
+                return false;
+            };
+            let named = declarator
+                .id
+                .get_binding_identifier()
+                .is_some_and(|id| self.static_exports.contains(&id.name.as_str()));
+            named
+                && at >= 2
+                && matches!(self.stack[at - 2], AstKind::ExportNamedDeclaration(_))
+                && !self.stack[at + 1..index].iter().any(|inner| {
+                    matches!(
+                        inner,
+                        AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+                    )
+                })
+        })
+    }
+
     fn plan(&self, index: usize) -> MutantPlan {
+        if self.in_static_export(index) {
+            return MutantPlan {
+                placement: Err(NEXT_SEGMENT_CONFIG),
+                is_static: !self.in_function(index),
+            };
+        }
         let kept = self.stack[..index]
             .iter()
             .find_map(|ancestor| match ancestor {
@@ -676,9 +744,11 @@ impl<'a> Visit<'a> for Planner<'_, 'a> {
 fn plans<'a>(
     program: &oxc_ast::ast::Program<'a>,
     source: &str,
+    file: &str,
     mutants: &[LedgerMutant],
     kept: &HashSet<(u32, u32)>,
 ) -> Vec<MutantPlan> {
+    let static_exports = next_static_exports(file);
     let mut slots = Slots::default();
     slots.visit_program(program);
     let mut pending = HashMap::<(u32, u32), Vec<usize>>::new();
@@ -694,6 +764,7 @@ fn plans<'a>(
         pending,
         slots,
         kept,
+        static_exports: &static_exports,
         stack: Vec::new(),
         plans: vec![None; mutants.len()],
     };
@@ -1694,11 +1765,12 @@ impl<'a> VisitMut<'a> for Switches<'_, 'a> {
 pub(crate) fn place<'a>(
     allocator: &'a Allocator,
     program: &mut oxc_ast::ast::Program<'a>,
+    file: &str,
     mutants: &[LedgerMutant],
     record: &str,
     kept: &HashSet<(u32, u32)>,
 ) -> Vec<StrongMutant> {
-    let plans = plans(program, program.source_text, mutants, kept);
+    let plans = plans(program, program.source_text, file, mutants, kept);
     let mut places = HashMap::<PlaceKey, Vec<usize>>::new();
     for (index, plan) in plans.iter().enumerate() {
         if let Ok(placement) = &plan.placement {
@@ -1996,6 +2068,56 @@ mod tests {
             "{}",
             output.code
         );
+    }
+
+    /// Next.js reads a route's segment config, and a middleware's `config`,
+    /// without running them: their values stay literals, and their mutants
+    /// are listed as unplaceable. A function's body there is code Next.js
+    /// runs, and keeps its switches.
+    #[test]
+    fn next_static_exports_keep_their_values() {
+        let reason = |output: &CandidateOutput, original: &str| {
+            output
+                .mutants
+                .iter()
+                .find(|mutant| mutant.original == original)
+                .unwrap_or_else(|| panic!("{original}: {:#?}", output.mutants))
+                .unplaceable
+                .clone()
+        };
+        let page = strong(
+            "export const dynamic = \"force-dynamic\";\nexport const revalidate = 60 > 1 ? 60 : 0;\nexport const config = { matcher: [\"/a\"] };\nexport const generateStaticParams = () => [\"x\"];\nconst runtime = \"edge\";\n",
+            "app/page.ts",
+        );
+        reparses(&page, "app/page.ts");
+        assert!(
+            page.code
+                .contains("export const dynamic = \"force-dynamic\""),
+            "{}",
+            page.code
+        );
+        assert_eq!(
+            reason(&page, "\"force-dynamic\"").as_deref(),
+            Some(NEXT_SEGMENT_CONFIG)
+        );
+        assert_eq!(
+            reason(&page, "60 > 1").as_deref(),
+            Some(NEXT_SEGMENT_CONFIG)
+        );
+        // `config` is read only from middleware, a proxy and `pages/`.
+        assert_eq!(reason(&page, "[\"/a\"]"), None);
+        assert_eq!(reason(&page, "[\"x\"]"), None);
+        // Not exported: the module's own.
+        assert_eq!(reason(&page, "\"edge\""), None);
+        let proxy = strong(
+            "export const config = { matcher: [\"/a\"] };\n",
+            "src/proxy.ts",
+        );
+        assert_eq!(
+            reason(&proxy, "[\"/a\"]").as_deref(),
+            Some(NEXT_SEGMENT_CONFIG)
+        );
+        assert!(proxy.code.contains("matcher: [\"/a\"]"), "{}", proxy.code);
     }
 
     /// Strong mode instruments in place of the probes, and only when asked.
