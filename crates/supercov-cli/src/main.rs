@@ -2319,7 +2319,7 @@ fn format_run_timings(
 
 /// What the caller asked for beyond the command itself.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct RunOptions {
+struct RunOptions {
     /// Credit every test with what it reached, at whatever the language's
     /// frontend has to do differently to manage it.
     ///
@@ -2371,7 +2371,7 @@ fn could_not_measure(error: &str) -> ExitCode {
     }
 }
 
-pub(crate) fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
+fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let command_started = Instant::now();
     let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
     if command.is_empty() {

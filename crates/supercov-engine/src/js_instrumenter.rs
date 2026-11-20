@@ -13679,6 +13679,8 @@ export function shapes(n: number): unknown {
     /// ahead of a function declared and called there, recursion included.
     #[test]
     fn probe_helpers_are_bound_before_any_top_level_code() {
+        // The probes are placed in a run that lists its mutants.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let source = concat!(
             "function count(n) { return n > 0 ? 1 + count(n - 1) : 0; }\n",
             "const depth = count(3);\n",
@@ -15274,6 +15276,8 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn probes_map_to_nothing_and_the_statements_around_them_to_their_own_starts() {
+        // The probes are placed in a run that lists its mutants.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let source = "function f(list) {\n  let total = 0;\n  for (const item of list) {\n    if (item > 1) total += item;\n    else if (item === 0) continue;\n    else total -= 1;\n  }\n  return total;\n}\nconst twice = (value) => value * 2;\n";
         let output = instrument_candidate(source, "app/f.js").unwrap();
         let lines = first_mappings(&output);
@@ -15611,6 +15615,8 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn relational_comparisons_record_their_operands_relation() {
+        // The probes are placed in a run that lists its mutants.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let source = "export function f(a: number, b: number, d: Date) {\n  const late = a <= b;\n  if (a > 0 && b >= a) return late;\n  return d < new Date();\n}\n";
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/compare.ts").unwrap();
@@ -15736,6 +15742,8 @@ export function shapes(n: number): unknown {
     /// an optional chain on a name is probed behind the chain's test.
     #[test]
     fn method_probes_reach_returns_and_optional_chains() {
+        // The probes are placed in a run that lists its mutants.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let source = concat!(
             "export function f(parts: string[], re: RegExp, state: { list: { ok: boolean }[] } | null, sites?: string[]) {\n",
             "  const a = state?.list.some((s) => s.ok);\n",
@@ -15784,6 +15792,8 @@ export function shapes(n: number): unknown {
 
     #[test]
     fn infection_probes_wrap_strykers_sites() {
+        // The probes are placed in a run that lists its mutants.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         let source = concat!(
             "export function f(a: number, b: number, xs: { id?: string; ok: boolean }[], s: string) {\n",
             "  let total = a * 1000 + b;\n",

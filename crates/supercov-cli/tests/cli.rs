@@ -20633,7 +20633,9 @@ fn mutants_on_a_change_are_those_on_its_lines() {
     project.commit("tax");
     let head = project.git(&["rev-parse", "HEAD"]).trim().to_owned();
     let merge_base = project.git(&["rev-parse", "base"]).trim().to_owned();
-    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
 
     let reply = project
         .supercov(&[
@@ -20780,7 +20782,9 @@ fn mutants_on_a_change_are_those_on_its_lines() {
 fn mutants_say_how_far_the_tests_got_toward_killing_each() {
     let project = mutants_project("mutants");
     // Listed by default.
-    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     contains_all(
         &summary,
@@ -21239,7 +21243,9 @@ fn mutants_under_node_test_are_decided_from_the_values_its_records_carry() {
     );
     project.git(&["init", "-q"]);
     project.commit("mutants");
-    project.supercov(&["--", "node", "--test"]).succeeds();
+    project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
     let reply = project
         .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
         .json();
@@ -21370,7 +21376,9 @@ fn a_copied_source_that_cannot_be_pruned_stays_in_the_copy() {
 #[test]
 fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it() {
     let project = mutants_project("strong-plan");
-    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
     let reply = project
         .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
         .json();
@@ -22106,6 +22114,78 @@ fn a_mutant_whose_endless_loop_is_caught_by_the_code_is_a_timeout() {
         })
         .unwrap_or_else(|| panic!("{listed}"));
     assert_eq!(endless["strong"]["status"], "timeout", "{endless}");
+}
+
+/// `supercov mutants` with no run measures one first and tests its mutants;
+/// a plain run before it lists none and says nothing of mutants; after a
+/// source changes, it measures again rather than read a run of other code.
+#[cfg(unix)]
+#[test]
+fn supercov_mutants_measures_when_it_must_and_plain_runs_know_no_mutants() {
+    let project = vitest_mutants_project("supercov-mutants-command");
+    project.write(
+        "src/double.js",
+        "export function double(n) {\n  return n * 2;\n}\n",
+    );
+    project.write(
+        "test/double.test.js",
+        "import { expect, it } from \"vitest\";\nimport { double } from \"../src/double.js\";\nit(\"doubles\", () => expect(double(3)).toBe(6));\n",
+    );
+    project.commit("double");
+    // No run yet: it measures first, with the command given.
+    let first = project.supercov(&["mutants", "--json", "--", "npx", "vitest", "run"]);
+    assert!(
+        first.stderr().contains("measuring first (no run yet)"),
+        "{}",
+        first.stderr()
+    );
+    let reply = first.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(
+        reply["summary"]["killed"].as_u64().unwrap_or(0) > 0,
+        "{reply}"
+    );
+    // A plain run lists no mutants and its summary says nothing of them.
+    let plain = project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    assert!(!plain.contains("Mutants "), "{plain}");
+    // The run is current: read as it is, nothing measured again.
+    let again = project.supercov(&["mutants", "--json"]);
+    assert!(
+        !again.stderr().contains("measuring first"),
+        "{}",
+        again.stderr()
+    );
+    assert!(again.json()["summary"]["killed"].as_u64().unwrap_or(0) > 0);
+    // A changed source is measured again, with the latest run's command.
+    project.write(
+        "src/double.js",
+        "export function double(n) {\n  return n + n;\n}\n",
+    );
+    let changed = project.supercov(&["mutants", "--json"]);
+    assert!(
+        changed
+            .stderr()
+            .contains("measuring first (the checkout changed since the latest run)"),
+        "{}",
+        changed.stderr()
+    );
+    let reply = changed.json();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/double.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    assert!(
+        mutants.iter().any(|mutant| mutant["original"] == "n + n"),
+        "{reply} {listed}"
+    );
 }
 
 /// A test file that fakes the clock and leaves it faked: the look for work

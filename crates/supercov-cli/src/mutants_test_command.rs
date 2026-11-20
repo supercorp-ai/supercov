@@ -194,8 +194,20 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
             },
             command.join(" ")
         );
+        // Measured as `supercov -- <command>` would be, its report on the
+        // standard error: the standard output is this command's answer.
         // Failing tests still leave a run; their tests kill nothing.
-        let _ = crate::public_coverage_run(command, crate::RunOptions::default());
+        let measured = std::env::current_exe().and_then(|program| {
+            std::process::Command::new(program)
+                .arg("--")
+                .args(&command)
+                .stdout(std::io::stderr())
+                .status()
+        });
+        if let Err(error) = measured {
+            eprintln!("[supercov] could not measure: {error}");
+            return ExitCode::from(2);
+        }
     }
     let mut forwarded = vec!["latest".to_owned(), "mutants".to_owned(), "test".to_owned()];
     forwarded.extend(args);
