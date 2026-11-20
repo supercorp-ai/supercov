@@ -51,10 +51,12 @@ try {
     ].join("\n"),
   );
 
+  // Measured with the mutants' probes, so the report has their verdicts.
   execFileSync(binary, ["--", "node", "--test"], {
     cwd: project,
     encoding: "utf8",
     stdio: "pipe",
+    env: { ...process.env, SUPERCOV_MUTANTS: "1" },
   });
   execFileSync(
     binary,

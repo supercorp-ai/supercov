@@ -53,7 +53,7 @@ try {
     mkdirSync(dirname(resolve(root, file)), { recursive: true });
     writeFileSync(resolve(root, file), text);
   }
-  const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_SOURCE_ROOTS: 'src' });
+  const measured = run(binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_SOURCE_ROOTS: 'src', SUPERCOV_MUTANTS: '1' });
   assert.equal(measured.status, 0, `${measured.stdout}${measured.stderr}`);
   const runId = JSON.parse(run(binary, ['runs', '--json']).stdout).data.runs[0].id;
   const paid = run(binary, ['runs', runId, 'test', 'a checkout is paid when the webhook arrives']);
