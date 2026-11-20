@@ -21602,8 +21602,13 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     project.git(&["init", "-q"]);
     project.commit("strong playwright");
     let roots = [("SUPERCOV_SOURCE_ROOTS", "server,public")];
+    // Measured with the mutants' probes: their values decide some mutants
+    // without running them.
     project
-        .supercov_with(&["--", "npx", "playwright", "test"], &roots)
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
         .succeeds();
     let _ = std::fs::remove_file(&served);
     let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
