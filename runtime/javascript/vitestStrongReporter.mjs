@@ -437,6 +437,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             const kill = (evidence, verdict) => {
                 if (certain(group, chosen, evidence))
                     finish(job, verdict);
+                else if (evidence.test && !group.whole) {
+                    // Tests after the failing one cannot change it: the
+                    // confirmation runs what ran up to it, which many
+                    // mutants' copies share.
+                    const ran = outcome.tests.map((test) => test.test);
+                    confirm(job, group, ran.slice(0, ran.indexOf(evidence.test) + 1), evidence, verdict);
+                }
                 else
                     confirm(job, group, chosen, evidence, verdict);
             };
