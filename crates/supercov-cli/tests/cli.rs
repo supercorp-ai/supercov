@@ -21454,15 +21454,15 @@ fn vitest_mutants_project(label: &str) -> Project {
 fn mutants_test_kills_and_keeps_what_the_vitest_tests_can_and_cannot_tell() {
     let project = vitest_mutants_project("strong-vitest");
     project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
-    let reply = project
-        .supercov(&["runs", "latest", "mutants", "test", "--json"])
-        .json();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
     let summary = &reply["summary"];
-    assert_eq!(summary["mutants"], 15, "{reply}");
-    assert_eq!(summary["error"], 0, "{reply}");
     let listed = project
         .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
         .json();
+    assert_eq!(summary["mutants"], 15, "{reply}");
+    assert_eq!(summary["error"], 0, "{reply}\n{said}\n{listed}");
     let strong = |id: &str| {
         listed["data"]["mutants"]
             .as_array()
