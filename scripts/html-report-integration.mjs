@@ -338,7 +338,7 @@ try {
       "",
     ].join("\n"),
   );
-  execFileSync(binary, ["--", "node", "--test"], { cwd: project, encoding: "utf8", stdio: "pipe" });
+  execFileSync(binary, ["--", "node", "--test"], { cwd: project, encoding: "utf8", stdio: "pipe", env: { ...process.env, SUPERCOV_MUTANTS: "1" } });
   execFileSync(
     binary,
     ["report", "--runs", "2", "--no-open", "--output", "report-two.html"],
