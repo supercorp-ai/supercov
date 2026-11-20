@@ -26,6 +26,9 @@ function toRelative(root, file) {
 }
 
 function isolated(vitest) {
+    // Warm workers (below) reset each copy's modules themselves.
+    if (vitest.__supercovWarm)
+        return true;
     for (const project of vitest.projects ?? [vitest.getCoreWorkspaceProject?.()]) {
         const config = project?.config;
         if (!config)
@@ -56,12 +59,35 @@ function setTestTimeout(vitest, ms) {
         vitest.config.testTimeout = ms;
 }
 
+// SUPERCOV_STRONG_WARM=1: copies run in worker processes Vitest keeps
+// between test files (the pool's own `isolate: false`), and each copy's setup
+// file resets the modules Vitest evaluated before its test file loads, as an
+// isolated worker would start: a copy no longer pays for a new process and
+// for the packages Node already loaded. Only the forks and threads pools keep
+// workers this way.
+function warmUp(vitest) {
+    if (process.env["SUPERCOV_STRONG_WARM"] !== "1" || !process.env["SUPERCOV_STRONG_PLAN"])
+        return;
+    const configs = [vitest.config, ...(vitest.projects ?? []).map((project) => project.config)].filter(Boolean);
+    const poolOf = (config) => config.pool ?? "forks";
+    if (!configs.every((config) => ["forks", "threads"].includes(poolOf(config)) && !config.browser?.enabled))
+        return;
+    for (const config of configs) {
+        const pool = poolOf(config);
+        config.poolOptions ??= {};
+        config.poolOptions[pool] = { ...config.poolOptions[pool], isolate: false };
+        config.isolate = false;
+    }
+    vitest.__supercovWarm = true;
+}
+
 export default class SupercovStrongReporter {
     constructor(configureProjects) {
         this.configureProjects = configureProjects;
     }
     onInit(vitest) {
         this.configureProjects?.(vitest.projects);
+        warmUp(vitest);
         const planPath = process.env["SUPERCOV_STRONG_PLAN"];
         const resultsPath = process.env["SUPERCOV_STRONG_RESULTS"];
         if (!planPath || !resultsPath)
@@ -174,7 +200,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             writeFileSync(`${directory}/${key}/${index}.json`, JSON.stringify(assignment.claim));
             placedAt.push(`${directory}/${key}/${index}.out`);
         }
-        provide(vitest, { root, round: directory });
+        provide(vitest, { root, round: directory, warm: Boolean(vitest.__supercovWarm) });
         setTestTimeout(vitest, Math.ceil(timeoutMs));
         // A round whose workers do not end (a fork that will not
         // terminate) must not hold the pass: past its deadline, what it
@@ -308,7 +334,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // SUPERCOV_STRONG_ROUND sets how many a round holds, as a multiple of
     // the workers (default 2: larger rounds load the machine, and timing-
     // sensitive tests slow down with it).
-    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || 2);
+    // Warm workers are recycled when a round ends: a larger round keeps
+    // them longer.
+    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || (vitest.__supercovWarm ? 6 : 2));
     const perFile = oneAtATime ? 1 : workers * Math.min(roundFactor, 4);
     const perRound = oneAtATime ? 1 : workers * roundFactor;
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));

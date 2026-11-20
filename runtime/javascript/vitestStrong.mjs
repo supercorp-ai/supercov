@@ -13,7 +13,7 @@
 // skipped: the mutant is killed.
 import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { afterAll, afterEach, beforeEach, inject } from "vitest";
+import { afterAll, afterEach, beforeEach, inject, vi } from "vitest";
 import * as localRuntime from "./runtime.mjs";
 
 const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? localRuntime;
@@ -56,12 +56,32 @@ function claim() {
     return undefined;
 }
 
+// A copy in a warm worker (SUPERCOV_STRONG_WARM) starts as an isolated one
+// would: the modules an earlier copy evaluated, and the mocks it registered,
+// are evaluated afresh. Packages Node itself loaded stay loaded.
+function resetWarmWorker() {
+    let provided;
+    try {
+        provided = inject("supercovStrong");
+    }
+    catch {
+        return;
+    }
+    if (!provided?.warm)
+        return;
+    globalThis.__vitest_mocker__?.reset?.();
+    vi.resetModules();
+}
+resetWarmWorker();
+
 const assignment = claim();
 const chosen = new Set(assignment?.tests ?? []);
 let killed = false;
 // Set once the active mutant was evaluated past the hit limit.
 let limitReached = false;
 let limitReported = false;
+// The clock as it was when this file loaded: a test file may fake Date.
+const realNow = Date.now.bind(Date);
 const report = (record) => {
     if (assignment)
         appendFileSync(assignment.out, `${JSON.stringify(record)}\n`);
@@ -81,7 +101,7 @@ function outsideTests(error) {
 if (assignment) {
     process.on("uncaughtException", outsideTests);
     process.on("unhandledRejection", outsideTests);
-    report({ claimed: true, at: Date.now() });
+    report({ claimed: true, at: realNow() });
     if (assignment.mutant) {
         runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
         runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
@@ -165,7 +185,10 @@ afterAll(async () => {
                 message: `the mutant was evaluated ${evaluations} times in ${LEFT_RUNNING_WINDOW_MS} ms after the tests ended`,
             });
     }
-    report({ done: true, at: Date.now() });
+    report({ done: true, at: realNow() });
+    // A warm worker runs further copies: this one's handlers end with it.
+    process.off("uncaughtException", outsideTests);
+    process.off("unhandledRejection", outsideTests);
     if (assignment.mutant)
         runtime.clearActiveMutant();
 });
