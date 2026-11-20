@@ -359,6 +359,15 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             tests.len() - 1
         });
         runnable[index] &= passed(raw);
+        // An attempt has two records under Playwright, the reporter's (its
+        // status, no span) and the fixture's (its evidence, its span), in
+        // either order: the span is the first attempt's, whichever record
+        // carries it.
+        if let Some(span) = raw.span
+            && tests[index].span.is_none_or(|seen| span[0] < seen[0])
+        {
+            tests[index].span = Some(span);
+        }
         // A runner that says no duration (Playwright) gives the attempt's
         // first and last moment.
         let measured = raw.duration_ms.or_else(|| {
