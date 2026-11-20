@@ -59,6 +59,9 @@ function claim() {
 const assignment = claim();
 const chosen = new Set(assignment?.tests ?? []);
 let killed = false;
+// Set once the active mutant was evaluated past the hit limit.
+let limitReached = false;
+let limitReported = false;
 const report = (record) => {
     if (assignment)
         appendFileSync(assignment.out, `${JSON.stringify(record)}\n`);
@@ -82,6 +85,14 @@ if (assignment) {
     if (assignment.mutant) {
         runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
         runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
+        // Code under test may catch the hit limit's error and carry on (a
+        // stream that turns an error into a frame): the limit having been
+        // reached is the mutant's timeout all the same.
+        const strong = globalThis[Symbol.for("supercov.strongMutation")];
+        if (strong)
+            strong.onTimeout = () => {
+                limitReached = true;
+            };
     }
 }
 
@@ -106,27 +117,44 @@ afterEach((context) => {
     // already recorded is what failed it.
     const errors = result?.errors ?? [];
     const failed = result?.state === "fail" || errors.length > 0;
-    const timeout = errors.some((error) => runtime.isMutantTimeout?.(error) ||
+    const limitNow = limitReached && !limitReported;
+    if (limitNow)
+        limitReported = true;
+    const timeout = limitNow || errors.some((error) => runtime.isMutantTimeout?.(error) ||
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`) ||
         /Test timed out in \d+ms/.test(`${error?.message}`));
-    report({ test: `vitest:${context.task.id}`, failed, timeout });
-    if (failed && assignment.mutant)
+    report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout });
+    if ((failed || limitNow) && assignment.mutant)
         killed = true;
 });
 
 // Work a mutant left going after the tests (a loop that never ends between
 // awaits, timers that re-arm) keeps evaluating the mutant: Vitest would have
 // to stop the worker by force, and a run waiting on it never ends. A short
-// look after the tests tells that from code that runs now and then.
+// look after the tests tells that from code that runs now and then. Most
+// copies leave nothing evaluating the mutant: a brief probe that sees no
+// evaluation ends the look there, so only a copy whose mutant is still
+// being evaluated waits the whole window.
+const LEFT_RUNNING_PROBE_MS = 25;
 const LEFT_RUNNING_WINDOW_MS = 300;
 const LEFT_RUNNING_EVALUATIONS = 100;
+// Timers as they were when this file loaded: a test file that fakes the
+// clock (vi.useFakeTimers) and leaves it faked must not hold the look up.
+const realSetTimeout = globalThis.setTimeout;
+const pause = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
 afterAll(async () => {
     if (!assignment)
         return;
     if (assignment.mutant && runtime.mutantHitCount) {
         const before = runtime.mutantHitCount();
-        await new Promise((resolve) => setTimeout(resolve, LEFT_RUNNING_WINDOW_MS));
+        await pause(LEFT_RUNNING_PROBE_MS);
+        if (runtime.mutantHitCount() > before)
+            await pause(LEFT_RUNNING_WINDOW_MS - LEFT_RUNNING_PROBE_MS);
         const evaluations = runtime.mutantHitCount() - before;
+        if (limitReached && !limitReported) {
+            limitReported = true;
+            report({ outside: true, timeout: true, message: "the mutant was evaluated past the hit limit outside any test" });
+        }
         if (evaluations > LEFT_RUNNING_EVALUATIONS)
             report({
                 outside: true,

@@ -21985,3 +21985,89 @@ fn a_mutant_whose_work_keeps_rearming_after_the_tests_is_a_timeout() {
         "{endless}"
     );
 }
+
+/// Code under test that catches every error (a stream turning a failure into
+/// a frame) also catches the hit limit's: the loop the mutant made endless
+/// ends, the test passes, and the mutant is a timeout all the same.
+#[cfg(unix)]
+#[test]
+fn a_mutant_whose_endless_loop_is_caught_by_the_code_is_a_timeout() {
+    let project = vitest_mutants_project("strong-swallowed-limit");
+    project.write(
+        "src/drain.js",
+        "export async function drain(source) {\n  const out = [];\n  try {\n    for (;;) {\n      const r = await source.next();\n      if (r.done) break;\n      out.push(r.value);\n    }\n  } catch {\n    return out;\n  }\n  return out;\n}\n",
+    );
+    project.write(
+        "test/drain.test.js",
+        "import { expect, it } from \"vitest\";\nimport { drain } from \"../src/drain.js\";\nasync function* two() {\n  yield 1;\n  yield 2;\n}\nit(\"drains\", async () => {\n  const out = await drain(two());\n  expect(out).toContain(2);\n});\n",
+    );
+    project.commit("drain");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/drain.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let endless = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/drain.js:6:") && id.ends_with(":ConditionalExpression:false")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(endless["strong"]["status"], "timeout", "{endless}");
+}
+
+/// A test file that fakes the clock and leaves it faked: the look for work
+/// left running after the tests waits on the real clock, so the file still
+/// finishes and a mutant its test cannot tell apart survives.
+#[cfg(unix)]
+#[test]
+fn a_test_file_that_leaves_the_clock_faked_still_finishes_under_a_mutant() {
+    let project = vitest_mutants_project("strong-faked-clock-left");
+    project.write(
+        "src/double.js",
+        "export function double(n) {\n  return n * 2;\n}\n",
+    );
+    project.write(
+        "test/double.test.js",
+        "import { expect, it, vi } from \"vitest\";\nimport { double } from \"../src/double.js\";\nit(\"doubles zero\", () => {\n  vi.useFakeTimers();\n  expect(double(0)).toBe(0);\n});\n",
+    );
+    project.commit("double");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/double.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let division = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/double.js:2:") && id.contains(":ArithmeticOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(division["strong"]["status"], "survived", "{division}");
+}
