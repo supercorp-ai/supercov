@@ -283,10 +283,15 @@ a browser. That is the price of rows; the server is not restarted.
 groups, which Playwright runs side by side where the project ran the file's
 tests one after another. A suite whose tests share a server's state (a
 harness's fault rules for one server slot, rewritten by each test) then
-fails for reasons no mutant made. So a file whose tests the measured run
-never ran at once (by their spans) runs one test at a time here too: each
-attempt holds the file's lock from its start to its end, across workers.
-The workers are the project's own.
+fails for reasons no mutant made. So a file runs one test at a time here
+when its tests are known not to run at once: two or more of them ran in the
+measured run and their spans never overlapped, or, where the spans tell
+nothing (one test, none spanned), the project does not run files
+`fullyParallel`. Each such attempt holds the file's lock from its start to
+its end, across workers. A file whose tests overlapped runs side by side.
+(Each Playwright attempt has two records, the reporter's, with its status,
+and the fixture's, with its span; the plan takes the span from whichever
+carries it.) The workers are the project's own.
 
 **Kills are confirmed.** A test that fails beside another mutant's attempt
 (their times overlap) may have failed for the other's doing. Such a kill is
@@ -306,8 +311,12 @@ candidates, side by side; a kill stops a mutant at its first test.
 
 **Time.** A mutant's test gets `1.5 × its measured duration + 5 s` (the
 duration from the attempt's span), plus the project's `expect` timeout
-(default 5 s) and `actionTimeout`: an assertion that fails waits out its
-own timeout first, and the budget must not cut it short. A test that fails
+(default 5 s) and `actionTimeout`, and never less than the test's own
+timeout (the project's, default 30 s, with `test.slow()` and
+`describe.configure`): an assertion that fails waits out its own timeout
+first (a spec's `{ timeout: 15_000 }`), Playwright ends the test at its own
+timeout anyway, and the budget must not cut either short. A mutant that
+makes a test hang costs up to the test's timeout. A test that fails
 on an assertion or an action, even as its time runs out, is a kill; one
 that only ran out of time is run again in a serial pass with twice the
 budget before it counts as `timeout`.
