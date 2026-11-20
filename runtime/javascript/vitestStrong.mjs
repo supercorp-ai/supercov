@@ -81,7 +81,7 @@ function outsideTests(error) {
 if (assignment) {
     process.on("uncaughtException", outsideTests);
     process.on("unhandledRejection", outsideTests);
-    report({ claimed: true });
+    report({ claimed: true, at: Date.now() });
     if (assignment.mutant) {
         runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
         runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
@@ -123,7 +123,7 @@ afterEach((context) => {
     const timeout = limitNow || errors.some((error) => runtime.isMutantTimeout?.(error) ||
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`) ||
         /Test timed out in \d+ms/.test(`${error?.message}`));
-    report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout });
+    report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout, ms: result?.duration });
     if ((failed || limitNow) && assignment.mutant)
         killed = true;
 });
@@ -165,7 +165,7 @@ afterAll(async () => {
                 message: `the mutant was evaluated ${evaluations} times in ${LEFT_RUNNING_WINDOW_MS} ms after the tests ended`,
             });
     }
-    report({ done: true });
+    report({ done: true, at: Date.now() });
     if (assignment.mutant)
         runtime.clearActiveMutant();
 });

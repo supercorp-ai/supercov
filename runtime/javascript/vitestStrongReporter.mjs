@@ -159,6 +159,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     rmSync(roundsDirectory, { recursive: true, force: true });
     let roundNumber = 0;
     let stalled = false;
+    // Where the pass's time goes: each round's wall time against what its
+    // copies spent loading (round start to claim), in tests, and after them.
+    const profile = { rounds: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, loadMs: 0, testMs: 0, copyMs: 0, tailMs: 0, testsRun: 0 };
     async function runRound(assignments, timeoutMs) {
         const directory = `${roundsDirectory}/${roundNumber++}`;
         const counts = new Map();
@@ -180,6 +183,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const deadline = new Promise((resolve) => {
             timer = setTimeout(() => resolve("deadline"), timeoutMs * 2 + 30_000);
         });
+        const roundStarted = Date.now();
         const ran = runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false);
         const finished = await Promise.race([ran.then((result) => ({ result })), deadline]);
         clearTimeout(timer);
@@ -187,6 +191,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             stalled = true;
         else
             last = finished.result;
+        const roundEnded = Date.now();
+        profile.rounds += 1;
+        profile.wallMs += roundEnded - roundStarted;
+        let lastDone = roundStarted;
         // The outcome of each claim, whichever copy took it.
         return placedAt.map((out) => {
             const outcome = { claimed: false, done: false, tests: [], outside: [] };
@@ -196,15 +204,38 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 if (!line.trim())
                     continue;
                 const record = JSON.parse(line);
-                if (record.claimed)
+                if (record.claimed) {
                     outcome.claimed = true;
-                else if (record.done)
+                    outcome.claimedAt = record.at;
+                }
+                else if (record.done) {
                     outcome.done = true;
+                    outcome.doneAt = record.at;
+                }
                 else if (record.test)
                     outcome.tests.push(record);
                 else if (record.outside)
                     outcome.outside.push(record);
             }
+            return outcome;
+        }).map((outcome, at) => {
+            if (outcome.claimedAt) {
+                profile.copies += 1;
+                if (assignments[at].claim.mutant)
+                    profile.mutantCopies += 1;
+                profile.loadMs += outcome.claimedAt - roundStarted;
+                profile.testsRun += outcome.tests.length;
+                for (const test of outcome.tests)
+                    profile.testMs += test.ms ?? 0;
+                if (outcome.doneAt) {
+                    profile.copyMs += outcome.doneAt - outcome.claimedAt;
+                    lastDone = Math.max(lastDone, outcome.doneAt);
+                }
+            }
+            return outcome;
+        }).map((outcome, at, all) => {
+            if (at === all.length - 1)
+                profile.tailMs += roundEnded - lastDone;
             return outcome;
         });
     }
@@ -402,6 +433,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             limit = Math.max(limit, budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS);
             assignments.push({ file: check.file, claim: check.claim });
         }
+        profile.checkCopies += checks.length;
         const outcomes = assignments.length ? await runRound(assignments, limit) : [];
         checks.forEach(({ check }, at) => {
             const outcome = outcomes[round.length + at];
@@ -498,7 +530,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
         rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, perRound, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
         // left run in the next pass `mutants test` starts.
