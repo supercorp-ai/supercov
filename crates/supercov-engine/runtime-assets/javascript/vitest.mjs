@@ -11,6 +11,9 @@ const activeScopes = new Map();
 // When each test began, for the time it took: the strong pass orders a
 // mutant's tests by it and sets their time limits from it.
 const startedAt = new Map();
+// The clock as it is now: a test that fakes timers fakes `performance.now`
+// too, and a duration read from it can come out negative.
+const realNow = performance.now.bind(performance);
 const runtimeGlobal = globalThis;
 const runtime = runtimeGlobal.__SUPERCOV_DIRECT_RUNTIME__ ?? {
     activateCoverageScope: localActivateCoverageScope,
@@ -95,7 +98,7 @@ beforeEach((context) => {
         attemptId: `${testKey}-${retry}`,
     };
     activeScopes.set(task.id, scope);
-    startedAt.set(task.id, performance.now());
+    startedAt.set(task.id, realNow());
     runtime.activateCoverageScope(scope);
     runtime.resetCoverage(testId);
 });
@@ -116,7 +119,7 @@ afterEach((context) => {
         title: task.name,
         retry,
         status: attemptStatus(task.result?.state),
-        ...(began === undefined ? {} : { durationMs: Math.round(performance.now() - began) }),
+        ...(began === undefined ? {} : { durationMs: Math.max(0, Math.round(realNow() - began)) }),
         provenance: inferTestProvenance({
             runner: "vitest",
             file: testFile,

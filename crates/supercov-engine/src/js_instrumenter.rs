@@ -2777,8 +2777,11 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
                 Expression::StaticMemberExpression(m) if m.optional)
                 || matches!(&call.callee, Expression::ComputedMemberExpression(m) if m.optional);
             // Never manufacture a passed occurrence when a call can
-            // short-circuit before invoking a matcher.
-            if optional {
+            // short-circuit before invoking a matcher. An inline snapshot
+            // matcher finds where to write its snapshot from its caller's
+            // place, and two in one file called from the runtime's would be
+            // one place: Vitest refuses them, so they stay as written.
+            if optional || operation.ends_with("InlineSnapshot") {
                 walk::walk_call_expression(self, call);
                 return;
             }

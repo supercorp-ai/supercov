@@ -21500,3 +21500,23 @@ fn mutants_test_kills_and_keeps_what_the_vitest_tests_can_and_cannot_tell() {
     assert_eq!(again["summary"]["ran"], 0, "{again}");
     assert_eq!(again["summary"]["killed"], 8, "{again}");
 }
+
+/// Two inline snapshots in one file, and a test that fakes the clock: the
+/// measured run passes as the suite does alone (the snapshots keep their own
+/// places; a duration is read from the real clock), and the strong pass runs.
+#[cfg(unix)]
+#[test]
+fn inline_snapshots_and_faked_clocks_measure_and_mutate_as_the_suite_runs() {
+    let project = vitest_mutants_project("strong-inline-snapshots");
+    project.write(
+        "test/snapshots.test.js",
+        "import { expect, it, vi } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"snapshots shipping\", () => {\n  expect(shipping(80)).toMatchInlineSnapshot(`0`);\n  expect(shipping(10)).toMatchInlineSnapshot(`5`);\n});\nit(\"labels under a faked clock\", () => {\n  vi.useFakeTimers();\n  vi.setSystemTime(0);\n  expect(label(\" b \")).toMatchInlineSnapshot(`\"B\"`);\n  vi.useRealTimers();\n});\n",
+    );
+    project.commit("snapshots");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["summary"]["killed"].as_u64().unwrap() >= 8, "{reply}");
+}

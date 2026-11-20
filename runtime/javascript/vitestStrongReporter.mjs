@@ -80,7 +80,9 @@ export default class SupercovStrongReporter {
 
 async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const root = vitest.config.root;
-    const specOf = new Map(specs.map((spec) => [toRelative(root, spec.moduleId), spec]));
+    // Vitest 2 and later pass specifications; Vitest 1, [project, file].
+    const fileOf = (spec) => spec.moduleId ?? (Array.isArray(spec) ? spec[1] : spec);
+    const specOf = new Map(specs.map((spec) => [toRelative(root, fileOf(spec)), spec]));
     const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
     const tests = plan.tests;
     const started = Date.now();
