@@ -3722,13 +3722,7 @@ pub fn archive_request(
 /// `None` for the mutants when the run listed none.
 pub(crate) fn archive_tests_and_mutants(
     request: &ArchiveReportRequest,
-) -> Result<
-    (
-        Vec<RawTestResult>,
-        Option<crate::js_mutant_links::MutantsFile>,
-    ),
-    ReportError,
-> {
+) -> Result<ArchiveTestsAndMutants, ReportError> {
     let (_, normalized, _, _, _, listed) = archive_request_from(request, None, true, |visit| {
         crate::evidence_archive::read_archive_each(
             Path::new(&request.archive_path),
@@ -3736,7 +3730,35 @@ pub(crate) fn archive_tests_and_mutants(
             visit,
         )
     })?;
-    Ok((normalized.raw_results, listed))
+    // Each measured file's point ids: what its sources must give again for
+    // mutants listed from them to be the run's.
+    let mut points = BTreeMap::<String, BTreeSet<String>>::new();
+    for point in &normalized.manifest.points {
+        points
+            .entry(point.file.clone())
+            .or_default()
+            .insert(point.id.clone());
+    }
+    Ok((normalized.raw_results, listed, points))
+}
+
+/// A run's tests, its mutants where it listed them, and each measured file's
+/// point ids.
+pub(crate) type ArchiveTestsAndMutants = (
+    Vec<RawTestResult>,
+    Option<crate::js_mutant_links::MutantsFile>,
+    BTreeMap<String, BTreeSet<String>>,
+);
+
+/// The file beside a run's evidence archive that holds the mutants
+/// `supercov mutants` listed from its sources, when the run itself listed
+/// none.
+pub const LISTED_MUTANTS_FILE: &str = "mutants-listed.json";
+
+/// The mutants listed beside the archive at `archive_path`, if any.
+fn listed_beside(archive_path: impl AsRef<Path>) -> Option<crate::js_mutant_links::MutantsFile> {
+    let bytes = std::fs::read(archive_path.as_ref().with_file_name(LISTED_MUTANTS_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// A run's evidence, still in memory as the archive is written from it, as
@@ -4051,12 +4073,20 @@ fn archive_request_from<D>(
                 .any(|raw| raw.provenance.runner == declared.runner)
         });
     }
-    // Each mutant's verdict, from the tests the view keeps.
+    // Each mutant's verdict, from the tests the view keeps. A run measured
+    // without its mutants has them listed beside its archive once
+    // `supercov mutants` asked for them.
     let listed = entries
         .iter()
         .find(|entry| entry.path == "mutants.json")
         .map(parse_entry::<crate::js_mutant_links::MutantsFile>)
         .transpose()?;
+    let listed = match listed {
+        Some(listed) if listed.mutant_set.is_some() => Some(listed),
+        archived => listed_beside(&request.archive_path)
+            .filter(|beside| beside.mutant_set.is_some())
+            .or(archived),
+    };
     let kept = if keep_listed { listed.clone() } else { None };
     let mutation = crate::js_weak_mutation::results(&raw_results, listed);
     let normalized = CoverageReportRequest {

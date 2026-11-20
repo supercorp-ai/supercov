@@ -863,6 +863,20 @@ fn identity_with(
     (evidence_sha256, evidence_bytes): ([u8; 32], u64),
     analysis: [u8; 32],
 ) -> QueryIndexIdentity {
+    // Mutants listed beside the archive after the run (`supercov mutants`)
+    // are part of what the index is built from.
+    let listed = run
+        .evidence_path
+        .with_file_name(crate::coverage_report::LISTED_MUTANTS_FILE);
+    let analysis = match file_sha256(&listed) {
+        Ok((listed, _)) => {
+            let mut hasher = Sha256::new();
+            hasher.update(analysis);
+            hasher.update(listed);
+            hasher.finalize().into()
+        }
+        Err(_) => analysis,
+    };
     QueryIndexIdentity {
         evidence_sha256,
         evidence_bytes,

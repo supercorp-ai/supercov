@@ -128,6 +128,80 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+pub(crate) const MUTANTS_HELP: &str = "\
+Usage: supercov mutants [options] [-- <test command>]
+
+Mutation-tests the project: lists the mutants of every JavaScript and
+TypeScript source the tests ran, runs each against only the tests that run
+its code, and saves the verdicts (killed, survived, timeout) into the run.
+It reads the latest run, and measures one first, with the latest run's test
+command or the one after --, when there is none or the checkout changed
+since. A plain run (supercov -- <tests>) does nothing for mutants and costs
+nothing more for them.
+
+Options are those of `supercov runs <run-id> mutants test`; the ones asked
+most:
+  --diff <base>     only the mutants on lines the change since <base> touched
+  --file <path>     only this source file's mutants (repeatable)
+  --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
+                    no-coverage or error
+  --plan            print what would run, and run nothing
+  --json            the answer as JSON
+";
+
+/// `supercov mutants [options] [-- <command>]`: the latest run's mutants
+/// tested, measured first where there is no run of this checkout.
+pub fn mutants_command(args: Vec<String>) -> ExitCode {
+    if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        print!("{MUTANTS_HELP}");
+        return ExitCode::SUCCESS;
+    }
+    let given = args
+        .iter()
+        .position(|a| a == "--")
+        .map(|at| args[at + 1..].to_vec())
+        .filter(|command| !command.is_empty());
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let latest = discover_runs(&root)
+        .ok()
+        .and_then(|inventory| select_run(&inventory, Some("latest")).ok().cloned());
+    let current = latest
+        .as_ref()
+        .filter(|run| !crate::checkout_comparison(&root, run).stale);
+    if current.is_none() {
+        let Some(command) = given
+            .clone()
+            .or_else(|| latest.as_ref().map(|run| run.metadata.command.clone()))
+            .filter(|command| !command.is_empty())
+        else {
+            eprintln!(
+                "[supercov] No run to read mutants from: give the test command, supercov mutants -- <test command>"
+            );
+            return ExitCode::from(2);
+        };
+        eprintln!(
+            "[supercov] measuring first ({}): {}",
+            if latest.is_some() {
+                "the checkout changed since the latest run"
+            } else {
+                "no run yet"
+            },
+            command.join(" ")
+        );
+        // Failing tests still leave a run; their tests kill nothing.
+        let _ = crate::public_coverage_run(command, crate::RunOptions::default());
+    }
+    let mut forwarded = vec!["latest".to_owned(), "mutants".to_owned(), "test".to_owned()];
+    forwarded.extend(args);
+    command(&forwarded)
+}
+
 /// `args` is `[<run-id>, "mutants", "test", ...]`.
 pub fn command(args: &[String]) -> ExitCode {
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
@@ -149,7 +223,7 @@ pub fn command(args: &[String]) -> ExitCode {
         let root = std::env::current_dir().map_err(|e| e.to_string())?;
         let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
-        let mut plan = run_plan(run)?;
+        let mut plan = run_plan(&root, run)?;
         narrow(&mut plan, &root, run, &options)?;
         let saved = read_saved(run);
         let asked = plan
@@ -205,22 +279,30 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 
-fn run_plan(run: &StoredRun) -> Result<StrongPlan, String> {
-    plan_for_archive(&ArchiveReportRequest {
-        archive_path: run.evidence_path.clone(),
-        run_id: run.id.clone(),
-        generated_at: run.metadata.started_at.clone(),
-        integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
-        test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
-        test_filter: None,
-    })
-    .map_err(|error| format!("{error:?}"))?
-    .ok_or_else(|| {
-        format!(
-            "run {} listed no mutants: measure it again without SUPERCOV_MUTANTS=0",
-            run.id
-        )
-    })
+fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
+    let planned = plan_for_archive(
+        &ArchiveReportRequest {
+            archive_path: run.evidence_path.clone(),
+            run_id: run.id.clone(),
+            generated_at: run.metadata.started_at.clone(),
+            integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
+            test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
+            test_filter: None,
+        },
+        root,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    if !planned.changed.is_empty() {
+        eprintln!(
+            "[supercov] {} file(s) changed since run {}; their mutants are left out until it is measured again: {}",
+            planned.changed.len(),
+            run.id,
+            planned.changed.join(", ")
+        );
+    }
+    planned
+        .plan
+        .ok_or_else(|| format!("run {} measured no JavaScript or TypeScript source", run.id))
 }
 
 /// Keeps the mutants `--file` and `--diff` ask about.

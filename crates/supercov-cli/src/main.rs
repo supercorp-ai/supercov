@@ -92,6 +92,10 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
+Test the tests with mutants (JavaScript and TypeScript):
+  supercov mutants                     which mutants the tests kill, run by run
+  supercov mutants --diff main         only the mutants on changed lines
+
 Check what the tests assert:
   supercov runs latest assertions         how much executed code the tests assert
   supercov runs latest assertions assess  work it out with Jev (TYPESAFE_API_KEY)
@@ -338,6 +342,7 @@ fn main() -> ExitCode {
                 Some("report") => html_report::report_command(asked),
                 Some("merge") => merge_command(asked),
                 Some("import") => import_command(asked),
+                Some("mutants") => mutants_test_command::mutants_command(asked),
                 Some(other) => {
                     eprintln!(
                         "[supercov] No help for {other}: it is no command. Try supercov help."
@@ -355,6 +360,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--") => public_coverage_run(arguments.collect(), RunOptions::default()),
+        Some("mutants") => mutants_test_command::mutants_command(arguments.collect()),
         // The one thing worth asking for before the command: credit every test
         // with what it reached, wherever that can only be had by running the
         // suite differently. Written once here rather than as a flag per
@@ -2313,7 +2319,7 @@ fn format_run_timings(
 
 /// What the caller asked for beyond the command itself.
 #[derive(Debug, Clone, Copy, Default)]
-struct RunOptions {
+pub(crate) struct RunOptions {
     /// Credit every test with what it reached, at whatever the language's
     /// frontend has to do differently to manage it.
     ///
@@ -2365,7 +2371,7 @@ fn could_not_measure(error: &str) -> ExitCode {
     }
 }
 
-fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
+pub(crate) fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let command_started = Instant::now();
     let command_ms = || command_started.elapsed().as_secs_f64() * 1000.0;
     if command.is_empty() {
@@ -3242,6 +3248,28 @@ fn execute_coverage_query(
         request.mutants.diff = Some(diff);
     }
     if request.command == "mutants" {
+        // A plain run lists its mutants the first time they are asked for.
+        let changed = supercov_engine::js_strong::list_run_mutants(
+            &supercov_engine::coverage_report::ArchiveReportRequest {
+                archive_path: run.evidence_path.clone(),
+                run_id: run.id.clone(),
+                generated_at: run.metadata.started_at.clone(),
+                integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
+                test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
+                    run.metadata.test_exit_code,
+                ),
+                test_filter: None,
+            },
+            root,
+        )
+        .unwrap_or_default();
+        if !changed.is_empty() {
+            warnings.push(format!(
+                "[supercov] {} file(s) changed since run {}: their mutants are not listed until it is measured again",
+                changed.len(),
+                run.id
+            ));
+        }
         let saved = mutants_test_command::read_saved(run);
         if !saved.is_empty() {
             request.mutants.strong = Some(

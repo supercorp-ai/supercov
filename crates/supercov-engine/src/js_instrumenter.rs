@@ -4056,19 +4056,36 @@ fn strong_files() -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
     .clone()
 }
 
-/// Whether instrumentation places the probes and enumerates StrykerJS's
-/// mutants, each linked to its evidence: unless `SUPERCOV_MUTANTS=0`. Each
-/// probe's helper is imported only by a file with a site of its kind, so a
-/// file without one is instrumented byte for byte as with them off. Strong
-/// mode lists the mutants whatever `SUPERCOV_MUTANTS` says.
+thread_local! {
+    /// Set while `list_mutants` instruments a file only to list its
+    /// mutants: they are listed and linked, and no probe is placed, so the
+    /// links name only the evidence a plain run records.
+    static LISTING_MUTANTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f`, with this thread's instrumentation listing mutants and placing no
+/// probe.
+pub(crate) fn listing_mutants<T>(f: impl FnOnce() -> T) -> T {
+    LISTING_MUTANTS.with(|listing| listing.set(true));
+    let result = f();
+    LISTING_MUTANTS.with(|listing| listing.set(false));
+    result
+}
+
+/// Whether instrumentation lists the file's StrykerJS mutants, each linked
+/// to its evidence. A plain coverage run does not: it measures coverage
+/// only, as fast as without mutants. `supercov mutants` lists them from the
+/// sources when it is asked (`listing_mutants`), a strong pass always does,
+/// and `SUPERCOV_MUTANTS=1` makes a run list them with their probes, which
+/// record the values the weak verdicts read.
 pub(crate) fn mutants_enabled() -> bool {
     #[cfg(test)]
     if let Some(on) = MUTANTS_FOR_TEST.with(std::cell::Cell::get) {
         return on;
     }
-    strong_enabled()
-        || std::env::var("SUPERCOV_MUTANTS")
-            .map_or(true, |value| !matches!(value.trim(), "0" | "false"))
+    LISTING_MUTANTS.with(std::cell::Cell::get)
+        || strong_enabled()
+        || std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
 }
 
 /// Strong mode set by the engine for this process: 0 when unset (the
@@ -4113,7 +4130,7 @@ fn probes_enabled() -> bool {
     if !PROBES_FOR_TEST.with(std::cell::Cell::get) {
         return false;
     }
-    mutants_enabled()
+    !LISTING_MUTANTS.with(std::cell::Cell::get) && mutants_enabled()
 }
 
 /// The equality comparisons (`===`, `!==`, `==`, `!=`) whose value can be

@@ -155,11 +155,89 @@ pub struct StrongPlan {
     pub mutants: Vec<PlannedMutant>,
 }
 
-/// The plan for a stored run's archive; `None` when the run listed no
-/// mutants.
-pub fn plan_for_archive(request: &ArchiveReportRequest) -> Result<Option<StrongPlan>, ReportError> {
-    let (raw_results, listed) = crate::coverage_report::archive_tests_and_mutants(request)?;
-    Ok(listed.and_then(|listed| plan(&raw_results, listed)))
+/// A stored run's plan, and the files whose mutants could not be listed.
+pub struct ArchivePlan {
+    /// `None` when the run has no mutants and none could be listed.
+    pub plan: Option<StrongPlan>,
+    /// Files changed since the run: their mutants are left out until the
+    /// run is measured again.
+    pub changed: Vec<String>,
+}
+
+/// The plan for a stored run's archive. A run measured without its mutants
+/// (a plain coverage run) has them listed from the sources under `root`, as
+/// they were measured, and kept beside the archive for every later query.
+pub fn plan_for_archive(
+    request: &ArchiveReportRequest,
+    root: &std::path::Path,
+) -> Result<ArchivePlan, ReportError> {
+    let (raw_results, listed, points) = crate::coverage_report::archive_tests_and_mutants(request)?;
+    let (listed, changed) = listed_or_list(request, root, listed, &points)?;
+    Ok(ArchivePlan {
+        plan: listed.and_then(|listed| plan(&raw_results, listed)),
+        changed,
+    })
+}
+
+/// Lists a run's mutants from its sources under `root`, unless the run or
+/// an earlier ask listed them: what a query about its mutants does first.
+/// The files changed since the run, whose mutants could not be listed.
+pub fn list_run_mutants(
+    request: &ArchiveReportRequest,
+    root: &std::path::Path,
+) -> Result<Vec<String>, ReportError> {
+    if beside(request).exists() {
+        return Ok(Vec::new());
+    }
+    let (_, listed, points) = crate::coverage_report::archive_tests_and_mutants(request)?;
+    Ok(listed_or_list(request, root, listed, &points)?.1)
+}
+
+fn beside(request: &ArchiveReportRequest) -> std::path::PathBuf {
+    request
+        .archive_path
+        .with_file_name(crate::coverage_report::LISTED_MUTANTS_FILE)
+}
+
+/// The run's own mutants where it listed them, else those listed from its
+/// sources, written beside its archive. Either way a file is left there, so
+/// a later query knows without reading the archive that nothing is left to
+/// list: an empty list where the run had its own.
+fn listed_or_list(
+    request: &ArchiveReportRequest,
+    root: &std::path::Path,
+    listed: Option<crate::js_mutant_links::MutantsFile>,
+    points: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> Result<(Option<crate::js_mutant_links::MutantsFile>, Vec<String>), ReportError> {
+    let path = beside(request);
+    let (kept, written, changed) = match listed {
+        Some(own) if own.mutant_set.is_some() => {
+            let none = crate::js_mutant_links::MutantsFile {
+                schema_version: own.schema_version,
+                mutant_set: None,
+                files: std::collections::BTreeMap::new(),
+                tests_without_values: Vec::new(),
+            };
+            (Some(own), none, Vec::new())
+        }
+        _ if points.is_empty() => return Ok((None, Vec::new())),
+        _ => {
+            let fresh = crate::js_mutant_links::list_mutants(root, points);
+            (Some(fresh.mutants.clone()), fresh.mutants, fresh.changed)
+        }
+    };
+    if !path.exists() {
+        // Written whole, then renamed into place: a query reading it
+        // meanwhile finds no file or the whole one.
+        let partial = path.with_extension("json.partial");
+        std::fs::write(
+            &partial,
+            serde_json::to_vec(&written).expect("plain data serializes"),
+        )
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(|error| ReportError::InvalidArchive(format!("{}: {error}", path.display())))?;
+    }
+    Ok((kept, changed))
 }
 
 /// A record's role: one a test's, a module setup's, or the run's

@@ -70,6 +70,80 @@ struct StoredMutants {
     tests_without_values: Vec<String>,
 }
 
+/// A run's mutants listed from its sources after the run, as
+/// `supercov mutants` asks for them: each file the run measured is
+/// instrumented again, with its mutants listed and linked and no probe
+/// placed, and its code thrown away. A file whose points are not the ones
+/// the run recorded changed since the run: it is left out, and named in
+/// `changed`.
+pub(crate) struct ListedMutants {
+    pub(crate) mutants: MutantsFile,
+    pub(crate) changed: Vec<String>,
+}
+
+/// The mutants of the files in `recorded` (each file's point ids, as the
+/// run's manifest has them), read from under `root`.
+pub(crate) fn list_mutants(
+    root: &std::path::Path,
+    recorded: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> ListedMutants {
+    // The run's other languages' files have no JavaScript mutants.
+    let files = recorded
+        .keys()
+        .filter(|file| {
+            std::path::Path::new(file.as_str())
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension,
+                        "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx"
+                    )
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let listed = crate::threads::parallel_map(&files, |file| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        let elide = crate::typescript_imports::elides_type_imports(root, file);
+        let output = crate::js_instrumenter::listing_mutants(|| {
+            crate::js_instrumenter::instrument_with_import_policy(
+                &source,
+                file,
+                "capability.mjs",
+                elide,
+            )
+        })
+        .ok()?;
+        let points = output
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        (Some(&points) == recorded.get(file)).then_some(output.mutants)
+    });
+    let mut mutants = BTreeMap::new();
+    let mut changed = Vec::new();
+    for (file, listed) in files.into_iter().zip(listed) {
+        match listed {
+            Some(list) if list.is_empty() => {}
+            Some(list) => {
+                mutants.insert(file, list);
+            }
+            None => changed.push(file),
+        }
+    }
+    ListedMutants {
+        mutants: MutantsFile {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: Some(crate::js_mutants::MUTANT_SET.to_owned()),
+            files: mutants,
+            tests_without_values: Vec::new(),
+        },
+        changed,
+    }
+}
+
 /// The id a mutant of `file` has from its span, mutator and descriptor.
 fn mutant_id(file: &str, mutant: &CandidateMutant) -> String {
     format!(
