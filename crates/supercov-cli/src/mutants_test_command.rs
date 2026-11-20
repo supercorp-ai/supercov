@@ -492,6 +492,30 @@ fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> 
     (total > 0).then(|| detected as f64 / total as f64)
 }
 
+/// How many passes `mutants test` makes at most: a pass that stopped early
+/// leaves the rest to the next while each gets further.
+const PASSES: usize = 6;
+
+/// Writes the verdicts into the run.
+fn save(
+    run: &StoredRun,
+    mutant_set: &str,
+    saved: &std::collections::BTreeMap<String, Verdict>,
+) -> Result<(), String> {
+    let document = json!({
+        "schemaVersion": 1,
+        "run": run.id,
+        "mutantSet": mutant_set,
+        "mutants": saved,
+    });
+    let path = results_path(run);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Runs the plan's mutants and saves every verdict into the run.
 fn execute(
     root: &Path,
@@ -527,20 +551,6 @@ fn execute(
     // canaries, and how many mutants ran alone.
     let mut passes = Vec::new();
     if to_run > 0 {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let work = root
-            .join(".supercov/strong")
-            .join(format!("{}-{nonce}", run.id));
-        std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-        let plan_path = work.join("plan.json");
-        let results = work.join("results.jsonl");
-        std::fs::write(
-            &plan_path,
-            serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("{}: {e}", plan_path.display()))?;
         let command = options
             .command
             .clone()
@@ -548,42 +558,82 @@ fn execute(
         if command.is_empty() {
             return Err("the run recorded no command: give one after --".into());
         }
-        let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
-            root: root.to_owned(),
-            command,
-            run_id: Some(format!("strong-{nonce}")),
-            started_at: None,
-            watchdog_program: std::env::current_exe()
-                .ok()
-                .and_then(|path| std::fs::canonicalize(path).ok()),
-            strong: Some(supercov_engine::javascript_run::StrongRun {
-                plan: plan_path,
-                results: results.clone(),
-            }),
-        };
-        let mut diagnostics = std::io::stderr();
-        let exit =
-            supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
-                .map_err(|error| error.to_string())?;
-        command_exit = Some(exit);
-        let text = std::fs::read_to_string(&results).unwrap_or_default();
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if record["summary"] == true {
-                passes.push(record);
-                continue;
+        let mut remaining = plan
+            .mutants
+            .iter()
+            .filter(|m| m.decided.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        // A pass that stops before its end (a test worker that never ended
+        // past a round's deadline) leaves its verdicts; the next pass runs
+        // what has none, while each pass gets further.
+        let mut exit = 0;
+        for _ in 0..PASSES {
+            if remaining.is_empty() {
+                break;
             }
-            let Some(id) = record["id"].as_str() else {
-                continue;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let work = root
+                .join(".supercov/strong")
+                .join(format!("{}-{nonce}", run.id));
+            std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+            let plan_path = work.join("plan.json");
+            let results = work.join("results.jsonl");
+            let pass_plan = StrongPlan {
+                mutant_set: plan.mutant_set.clone(),
+                tests: plan.tests.clone(),
+                mutants: remaining.clone(),
             };
-            if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
-                saved.insert(id.to_owned(), verdict);
+            std::fs::write(
+                &plan_path,
+                serde_json::to_vec(&pass_plan).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+            let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
+                root: root.to_owned(),
+                command: command.clone(),
+                run_id: Some(format!("strong-{nonce}")),
+                started_at: None,
+                watchdog_program: std::env::current_exe()
+                    .ok()
+                    .and_then(|path| std::fs::canonicalize(path).ok()),
+                strong: Some(supercov_engine::javascript_run::StrongRun {
+                    plan: plan_path,
+                    results: results.clone(),
+                }),
+            };
+            let mut diagnostics = std::io::stderr();
+            exit =
+                supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
+                    .map_err(|error| error.to_string())?;
+            command_exit = Some(exit);
+            let before = remaining.len();
+            let text = std::fs::read_to_string(&results).unwrap_or_default();
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                let Ok(record) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if record["summary"] == true {
+                    passes.push(record);
+                    continue;
+                }
+                let Some(id) = record["id"].as_str() else {
+                    continue;
+                };
+                if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
+                    saved.insert(id.to_owned(), verdict);
+                }
+            }
+            remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+            save(run, &plan.mutant_set, &saved)?;
+            if remaining.len() == before {
+                break;
             }
         }
-        // A mutant the driver gave no verdict did not run to its end.
-        for mutant in plan.mutants.iter().filter(|m| m.decided.is_none()) {
+        // A mutant no pass gave a verdict did not run to its end.
+        for mutant in &remaining {
             saved.entry(mutant.id.clone()).or_insert_with(|| Verdict {
                 status: "error".into(),
                 killed_by: None,
@@ -595,18 +645,7 @@ fn execute(
             });
         }
     }
-    let document = json!({
-        "schemaVersion": 1,
-        "run": run.id,
-        "mutantSet": plan.mutant_set,
-        "mutants": saved,
-    });
-    let path = results_path(run);
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))?;
+    save(run, &plan.mutant_set, &saved)?;
     let count = |status: &str| saved.values().filter(|v| v.status == status).count();
     Ok(json!({
         "run": run.id,

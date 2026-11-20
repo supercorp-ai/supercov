@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1201")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1206")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1201"),
+        seen.contains("test fault at fs (javascript_run.rs:1206"),
         "{seen}"
     );
 }
@@ -17208,15 +17208,15 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:758",
         "fs.write#javascript_run.rs:1075",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1149",
-        "fs.create_dir_all#javascript_run.rs:1339",
+        "fs.create_dir_all#javascript_run.rs:1154",
+        "fs.create_dir_all#javascript_run.rs:1344",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1614",
-        "fs.create_dir_all#javascript_run.rs:1616",
+        "fs.create_dir_all#javascript_run.rs:1619",
+        "fs.create_dir_all#javascript_run.rs:1621",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1716",
-        "fs.create_dir_all#javascript_run.rs:1718",
+        "fs.create_dir_all#javascript_run.rs:1721",
+        "fs.create_dir_all#javascript_run.rs:1723",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -21692,4 +21692,45 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     });
     let _ = std::fs::remove_file(&served);
     assert!(shared, "{log}\n{context}");
+}
+
+/// A test that passes only after an earlier test of its file ran: its file
+/// runs whole for the mutants it can kill, so the mutant it kills is killed,
+/// as StrykerJS (which runs the file's tests in order) kills it.
+#[cfg(unix)]
+#[test]
+fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
+    let project = vitest_mutants_project("strong-ordered-tests");
+    project.write(
+        "src/registry.js",
+        "let built = false;\nexport function build() {\n  built = true;\n}\nexport function add() {\n  if (built) {\n    throw new Error(\"already built\");\n  }\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/registry.test.js",
+        "import { expect, it } from \"vitest\";\nimport { add, build } from \"../src/registry.js\";\nit(\"adds before the build\", () => expect(add()).toBe(1));\nit(\"builds\", () => build());\nit(\"refuses to add after the build\", () => expect(() => add()).toThrow(\"already built\"));\n",
+    );
+    project.commit("registry");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/registry.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let throw = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/registry.js:6:15-8:4:BlockStatement:{}")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(throw["strong"]["status"], "killed", "{throw}");
 }

@@ -221,7 +221,8 @@ fn plain(expression: &Expression<'_>) -> bool {
 impl<'a> Values<'a> {
     /// Whether `expression` is a clock (or random) reading itself, and not
     /// only something worked out from one: the reading; arithmetic of it
-    /// with readings, numbers and names; `-x` and `+x`; `.getTime()`,
+    /// with readings, numbers and names; `-x` and `+x`; `Math.floor`,
+    /// `ceil`, `round` and `trunc` of it; `.getTime()`,
     /// `.valueOf()`, `Number()` and `new Date()` of it; a date-fns `add*`,
     /// `sub*`, `differenceIn*`, `startOf*` or `endOf*` of it; a `??` or `||`
     /// fallback to it; and, up to `hops` of them, a `const` of an enclosing
@@ -260,6 +261,17 @@ impl<'a> Values<'a> {
                     }
                     Expression::Identifier(callee)
                         if callee.name == "Number" || date_fns_time(&callee.name) =>
+                    {
+                        arguments.any(valued)
+                    }
+                    // `Math.floor(Date.now() / 1000)`: a reading in seconds is
+                    // still a reading.
+                    Expression::StaticMemberExpression(member)
+                        if matches!(&member.object, Expression::Identifier(math) if math.name == "Math")
+                            && matches!(
+                                member.property.name.as_str(),
+                                "floor" | "ceil" | "round" | "trunc"
+                            ) =>
                     {
                         arguments.any(valued)
                     }
@@ -788,7 +800,7 @@ mod tests {
     /// depends on the clock: a count of what a clock-dependent `find` found.
     #[test]
     fn a_clock_hint_needs_a_time_valued_operand_not_one_worked_out_from_the_clock() {
-        let source = "import { addMinutes } from 'date-fns';\nconst CRON_BUDGET_MS = 60000;\nexport function f(sub: { expires: string; trial: number }, deadline: number, expiry: number, params: { now?: Date }, items: { at: string }[]) {\n  const startedAt = Date.now();\n  const msRemaining = () => CRON_BUDGET_MS - (Date.now() - startedAt);\n  const tokenExpiresIn = expiry - Date.now();\n  const refreshBefore = addMinutes(new Date(), 5);\n  const now = params.now ?? new Date();\n  const expiresAt = new Date(sub.expires);\n  const groups = items.map((item) => ({ items: [item], isToday: new Date(item.at).getDate() === new Date().getDate() }));\n  const today = groups.find((g) => g.isToday);\n  const label = String(Date.now());\n  const run = async () => {\n    while (msRemaining() >= 1000) {}\n  };\n  return [\n    run,\n    tokenExpiresIn > 0,\n    expiresAt.getTime() < refreshBefore.getTime(),\n    sub.trial * 1000 <= now.getTime(),\n    expiresAt > now,\n    expiresAt > new Date(),\n    deadline - Date.now() < 0,\n    today && today.items.length > 0,\n    groups.length > 1,\n    label.length > 3,\n    -Date.now() < deadline,\n  ];\n}\n";
+        let source = "import { addMinutes } from 'date-fns';\nconst CRON_BUDGET_MS = 60000;\nexport function f(sub: { expires: string; trial: number }, deadline: number, expiry: number, params: { now?: Date }, items: { at: string }[]) {\n  const startedAt = Date.now();\n  const msRemaining = () => CRON_BUDGET_MS - (Date.now() - startedAt);\n  const tokenExpiresIn = expiry - Date.now();\n  const refreshBefore = addMinutes(new Date(), 5);\n  const now = params.now ?? new Date();\n  const expiresAt = new Date(sub.expires);\n  const groups = items.map((item) => ({ items: [item], isToday: new Date(item.at).getDate() === new Date().getDate() }));\n  const today = groups.find((g) => g.isToday);\n  const label = String(Date.now());\n  const seconds = Math.floor(Date.now() / 1000);\n  const run = async () => {\n    while (msRemaining() >= 1000) {}\n  };\n  return [\n    run,\n    tokenExpiresIn > 0,\n    expiresAt.getTime() < refreshBefore.getTime(),\n    sub.trial * 1000 <= now.getTime(),\n    expiresAt > now,\n    expiresAt > new Date(),\n    deadline - Date.now() < 0,\n    today && today.items.length > 0,\n    groups.length > 1,\n    label.length > 3,\n    -Date.now() < deadline,\n    seconds < expiry,\n  ];\n}\n";
         assert_eq!(
             ruled(source, StaticFacts::untestable),
             [
@@ -800,6 +812,7 @@ mod tests {
                 "expiresAt > new Date() → >=: clock",
                 "deadline - Date.now() < 0 → <=: clock",
                 "-Date.now() < deadline → <=: clock",
+                "seconds < expiry → <=: clock",
             ]
         );
     }

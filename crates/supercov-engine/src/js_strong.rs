@@ -454,11 +454,16 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     planned.decided = Some(Decided::NoCoverage);
                     planned.reason = Some(reason.code.to_owned());
                 }
-                Status::NotInfected => {
+                // Not infected where the operands are clock or random
+                // readings proves only that this run's values never met:
+                // another run's may. Such a mutant runs against the tests
+                // that reached it.
+                Status::NotInfected if mutant.untestable.is_none() => {
                     planned.decided = Some(Decided::Survived);
                     planned.reason = Some(reason.code.to_owned());
                 }
-                Status::Infected { .. } | Status::Unknown => {
+                Status::Infected { .. } | Status::Unknown | Status::NotInfected => {
+                    let reach_only = status == Status::NotInfected;
                     let mut chosen = BTreeMap::<usize, CandidateReason>::new();
                     let mut whole_files = HashSet::<String>::new();
                     let mut take = |test: usize, why: CandidateReason| {
@@ -493,6 +498,13 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         }
                         let why = if role_of(raw) == "test" && !exact(raw) {
                             Some(CandidateReason::NotExact)
+                        } else if reach_only {
+                            (may_reach(mutant, own)
+                                || mutant
+                                    .function
+                                    .as_ref()
+                                    .is_some_and(|function| own.hits.contains(function)))
+                            .then_some(CandidateReason::Unknown)
                         } else {
                             could_infect(mutant, own, &whole)
                         };

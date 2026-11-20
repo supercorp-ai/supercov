@@ -54,6 +54,45 @@ function writeEvidence(payload) {
         return;
     appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-worker", payload);
 }
+// Work a test file did while none of its tests ran: a `beforeAll` of a
+// later `describe`, an `afterAll`, async work a test left going. It is the
+// file's, as its module setup is, and no test's: written as one more setup
+// record of the file. A test's afterEach clears what it ran, so what is
+// there at the next test's start, or at the file's end, is that work.
+const fileWork = new Map();
+function writeFileWork(file, testFile, title) {
+    const snapshot = runtime.coverageSnapshotColumns();
+    if (!snapshot.hits.length && !snapshot.decisions.length)
+        return;
+    const nth = (fileWork.get(file.id) ?? 0) + 1;
+    fileWork.set(file.id, nth);
+    writeEvidence({
+        testId: `vitest:${file.id}:between:${nth}`,
+        test: `${testFile} > ${title}`,
+        testFile,
+        title,
+        retry: 0,
+        status: "passed",
+        provenance: inferTestProvenance({
+            runner: "vitest",
+            file: testFile,
+            project: file.projectName,
+            explicitKind: process.env["SUPERCOV_TEST_KIND"],
+        }),
+        role: "setup",
+        runtime: [snapshot],
+        browser: [],
+        server: [],
+    });
+}
+afterAll((context) => {
+    const file = context?.file ?? context;
+    if (!file?.filepath)
+        return;
+    const testFile = relative(process.cwd(), file.filepath).split(sep).join("/");
+    if (emittedSetupFiles.has(testFile))
+        writeFileWork(file, testFile, "after the tests");
+});
 beforeEach((context) => {
     const task = context.task;
     const testFile = relative(process.cwd(), task.file.filepath)
@@ -83,6 +122,9 @@ beforeEach((context) => {
                 server: [],
             });
         }
+    }
+    else {
+        writeFileWork(task.file, testFile, "between tests");
     }
     const testId = `vitest:${task.id}`;
     const retry = attempts.get(testId) ?? 0;
@@ -138,4 +180,6 @@ afterEach((context) => {
     writeEvidence(payload);
     activeScopes.delete(task.id);
     runtime.activateCoverageScope();
+    // What runs from here to the next test is the file's (writeFileWork).
+    runtime.resetCoverage(`vitest:${task.file.id}:between`);
 });

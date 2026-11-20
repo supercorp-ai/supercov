@@ -158,6 +158,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const roundsDirectory = `${root}/.supercov/strong-rounds`;
     rmSync(roundsDirectory, { recursive: true, force: true });
     let roundNumber = 0;
+    let stalled = false;
     async function runRound(assignments, timeoutMs) {
         const directory = `${roundsDirectory}/${roundNumber++}`;
         const counts = new Map();
@@ -172,7 +173,20 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
         provide(vitest, { root, round: directory });
         setTestTimeout(vitest, Math.ceil(timeoutMs));
-        last = await runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false);
+        // A round whose workers do not end (a fork that will not
+        // terminate) must not hold the pass: past its deadline, what it
+        // finished is read and the rest is a timeout.
+        let timer;
+        const deadline = new Promise((resolve) => {
+            timer = setTimeout(() => resolve("deadline"), timeoutMs * 2 + 30_000);
+        });
+        const ran = runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false);
+        const finished = await Promise.race([ran.then((result) => ({ result })), deadline]);
+        clearTimeout(timer);
+        if (finished === "deadline")
+            stalled = true;
+        else
+            last = finished.result;
         // The outcome of each claim, whichever copy took it.
         return placedAt.map((out) => {
             const outcome = { claimed: false, done: false, tests: [] };
@@ -205,21 +219,41 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
     }
     const baselineFailed = new Set();
-    if (union.size) {
-        const assignments = [...union].map(([file, entry]) => ({
+    const baseline = async (files) => {
+        const assignments = [...files].map(([file, entry]) => ({
             file,
             claim: { mutant: null, tests: [...entry.tests], wholeFile: entry.whole },
         }));
         const outcomes = await runRound(assignments, 60_000);
-        assignments.forEach((assignment, at) => {
-            const outcome = outcomes[at];
-            if (!outcome.done)
-                baselineFailed.add(`${assignment.file}#file`);
-            for (const test of outcome.tests) {
-                if (test.failed)
-                    baselineFailed.add(test.test);
-            }
-        });
+        return assignments.map((assignment, at) => ({ assignment, outcome: outcomes[at] }));
+    };
+    const recordBaseline = ({ assignment, outcome }) => {
+        if (!outcome.done)
+            baselineFailed.add(`${assignment.file}#file`);
+        for (const test of outcome.tests)
+            if (test.failed)
+                baselineFailed.add(test.test);
+    };
+    if (union.size) {
+        // A candidate that fails with only the candidates of its file
+        // around it leans on a test before it: its file runs whole, and
+        // only what fails then, with nothing mutated, is no kill.
+        const widened = new Map();
+        for (const result of await baseline(union)) {
+            const failed = result.outcome.tests.some((test) => test.failed);
+            if ((failed || !result.outcome.done) && !result.assignment.claim.wholeFile)
+                widened.set(result.assignment.file, { tests: new Set(), whole: true });
+            else
+                recordBaseline(result);
+        }
+        if (widened.size) {
+            for (const result of await baseline(widened))
+                recordBaseline(result);
+            for (const job of pending)
+                for (const group of job.files)
+                    if (widened.has(group.file))
+                        group.whole = true;
+        }
     }
 
     const oneAtATime = !isolated(vitest);
@@ -229,37 +263,44 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const perFile = oneAtATime ? 1 : workers;
     const perRound = oneAtATime ? 1 : workers * 2;
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));
-    while (pending.length) {
+    // A mutant runs its cheapest file first; if that does not kill it, all
+    // its other files at once: the first file kills most killed mutants,
+    // and a survivor then takes one round more, not one per file.
+    for (const job of pending) {
+        job.waiting = [job.files[0]];
+        job.later = job.files.slice(1);
+        job.open = 0;
+    }
+    const finish = (job, verdict) => {
+        write({ id: job.mutant.id, ...verdict, tests: job.ran, durationMs: Date.now() - (job.started || Date.now()) });
+        job.done = true;
+    };
+    while (pending.length && !stalled) {
         const used = new Map();
         const round = [];
         for (const job of pending) {
             if (round.length >= perRound)
                 break;
-            const group = job.files[job.next];
-            if ((used.get(group.file) ?? 0) >= perFile || baselineFailed.has(`${group.file}#file`) && !job.skipped)
-                continue;
-            used.set(group.file, (used.get(group.file) ?? 0) + 1);
-            round.push(job);
-        }
-        // A job whose next file cannot run (it failed without any mutant)
-        // moves on, or ends.
-        for (const job of pending) {
-            const group = job.files[job.next];
-            if (!round.includes(job) && baselineFailed.has(`${group.file}#file`)) {
-                if (job.next + 1 < job.files.length)
-                    job.next += 1;
-                else {
-                    write({ id: job.mutant.id, status: "error", reason: `${group.file} fails without any mutant`, tests: job.ran, durationMs: 0 });
-                    job.done = true;
+            for (const group of [...job.waiting]) {
+                if (round.length >= perRound || (oneAtATime && round.length))
+                    break;
+                if (baselineFailed.has(`${group.file}#file`)) {
+                    job.waiting.splice(job.waiting.indexOf(group), 1);
+                    continue;
                 }
+                if ((used.get(group.file) ?? 0) >= perFile)
+                    continue;
+                used.set(group.file, (used.get(group.file) ?? 0) + 1);
+                job.waiting.splice(job.waiting.indexOf(group), 1);
+                job.open += 1;
+                round.push({ job, group });
             }
         }
         let limit = 0;
-        const assignments = round.map((job) => {
-            const group = job.files[job.next];
+        const assignments = round.map(({ job, group }) => {
             const chosen = group.tests.filter((id) => !baselineFailed.has(id));
             const budget = Math.max(...chosen.map((id) => durationOf.get(id) ?? 1_000), 1_000);
-            limit = Math.max(limit, (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * (job.retried ? 2 : 1));
+            limit = Math.max(limit, (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * (group.retried ? 2 : 1));
             if (!job.started)
                 job.started = Date.now();
             return {
@@ -273,55 +314,66 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             };
         });
         const outcomes = round.length ? await runRound(assignments, limit) : [];
-        round.forEach((job, at) => {
-            const group = job.files[job.next];
+        round.forEach(({ job, group }, at) => {
+            job.open -= 1;
+            if (job.done)
+                return;
             const outcome = outcomes[at];
             if (!outcome.claimed) {
-                // No copy took it: run it again in a later round.
-                job.unclaimed = (job.unclaimed ?? 0) + 1;
-                if (job.unclaimed > 2) {
-                    write({ id: job.mutant.id, status: "error", reason: "no copy of its test file ran it", tests: job.ran, durationMs: Date.now() - job.started });
-                    job.done = true;
-                }
+                if (stalled)
+                    return;
+                group.unclaimed = (group.unclaimed ?? 0) + 1;
+                if (group.unclaimed > 2)
+                    finish(job, { status: "error", reason: "no copy of its test file ran it" });
+                else
+                    job.waiting.push(group);
                 return;
             }
             job.ran += outcome.tests.length;
             const failed = outcome.tests.find((test) => test.failed && !baselineFailed.has(test.test));
-            let verdict;
             if (failed) {
-                if (failed.timeout && !job.retried) {
-                    job.retried = true;
+                if (failed.timeout && !group.retried) {
+                    group.retried = true;
+                    job.waiting.push(group);
                     return;
                 }
-                verdict = { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test };
+                finish(job, { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test });
             }
             else if (!outcome.done) {
                 // The copy started and its file did not finish: the mutant
-                // broke it while it loaded or ran.
-                verdict = { status: "killed", killedBy: group.file, reason: "the test file did not finish" };
+                // broke it while it loaded or ran, or held it past the
+                // round's deadline.
+                finish(job, stalled
+                    ? { status: "timeout", reason: "its test file did not finish by the round's deadline" }
+                    : { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
             }
-            else if (job.next + 1 < job.files.length) {
-                job.next += 1;
-                job.retried = false;
-                return;
-            }
-            else {
-                verdict = { status: "survived" };
-            }
-            write({ id: job.mutant.id, ...verdict, tests: job.ran, durationMs: Date.now() - job.started });
-            job.done = true;
         });
+        for (const job of pending) {
+            if (job.done || job.open || job.waiting.length)
+                continue;
+            if (job.later.length) {
+                job.waiting = job.later;
+                job.later = [];
+            }
+            else
+                finish(job, { status: "survived" });
+        }
         for (let index = pending.length - 1; index >= 0; index--) {
             if (pending[index].done)
                 pending.splice(index, 1);
         }
-        if (!round.length && pending.length) {
+        if (!round.length && pending.length && !stalled) {
             for (const job of pending)
-                write({ id: job.mutant.id, status: "error", reason: "could not be scheduled", tests: job.ran, durationMs: 0 });
+                finish(job, { status: "error", reason: "could not be scheduled" });
             break;
         }
     }
     rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length });
+    if (stalled) {
+        // A worker that will not end keeps Vitest from closing: the mutants
+        // left run in the next pass `mutants test` starts.
+        process.exit(0);
+    }
     return last;
 }
