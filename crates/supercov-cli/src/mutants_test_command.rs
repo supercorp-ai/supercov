@@ -30,6 +30,8 @@ Options:
   --plan            print what would run, and run nothing
   --file <path>     only this source file's mutants (repeatable)
   --diff <base>     only the mutants on lines the change since <base> touched
+  --shard <k>/<n>   only the k-th of n even shares of the mutants to run (for
+                    parallel jobs; decided mutants go to shard 1)
   --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
                     no-coverage or error (accepted mutants excepted)
   --critical <glob> source files where every mutant must be killed or
@@ -51,6 +53,7 @@ struct Options {
     diff: Option<String>,
     fail_on: Vec<String>,
     critical: Vec<String>,
+    shard: Option<(usize, usize)>,
     command: Option<Vec<String>>,
 }
 
@@ -91,6 +94,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     }
                     options.fail_on.push(status.to_owned());
                 }
+            }
+            "--shard" => {
+                index += 1;
+                let value = args.get(index).ok_or("--shard needs k/n")?;
+                let parsed = value
+                    .split_once('/')
+                    .and_then(|(k, n)| Some((k.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+                    .filter(|(k, n)| *n > 0 && (1..=*n).contains(k))
+                    .ok_or_else(|| format!("--shard takes k/n with 1 <= k <= n, not {value}"))?;
+                options.shard = Some(parsed);
             }
             "--critical" => {
                 index += 1;
@@ -147,6 +160,18 @@ pub fn command(args: &[String]) -> ExitCode {
         // A second pass over the same run runs only what has no verdict.
         plan.mutants
             .retain(|mutant| !saved.contains_key(&mutant.id));
+        // A shard: every n-th mutant to run, from the k-th; the decided ones
+        // with the first shard.
+        if let Some((k, n)) = options.shard {
+            let mut position = 0usize;
+            plan.mutants.retain(|mutant| {
+                if mutant.decided.is_some() {
+                    return k == 1;
+                }
+                position += 1;
+                (position - 1) % n == k - 1
+            });
+        }
         if options.plan {
             return Ok(plan_json(run, &plan));
         }

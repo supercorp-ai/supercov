@@ -40,6 +40,9 @@ pub struct PlannedTest {
     pub runner: String,
     /// How long it took in the measured run, when the runner said.
     pub duration_ms: Option<u64>,
+    /// Whether every attempt passed in the measured run: only such a test
+    /// can be a candidate.
+    pub runnable: bool,
 }
 
 /// Why a test is one of a mutant's candidates.
@@ -152,15 +155,46 @@ fn own_observations(raw: &RawTestResult, without_values: &HashSet<&String>) -> O
     seen
 }
 
+/// `from`'s observations added to `into`'s.
+fn merge(into: &mut Observations, from: &Observations) {
+    into.hits.extend(from.hits.iter().cloned());
+    into.server_hits.extend(from.server_hits.iter().cloned());
+    into.unvalued_hits
+        .extend(from.unvalued_hits.iter().cloned());
+    for (id, vectors) in &from.decisions {
+        let seen = into.decisions.entry(id.clone()).or_default();
+        for vector in vectors {
+            if !seen.contains(vector) {
+                seen.push(vector.clone());
+            }
+        }
+    }
+    for (id, outcomes) in &from.logicals {
+        into.logicals
+            .entry(id.clone())
+            .or_default()
+            .extend(outcomes.iter().copied());
+    }
+    for (id, outcomes) in &from.comparisons {
+        into.comparisons
+            .entry(id.clone())
+            .or_default()
+            .extend(outcomes.iter().cloned());
+    }
+}
+
 /// Whether the mutant's code is among what `seen` hit: its statement, or
 /// its function where no statement contains it. A mutant with neither
 /// point cannot be narrowed, and counts as hit by anything.
 fn may_reach(mutant: &CandidateMutant, seen: &Observations) -> bool {
-    match (&mutant.statement, &mutant.function) {
-        (Some(statement), _) => seen.hits.contains(statement),
-        (None, Some(function)) => seen.hits.contains(function),
-        (None, None) => true,
-    }
+    mutant
+        .statement
+        .as_ref()
+        .is_none_or(|statement| seen.hits.contains(statement))
+        && mutant
+            .function
+            .as_ref()
+            .is_none_or(|function| seen.hits.contains(function))
 }
 
 /// Whether `seen` could have infected the mutant: its verdict read from
@@ -221,6 +255,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 title: raw.title.clone(),
                 runner: raw.provenance.runner.clone(),
                 duration_ms: None,
+                runnable: true,
             });
             runnable.push(true);
             if let Some(file) = &raw.test_file {
@@ -245,11 +280,30 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         record: usize,
         seen: Observations,
     }
+    for (test, ok) in tests.iter_mut().zip(&runnable) {
+        test.runnable = *ok;
+    }
     let mut seen = Vec::<Seen>::new();
     let mut by_point = HashMap::<String, Vec<usize>>::new();
     let mut unbounded = Vec::<usize>::new();
+    // What each test file's modules did as they loaded: every test of the
+    // file runs after it, so a test's own evidence is read with it. A
+    // method of an object a module exports is reached when its statement
+    // (the export) ran, at load, and its function, in the test.
+    let mut loaded = HashMap::<&str, Observations>::new();
+    for raw in raw_results.iter().filter(|raw| role_of(raw) == "setup") {
+        if let Some(file) = &raw.test_file {
+            let own = own_observations(raw, &without_values);
+            merge(loaded.entry(file.as_str()).or_default(), &own);
+        }
+    }
     for (record, raw) in raw_results.iter().enumerate() {
-        let own = own_observations(raw, &without_values);
+        let mut own = own_observations(raw, &without_values);
+        if role_of(raw) == "test"
+            && let Some(at_load) = raw.test_file.as_deref().and_then(|file| loaded.get(file))
+        {
+            merge(&mut own, at_load);
+        }
         let at = seen.len();
         if role_of(raw) == "test" && !exact(raw) {
             unbounded.push(at);
@@ -310,7 +364,8 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     // The records that ran the mutant's point (or all, for a
                     // mutant no point contains), and every record whose
                     // silence proves nothing.
-                    let point = mutant.statement.as_ref().or(mutant.function.as_ref());
+                    // Reach needs both points; the function's is the narrower.
+                    let point = mutant.function.as_ref().or(mutant.statement.as_ref());
                     let mut records = match point {
                         Some(point) => by_point.get(point).cloned().unwrap_or_default(),
                         None => (0..seen.len()).collect(),
