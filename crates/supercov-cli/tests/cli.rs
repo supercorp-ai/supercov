@@ -21918,6 +21918,7 @@ fn a_copy_in_a_warm_worker_starts_from_fresh_modules() {
     a_test_that_fails_without_its_predecessor_kills_no_mutant_with("0", "1");
 }
 
+#[cfg(unix)]
 fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, warm: &str) {
     let project = vitest_mutants_project(&format!("strong-subset-false-kill-{prefix}-{warm}"));
     // `if (item)` gives the first test mutants of its own, so the file's
