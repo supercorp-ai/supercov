@@ -6469,9 +6469,10 @@ fn instrument_strong<'a>(
     } else {
         (String::new(), VariableDeclarationKind::Const)
     };
-    // The names a measured file gives its helpers, in the same order, then
-    // the two strong mode adds.
+    // The record first: the switches name it, so it is the shortest.
     let mut names = CandidateNames::within(source, &namespace);
+    let record = names.allocate("__supercovStrong");
+    let strong_slot = names.allocate("__supercovStrongSlot");
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
@@ -6482,8 +6483,6 @@ fn instrument_strong<'a>(
     let probe_file_v2 = names.allocate("__supercovFile");
     let probe_clock_v2 = names.allocate("__supercovClock");
     let probe_hits_v2 = names.allocate("__supercovHits");
-    let strong_slot = names.allocate("__supercovStrongSlot");
-    let record = names.allocate("__supercovStrong");
     let placed = crate::js_schemata::place(
         allocator,
         program,

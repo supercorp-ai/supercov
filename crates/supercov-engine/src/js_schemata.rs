@@ -91,16 +91,6 @@ enum PlaceKind {
     SwitchCase,
 }
 
-/// Where a mutated node sits in an optional chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChainPlace {
-    None,
-    /// The chain's last link: its slot holds the chain.
-    Root,
-    /// A link before the last: its slot is inside the chain.
-    Inner,
-}
-
 /// The node a switch goes on: an expression or a statement by its address,
 /// a function body or a `case` by its span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,7 +111,6 @@ struct Placement {
 
 #[derive(Debug, Clone)]
 struct MutantPlan {
-    chain: ChainPlace,
     placement: Result<Placement, &'static str>,
     is_static: bool,
 }
@@ -473,32 +462,6 @@ impl<'a> Planner<'_, 'a> {
         }
     }
 
-    fn chain_place(&self, index: usize) -> ChainPlace {
-        let mut child = index;
-        while child > 0 {
-            let parent = child - 1;
-            let span = self.stack[child].span();
-            let within = |outer: Span| outer.start <= span.start && span.end <= outer.end;
-            match self.stack[parent] {
-                AstKind::ChainExpression(_) => {
-                    return if child == index {
-                        ChainPlace::Root
-                    } else {
-                        ChainPlace::Inner
-                    };
-                }
-                AstKind::StaticMemberExpression(member) if within(member.object.span()) => {}
-                AstKind::PrivateFieldExpression(member) if within(member.object.span()) => {}
-                AstKind::ComputedMemberExpression(member) if within(member.object.span()) => {}
-                AstKind::CallExpression(call) if within(call.callee.span()) => {}
-                AstKind::TSNonNullExpression(_) => {}
-                _ => return ChainPlace::None,
-            }
-            child = parent;
-        }
-        ChainPlace::None
-    }
-
     /// The name an anonymous function or class at `index` has from where it
     /// is written.
     fn inferred_name(&self, index: usize) -> Option<String> {
@@ -617,7 +580,6 @@ impl<'a> Planner<'_, 'a> {
     }
 
     fn plan(&self, index: usize) -> MutantPlan {
-        let chain = self.chain_place(index);
         let kept = self.stack[..index]
             .iter()
             .find_map(|ancestor| match ancestor {
@@ -633,7 +595,6 @@ impl<'a> Planner<'_, 'a> {
             });
         if let Some(reason) = kept {
             return MutantPlan {
-                chain,
                 placement: Err(reason),
                 is_static: !self.in_function(index),
             };
@@ -651,7 +612,6 @@ impl<'a> Planner<'_, 'a> {
                     PlaceKind::SwitchCase => PlaceKey::Case(span.start, span.end),
                 };
                 MutantPlan {
-                    chain,
                     placement: Ok(Placement {
                         key,
                         itself: at == index,
@@ -663,7 +623,6 @@ impl<'a> Planner<'_, 'a> {
                 }
             }
             None => MutantPlan {
-                chain,
                 placement: Err(NO_PLACEABLE_ANCESTOR),
                 is_static: !self.in_function(index),
             },
@@ -726,7 +685,6 @@ fn plans<'a>(
         .into_iter()
         .map(|plan| {
             plan.unwrap_or(MutantPlan {
-                chain: ChainPlace::None,
                 placement: Err(NODE_NOT_FOUND),
                 is_static: false,
             })
@@ -813,8 +771,7 @@ fn expression_replacement<'a>(
     let span = expression.span();
     let descriptor = mutant.replacement.as_str();
     if let Expression::ChainExpression(chain) = expression {
-        return chain_replacement(ast, chain.span, &chain.expression, mutant)
-            .map(|element| ast.expression_chain(chain.span, element));
+        return chain_replacement(ast, chain.span, &chain.expression, mutant);
     }
     let replacement = match (mutant.mutator, expression) {
         ("ArithmeticOperator" | "EqualityOperator", Expression::BinaryExpression(binary)) => {
@@ -978,13 +935,14 @@ fn method_replacement<'a>(
     ))
 }
 
-/// The replacement of a chain's last link, as the chain's new last link.
+/// The replacement of a chain's last link: a chain whose last link it is,
+/// or, where it is no link (`text?.trim()` to `text`, or `true`), itself.
 fn chain_replacement<'a>(
     ast: AstBuilder<'a>,
     span: Span,
     element: &ChainElement<'a>,
     mutant: &LedgerMutant,
-) -> Option<ChainElement<'a>> {
+) -> Option<Expression<'a>> {
     let allocator = ast.allocator;
     let expression = match element {
         ChainElement::CallExpression(call) => Expression::CallExpression(call.clone_in(allocator)),
@@ -1002,7 +960,7 @@ fn chain_replacement<'a>(
         }
     };
     let replaced = expression_replacement(ast, &expression, mutant)?;
-    Some(match replaced {
+    let element = match replaced {
         Expression::CallExpression(call) => ChainElement::CallExpression(call),
         Expression::StaticMemberExpression(member) => ChainElement::StaticMemberExpression(member),
         Expression::ComputedMemberExpression(member) => {
@@ -1010,11 +968,9 @@ fn chain_replacement<'a>(
         }
         Expression::PrivateFieldExpression(member) => ChainElement::PrivateFieldExpression(member),
         Expression::TSNonNullExpression(non_null) => ChainElement::TSNonNullExpression(non_null),
-        // Not a link (`text?.trim()` to `text`, or `true`): the chain is
-        // gone, so the replacement goes in a non-null assertion's place,
-        // which is only a wrapper.
-        other => ChainElement::TSNonNullExpression(ast.alloc_ts_non_null_expression(span, other)),
-    })
+        other => return Some(other),
+    };
+    Some(ast.expression_chain(span, element))
 }
 
 /// Whether `expression`, a chain's last link, is the mutant's node.
@@ -1051,25 +1007,6 @@ fn statement_replacement<'a>(
     })
 }
 
-/// Unwraps the chain a replacement may stand in when it is no link: see
-/// `chain_replacement`.
-fn settle_chain<'a>(ast: AstBuilder<'a>, expression: Expression<'a>) -> Expression<'a> {
-    match expression {
-        Expression::ChainExpression(mut chain) => {
-            let chain_span = chain.span;
-            if let ChainElement::TSNonNullExpression(non_null) = &mut chain.expression
-                && non_null.span == chain_span
-                && !matches!(non_null.expression, Expression::TSNonNullExpression(_))
-                && non_null.expression.span() == chain_span
-            {
-                return non_null.expression.take_in(ast.allocator);
-            }
-            Expression::ChainExpression(chain)
-        }
-        expression => expression,
-    }
-}
-
 // ---- finding a mutant's node ----------------------------------------------
 
 /// Builds each mutant's replacement on the program as written, in order.
@@ -1103,9 +1040,8 @@ impl<'a> Visit<'a> for Builder<'_, 'a> {
         for index in self.waiting(expression.span()) {
             let mutant = &self.mutants[index];
             if expression_matches(expression, mutant) {
-                let replacement = expression_replacement(self.ast, expression, mutant)
-                    .map(|replacement| settle_chain(self.ast, replacement));
-                self.built[index] = replacement.map(Replacement::Expression);
+                self.built[index] = expression_replacement(self.ast, expression, mutant)
+                    .map(Replacement::Expression);
                 self.done(expression.span(), index);
             }
         }
@@ -1122,6 +1058,18 @@ impl<'a> Visit<'a> for Builder<'_, 'a> {
             }
         }
         walk::walk_statement(self, statement);
+    }
+
+    fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+        for index in self.waiting(block.span) {
+            if accepts(&self.mutants[index], NodeKind::Block) {
+                self.built[index] = Some(Replacement::Statement(
+                    self.ast.statement_block(block.span, self.ast.vec()),
+                ));
+                self.done(block.span, index);
+            }
+        }
+        walk::walk_block_statement(self, block);
     }
 
     fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
@@ -1386,7 +1334,6 @@ impl<'a> VisitMut<'a> for Unplace<'a, '_> {
 struct Apply<'p, 'a> {
     ast: AstBuilder<'a>,
     mutant: &'p LedgerMutant,
-    chain: ChainPlace,
     applied: bool,
 }
 
@@ -1398,11 +1345,7 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         if expression_matches(expression, self.mutant)
             && let Some(replacement) = expression_replacement(self.ast, expression, self.mutant)
         {
-            *expression = if self.chain == ChainPlace::Inner {
-                replacement
-            } else {
-                settle_chain(self.ast, replacement)
-            };
+            *expression = replacement;
             self.applied = true;
             return;
         }
@@ -1421,6 +1364,18 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
             return;
         }
         walk_mut::walk_statement(self, statement);
+    }
+
+    fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
+        if self.applied {
+            return;
+        }
+        if block.span == self.mutant.span && accepts(self.mutant, NodeKind::Block) {
+            block.body.clear();
+            self.applied = true;
+            return;
+        }
+        walk_mut::walk_block_statement(self, block);
     }
 
     fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
@@ -1561,7 +1516,6 @@ impl<'a> Switches<'_, 'a> {
         let mut apply = Apply {
             ast: self.ast,
             mutant,
-            chain: plan.chain,
             applied: false,
         };
         copy.accept(&mut apply);
@@ -1894,7 +1848,7 @@ mod tests {
             assert!(
                 output
                     .code
-                    .contains(&format!("__supercovStrongSlot(\"{name}\")")),
+                    .contains(&format!("__supercovStrongSlot1(\"{name}\")")),
                 "{name}"
             );
             for index in 0..golden.len() {
@@ -1917,11 +1871,11 @@ mod tests {
         reparses(&output, "src/a.js");
         let code = &output.code;
         assert!(
-            code.contains("__supercovStrongSlot as __supercovStrongSlot"),
+            code.contains("strongSlot as __supercovStrongSlot1"),
             "{code}"
         );
         assert!(
-            code.contains("const __supercovStrong = __supercovStrongSlot(\"src/a.js\");"),
+            code.contains("const __supercovStrong = __supercovStrongSlot1(\"src/a.js\");"),
             "{code}"
         );
         let index = |mutator: &str, descriptor: &str| {
