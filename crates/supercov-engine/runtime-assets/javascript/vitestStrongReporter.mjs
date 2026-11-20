@@ -264,8 +264,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const workers = Math.max(1, Number(vitest.config.maxWorkers) || availableParallelism());
     // Copies of one test file in a round, and assignments in all: enough to
     // keep every worker busy while the slowest copy finishes.
-    const perFile = oneAtATime ? 1 : workers;
-    const perRound = oneAtATime ? 1 : workers * 2;
+    // A round ends when its slowest copy does, and the workers wait: the
+    // more a round holds, the less of that wait there is per assignment.
+    // SUPERCOV_STRONG_ROUND sets how many a round holds, as a multiple of
+    // the workers.
+    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || 6);
+    const perFile = oneAtATime ? 1 : workers * Math.min(roundFactor, 4);
+    const perRound = oneAtATime ? 1 : workers * roundFactor;
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));
     // A mutant runs its cheapest file first; if that does not kill it, all
     // its other files at once: the first file kills most killed mutants,
