@@ -368,7 +368,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             break;
         }
     }
-    rmSync(roundsDirectory, { recursive: true, force: true });
+    // SUPERCOV_STRONG_KEEP_ROUNDS=1 keeps each round's assignments and what
+    // every copy reported, to read where a verdict came from.
+    if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
+        rmSync(roundsDirectory, { recursive: true, force: true });
     write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
