@@ -21893,6 +21893,62 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
     assert_eq!(throw["strong"]["status"], "killed", "{throw}");
 }
 
+/// A mutant only a later test reaches, where that test leans on an earlier
+/// one the mutant's copy leaves out: the later test fails alone with or
+/// without the mutant, so that failure is no kill. The file runs whole for
+/// the mutant, where the test passes: the mutant survives, as it does in a
+/// run of the whole suite.
+#[cfg(unix)]
+#[test]
+fn a_test_that_fails_without_its_predecessor_kills_nothing() {
+    let project = vitest_mutants_project("strong-subset-false-kill");
+    project.write(
+        "src/items.js",
+        "const items = [];\nexport function register(item) {\n  items.push(item);\n}\nexport function count() {\n  return items.length > 0 ? items.length : 0;\n}\n",
+    );
+    project.write(
+        "test/items.test.js",
+        "import { expect, it } from \"vitest\";\nimport { count, register } from \"../src/items.js\";\nit(\"registers\", () => register(\"a\"));\nit(\"counts what was registered\", () => expect(count()).toBe(1));\n",
+    );
+    project.commit("items");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/items.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    // `items.length > 0` to `items.length >= 0`: the count is the same.
+    let equal = mutants
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:6:") && id.contains(":EqualityOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+    // `items.length > 0 ? ... : 0` to `... false ...`: the count is 0, and
+    // the test fails with its predecessor run too.
+    let never = mutants
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:6:") && id.ends_with(":ConditionalExpression:false")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(never["strong"]["status"], "killed", "{never}");
+}
+
 /// A mutant that makes work a test left running loop forever (a timer that
 /// fires after the test passed): its evaluations pass the limit outside any
 /// test, and the mutant is a timeout, not a survivor.

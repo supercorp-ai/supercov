@@ -221,6 +221,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
     }
     const baselineFailed = new Set();
+    // What each file's baseline ran, in order, and the files it ran whole:
+    // a kill by a test whose file's baseline ran the same tests before it
+    // is certain; any other is confirmed without the mutant first.
+    const baselineOrder = new Map();
+    const wholeBaseline = new Set();
     const baseline = async (files) => {
         const assignments = [...files].map(([file, entry]) => ({
             file,
@@ -230,6 +235,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         return assignments.map((assignment, at) => ({ assignment, outcome: outcomes[at] }));
     };
     const recordBaseline = ({ assignment, outcome }) => {
+        baselineOrder.set(assignment.file, outcome.tests.map((test) => test.test));
+        if (assignment.claim.wholeFile)
+            wholeBaseline.add(assignment.file);
         if (outcome.outside.length)
             baselineFailed.add(`${assignment.file}#outside`);
         if (!outcome.done)
@@ -285,14 +293,80 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         write({ id: job.mutant.id, ...verdict, tests: job.ran, durationMs: Date.now() - (job.started || Date.now()) });
         job.done = true;
     };
+    // A copy runs only a mutant's candidates, and a test can lean on one
+    // the copy left out (state an earlier test built): it fails then with
+    // or without the mutant. A kill counts where the file's baseline ran
+    // the same tests before the killing one (or the copy ran what the
+    // baseline ran whole); any other kill is confirmed by running the same
+    // tests without the mutant. Where they fail that way too, it is no
+    // kill: the mutant runs again with its test file whole, and only what
+    // fails there without the mutant as well is none.
+    const confirmations = new Map();
+    let overturned = 0;
+    const confirmationKey = (file, chosen, whole) => `${file}\0${whole ? "*" : chosen.join("\0")}`;
+    const certain = (group, chosen, evidence) => {
+        if (group.whole)
+            return wholeBaseline.has(group.file);
+        const order = baselineOrder.get(group.file);
+        if (!order)
+            return false;
+        if (evidence.test) {
+            const at = order.indexOf(evidence.test);
+            return at >= 0 && order.slice(0, at).every((id) => chosen.includes(id));
+        }
+        return order.length === chosen.length && order.every((id) => chosen.includes(id));
+    };
+    const confirm = (job, group, chosen, evidence, verdict) => {
+        const key = confirmationKey(group.file, chosen, group.whole);
+        if (!confirmations.has(key))
+            confirmations.set(key, {
+                file: group.file,
+                claim: { mutant: null, tests: chosen, wholeFile: group.whole },
+                tries: 0,
+                result: undefined,
+            });
+        (job.confirming ??= []).push({ key, group, evidence, verdict });
+    };
+    // Each of a job's kills waiting on a confirmation, once it has run.
+    const settle = (job) => {
+        for (const waiting of [...job.confirming]) {
+            const { key, group, evidence, verdict } = waiting;
+            const result = confirmations.get(key).result;
+            if (!result)
+                continue;
+            job.confirming.splice(job.confirming.indexOf(waiting), 1);
+            const alsoWithout = evidence.test ? result.failed.has(evidence.test)
+                : evidence.outside ? result.outside
+                    : !result.done;
+            if (!alsoWithout) {
+                finish(job, verdict);
+                return;
+            }
+            overturned += 1;
+            if (!group.whole)
+                job.waiting.push({ file: group.file, tests: [], cost: group.cost, whole: true });
+            else if (evidence.test)
+                baselineFailed.add(evidence.test);
+        }
+    };
     while (pending.length && !stalled) {
         const used = new Map();
         const round = [];
+        const checks = [];
+        for (const [key, check] of confirmations) {
+            if (check.result || check.running || round.length + checks.length >= perRound)
+                continue;
+            if ((used.get(check.file) ?? 0) >= perFile)
+                continue;
+            used.set(check.file, (used.get(check.file) ?? 0) + 1);
+            check.running = true;
+            checks.push({ key, check });
+        }
         for (const job of pending) {
-            if (round.length >= perRound)
+            if (round.length + checks.length >= perRound)
                 break;
             for (const group of [...job.waiting]) {
-                if (round.length >= perRound || (oneAtATime && round.length))
+                if (round.length + checks.length >= perRound || (oneAtATime && round.length + checks.length))
                     break;
                 if (baselineFailed.has(`${group.file}#file`)) {
                     job.waiting.splice(job.waiting.indexOf(group), 1);
@@ -323,7 +397,26 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 },
             };
         });
-        const outcomes = round.length ? await runRound(assignments, limit) : [];
+        for (const { check } of checks) {
+            const budget = Math.max(...check.claim.tests.map((id) => durationOf.get(id) ?? 1_000), 1_000);
+            limit = Math.max(limit, budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS);
+            assignments.push({ file: check.file, claim: check.claim });
+        }
+        const outcomes = assignments.length ? await runRound(assignments, limit) : [];
+        checks.forEach(({ check }, at) => {
+            const outcome = outcomes[round.length + at];
+            check.running = false;
+            check.tries += 1;
+            if (!outcome.claimed && !stalled && check.tries < 3)
+                return;
+            check.result = {
+                failed: new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test)),
+                outside: outcome.outside.length > 0,
+                // A copy no worker took cannot say the tests fail without
+                // the mutant: the kill stands.
+                done: outcome.done || !outcome.claimed,
+            };
+        });
         round.forEach(({ job, group }, at) => {
             job.open -= 1;
             if (job.done)
@@ -340,10 +433,17 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 return;
             }
             job.ran += outcome.tests.length;
+            const chosen = assignments[at].claim.tests;
+            const kill = (evidence, verdict) => {
+                if (certain(group, chosen, evidence))
+                    finish(job, verdict);
+                else
+                    confirm(job, group, chosen, evidence, verdict);
+            };
             const failed = outcome.tests.find((test) => test.failed && !baselineFailed.has(test.test));
             const outside = baselineFailed.has(`${group.file}#outside`) ? undefined : outcome.outside[0];
             if (!failed && outside) {
-                finish(job, outside.timeout
+                kill({ outside: true }, outside.timeout
                     ? { status: "timeout", reason: "outside any test: the mutant's evaluations passed its limit" }
                     : { status: "killed", killedBy: group.file, reason: `an error outside any test: ${outside.message}` });
             }
@@ -353,19 +453,22 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     job.waiting.push(group);
                     return;
                 }
-                finish(job, { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test });
+                kill({ test: failed.test }, { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test });
             }
             else if (!outcome.done) {
                 // The copy started and its file did not finish: the mutant
                 // broke it while it loaded or ran, or held it past the
                 // round's deadline.
-                finish(job, stalled
-                    ? { status: "timeout", reason: "its test file did not finish by the round's deadline" }
-                    : { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
+                if (stalled)
+                    finish(job, { status: "timeout", reason: "its test file did not finish by the round's deadline" });
+                else
+                    kill({ unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
             }
         });
         for (const job of pending) {
-            if (job.done || job.open || job.waiting.length)
+            if (job.confirming?.length && !job.done)
+                settle(job);
+            if (job.done || job.open || job.waiting.length || job.confirming?.length)
                 continue;
             if (job.later.length) {
                 job.waiting = job.later;
@@ -378,7 +481,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (pending[index].done)
                 pending.splice(index, 1);
         }
-        if (!round.length && pending.length && !stalled) {
+        if (!round.length && !checks.length && pending.length && !stalled) {
             for (const job of pending)
                 finish(job, { status: "error", reason: "could not be scheduled" });
             break;
@@ -388,7 +491,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
         rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
         // left run in the next pass `mutants test` starts.
