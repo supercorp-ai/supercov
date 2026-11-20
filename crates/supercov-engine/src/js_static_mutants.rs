@@ -817,6 +817,18 @@ mod tests {
         );
     }
 
+    /// A token's issued-at check, as a JWT library writes it: seconds from
+    /// the clock in a `const`, compared at the end of an `||` chain inside an
+    /// async arrow.
+    #[test]
+    fn a_seconds_clock_in_a_const_of_an_async_arrow_is_a_clock_operand() {
+        let source = "export const verify = async (token: string, iat: boolean) => {\n  const { payload } = decode(token)\n  const now = Math.floor(Date.now() / 1000)\n  if (iat && payload.iat !== undefined) {\n    if (typeof payload.iat !== 'number' || !Number.isFinite(payload.iat) || now < payload.iat) {\n      throw new Error('iat')\n    }\n  }\n  return payload\n}\n";
+        assert_eq!(
+            ruled(source, StaticFacts::untestable),
+            ["now < payload.iat → <=: clock"]
+        );
+    }
+
     #[test]
     fn a_clock_is_followed_through_two_consts_of_the_same_function_only() {
         // `later` names `now`, which reads the clock: two hops. `latest`
