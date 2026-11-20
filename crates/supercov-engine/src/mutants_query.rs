@@ -660,7 +660,7 @@ pub struct CoverageMutantsQueryOptions<'a> {
     pub limit: usize,
 }
 
-const NO_LIST: &str = "This run did not list its mutants. A JavaScript or TypeScript run lists them unless it is measured with SUPERCOV_MUTANTS=0; a run of another language, or one recorded before Supercov listed mutants, has none. Measure it again without SUPERCOV_MUTANTS=0 to list them.";
+const NO_LIST: &str = "This run has no mutants listed. A JavaScript or TypeScript run lists them from its sources the first time they are asked for, while the sources are as the run measured them; a run of another language has none. supercov mutants measures the checkout again where it changed, and tests its mutants.";
 
 pub fn coverage_mutants_query(
     index: &CoverageIndex<'_>,

@@ -117,7 +117,7 @@ Settings, in the environment of the measured command (supercov docs cli says wha
   SUPERCOV_SOURCE_TOOLS=<names>        run these linters on your files, not the copy
   SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
-  SUPERCOV_MUTANTS=0                   no mutants or their probes
+  SUPERCOV_MUTANTS=1                   list mutants as the run measures, with their probes
 
 Guides:
   supercov docs                        list bundled guides

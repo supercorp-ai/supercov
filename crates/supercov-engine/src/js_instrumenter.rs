@@ -6190,7 +6190,7 @@ fn instrument_candidate_with_binding(
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
-    // The probes (unless SUPERCOV_MUTANTS=0): each relational comparison of
+    // The probes (with SUPERCOV_MUTANTS=1): each relational comparison of
     // the source records whether its operands were less, equal, greater or
     // unordered, and the infection probes whether Stryker's replacement
     // would have differed, beside (never in) the coverage figures. Last of

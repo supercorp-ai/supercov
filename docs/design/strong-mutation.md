@@ -208,7 +208,8 @@ engine's own process (the frontend instruments in process), and
 (`set_strong_mode(None)` defers to the variable). Either is part of the
 instrumented copy's cache key (`probe_options()`), so a strong copy and a
 measured one never share it. Strong mode lists the mutants whatever
-`SUPERCOV_MUTANTS` says.
+`SUPERCOV_MUTANTS` says. A plain run lists none; the plan lists them from the
+sources the run measured (see `docs/design/mutants.md`).
 
 **Addressing a mutant.** A mutant is `(file, index)`: `file` is the key of
 its file in `mutants.json` (its path from the project root, as in mutant

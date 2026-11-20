@@ -38,17 +38,28 @@ A mutant's id is stable across runs: the file, its span, the mutator and the
 replacement. A later strong pass can reuse a result while the file's hash and
 the tests that reach it are unchanged.
 
-### On by default
+### Off in a plain run, listed when asked
 
-Every JavaScript and TypeScript run places the probes and lists its mutants;
-`SUPERCOV_MUTANTS=0` turns both off.
+A plain run places no probe and lists no mutant: measuring coverage costs
+what it did before mutants (listing and linking them made instrumentation
+about 55% slower, every run, whether or not anyone read a mutant). The first
+query about a run's mutants lists them from its sources: each file the run
+measured is instrumented again with its mutants listed and no probe, its code
+thrown away, and the list is kept beside the run (`mutants-listed.json`, part
+of its query index's identity). A file whose points differ from the run's
+changed since: it is left out until the run is measured again, which
+`supercov mutants` does. Without probes, a mutant whose infection needs a
+recorded value is `unknown` and the strong pass runs it (on a private
+application's suites, reach alone gives 9-26% more candidate tests than the
+probes). `SUPERCOV_MUTANTS=1` places the probes and lists the mutants as the
+run measures.
 
 Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
 `valueV2`) is named only once the file has a site of that kind,
 after every other name the file's allocator gives. A file with no site of a
 kind imports nothing for it, and the names of everything else in it are those
 it has with the probes off: a file with no site at all is instrumented byte
-for byte as with `SUPERCOV_MUTANTS=0`.
+for byte as with the probes off.
 
 ### Ids and descriptors
 
@@ -292,7 +303,7 @@ anywhere else, and a hint does not exempt a mutant from the gate.
 
 Beside this shape the reply has `run`; `file` and `line` when one was asked;
 and `note` when there are no mutants, saying why and how to get them (the run
-did not list them: measure it again without `SUPERCOV_MUTANTS=0`). `weak.code` is a
+has none listed, and how to get them). `weak.code` is a
 stable code for the reason, and `weak.proxy` is `true` for an infection that is
 only that the code around it ran (a block or a call removed). `reach` is
 `unknown` where no statement or function point contains the mutant, and for
@@ -524,8 +535,8 @@ one listed it and the other did not, the merge is refused; the same mutant set
 (`stryker-js@10.1.1`) is required too. A file recorded with other bytes keeps
 the first run's list.
 
-A run that listed no mutants (measured with `SUPERCOV_MUTANTS=0`, or before mutants
-were listed) adds no files, and its tests still count: their hits say what ran.
+A run that listed no mutants (a plain run not yet asked for them, or one from
+before mutants were listed) adds no files, and its tests still count: their hits say what ran.
 They recorded no comparison or probe values, though, so their silence is not
 evidence. Their ids go in the merged list's `testsWithoutValues`, and a verdict
 of not-reached or not-infected that reads values, at a mutant whose statement
