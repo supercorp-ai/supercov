@@ -51,7 +51,10 @@ For each listed mutant:
 2. `not-reached`: `survived` is impossible to tell from `NoCoverage`; it is
    recorded as `no-coverage`, as StrykerJS records it. Not run.
 3. `not-infected`: no test infected it, so none can kill it. Recorded as
-   `survived` with the weak reason. Not run.
+   `survived` with the weak reason. Not run -- except where an operand is a
+   clock or random reading (the `untestable` hint, `Math.floor(Date.now() /
+   1000)` included): that this run's values never met says nothing of the
+   next run's, so it runs against the tests that reached it.
 4. `infected` or `unknown`: run, against its **candidate tests**.
 
 A test is a candidate for a mutant when the mutant's weak verdict computed
@@ -63,27 +66,37 @@ it did, and passes as it did. This is the same rule that makes `not-infected`
 a certain survivor (Just, Ernst and Fraser, ISSTA 2014), applied one test at
 a time.
 
+A test's evidence is read with its file's module-load evidence: every test
+of the file runs after its modules loaded. And where a test ran the mutant's
+function but the statement around it ran elsewhere (a method of an exported
+object: the export ran once, in whichever test loaded the module), the
+statement counts as run for that test.
+
 It holds only where a test's evidence is its own. So a test is always a
 candidate, whatever its verdict, when:
 
 - its attribution is not `exact` or `by-time` (`run-wide`, `partial`): its
   silence does not prove it did not run the code;
-- the mutant's code ran in work no test was credited with (a server's
-  start-up, work between tests): that work may be any test's;
+- the mutant's code ran in work no test was credited with: a server's
+  start-up (any test of the run), or work a test file did between its tests
+  -- a later `describe`'s `beforeAll`, an `afterAll`, async work a test left
+  going -- which the Vitest hooks record as the file's setup evidence (every
+  test of that file);
 - it failed, was skipped or was flaky in the measured run: it is not run at
   all (it cannot pass as a baseline), and a mutant whose only candidates are
   such tests is recorded `survived` with that reason.
 
-And a mutant is **static** when it can be evaluated while a module loads
-(StrykerJS's `static`): every test of every file that loaded the module is a
-candidate, and the files run whole.
+And a mutant in module-level code (no function around it) takes every test
+of each file that ran it, whole: a module loaded lazily by one test keeps the
+mutated value for the file's later tests, which never run that code again.
 
 ## Order and early exit
 
-A mutant's candidates run cheapest first by their measured duration, except
-that a test that killed the same mutant in an earlier strong pass, or killed
-a mutant at the same site, goes first. The mutant's run stops at its first
-failing test: that settles `killed`.
+A mutant's candidates are grouped by test file, cheapest file first. It runs
+its cheapest file first; if that leaves it alive, all its other files run in
+the next round at once: the first file kills most killed mutants, and a
+survivor takes two rounds rather than one per file. Within a file a copy stops
+at its first failing test: that settles `killed`.
 
 ## Running many mutants at once without restarting anything (Vitest)
 
@@ -93,11 +106,16 @@ test file's imports. So different files of **one** Vitest run can each have a
 different mutant switched on, and nothing one file does with its mutant can
 reach another file's modules.
 
-The pass therefore schedules rounds. In a round each test file gets at most
-one mutant, and a mutant whose candidates span several files gets all of them
-in the same round. Supercov's setup file reads its file's assignment, switches
-the mutant on before the file's imports run, and skips every test of the file
-that is not a candidate. One round is one call into the resident Vitest
+The pass therefore schedules rounds. A round can run one test file several
+times, each copy with its own mutant: Vitest's pool runs a file listed twice
+twice, each in its own worker (with the worker's own database, where a suite
+gives each worker one). The copies cannot be told apart in Vitest's results,
+which are kept by file path, so each copy claims its assignment from the
+round's directory and reports its tests' outcomes there itself. Supercov's
+setup file switches the copy's mutant on before the file's imports run, and
+skips every test the assignment did not choose. A round holds
+`SUPERCOV_STRONG_ROUND` (default 6) × the workers assignments: a round ends
+when its slowest copy does. One round is one call into the resident Vitest
 instance (`runTestSpecifications`): no new process, no new workers, the
 project's own pool, so a suite that gives each worker its own database keeps
 doing so.
@@ -108,9 +126,10 @@ sharing modules) a round holds one mutant.
 ## Baselines
 
 Skipping tests can change what the remaining tests see (a test that relies on
-an earlier one's state). Each file's candidate selection is first run with no
-mutant; a selection that fails is widened to the whole file, and a file that
-fails whole is reported, its mutants `error`.
+an earlier one's state). Each file is first run with the union of its
+candidates and no mutant; a file where that fails runs whole from then on, and
+only a test that fails with the whole file and no mutant is no kill. A file
+that does not finish without a mutant is reported, its mutants `error`.
 
 ## Timeouts and runaway loops
 
@@ -118,9 +137,14 @@ A mutant's test gets `factor × its measured duration + constant` (defaults
 1.5× and 5 s, as StrykerJS). A mutant switch counts its evaluations; past
 `max(1,000, 10 × the hits seen without the mutant)` it throws a timeout
 error, so a loop the mutant made endless ends in the file's worker rather
-than hanging it. A test that runs out of time is run once more, alone, with
-twice the budget before it counts as `timeout`; an error outside any test is
-run once more too before it counts as a kill.
+than hanging it. A test that runs out of time is run once more with twice
+the budget before it counts as `timeout`. An error no test catches (work a
+test left running, a rejected promise nobody awaited) is the mutant's where
+the file raised none without it: a kill, or a `timeout` where it is the
+switch's own limit. A round past its deadline (twice its time limit plus 30 s:
+a worker that will not end) ends the pass: its unfinished copies are
+timeouts, every verdict so far is saved, and `mutants test` starts another
+pass for the mutants left.
 
 ## Instrumentation
 
@@ -230,6 +254,18 @@ Every verdict is checked against StrykerJS run with `disableBail: true` (all
 killers) on the same mutants: a mutant StrykerJS kills and the pass calls
 `survived` is a soundness violation, and the release keeps their count at 0.
 Speed is measured on the public benchmark in `benchmarks/mutation/`.
+
+Where StrykerJS's kill and the pass disagree, the mutant is applied by hand
+and the suite run as written, whole: StrykerJS runs a covering subset, and a
+subset can kill what the suite as written does not (a test that passes only
+after earlier tests, a fake clock left running into later tests). Such kills
+are artifacts of the subset, not misses. On the benchmark's hono run all
+seven disagreements were of this kind.
+
+Module-level mutants: StrykerJS with `ignoreStatic` switches a mutant on
+after the module loaded, so a module-level constant is never mutated and
+such mutants read `Survived`. The pass switches a file's mutant on before the
+file's imports, mutates them and can kill them.
 
 ## Browser tests against a server (Playwright)
 
