@@ -66,6 +66,8 @@ const mappings = [
     "playwright.mjs",
     "playwrightCacheThread.mjs",
     "playwrightReporter.mjs",
+    "playwrightStrong.mjs",
+    "playwrightStrongReporter.mjs",
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
