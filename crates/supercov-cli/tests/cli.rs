@@ -21730,7 +21730,9 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|mutant| mutant["id"] == "src/registry.js:6:15-8:4:BlockStatement:{}")
+        // `if (built)` to `if (false)`: only the last test, after the second
+        // built, can tell.
+        .find(|mutant| mutant["id"] == "src/registry.js:6:7-6:12:ConditionalExpression:false")
         .unwrap_or_else(|| panic!("{listed}"));
     assert_eq!(throw["strong"]["status"], "killed", "{throw}");
 }
