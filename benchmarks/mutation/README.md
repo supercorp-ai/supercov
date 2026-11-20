@@ -7,7 +7,9 @@ mode can later be measured against the same numbers:
 - **StrykerJS** (`@stryker-mutator/core` and `@stryker-mutator/vitest-runner`), tuned for speed;
 - **mizchi/mutator** (`@mizchi/mutator`), a diff-driven tool for Vitest;
 - a **ground truth**: StrykerJS with `disableBail`, so every covering test runs against every
-  mutant, which gives the full kill matrix (which tests kill which mutant).
+  mutant, which gives the full kill matrix (which tests kill which mutant);
+- **Supercov**'s strong mutation (`supercov -- <tests>`, then `supercov runs latest mutants test`),
+  built from the working tree of the branch under test.
 
 Nothing here is a dependency of Supercov. Every tool is installed inside the CI job, into the
 cloned project.
@@ -23,6 +25,8 @@ For each project and tool, each in a job of its own:
 | `truth` | StrykerJS as in `stryker-cold` with `disableBail: true`; large projects are split into shards of files or line ranges (see below). |
 | `pr-stryker` | A StrykerJS run with `--incremental` on the unedited project (the warm-up), then the scripted edit, then StrykerJS with `mutate` limited to the changed lines (cold), then StrykerJS `--incremental` from the warm-up's file (warm). |
 | `pr-mutator` | A full mutator run on the unedited project (the warm-up, a second cold sample), then the edit committed, then `mutator --since HEAD~1` without a snapshot (cold) and with the warm-up's snapshot (warm). |
+| `supercov-cold` | `supercov -- <the project's test command>` (measure: per-test coverage and weak mutation), then `supercov runs latest mutants test --json` (the strong pass: each infected mutant against only the tests that infected it). Measure and strong pass are timed separately. A project that needs it sets `supercovShards`, and each job then measures and runs `--shard k/n` of the strong pass. |
+| `pr-supercov` | The edit committed, then measure (as a PR's CI would, with no earlier run), then `mutants test --diff HEAD~1`. |
 
 Each measured phase records wall time, CPU seconds and peak RSS (GNU `time -v`: the process and
 every descendant it waited for), the exit code, and the full log with a timestamp on every line.
@@ -90,6 +94,7 @@ integration-style ones.
 | mizchi/mutator | 0.5.0 (`@mizchi/mutator`, published 2026-11-19) |
 | Vitest | the project's own for StrykerJS; 5.1.1 for mutator where the project is on Vitest 4 or older |
 | pnpm | the project's own (`packageManager`) |
+| Supercov | the binary built from the working tree (`cargo build --profile measure -p supercov`, 4.28.0, at `6049a02f` plus uncommitted changes), run through the published npm wrapper `supercov@4.28.0` with `SUPERCOV_RUST_BINARY`; each job records the build key, a hash of `crates/`, `runtime/`, `Cargo.*` and `rust-toolchain.toml` |
 
 Vitest changes made inside the jobs, and recorded in each job's `result.json`:
 
@@ -100,6 +105,12 @@ Vitest changes made inside the jobs, and recorded in each job's `result.json`:
   5.0.12, which Vitest 5 cannot load. The other projects run StrykerJS on their own Vitest (4.x, or 5.x for hono
   and tRPC). StrykerJS 10.1 supports Vitest 5; 10.0 did not, which is why mizchi/mutator's
   benchmark ran StrykerJS on Vitest 4.
+
+Supercov runs on each project's own Vitest (4.x for the unjs libraries, 5.x for hono and tRPC).
+scule runs twice: on its own Vitest 1.5.3 (variant `own-vitest`) and on Vitest 5.1.1 with Vite
+8.3.8, as its StrykerJS jobs do. Supercov instruments only
+the mutate set: `SUPERCOV_SOURCE_ROOTS` lists the mutate set's files, and only those mutants are
+counted.
 
 Tool settings changed for one project, also recorded in `result.json` notes:
 
@@ -143,6 +154,8 @@ A run that cannot finish in one job is split:
 - **tRPC cold runs**: StrykerJS in 8 file shards (`coldShards`), mutator in 10 jobs of its own
   `--shard i/10` partition (`mutatorColdShards`). Wall and CPU seconds are summed over the shards,
   so they include each shard's set-up and dry run (StrykerJS's is 90 s here, see below).
+- **Supercov strong pass** (`supercovShards`): hono 3 ways, tRPC 32 ways (`--shard k/n`, every
+  n-th mutant to run from the k-th). Each job measures again before its part of the strong pass.
 - **tRPC PR scenario** (`prMutate`): the warm-up and PR runs cover the edited file and its small
   siblings in `unstable-core-do-not-import/http/` (about 140 StrykerJS mutants): mutator needed
   8 minutes for the 390 mutants of `http/` without `resolveResponse.ts`.
@@ -152,10 +165,19 @@ A run that cannot finish in one job is split:
 From the repository root, with a runner label for 16-vCPU machines:
 
 ```sh
+# 0. for the Supercov scenarios: build the binary from this tree in one run, keyed by a hash of the tree
+KEY=$(git ls-files -co --exclude-standard -- crates runtime Cargo.toml Cargo.lock rust-toolchain.toml | sort | xargs shasum | shasum | cut -c1-16)
+node benchmarks/mutation/build-workflow.mjs --runs-on <64-vCPU label> > .github/workflows/mutation-bench-build.yml
+#    run it with the variable SUPERCOV_BIN_KEY=$KEY; the benchmark run below gets the same variable,
+#    and its Supercov jobs restore the binary from the CI cache by that key (matrix jobs cannot
+#    depend on a build job in the same run on every CI service)
+
 # 1. the workflow (one job per project x scenario x shard)
 node benchmarks/mutation/workflow.mjs --runs-on <16-vCPU label> --truth-runs-on <16-vCPU, 64 GiB+ label> \
   > .github/workflows/mutation-bench.yml
-#    --projects defu,ufo, --scenarios stryker-cold,truth and --shards s2,s6 narrow it
+#    --projects defu,ufo, --scenarios stryker-cold,truth and --shards s2,s6 narrow it; --variants round-2,round-6 runs Supercov jobs
+#    at those SUPERCOV_STRONG_ROUND settings. The CI service used here takes at most 64 jobs per
+#    run from a computer, so the full matrix (about 140 jobs) goes in several runs by --projects
 
 # 2. run it on a workflow_dispatch-capable CI service, then download every artifact
 #    (mutation-bench-<project>-<scenario>[-<shard>]) into one directory
@@ -177,15 +199,15 @@ To re-plan shards after a corpus change:
 examples of every verdict disagreement; `jobs/` each job's `result.json`. In short (wall seconds on
 one 16-vCPU machine; tRPC's full runs are summed over their shards):
 
-| project | StrykerJS cold | mutator cold | ground truth | PR, cold: Stryker lines / mutator `--since` | PR, warm: Stryker `--incremental` / mutator `--since` |
-|---|---:|---:|---:|---:|---:|
-| defu | 3.4 | 3.9 | 3.5 | 1.7 / 1.5 | 1.7 / 1.5 |
-| scule | 2.9 | 6.8 | 3.9 | 1.4 / 1.6 | 1.7 / 1.5 |
-| cookie-es | 10.4 | 17.7 | 11.4 | 1.7 / 1.3 | 1.9 / 1.2 |
-| pathe | 10.8 | 18.9 | 14.4 | 2.0 / 1.9 | 3.4 / 1.9 |
-| ufo | 16.9 | 33.1 | 27.9 | 2.5 / 2.2 | 2.9 / 2.0 |
-| hono | 258.5 | 301.4 | 1,192 (6 shards) | 27.6 / 12.4 | 37.9 / 11.7 |
-| tRPC | 2,782 (8 shards) | 3,446 (10 shards) | 10,762 (34 shards) | 93.0 / 21.9 | 94.5 / 2.8 |
+| project | StrykerJS cold | mutator cold | Supercov cold (measure + strong) | ground truth | PR, cold: Stryker lines / mutator `--since` | PR, warm: Stryker `--incremental` / mutator `--since` | PR: Supercov measure / `--diff` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| defu | 3.4 | 3.9 | 2.8 | 3.5 | 1.7 / 1.5 | 1.7 / 1.5 | 1.2 / 0.9 |
+| scule | 2.9 | 6.8 | 2.7 | 3.9 | 1.4 / 1.6 | 1.7 / 1.5 | 1.0 / 0.8 |
+| cookie-es | 10.4 | 17.7 | 11.8 | 11.4 | 1.7 / 1.3 | 1.9 / 1.2 | 0.7 / 0.9 |
+| pathe | 10.8 | 18.9 | 13.8 | 14.4 | 2.0 / 1.9 | 3.4 / 1.9 | 3.3 / 1.5 |
+| ufo | 16.9 | 33.1 | 25.5 | 27.9 | 2.5 / 2.2 | 2.9 / 2.0 | 1.1 / 1.4 |
+| hono | 258.5 | 301.4 | 1,220 (strong pass 6 shards) | 1,192 (6 shards) | 27.6 / 12.4 | 37.9 / 11.7 | 9.0 / 23.3 |
+| tRPC | 2,782 (8 shards) | 3,446 (10 shards) | 9,150 (strong pass 32 shards) | 10,762 (34 shards) | 93.0 / 21.9 | 94.5 / 2.8 | 22.9 / 7.7 |
 
 - **Verdicts.** On the mutants both tools generate, the two cold runs agree with each other and
   with the ground truth everywhere in the five libraries. On hono mutator calls 3 mutants in
@@ -219,9 +241,148 @@ Where the time goes:
   `--since` runs only the diff's mutants but pays a full dry run; StrykerJS's warm
   `--incremental` run still instruments and dry-runs the whole PR scope.
 
+### Supercov
+
+Supercov cold rows come from one binary: `6049a02f` plus the working tree (build key
+`f155046dc49afc31`, built in run 6615399405765448), at the default strong-round size (twice the
+Vitest workers), all in CI run 6892707219384574. The PR column is from the previous binary
+(`8342afac`, key `6176aa9dd959d1da`, run 4982353503892003), whose changes since affect only the
+strong pass's after-the-tests check. Wall seconds; hono's and tRPC's strong pass are summed over
+their shards (6 and 32), each of which measured again (one job's measure is shown).
+
+| project | measure s | strong pass s | total s | StrykerJS cold s | mutants | statuses | score on joined (Supercov / truth, mutants) | disagreements with the ground truth | PR: measure / `--diff` s, mutants run |
+|---|---:|---:|---:|---:|---:|---|---|---|---|
+| defu | 0.9 | 1.9 | 2.8 | 3.4 | 103 | K87 S16 | 84.5 / 84.5 (103) | 0 | 1.2 / 0.9, 6 |
+| scule (Vitest 5.1.1) | 1.1 | 1.6 | 2.7 | 2.9 | 78 | K73 S5 | 93.6 / 93.6 (78) | 0 | 1.0 / 0.8, 1 |
+| scule (own Vitest 1.5.3) | 1.5 | 2.7 | 4.2 | 2.9 | 78 | K73 S5 | 93.6 / 93.6 (78) | 0 | 1.3 / 1.0, 1 |
+| cookie-es | 0.9 | 10.8 | 11.8 | 10.4 | 691 | K573 T32 S84 NC2 | 87.5 / 87.5 (691) | 0 | 0.7 / 0.9, 6 |
+| pathe | 3.5 | 10.3 | 13.8 | 10.8 | 490 | K425 T4 S60 NC1 | 87.5 / 87.5 (488) | 0 | 3.3 / 1.5, 9 |
+| ufo | 1.1 | 24.4 | 25.5 | 16.9 | 926 | K753 T11 S141 NC21 | 82.5 / 82.5 (926) | 0 | 1.1 / 1.4, 17 of 18 |
+| hono | 9.4 | 1,211 (6 shards) | 1,220 | 258.5 | 4,295 | K3632 T87 S498 NC78 | 86.6 / 86.6 (4,290) | 7 ground-truth artifacts; 5 Supercov false kills | 9.0 / 23.3, 11 |
+| tRPC | 22.4 | 9,128 (32 shards) | 9,150 | 2,782 | 2,688 | K1868 T198 S490 NC119 RE13 | 77.0 / 77.1 (2,646) | 1 ground-truth artifact (`withPing.ts:37`, StrykerJS hit-limit heuristic), 1 flaky | 22.9 / 7.7, 1 |
+
+**Disagreements, classified.**
+
+- Five libraries and scule (both Vitest versions): none.
+- hono, 7 "soundness violations": all **ground-truth artifacts** (diagnosis below): `smart-router/router.ts:14:24` and `:15:7`, `jwt.ts:156:77`, `html.ts:63`, `:76`, `:81` and `:161`.
+- hono, 5 extra kills (Supercov killed, ground truth survived or NoCoverage): all **Supercov false kills**. Diagnosed with plain Vitest in run 6026863845292028 and 4897865421927113 (`diag/hono-extra.sh`):
+  - `smart-router/router.ts:14:9` `!this.#routes` to `false`: Supercov ran one test, `hono.test.ts > c.var - with testing types > Should be a read-only`, which fails when run alone **without any mutant** (it needs the earlier tests of its `describe` to have built the router). With the mutant the whole file passes (225).
+  - `html.ts:100:7` `match === -1` to `false`, `html.ts:100:17` `-1` to `+1` and `html.ts:157:7` `typeof str === 'object'` to `true`: the killer, `components.test.tsx > ErrorBoundary > streaming > no error`, likewise fails without any mutant when run without the file's earlier tests. With each mutant, `components.test.tsx` passes whole (45) and so does the entire suite (5,010).
+  - `html.ts:83:64` `[]` to `["Stryker was here"]`: the killer, `streaming.test.tsx > … > render to stream`, passes with the mutant alone, in its file (46) and in the entire suite. Cause not found.
+
+  So four of the five come from running an order-dependent test without its predecessors (the baseline-widening rule did not catch these selections), and one is unexplained.
+- tRPC `stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false`: a **ground-truth artifact** (StrykerJS's hit-limit heuristic), not a Supercov miss. Diagnosed in runs 6026863845292028, 6222063720211872 (`diag/trpc-withping.sh`):
+  - StrykerJS's report says "Hit limit reached (8224/4100)": its limit is 100 times the 41 evaluations it saw in the dry run, and a Timeout is its verdict for passing it, not a hang.
+  - With plain Vitest and no mutation tool, the two covering files pass with the mutant in 1.7 s (1.7 s without). Each covering test takes about twice as long: 97–131 ms against 51–61 ms for the five heartbeat tests, and 144–155 ms against 6–8 ms for `e2e, withPing`.
+  - Line 37 is evaluated about 45,350 times with the mutant against 8 without it, all during the tests. The generator keeps yielding after its iterator is done until the response is closed, and nothing is left running afterwards.
+  - Supercov ran it in two copies, `e2e, withPing` (1 test) and the five heartbeat tests, after a passing no-mutant baseline (round 0). Each copy reported `claimed`, every test `failed: false`, and `done`. The "54 s" earlier is the strong pass's time for the round, shared by every mutant in it.
+  - The mutant's ~45,000 evaluations stay under Supercov's hit limit (1,000,000 by default). The design note's `max(1,000, 10 × measured hits)` would be about 1,000 here and would have stopped it, but this binary did not.
+  - mutator calls it Killed (by `merged one preserves JSONL headers and heartbeats`).
+- tRPC `http/contentType.ts:109:7-110:39:LogicalOperator:||`: **flaky** ground-truth kill (one test; StrykerJS's cold run and mutator call it survived too).
+- tRPC extra kills: **none**. The previous binary's 105 false kills (reason "the test file did not finish", 130 of its 189 such verdicts credited to `websockets.lazyInactivityTimer.test.ts`) are gone. 62 mutants still carry that reason (58 killed, 4 timeout; credited to `inferenceHelpers.test.ts` 33, `issue-5034-input-with-index-signature.test.ts` 13, `expressRawBodyParser.test.ts` 8, two other files), and all of them agree with the ground truth.
+
+**Diagnosis of hono's seven** (binary `568217e7`, key `62219e9f2b81e21b`). CI run 7222499611771269
+kept every strong round (`SUPERCOV_STRONG_KEEP_ROUNDS=1`); `diag/strong-rounds.mjs` reads them.
+Run 8634879108287974 (`diag/hono-order.sh`) applied each mutant by hand and ran plain Vitest. For
+every mutant, the plan's `index` names the same mutant in the strong copy's
+`frontend-evidence/mutants.json` (router 8 and 9, html 14, 32, 42 and 115, jwt 160).
+
+- **`smart-router/router.ts:14:24` BlockStatement and `:15:7` CallExpression.**
+  - `Should be a read-only` is a candidate. It ran with each mutant switched on, in the whole
+    `src/hono.test.ts` (round 10 and round 12, 225 tests, `wholeFile: true`), and reported
+    `failed: false`. No test of any of the 58 copies failed. Round 0 (no mutant) passed too.
+  - With the throw removed, `this.#routes.push(...)` on the built router's `undefined` routes
+    throws a TypeError, so `expect(...).toThrow()` still passes.
+  - StrykerJS's covering set for the block is that test alone. Run alone, it **fails without any
+    mutant** (`1 failed | 224 skipped`): it depends on earlier tests in its `describe` building the
+    router (`app.request(...)`).
+  - The whole file passes with the mutant (225 passed). StrykerJS's kill comes from running an
+    order-dependent test without its predecessors.
+- **`jwt.ts:156:77` `<=` (`now < payload.iat`).**
+  - With this binary the mutant has the `clock` hint (`untestable: clock`, "an operand is a clock
+    reading: they differ only on one exact millisecond") and the plan runs it (`decided: null`,
+    121 candidates, reason `unknown`). The binary of `2e394f5a` had decided it.
+  - It ran in round 8 (`jwt.test.ts`, 73 tests), including `JwtTokenIssuedAt` and the `iat =
+    Infinity` test, and nothing failed. It survived.
+  - `JwtTokenIssuedAt` sets a fake clock to 1633046400 and never restores it. The `iat = Infinity`
+    test restores real timers before the `JwtTokenIssuer` tests, whose tokens carry
+    `iat: 1633046400`.
+  - StrykerJS's covering set has `JwtTokenIssuedAt` but not the `Infinity` test (its `iat` check
+    short-circuits before the comparison). In that subset the fake clock leaks, `now == iat`, and
+    the five `JwtTokenIssuer` tests fail with the mutant. Run by hand: that subset kills it (5
+    failed), and the whole file passes (98 passed).
+- **`html.ts:63` (`i < 0` to `<=`), `:76` and `:81` (`typeof r === 'object'` to `true`), and
+  `:161` (`instanceof Promise` to `true`).**
+  - `render to stream` is not a candidate for these four. Its measured evidence does reach the
+    lines: it is an infected candidate of `:63` `true`/`false`/`>=`, `:76` `false`/`!==`, `:81`
+    `false`/`!==` and `:161` `false`. But for it the condition was always true (`:76`, `:81`,
+    `:161`), and `i` never 0 (`:63`), so these four replacements cannot change its run.
+  - Round 0 ran `streaming.test.tsx` (46 tests) and passed.
+  - Applied by hand, each of the four passes `render to stream` alone, the whole
+    `streaming.test.tsx` and the entire suite (5,010 passed).
+  - StrykerJS's kill with that test does not reproduce outside StrykerJS's run, so the
+    difference is in how StrykerJS's mutated program runs, not in the tests.
+
+So none of hono's seven is a Supercov soundness violation. Each is a StrykerJS "kill" that the
+suite, run in its own order or in full, does not make: two need a test run without its
+predecessors, one needs a fake clock leaked from a test whose clean-up was skipped, and four do
+not reproduce outside StrykerJS.
+
+**Static (module-level) mutants**, joined to the ground truth:
+
+- pathe 62: Supercov K48 S14, ground truth K46 S14 RE2. The two RuntimeErrors are Supercov's kills.
+- hono 320: Supercov K299 T1 S20, ground truth K269 T26 S24 RE1.
+- tRPC 399: Supercov K290 T20 S87 RE2, ground truth K212 T92 S87 RE8 (the same 87 survive in both).
+- defu 2 and ufo 5: same verdicts.
+
+**Where the time goes** (strong pass per mutant it ran, wall / CPU):
+
+| | this binary (`6049a02f`) | previous (`8342afac`) | StrykerJS mutant phase, per mutant |
+|---|---|---|---:|
+| defu, scule, cookie-es, pathe, ufo | 16–28 ms / 121–212 ms (scule on Vitest 1.5.3: 35 / 286) | 39–66 ms / 118–251 ms | 12–17 ms |
+| hono | 296 / 941 ms | 430 / 892 ms | 51 ms |
+| tRPC | 3.7 / 11.9 s | 3.8 / 11.6 s | 0.76 s |
+
+- The short 25 ms probe removed most of the previous binary's slowdown: the libraries are back to
+  within 15% of their first measurement (ufo 24.4 s against 21.4 s with `2e394f5a`), and hono's
+  6 strong-pass jobs take at most 212 s each.
+- hono is still 13% slower per mutant than with `2e394f5a` (296 ms against 264), and 5.8 times
+  StrykerJS's mutant phase; tRPC 5 times.
+- Measure costs the plain test run plus 0.5–2.9 s.
+- Three tRPC shards (5, 23, 25) end a pass at its deadline and finish in the next; no job is lost.
+
+**Strong-round size**, measured with the earlier binary of `0331242b` (key `92c60964ce6caf76`;
+CI runs 6150252416259884 and 6687871227236369), each setting a full cold run:
+
+| project | setting | strong pass s (sum of shards) | strong ms per mutant run, wall / CPU | StrykerJS mutant phase, ms per mutant | verdicts different from setting 6 |
+|---|---|---:|---|---:|---|
+| hono | 2 | 1,104 | 269 / 907 | 51 | 3 (all Killed vs Timeout) |
+| hono | 6 | 1,124 | 274 / 1,083 | 51 | – |
+| hono | 12 | 886 | 216 / 1,139 | 51 | 16 (all Killed vs Timeout) |
+| tRPC | 2 | 8,931 | 3,663 / 11,740 | 755 | 19: 18 Killed vs Timeout, 1 detected vs not (below) |
+| tRPC | 6 | 8,594 | 3,525 / 14,365 | 755 | – |
+
+- Larger rounds trade CPU for wall time: hono's setting 12 is 21% faster than 6, tRPC's 6 is 4%
+  faster than 2.
+- Per mutant, hono's strong pass is still about 5 times StrykerJS's mutant phase, and tRPC's
+  about 5 times.
+- The only change of detected versus undetected across settings is tRPC
+  `rpc/codes.ts:68:4-68:10:UnaryOperator:+` (`[-32029]` key of the error-code map to
+  `[+32029]`, a static mutant). Setting 6 killed it with `links.test.ts > batching > batching on
+  maxURLLength` after 332 tests; setting 2 calls it survived after 938 tests; StrykerJS's cold
+  run and ground truth call it survived. It is likely a timing-sensitive test failing under the
+  heavier round, so a flaky kill rather than a real one.
+
+Diagnosis runs for the last two findings: 6026863845292028, 6222063720211872 and 4897865421927113 (build 7585433971020896, binary `5e47d81d`).
+
 CI runs used for these results: 7918046463203622 (all projects), 6816238857423170 (scule),
 8402334254856692 (hono PR, StrykerJS), 6506939654971330 (tRPC PR), 7095666567225085,
-7210302856247792, 8297132922154682 and 6783811573326500 (tRPC full runs and ground truth).
+7210302856247792, 8297132922154682 and 6783811573326500 (tRPC full runs and ground truth),
+6615399405765448 (Supercov build) and 6892707219384574 (Supercov cold runs), 4982353503892003
+(Supercov PR runs). Earlier Supercov binaries, kept for the history above: builds 5656720915005855, 8047260535649989,
+4535161164572003 and 5306559846578190; runs 8315113977722139, 6376777667608942,
+5925894578908004, 6328770082850449, 5483861312150401, 8608543604157054, 6150252416259884 and 6687871227236369;
+diagnosis 7222499611771269 and 8634879108287974.
 
 ## Files
 
@@ -234,6 +395,9 @@ CI runs used for these results: 7918046463203622 (all projects), 681623885742317
 | `workflow.mjs` | prints the matrix workflow |
 | `plan-shards.mjs` | splits a mutate set into ground-truth or cold-run shards |
 | `summarize.mjs` | artifacts to `results/<date>/summary.json` and `summary.md` |
+| `supercov-join.mjs` | reads Supercov's mutants and joins them to StrykerJS's (used by `summarize.mjs`) |
+| `build-workflow.mjs` | prints the workflow that builds the Supercov binary and caches it by key |
+| `diag/hono-order.sh`, `diag/strong-rounds.mjs`, `diag/hono-extra.sh`, `diag/trpc-withping.sh`, `diag/diag-*.sh` | the diagnoses of disputed mutants: hand-applied mutants under plain Vitest, evaluation counts, and Supercov's kept strong rounds (`shell-diag` and `supercov-diag` scenarios) |
 | `results/<date>/` | a run's summary and every job's `result.json` |
 
 ## Caveats

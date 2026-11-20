@@ -4,7 +4,9 @@
     "node": "24",
     "stryker": "10.1.1",
     "mutator": "0.5.0",
-    "vitestForMutator": "5.1.1"
+    "vitestForMutator": "5.1.1",
+    "supercovWrapper": "4.28.0",
+    "supercovBuild": "cargo build --profile measure -p supercov, from the working tree of the branch under test"
   },
   "projects": [
     {
@@ -45,7 +47,12 @@
       "vitestUpgradeAlso": [
         "vite@8.3.8"
       ],
-      "vitestUpgradeAlsoReason": "scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)"
+      "vitestUpgradeAlsoReason": "scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)",
+      "supercovVitest": "5.1.1",
+      "supercovVitestReason": "as StrykerJS's ground truth uses; the own-vitest variant runs Supercov on scule's Vitest 1.5.3",
+      "supercovVariants": [
+        "own-vitest"
+      ]
     },
     {
       "name": "cookie-es",
@@ -209,7 +216,23 @@
       "mutatorArgsReason": "mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts",
       "patch": "patches/hono.patch",
       "edit": "getPath: '?'/'#' char codes written as hex literals (refactor on the routing hot path; every request test covers it)",
-      "shardsNote": "planned by plan-shards.mjs from a StrykerJS cold report: 2658682 test runs under disableBail split 6 ways"
+      "shardsNote": "planned by plan-shards.mjs from a StrykerJS cold report: 2658682 test runs under disableBail split 6 ways",
+      "supercovShards": 6,
+      "groundTruthArtifacts": {
+        "src/router/smart-router/router.ts:14:24-16:6:BlockStatement:{}": "StrykerJS ran 'Should be a read-only' without the earlier tests of its describe that build the router; alone the test fails with no mutant, and the whole file passes with the mutant (diag/hono-order.sh)",
+        "src/router/smart-router/router.ts:15:7-15:56:CallExpression:empty": "StrykerJS ran 'Should be a read-only' without the earlier tests of its describe that build the router; alone the test fails with no mutant, and the whole file passes with the mutant (diag/hono-order.sh)",
+        "src/utils/jwt/jwt.ts:156:77-156:94:EqualityOperator:<=": "StrykerJS's covering set leaves out the test that restores real timers, so JwtTokenIssuedAt's fake clock (never restored) leaks into the JwtTokenIssuer tests; that subset kills it, the whole file passes (diag/hono-order.sh)",
+        "src/utils/html.ts:63:9-63:14:EqualityOperator:<=": "does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)",
+        "src/utils/html.ts:76:9-76:30:ConditionalExpression:true": "does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)",
+        "src/utils/html.ts:81:16-81:37:ConditionalExpression:true": "does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)",
+        "src/utils/html.ts:161:9-161:61:ConditionalExpression:true": "does not reproduce outside StrykerJS: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-order.sh)",
+        "src/router/smart-router/router.ts:14:9-14:22:ConditionalExpression:false": "supercov-false-kill: Supercov ran 'Should be a read-only' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
+        "src/utils/html.ts:100:7-100:19:ConditionalExpression:false": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
+        "src/utils/html.ts:100:17-100:19:UnaryOperator:+": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
+        "src/utils/html.ts:157:7-157:30:ConditionalExpression:true": "supercov-false-kill: Supercov ran 'ErrorBoundary > streaming > no error' without the earlier tests it depends on; that test fails run alone without any mutant, and its whole file passes with the mutant (diag/hono-extra.sh)",
+        "src/utils/html.ts:83:64-83:66:ArrayDeclaration:[\"Stryker was here\"]": "supercov-false-kill: applied by hand, the mutant passes 'render to stream' alone, its file and the whole suite (diag/hono-extra.sh); cause not found"
+      },
+      "supercovShardsNote": "6 ways: with 3, every shard's strong pass ran past the job budget with the binary of 4a0647f5"
     },
     {
       "name": "trpc",
@@ -618,7 +641,14 @@
       },
       "prMutateNote": "the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
       "mutatorColdShards": 10,
-      "mutatorColdShardsNote": "mutator runs its own --shard i/10 partition: with 8, two of the partitions needed more than 8 minutes"
+      "mutatorColdShardsNote": "mutator runs its own --shard i/10 partition: with 8, two of the partitions needed more than 8 minutes",
+      "supercovShards": 32,
+      "supercovShardsNote": "32 ways: with 24 (binary of fdbdc8d4) six shards ran out of time, three of them in a hung fork worker",
+      "groundTruthArtifacts": {
+        "packages/server/src/unstable-core-do-not-import/http/contentType.ts:109:7-110:39:LogicalOperator:||": "flaky: only the ground truth kills it, with one test (httpSubscriptionLink.test.ts > iterable event with bad yield); StrykerJS's cold run and mutator call it survived",
+        "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false": "StrykerJS's Timeout is its hit-limit heuristic ('Hit limit reached (8224/4100)': 100 times the 41 dry-run evaluations); with plain Vitest the mutant's tests pass, about twice as slow, after about 45,000 evaluations of the line against 8 without it (diag/trpc-withping.sh)"
+      },
+      "supercovNote": "the binary of 8342afac 'killed' 189 tRPC mutants with the reason 'the test file did not finish', 105 of them false (survived or NoCoverage in the ground truth); with 6049a02f none of the 62 remaining such verdicts disagrees with the ground truth"
     }
   ]
 }

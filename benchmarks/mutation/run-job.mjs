@@ -19,12 +19,20 @@
 //                  then Stryker --incremental from the base run's file (warm)
 //   pr-mutator     cold base run, then the edit committed; mutator --since HEAD~1 without
 //                  a snapshot (cold), then with the base run's snapshot (warm)
+//   supercov-cold  Supercov: measure the project's test command (per-test coverage and weak
+//                  mutation), then `mutants test` (the strong pass); with --shard K, only
+//                  `--shard K/n` of the strong pass, n = the project's "supercovShards"
+//   pr-supercov    the edit committed, then measure, then `mutants test --diff HEAD~1`
+//
+// Supercov runs through the published npm wrapper, installed outside the clone, with
+// SUPERCOV_RUST_BINARY pointing at a binary built from the working tree (the workflow
+// restores it and passes its path as SUPERCOV_BENCH_BINARY).
 //
 // Runs on a CI machine, never locally: it installs packages into the clone.
 // Node only, no dependencies.
 
 import { spawn, execSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, createWriteStream } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, globSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, createWriteStream } from 'node:fs';
 import { availableParallelism, cpus, totalmem, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,15 +47,17 @@ const { values: args } = parseArgs({
     out: { type: 'string' },
     work: { type: 'string' },
     budget: { type: 'string' },
+    variant: { type: 'string' },
   },
 });
 const corpus = JSON.parse(readFileSync(join(here, 'corpus.json'), 'utf8'));
 const project = corpus.projects.find((p) => p.name === args.project);
 if (!project) throw new Error(`unknown project ${args.project}`);
 const scenario = args.scenario;
-const SCENARIOS = ['stryker-cold', 'mutator-cold', 'truth', 'pr-stryker', 'pr-mutator'];
+const SCENARIOS = ['stryker-cold', 'mutator-cold', 'truth', 'pr-stryker', 'pr-mutator', 'supercov-cold', 'pr-supercov', 'supercov-diag', 'shell-diag'];
 if (!SCENARIOS.includes(scenario)) throw new Error(`unknown scenario ${scenario}`);
 const out = resolve(args.out ?? 'out');
+const out_ = out;
 mkdirSync(out, { recursive: true });
 const workRoot = resolve(args.work ?? process.env.RUNNER_TEMP ?? tmpdir(), 'mutation-bench');
 const clone = join(workRoot, project.name);
@@ -60,6 +70,7 @@ const result = {
   project: project.name,
   scenario,
   shard: args.shard ?? null,
+  variant: args.variant || null,
   commit: project.commit,
   startedAt: new Date(started).toISOString(),
   machine: machine(),
@@ -305,6 +316,97 @@ function collectReport(name, file, record) {
   save();
 }
 
+/** The project's mutate set as files, for SUPERCOV_SOURCE_ROOTS. */
+function mutateFiles() {
+  const excluded = new Set(project.mutate.exclude.flatMap((g) => globSync(g, { cwd: clone })));
+  return [...new Set(project.mutate.include.flatMap((g) => globSync(g, { cwd: clone })))].filter((f) => !excluded.has(f)).sort();
+}
+
+let supercov = null;
+
+async function installSupercov() {
+  const binary = process.env.SUPERCOV_BENCH_BINARY;
+  if (!binary || !existsSync(binary)) throw new Error(`SUPERCOV_BENCH_BINARY (${binary}) is not a file`);
+  const prefix = join(workRoot, 'supercov-cli');
+  mkdirSync(prefix, { recursive: true });
+  await phase('tool-install', `npm i --prefix ${prefix} --no-audit --no-fund supercov@${corpus.tools.supercovWrapper} >/dev/null && ls ${prefix}/node_modules/.bin`, { cwd: workRoot });
+  if (project.supercovVitest && args.variant !== 'own-vitest') await upgradeVitest(project.supercovVitest, project.supercovVitestReason);
+  if (args.variant === 'own-vitest') note(`variant own-vitest: Supercov on the project's own Vitest ${project.vitest}`);
+  const round = args.variant?.match(/^round-(\d+)$/);
+  if (round) {
+    process.env.SUPERCOV_STRONG_ROUND = round[1];
+    note(`variant round-N: SUPERCOV_STRONG_ROUND set per job (assignments per Vitest worker in a strong round)`);
+  }
+  process.env.SUPERCOV_RUST_BINARY = binary;
+  process.env.SUPERCOV_SOURCE_ROOTS = mutateFiles().join(',');
+  supercov = `${prefix}/node_modules/.bin/supercov`;
+  result.versions.supercovWrapper = corpus.tools.supercovWrapper;
+  try {
+    result.versions.supercov = execSync(`${supercov} --version`, { cwd: clone, encoding: 'utf8' }).trim();
+  } catch (error) {
+    result.versions.supercov = `--version failed: ${String(error.message).split('\n')[0]}`;
+  }
+  result.versions.supercovBinaryKey = process.env.SUPERCOV_BENCH_BINARY_KEY ?? null;
+  note(`Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its ${process.env.SUPERCOV_SOURCE_ROOTS.split(',').length} files`);
+}
+
+/** The latest run's directory under .supercov/runs. */
+function latestRunDir() {
+  const root = join(clone, '.supercov', 'runs');
+  if (!existsSync(root)) return null;
+  const dirs = readdirSync(root).map((d) => join(root, d)).filter((d) => statSync(d).isDirectory());
+  dirs.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  return dirs[0] ?? null;
+}
+
+async function supercovMeasure() {
+  const debug = process.env.SUPERCOV_BENCH_DEBUG_GLOBS;
+  if (debug) process.env.SUPERCOV_KEEP_WORKSPACE = '1';
+  const record = await phase('supercov-measure', `${supercov} -- node_modules/.bin/${project.test}`, { allowFail: true });
+  if (debug) {
+    // Diagnosis only: copy files of the kept workspace (globs relative to .supercov/) into the output.
+    const base = join(clone, '.supercov');
+    const files = debug.split(',').flatMap((g) => globSync(g, { cwd: base }));
+    for (const file of files.slice(0, 50)) {
+      const from = join(base, file);
+      if (!statSync(from).isFile()) continue;
+      const to = join(out_, 'debug', file);
+      mkdirSync(dirname(to), { recursive: true });
+      writeFileSync(to, readFileSync(from).subarray(0, 4 << 20));
+    }
+    record.debugFiles = files.length;
+    mkdirSync(join(out_, 'debug'), { recursive: true });
+    try {
+      execSync(`find .supercov -maxdepth 8 \\( -name '*.jsonl' -o -type d -maxdepth 5 \\) | head -400 > ${join(out_, 'debug', 'listing.txt')}`, { cwd: clone, stdio: 'ignore' });
+    } catch {}
+  }
+  const run = latestRunDir();
+  record.runDir = run ? run.slice(clone.length + 1) : null;
+  save();
+  return record;
+}
+
+async function supercovStrong(name, flags) {
+  const out = join(out_, `${name}.result.json`);
+  const record = await phase(name, `${supercov} runs latest mutants test --json ${flags.join(' ')} > ${out}`, { allowFail: true });
+  record.result = existsSync(out) ? `${name}.result.json` : null;
+  const run = latestRunDir();
+  if (run && existsSync(join(run, 'strong-mutation.json'))) {
+    copyFileSync(join(run, 'strong-mutation.json'), join(out_, `${name}.strong-mutation.json`));
+    record.strongFile = `${name}.strong-mutation.json`;
+  }
+  // Every mutant with its strong verdict, for the join with the ground truth (not timed).
+  const list = join(out_, `${name}.mutants.jsonl`);
+  try {
+    // `--json --limit N` stops at a reply-size cap (about 120 mutants here, with hasMore); jsonl writes every one.
+    execSync(`${supercov} runs latest mutants --format jsonl --output ${list}`, { cwd: clone, stdio: ['ignore', 'ignore', 'inherit'], maxBuffer: 1 << 30 });
+    record.mutants = `${name}.mutants.jsonl`;
+  } catch (error) {
+    record.mutantsError = String(error.message).split('\n')[0];
+  }
+  save();
+}
+
 async function setup() {
   rmSync(clone, { recursive: true, force: true });
   mkdirSync(clone, { recursive: true });
@@ -343,7 +445,13 @@ async function main() {
   save();
   await setup();
   const isStryker = scenario.includes('stryker') || scenario === 'truth';
-  if (isStryker) await installStryker();
+  const isSupercov = scenario.includes('supercov');
+  if (isSupercov) {
+    excludeFromGit(['.supercov/']);
+    await installSupercov();
+  } else if (scenario === 'shell-diag') {
+    // nothing to install: DIAG_SCRIPT's commands use the project's own tools
+  } else if (isStryker) await installStryker();
   else await installMutator();
   result.versions.node = process.version;
   result.versions.pnpm = project.pnpm;
@@ -371,6 +479,52 @@ async function main() {
     result.changedLines = lines;
     await stryker('stryker-lines', { mutate: lines });
     await stryker('stryker-incremental', { mutate: strykerMutate(prMutate), incremental: true });
+  } else if (scenario === 'supercov-cold') {
+    if (!args.shard || args.shard === '1') await plainTests();
+    const measure = await supercovMeasure();
+    if (measure.exitCode !== 0) throw new Error(`supercov measure failed (exit ${measure.exitCode})`);
+    // A shard is K (of the project's supercovShards) or K-N (K of N, for a re-split shard).
+    const split = args.shard?.match(/^(\d+)-(\d+)$/);
+    const shard = args.shard ? ['--shard', split ? `${split[1]}/${split[2]}` : `${args.shard}/${project.supercovShards}`] : [];
+    // The plan of this job's part (what would run, against which tests), for where time goes.
+    await phase('supercov-plan', `${supercov} runs latest mutants test --plan --json ${shard.join(' ')} > ${join(out_, 'supercov-plan.json')}`, { allowFail: true });
+    if (args.shard && !project.supercovShards) throw new Error(`${project.name} has no supercovShards`);
+    await supercovStrong('supercov-strong', shard);
+  } else if (scenario === 'shell-diag') {
+    // Diagnosis only: DIAG_SCRIPT holds commands separated by ';;', each run in the clone as a phase.
+    const commands = (process.env.DIAG_SCRIPT ?? '').split(';;').map((c) => c.trim()).filter(Boolean);
+    for (const [i, command] of commands.entries()) await phase(`diag-${i + 1}`, command, { allowFail: true });
+  } else if (scenario === 'supercov-diag') {
+    // Diagnosis of strong-pass verdicts: SUPERCOV_DIAG_FILES (comma-separated source files) and
+    // SUPERCOV_DIAG_POINTS (comma-separated file:line) name what to look at. Keeps the workspace
+    // and each strong round's assignments and outcomes, and archives them with the plans.
+    process.env.SUPERCOV_KEEP_WORKSPACE = '1';
+    process.env.SUPERCOV_STRONG_KEEP_ROUNDS = '1';
+    const files = (process.env.SUPERCOV_DIAG_FILES ?? '').split(',').filter(Boolean);
+    const points = (process.env.SUPERCOV_DIAG_POINTS ?? '').split(',').filter(Boolean);
+    const measure = await supercovMeasure();
+    if (measure.exitCode !== 0) throw new Error(`supercov measure failed (exit ${measure.exitCode})`);
+    for (const point of points) {
+      const name = point.replace(/[^A-Za-z0-9]+/g, '_');
+      await phase(`query-${name}`, `${supercov} runs latest mutants ${point} --json > ${join(out_, `query-${name}.json`)}`, { allowFail: true });
+    }
+    files.forEach((file, i) => {
+      result.notes.push(`diag file ${i + 1}: ${file}`);
+    });
+    for (const [i, file] of files.entries()) {
+      await phase(`plan-${i + 1}`, `${supercov} runs latest mutants test --plan --json --file ${file} > ${join(out_, `plan-${i + 1}.json`)}`, { allowFail: true });
+    }
+    for (const [i, file] of files.entries()) {
+      await phase(`strong-${i + 1}`, `${supercov} runs latest mutants test --json --file ${file} > ${join(out_, `strong-${i + 1}.json`)}`, { allowFail: true });
+      // Each command numbers its rounds from 0 in the same directory: keep this command's, then clear them.
+      await phase(`rounds-${i + 1}`, `d=$(find .supercov -path '*node_modules*' -prune -o -type d -name strong-rounds -print | head -1); [ -n "$d" ] && tar czf ${join(out_, `rounds-${i + 1}.tgz`)} -C "$d" . && rm -rf "$d"`, { allowFail: true });
+    }
+    await phase('archive', `find .supercov \\( -path '*node_modules*' -prune \\) -o \\( -path '*strong-rounds*' -o -path '.supercov/strong/*' -o -path '*frontend-evidence/mutants.json' -o -path '.supercov/runs/*/strong-mutation.json' \\) -type f -print | tar czf ${join(out_, 'diag.tgz')} -T -`, { allowFail: true });
+  } else if (scenario === 'pr-supercov') {
+    applyEdit();
+    const measure = await supercovMeasure();
+    if (measure.exitCode !== 0) throw new Error(`supercov measure failed (exit ${measure.exitCode})`);
+    await supercovStrong('supercov-diff', ['--diff', 'HEAD~1']);
   } else if (scenario === 'pr-mutator') {
     if (project.prMutate) note(`PR scenario base runs mutate ${JSON.stringify(project.prMutate.include)}: ${project.prMutateNote}`);
     await mutator('mutator-base', [], { includeGlobs: prMutate });

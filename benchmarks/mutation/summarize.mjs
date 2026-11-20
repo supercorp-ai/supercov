@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { joinMutants, originalCode, readSupercovMutants } from './supercov-join.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values: args, positionals } = parseArgs({
@@ -42,8 +43,11 @@ function findResults(dir) {
 function readMutants(file) {
   const report = JSON.parse(readFileSync(file, 'utf8'));
   const mutants = [];
+  const testNames = new Map();
+  for (const [testFile, tf] of Object.entries(report.testFiles ?? {})) for (const t of tf.tests ?? []) testNames.set(t.id, `${testFile ? `${testFile} > ` : ''}${t.name}`);
   for (const [path, entry] of Object.entries(report.files ?? {})) {
     const filePath = path.replace(/\\/g, '/');
+    const source = entry.source ?? null;
     for (const m of entry.mutants) {
       const { start, end } = m.location;
       const span = `${start.line}:${start.column}-${end.line}:${end.column}`;
@@ -53,9 +57,11 @@ function readMutants(file) {
         span,
         mutator: m.mutatorName,
         replacement,
+        rawReplacement: m.replacement ?? '',
+        original: originalCode(source, m.location),
         status: m.status,
         static: m.static ?? false,
-        killedBy: m.killedBy ?? [],
+        killedBy: (m.killedBy ?? []).map((id) => testNames.get(id) ?? id),
         coveredBy: m.coveredBy ?? [],
         statusReason: m.statusReason,
         key: `${filePath}|${span}|${m.mutatorName}|${replacement}`,
@@ -177,6 +183,20 @@ for (const file of findResults(root)) {
       entry.stages = stages(p.wallS, kind, log);
       entry.executed = executedCount(kind, log);
     }
+    if (p.mutants && existsSync(join(dir, p.mutants))) {
+      const project = corpus.projects.find((x) => x.name === result.project);
+      entry._sc = readSupercovMutants(readFileSync(join(dir, p.mutants), 'utf8'), project.mutate);
+    }
+    if (p.result && existsSync(join(dir, p.result))) {
+      try {
+        // The test command's own stdout (defu's node:test output) can precede the reply: take its last JSON line.
+        const lines = readFileSync(join(dir, p.result), 'utf8').split('\n').filter((l) => l.startsWith('{'));
+        const reply = JSON.parse(lines.at(-1));
+        entry.reply = reply.summary ? { ...reply.summary, passes: reply.passes ?? null } : null;
+      } catch {
+        entry.reply = null;
+      }
+    }
     if (p.report && existsSync(join(dir, p.report))) {
       const mutants = readMutants(join(dir, p.report));
       Object.assign(entry, tally(mutants));
@@ -289,10 +309,159 @@ function killMatrix(mutants) {
   };
 }
 
+// ---- Supercov
+
+const SC_DETECTED = new Set(['Killed', 'Timeout']);
+const SC_UNDETECTED = new Set(['Survived', 'NoCoverage']);
+const scVerdict = (status) => (SC_DETECTED.has(status) ? 'detected' : SC_UNDETECTED.has(status) ? 'undetected' : null);
+
+function scTally(mutants) {
+  const statuses = {};
+  let detected = 0;
+  let undetected = 0;
+  for (const m of mutants) {
+    statuses[m.status] = (statuses[m.status] ?? 0) + 1;
+    const v = scVerdict(m.status);
+    if (v === 'detected') detected++;
+    else if (v === 'undetected') undetected++;
+  }
+  return { mutants: mutants.length, statuses, score: detected + undetected ? +((100 * detected) / (detected + undetected)).toFixed(2) : null };
+}
+
+/** Supercov's cold run (measure once per job, strong pass summed over shards), its PR run, and the join with the ground truth. */
+function supercovSummary(coldJobs, prJob, truth) {
+  if (!coldJobs.length && !prJob) return null;
+  const out = {};
+  if (coldJobs.length) {
+    const measures = coldJobs.map((j) => j.phases['supercov-measure']).filter(Boolean);
+    const strongs = coldJobs.map((j) => ({ shard: j.result.shard, ...(j.phases['supercov-strong'] ?? {}) }));
+    const merged = new Map();
+    for (const p of strongs) {
+      for (const m of p._sc ?? []) {
+        const seen = merged.get(m.id);
+        if (!seen || (!seen.strong && m.strong)) merged.set(m.id, m);
+      }
+    }
+    const mutants = [...merged.values()];
+    const measureS = measures[0]?.wallS ?? null;
+    const strongS = +strongs.reduce((a, p) => a + (p.wallS ?? 0), 0).toFixed(2);
+    out.cold = {
+      shards: strongs.length,
+      measureS,
+      measureCpuS: measures[0]?.cpuS ?? null,
+      measureRssMiB: measures[0]?.maxRssMiB ?? null,
+      measureExitCodes: measures.map((m) => m.exitCode),
+      strongS,
+      strongCpuS: +strongs.reduce((a, p) => a + (p.cpuS ?? 0), 0).toFixed(2),
+      slowestStrongS: Math.max(0, ...strongs.map((p) => p.wallS ?? 0)),
+      totalS: measureS == null ? null : +(measureS + strongS).toFixed(2),
+      strongExitCodes: strongs.map((p) => p.exitCode),
+      timedOut: strongs.some((p) => p.timedOut) || measures.some((m) => m.timedOut),
+      complete: strongs.every((p) => p._sc && p.exitCode === 0 && !p.timedOut),
+      replies: strongs.map((p) => p.reply ?? null),
+      ran: strongs.reduce((a, p) => a + (p.reply?.ran ?? 0), 0),
+      passes: strongs.reduce((a, p) => a + (p.reply?.passes?.length ?? 0), 0),
+      stalledPasses: strongs.reduce((a, p) => a + (p.reply?.passes ?? []).filter((x) => x.stalled).length, 0),
+      shardsWithResumedPasses: strongs.filter((p) => (p.reply?.passes?.length ?? 0) > 1).map((p) => p.shard ?? 'all'),
+      ...scTally(mutants),
+    };
+    out._statuses = new Map(mutants.map((m) => [m.id, m.status]));
+    out.cold.strongMsPerMutantRun = out.cold.ran ? Math.round((1000 * strongS) / out.cold.ran) : null;
+    out.cold.strongCpuMsPerMutantRun = out.cold.ran ? Math.round((1000 * out.cold.strongCpuS) / out.cold.ran) : null;
+    out.vsTruth = supercovAgainstTruth(mutants, truth);
+  }
+  if (prJob) {
+    const m = prJob.phases['supercov-measure'];
+    const d = prJob.phases['supercov-diff'];
+    const ran = (d?._sc ?? []).filter((x) => x.strong);
+    out.pr = {
+      measureS: m?.wallS ?? null,
+      diffS: d?.wallS ?? null,
+      totalS: m?.wallS != null && d?.wallS != null ? +(m.wallS + d.wallS).toFixed(2) : null,
+      exitCodes: [m?.exitCode, d?.exitCode],
+      diffMutants: ran.length,
+      reply: d?.reply ?? null,
+      ...Object.fromEntries(Object.entries(scTally(ran)).filter(([k]) => k !== 'mutants')),
+    };
+  }
+  return out;
+}
+
+function supercovAgainstTruth(mutants, truth) {
+  if (!truth) return null;
+  const { pairs, supercovOnly, strykerOnly, ambiguous } = joinMutants(mutants, truth);
+  let both = 0;
+  let scDetected = 0;
+  let truthDetected = 0;
+  const violations = [];
+  const extraKills = [];
+  const notCompared = {};
+  for (const [s, t] of pairs) {
+    const vs = scVerdict(s.status);
+    const vt = scVerdict(t.status);
+    if (!vs || !vt) {
+      const key = `${s.status} / ${t.status}`;
+      notCompared[key] = (notCompared[key] ?? 0) + 1;
+      if (s.status === 'Equivalent' && vt === 'detected') violations.push(describe(s, t, 'Supercov calls it equivalent'));
+      continue;
+    }
+    both++;
+    if (vs === 'detected') scDetected++;
+    if (vt === 'detected') truthDetected++;
+    if (vs === vt) continue;
+    if (vs === 'undetected') violations.push(describe(s, t));
+    else extraKills.push(describe(s, t));
+  }
+  const staticPairs = pairs.filter(([, t]) => t.static);
+  return {
+    joined: pairs.length,
+    supercovOnly: supercovOnly.length,
+    supercovOnlyByMutator: countBy(supercovOnly, (m) => m.mutator),
+    strykerOnly: strykerOnly.length,
+    strykerOnlyByMutator: countBy(strykerOnly, (m) => m.mutator),
+    ambiguous: ambiguous.length,
+    compared: both,
+    scoreSupercov: both ? +((100 * scDetected) / both).toFixed(2) : null,
+    scoreTruth: both ? +((100 * truthDetected) / both).toFixed(2) : null,
+    notCompared,
+    soundnessViolations: violations,
+    extraKills,
+    static: {
+      joined: staticPairs.length,
+      supercovStatuses: countBy(staticPairs, ([s]) => s.status),
+      truthStatuses: countBy(staticPairs, ([, t]) => t.status),
+    },
+  };
+}
+
+function describe(s, t, note) {
+  return {
+    id: s.id,
+    supercov: s.status,
+    truth: t.status,
+    static: t.static,
+    truthKillers: t.killedBy.slice(0, 5),
+    truthKillerCount: t.killedBy.length,
+    supercovKilledBy: s.killedBy.slice(0, 3),
+    weak: s.weak,
+    weakCode: s.weakCode,
+    reason: s.reason,
+    original: s.original,
+    replacement: t.rawReplacement,
+    ...(note ? { note } : {}),
+  };
+}
+
+function countBy(list, key) {
+  const counts = {};
+  for (const item of list) counts[key(item)] = (counts[key(item)] ?? 0) + 1;
+  return counts;
+}
+
 // ---- per project
 
 const SETUP_PHASES = ['clone', 'pnpm-setup', 'install', 'vitest-plugins-remove', 'vitest-upgrade', 'tool-install', 'tests'];
-const jobName = (j) => j.result.scenario + (j.result.shard ? `:${j.result.shard}` : '');
+const jobName = (j) => j.result.scenario + (j.result.shard ? `:${j.result.shard}` : '') + (j.result.variant ? `:${j.result.variant}` : '');
 const summary = { date, runs: args.runs?.split(',') ?? [], tools: corpus.tools, projects: {} };
 
 for (const project of corpus.projects) {
@@ -307,6 +476,36 @@ for (const project of corpus.projects) {
   const ps = of('pr-stryker')[0];
   const pm = of('pr-mutator')[0];
   const testsOf = (scenario) => of(scenario).find((j) => j.phases.tests)?.phases.tests;
+
+  const main = project.supercovMainVariant ?? null;
+  const plain = (list) => list.filter((j) => (j.result.variant ?? null) === main);
+  // The PR scenario is not run per strong-pass setting: its plain job goes with the main setting.
+  const prJob = plain(of('pr-supercov'))[0] ?? of('pr-supercov').find((j) => !j.result.variant);
+  const supercov = supercovSummary(plain(of('supercov-cold')), prJob, truth?._mutants);
+  if (supercov) {
+    for (const variant of new Set(mine.map((j) => j.result.variant).filter((v) => v && v !== main))) {
+      const v = (list) => list.filter((j) => j.result.variant === variant);
+      supercov.variants = { ...supercov.variants, [variant]: supercovSummary(v(of('supercov-cold')), v(of('pr-supercov'))[0], truth?._mutants) };
+    }
+    if (main) supercov.mainVariant = main;
+    // Verdicts across settings: the same mutant, a different status.
+    const comparisons = {};
+    for (const [variant, other] of Object.entries(supercov.variants ?? {})) {
+      if (!supercov._statuses || !other?._statuses) continue;
+      let compared = 0;
+      const differ = [];
+      for (const [id, status] of supercov._statuses) {
+        const o = other._statuses.get(id);
+        if (!o || status === 'Pending' || o === 'Pending') continue;
+        compared++;
+        if (o !== status) differ.push({ id, [main ?? 'main']: status, [variant]: o });
+      }
+      comparisons[variant] = { compared, differ: differ.length, examples: differ.slice(0, 20) };
+    }
+    if (Object.keys(comparisons).length) supercov.verdictsAcrossVariants = comparisons;
+    delete supercov._statuses;
+    for (const other of Object.values(supercov.variants ?? {})) if (other) delete other._statuses;
+  }
 
   summary.projects[project.name] = {
     commit: project.commit,
@@ -323,6 +522,7 @@ for (const project of corpus.projects) {
       ? { ...strip(truth), complete: Boolean(truth.complete) && of('truth').length === expectedTruthShards, expectedShards: expectedTruthShards, killMatrix: killMatrix(truth._mutants) }
       : null,
     vsTruth: { stryker: againstTruth(stryker?._mutants, truth?._mutants), mutator: againstTruth(mutator?._mutants, truth?._mutants) },
+    supercov,
     pr: {
       changedLines: ps?.result.changedLines ?? null,
       strykerIncrementalBase: strip(ps?.phases['stryker-incremental-base']),
@@ -445,7 +645,86 @@ function markdown(s) {
   }
   L.push('');
 
+  L.push(...supercovMarkdown(s));
+
   const problems = Object.entries(s.projects).flatMap(([name, p]) => [...p.errors.map((e) => `${name} ${e.job}: ${e.error}`), ...p.notes.map((n) => `${name}: ${n}`)]);
   if (problems.length) L.push('## Notes and errors', '', ...problems.map((x) => `- ${x}`), '');
   return L.join('\n');
+}
+
+function supercovMarkdown(s) {
+  const projects = Object.entries(s.projects).filter(([, p]) => p.supercov);
+  if (!projects.length) return [];
+  const L = [];
+  L.push('## Supercov (strong mutation)', '');
+  L.push(
+    'Cold: `supercov -- <test command>` (measure: per-test coverage and weak mutation), then `supercov runs latest mutants test` (strong pass); a sharded strong pass is summed over its `--shard k/n` jobs, each of which measured again (the measure time shown is one job\'s). PR: the edit committed, measure, then `mutants test --diff HEAD~1`. Statuses: K killed, S survived, T timeout, NC no-coverage, RE error, Equivalent (static rule), P not run. Only mutants in the corpus mutate set are counted.',
+    '',
+  );
+  L.push('| project | measure s | strong s | total s | StrykerJS cold s | mutants | statuses | score | joined to truth | score on joined (Supercov / truth) | soundness violations | extra kills | PR: measure / diff s, mutants run of the diff, statuses |');
+  L.push('|---|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---|');
+  const rows = projects.flatMap(([name, p]) => [[p.supercov.mainVariant ? `${name} (${p.supercov.mainVariant})` : name, p.supercov], ...Object.entries(p.supercov.variants ?? {}).map(([v, sc]) => [`${name} (${v})`, sc])]);
+  const artifacts = (name) => corpus.projects.find((x) => x.name === name.split(' ')[0])?.groundTruthArtifacts ?? {};
+  for (const [name, sc] of rows) {
+    const p = s.projects[name.split(' ')[0]];
+    const c = sc.cold;
+    const v = sc.vsTruth;
+    const pr = sc.pr;
+    const strong = c ? `${fmt(c.strongS)}${c.shards > 1 ? ` (${c.shards} shards, slowest ${fmt(c.slowestStrongS)})` : ''}${c.complete ? '' : ', incomplete'}` : '–';
+    L.push(
+      `| ${name} | ${fmt(c?.measureS)} | ${strong} | ${fmt(c?.totalS)} | ${fmt(p.cold.stryker?.wallS)} | ${c?.mutants ?? '–'} | ${statusText(c?.statuses)} | ${fmt(c?.score)} | ${v ? `${v.joined} (Supercov only ${v.supercovOnly}, StrykerJS only ${v.strykerOnly})` : '–'} | ${v ? `${fmt(v.scoreSupercov)} / ${fmt(v.scoreTruth)} (${v.compared})` : '–'} | ${v ? `${v.soundnessViolations.length}${v.soundnessViolations.some((d) => artifacts(name)[d.id]) ? ` (${v.soundnessViolations.filter((d) => !artifacts(name)[d.id]).length} after diagnosis)` : ''}` : '–'} | ${v ? `${v.extraKills.length}${v.extraKills.some((d) => artifacts(name)[d.id]?.startsWith('supercov-false-kill')) ? ` (${v.extraKills.filter((d) => artifacts(name)[d.id]?.startsWith('supercov-false-kill')).length} diagnosed false)` : ''}` : '–'} | ${pr ? `${fmt(pr.measureS)} / ${fmt(pr.diffS)}, ${pr.reply ? `${pr.reply.ran} of ${pr.reply.mutants}, K${pr.reply.killed} T${pr.reply.timeout} S${pr.reply.survived} NC${pr.reply.noCoverage}${pr.reply.error ? ` RE${pr.reply.error}` : ''}` : `${pr.diffMutants}, ${statusText(pr.statuses)}`}` : '–'} |`,
+    );
+  }
+  L.push('');
+  L.push('### Where Supercov\'s time goes', '');
+  L.push('Strong pass per mutant = strong-pass wall (CPU) seconds over the mutants it ran (not-infected, not-reached and equivalent mutants are decided without running). StrykerJS per mutant = its cold mutant phase over its mutants, for scale.', '');
+  L.push('| project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) |');
+  L.push('|---|---:|---:|---:|---:|---|---:|---|');
+  for (const [name, sc] of rows) {
+    const p = s.projects[name.split(' ')[0]];
+    const c = sc.cold;
+    if (!c) continue;
+    const st = p.cold.stryker;
+    const stMutants = st?.stages?.mutantsS ?? null;
+    const perStryker = st?.mutants && stMutants != null ? Math.round((1000 * stMutants) / st.mutants) : st?.shards ? Math.round((1000 * st.shards.reduce((a, x) => a + (x.stages?.mutantsS ?? 0), 0)) / st.mutants) : null;
+    L.push(`| ${name} | ${fmt(p.plainTests.strykerVitest?.wallS ?? p.plainTests.mutatorVitest?.wallS)} | ${fmt(c.measureS)} | ${fmt(c.strongS)} | ${c.ran} | ${c.strongMsPerMutantRun ?? '–'} / ${c.strongCpuMsPerMutantRun ?? '–'} | ${perStryker ?? '–'} | ${c.passes} (${c.stalledPasses})${c.shardsWithResumedPasses.length ? `, resumed in ${c.shardsWithResumedPasses.join(', ')}` : ''} |`);
+  }
+  L.push('');
+  const across = projects.filter(([, p]) => p.supercov.verdictsAcrossVariants);
+  if (across.length) {
+    L.push('### Verdicts across strong-pass settings', '');
+    L.push('| project | compared with | mutants compared | different verdicts |');
+    L.push('|---|---|---:|---:|');
+    for (const [name, p] of across) for (const [variant, c] of Object.entries(p.supercov.verdictsAcrossVariants)) L.push(`| ${name}${p.supercov.mainVariant ? ` (${p.supercov.mainVariant})` : ''} | ${variant} | ${c.compared} | ${c.differ}${c.examples.length ? `: ${c.examples.slice(0, 5).map((e) => `\`${e.id}\` ${Object.values(e).slice(1).join(' / ')}`).join('; ')}` : ''} |`);
+    L.push('');
+  }
+  L.push('### Module-level (static) mutants', '');
+  L.push('StrykerJS\'s ground truth runs static mutants (no `ignoreStatic`); Supercov switches them on before the module loads.', '');
+  L.push('| project | static mutants joined | Supercov statuses | ground-truth statuses |');
+  L.push('|---|---:|---|---|');
+  for (const [name, sc] of rows) {
+    const st = sc.vsTruth?.static;
+    if (!st) continue;
+    L.push(`| ${name} | ${st.joined} | ${statusText(st.supercovStatuses)} | ${statusText(st.truthStatuses)} |`);
+  }
+  L.push('');
+  L.push('### Every disagreement with the ground truth', '');
+  L.push('A soundness violation is a mutant the ground truth detects (Killed or Timeout) that Supercov calls survived, no-coverage or equivalent. An extra kill is the reverse.', '');
+  let any = false;
+  for (const [name, sc] of rows) {
+    const v = sc.vsTruth;
+    if (!v) continue;
+    for (const [kind, list] of [['soundness violation', v.soundnessViolations], ['extra kill', v.extraKills]]) {
+      for (const d of list) {
+        any = true;
+        const killers = d.truthKillerCount ? `; ground truth killed by ${d.truthKillerCount} (${d.truthKillers.map((k) => `\`${k}\``).join(', ')}${d.truthKillerCount > d.truthKillers.length ? ', ...' : ''})` : '';
+        const artifact = corpus.projects.find((x) => x.name === name.split(' ')[0])?.groundTruthArtifacts?.[d.id];
+        const artifactLabel = !artifact ? '' : artifact.startsWith('flaky') ? ' (ground truth: flaky kill)' : artifact.startsWith('supercov-false-kill') ? ' (Supercov false kill)' : ' (ground-truth artifact)';
+        L.push(`- ${name}, ${kind}${artifactLabel}${d.static ? ' (static)' : ''}: \`${d.id}\`: Supercov ${d.supercov}${d.weakCode ? ` (weak: ${d.weak}, ${d.weakCode})` : ''}${d.reason ? `, "${String(d.reason).slice(0, 160)}"` : ''}; ground truth ${d.truth}${killers}${d.note ? `; ${d.note}` : ''}${artifact ? `. Diagnosed: ${artifact}` : ''}`);
+      }
+    }
+  }
+  if (!any) L.push('None.');
+  L.push('');
+  return L;
 }

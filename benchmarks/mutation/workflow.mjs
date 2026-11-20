@@ -11,6 +11,8 @@
 // failing test's result; two hono ground-truth jobs on 32 GiB machines appear to have run out of memory).
 //
 // Each job uploads its output directory as the artifact mutation-bench-<project>-<scenario>[-<shard>].
+// Supercov jobs restore the binary that build-workflow.mjs's workflow saved under
+// mutation-bench-supercov-bin-<key>; pass the key as the variable SUPERCOV_BIN_KEY.
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,12 +27,13 @@ const { values: args } = parseArgs({
     projects: { type: 'string' },
     scenarios: { type: 'string' },
     shards: { type: 'string' },
+    variants: { type: 'string' },
     'max-parallel': { type: 'string', default: '16' },
   },
 });
 if (!args['runs-on']) throw new Error('--runs-on <runner label> is required');
 const corpus = JSON.parse(readFileSync(join(here, 'corpus.json'), 'utf8'));
-const scenarios = args.scenarios?.split(',') ?? ['stryker-cold', 'mutator-cold', 'truth', 'pr-stryker', 'pr-mutator'];
+const scenarios = args.scenarios?.split(',') ?? ['stryker-cold', 'mutator-cold', 'truth', 'pr-stryker', 'pr-mutator', 'supercov-cold', 'pr-supercov'];
 const projects = corpus.projects.filter((p) => !args.projects || args.projects.split(',').includes(p.name));
 
 const include = [];
@@ -39,10 +42,13 @@ for (const project of projects) {
     const list = scenario === 'truth' ? project.shards : scenario === 'stryker-cold' ? project.coldShards : null;
     let shards = list ? list.map((s) => s.name) : [''];
     if (scenario === 'mutator-cold' && project.mutatorColdShards) shards = Array.from({ length: project.mutatorColdShards }, (_, i) => String(i + 1));
+    if (scenario === 'supercov-cold' && project.supercovShards) shards = [...Array.from({ length: project.supercovShards }, (_, i) => String(i + 1)), ...(project.supercovExtraShards ?? [])];
     const runsOn = scenario === 'truth' && args['truth-runs-on'] ? args['truth-runs-on'] : args['runs-on'];
     for (const shard of shards) {
       if (args.shards && !args.shards.split(',').includes(shard)) continue;
-      include.push({ project: project.name, scenario, shard, runsOn });
+      // --variants replaces the variant list of Supercov jobs ('' = the plain job), e.g. round-2,round-6.
+      const variants = args.variants !== undefined && scenario.includes('supercov') ? args.variants.split(',') : ['', ...(scenario.includes('supercov') ? project.supercovVariants ?? [] : [])];
+      for (const variant of variants) include.push({ project: project.name, scenario, shard, runsOn, variant });
     }
   }
 }
@@ -57,7 +63,7 @@ const lines = [
   '',
   'jobs:',
   '  bench:',
-  "    name: ${{ matrix.project }} ${{ matrix.scenario }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }}",
+  "    name: ${{ matrix.project }} ${{ matrix.scenario }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }}${{ matrix.variant && format(' {0}', matrix.variant) || '' }}",
   '    runs-on: ${{ matrix.runs_on }}',
   '    timeout-minutes: 11',
   '    strategy:',
@@ -65,7 +71,7 @@ const lines = [
   `      max-parallel: ${Number(args['max-parallel'])}`,
   '      matrix:',
   '        include:',
-  ...include.map((e) => `          - { project: ${e.project}, scenario: ${e.scenario}, shard: "${e.shard}", runs_on: "${e.runsOn}" }`),
+  ...include.map((e) => `          - { project: ${e.project}, scenario: ${e.scenario}, shard: "${e.shard}", runs_on: "${e.runsOn}", variant: "${e.variant}" }`),
   '    env:',
   '      PNPM_STORE: ${{ github.workspace }}/../pnpm-store',
   '    steps:',
@@ -78,6 +84,13 @@ const lines = [
   '          path: ${{ github.workspace }}/../pnpm-store',
   '          key: mutation-bench-pnpm-v1-${{ matrix.project }}-${{ matrix.scenario }}',
   '          restore-keys: mutation-bench-pnpm-v1-${{ matrix.project }}-',
+  "      - name: Supercov binary built from the working tree (by the build workflow; key passed as vars.SUPERCOV_BIN_KEY)",
+  "        if: ${{ contains(matrix.scenario, 'supercov') }}",
+  '        uses: actions/cache/restore@v4',
+  '        with:',
+  '          path: ${{ runner.temp }}/supercov-bin',
+  '          key: mutation-bench-supercov-bin-${{ vars.SUPERCOV_BIN_KEY }}',
+  '          fail-on-cache-miss: true',
   '      - name: GNU time',
   '        run: test -x /usr/bin/time || (sudo apt-get update -qq && sudo apt-get install -y -qq time) || true',
   '      - name: Benchmark',
@@ -89,13 +102,19 @@ const lines = [
   '          npm_config_strict_dep_builds: "false"',
   '          pnpm_config_strict_dep_builds: "false"',
   '          COREPACK_ENABLE_STRICT: "0"',
+  '          SUPERCOV_BENCH_BINARY: ${{ runner.temp }}/supercov-bin/supercov',
+  '          SUPERCOV_BENCH_BINARY_KEY: ${{ vars.SUPERCOV_BIN_KEY }}',
+  '          SUPERCOV_BENCH_DEBUG_GLOBS: ${{ vars.SUPERCOV_DEBUG_GLOBS }}',
+  '          SUPERCOV_DIAG_FILES: ${{ vars.SUPERCOV_DIAG_FILES }}',
+  '          SUPERCOV_DIAG_POINTS: ${{ vars.SUPERCOV_DIAG_POINTS }}',
+  '          DIAG_SCRIPT: ${{ vars.DIAG_SCRIPT }}',
   '        run: >-',
   '          node benchmarks/mutation/run-job.mjs --project ${{ matrix.project }} --scenario ${{ matrix.scenario }}',
-  "          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }} --out out",
+  "          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }} ${{ matrix.variant && format('--variant {0}', matrix.variant) || '' }} --out out",
   '      - uses: actions/upload-artifact@v4',
   '        if: ${{ !cancelled() }}',
   '        with:',
-  "          name: mutation-bench-${{ matrix.project }}-${{ matrix.scenario }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}",
+  "          name: mutation-bench-${{ matrix.project }}-${{ matrix.scenario }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}",
   '          path: out',
   '          if-no-files-found: warn',
   '',

@@ -8,13 +8,18 @@
     "7095666567225085",
     "7210302856247792",
     "8297132922154682",
-    "6783811573326500"
+    "6783811573326500",
+    "6615399405765448",
+    "6892707219384574",
+    "4982353503892003"
   ],
   "tools": {
     "node": "24",
     "stryker": "10.1.1",
     "mutator": "0.5.0",
-    "vitestForMutator": "5.1.1"
+    "vitestForMutator": "5.1.1",
+    "supercovWrapper": "4.28.0",
+    "supercovBuild": "cargo build --profile measure -p supercov, from the working tree of the branch under test"
   },
   "projects": {
     "defu": {
@@ -46,8 +51,26 @@
           "vitest": "4.1.6",
           "vitestProject": "4.1.6"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "4.1.6",
+          "vitestProject": "4.1.6"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "4.1.6",
+          "vitestProject": "4.1.6"
+        },
+        "supercov-cold": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "10.33.4",
           "vitest": "4.1.6",
@@ -62,7 +85,8 @@
         }
       },
       "notes": [
-        "Vitest upgraded in this job from 4.1.6 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+        "Vitest upgraded in this job from 4.1.6 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 3 files"
       ],
       "errors": [],
       "setup": {
@@ -89,12 +113,25 @@
           "install": 1.06,
           "tool-install": 1.569
         },
+        "pr-supercov": {
+          "clone": 0.28,
+          "pnpm-setup": 1.431,
+          "install": 1.043,
+          "tool-install": 3.382
+        },
         "stryker-cold": {
           "clone": 0.247,
           "pnpm-setup": 1.609,
           "install": 1.071,
           "tool-install": 1.555,
           "tests": 0.403
+        },
+        "supercov-cold": {
+          "clone": 0.202,
+          "pnpm-setup": 1.341,
+          "install": 1.042,
+          "tool-install": 4.843,
+          "tests": 0.366
         },
         "truth": {
           "clone": 0.179,
@@ -251,6 +288,121 @@
           "extraKills": 0,
           "notInTruth": 7,
           "examples": []
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 1,
+          "measureS": 0.943,
+          "measureCpuS": 0.73,
+          "measureRssMiB": 152,
+          "measureExitCodes": [
+            0
+          ],
+          "strongS": 1.88,
+          "strongCpuS": 13.69,
+          "slowestStrongS": 1.884,
+          "totalS": 2.82,
+          "strongExitCodes": [
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 103,
+              "ran": 99,
+              "killed": 87,
+              "timeout": 0,
+              "survived": 16,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8446601941747572,
+              "durationMs": 1853,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 1572,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 99,
+          "passes": 1,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 103,
+          "statuses": {
+            "Killed": 87,
+            "Survived": 16
+          },
+          "score": 84.47,
+          "strongMsPerMutantRun": 19,
+          "strongCpuMsPerMutantRun": 138
+        },
+        "vsTruth": {
+          "joined": 103,
+          "supercovOnly": 0,
+          "supercovOnlyByMutator": {},
+          "strykerOnly": 0,
+          "strykerOnlyByMutator": {},
+          "ambiguous": 0,
+          "compared": 103,
+          "scoreSupercov": 84.47,
+          "scoreTruth": 84.47,
+          "notCompared": {},
+          "soundnessViolations": [],
+          "extraKills": [],
+          "static": {
+            "joined": 2,
+            "supercovStatuses": {
+              "Killed": 2
+            },
+            "truthStatuses": {
+              "Killed": 2
+            }
+          }
+        },
+        "pr": {
+          "measureS": 1.166,
+          "diffS": 0.868,
+          "totalS": 2.03,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 6,
+          "reply": {
+            "mutants": 6,
+            "ran": 6,
+            "killed": 6,
+            "timeout": 0,
+            "survived": 0,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 1,
+            "durationMs": 832,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 558,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 6
+          },
+          "score": 100
         }
       },
       "pr": {
@@ -445,11 +597,47 @@
           "vitest": "5.1.1",
           "vitestProject": "1.5.3"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "pr-supercov:own-vitest": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "1.5.3",
+          "vitestProject": "1.5.3"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
           "node": "v24.22.2",
           "pnpm": "9.0.6",
           "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "supercov-cold": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "supercov-cold:own-vitest": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "1.5.3",
           "vitestProject": "1.5.3"
         },
         "truth": {
@@ -463,7 +651,10 @@
       "notes": [
         "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
         "also added vite@8.3.8: scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)",
-        "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): StrykerJS 10's Vitest runner needs Vitest >= 2; scule pins Vitest 1.5.3"
+        "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): StrykerJS 10's Vitest runner needs Vitest >= 2; scule pins Vitest 1.5.3",
+        "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): as StrykerJS's ground truth uses; the own-vitest variant runs Supercov on scule's Vitest 1.5.3",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 2 files",
+        "variant own-vitest: Supercov on the project's own Vitest 1.5.3"
       ],
       "errors": [],
       "setup": {
@@ -492,6 +683,20 @@
           "vitest-upgrade": 1.29,
           "tool-install": 1.325
         },
+        "pr-supercov": {
+          "clone": 0.279,
+          "pnpm-setup": 1.201,
+          "install": 1.225,
+          "tool-install": 3.41,
+          "vitest-plugins-remove": 0.767,
+          "vitest-upgrade": 1.158
+        },
+        "pr-supercov:own-vitest": {
+          "clone": 0.212,
+          "pnpm-setup": 1.248,
+          "install": 1.217,
+          "tool-install": 4.507
+        },
         "stryker-cold": {
           "clone": 0.193,
           "pnpm-setup": 1.271,
@@ -500,6 +705,22 @@
           "vitest-upgrade": 1.715,
           "tool-install": 1.282,
           "tests": 0.35
+        },
+        "supercov-cold": {
+          "clone": 0.242,
+          "pnpm-setup": 1.259,
+          "install": 1.225,
+          "tool-install": 3.602,
+          "vitest-plugins-remove": 0.784,
+          "vitest-upgrade": 1.158,
+          "tests": 0.349
+        },
+        "supercov-cold:own-vitest": {
+          "clone": 0.229,
+          "pnpm-setup": 1.418,
+          "install": 1.195,
+          "tool-install": 3.618,
+          "tests": 0.716
         },
         "truth": {
           "clone": 0.202,
@@ -656,6 +877,241 @@
           "extraKills": 0,
           "notInTruth": 76,
           "examples": []
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 1,
+          "measureS": 1.115,
+          "measureCpuS": 0.62,
+          "measureRssMiB": 231,
+          "measureExitCodes": [
+            0
+          ],
+          "strongS": 1.61,
+          "strongCpuS": 9.29,
+          "slowestStrongS": 1.608,
+          "totalS": 2.73,
+          "strongExitCodes": [
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 78,
+              "ran": 77,
+              "killed": 73,
+              "timeout": 0,
+              "survived": 5,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9358974358974359,
+              "durationMs": 1573,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 1289,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 77,
+          "passes": 1,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 78,
+          "statuses": {
+            "Survived": 5,
+            "Killed": 73
+          },
+          "score": 93.59,
+          "strongMsPerMutantRun": 21,
+          "strongCpuMsPerMutantRun": 121
+        },
+        "vsTruth": {
+          "joined": 78,
+          "supercovOnly": 0,
+          "supercovOnlyByMutator": {},
+          "strykerOnly": 3,
+          "strykerOnlyByMutator": {
+            "Regex": 3
+          },
+          "ambiguous": 0,
+          "compared": 78,
+          "scoreSupercov": 93.59,
+          "scoreTruth": 93.59,
+          "notCompared": {},
+          "soundnessViolations": [],
+          "extraKills": [],
+          "static": {
+            "joined": 0,
+            "supercovStatuses": {},
+            "truthStatuses": {}
+          }
+        },
+        "pr": {
+          "measureS": 1.048,
+          "diffS": 0.822,
+          "totalS": 1.87,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 1,
+          "reply": {
+            "mutants": 1,
+            "ran": 1,
+            "killed": 1,
+            "timeout": 0,
+            "survived": 0,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 1,
+            "durationMs": 785,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 522,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 1
+          },
+          "score": 100
+        },
+        "variants": {
+          "own-vitest": {
+            "cold": {
+              "shards": 1,
+              "measureS": 1.468,
+              "measureCpuS": 2.73,
+              "measureRssMiB": 484,
+              "measureExitCodes": [
+                0
+              ],
+              "strongS": 2.72,
+              "strongCpuS": 22,
+              "slowestStrongS": 2.722,
+              "totalS": 4.19,
+              "strongExitCodes": [
+                0
+              ],
+              "timedOut": false,
+              "complete": true,
+              "replies": [
+                {
+                  "mutants": 78,
+                  "ran": 77,
+                  "killed": 73,
+                  "timeout": 0,
+                  "survived": 5,
+                  "noCoverage": 0,
+                  "equivalent": 0,
+                  "error": 0,
+                  "mutationScore": 0.9358974358974359,
+                  "durationMs": 2689,
+                  "commandExitCode": 0,
+                  "passes": [
+                    {
+                      "summary": true,
+                      "durationMs": 2305,
+                      "isolated": true,
+                      "stalled": false,
+                      "left": 0
+                    }
+                  ]
+                }
+              ],
+              "ran": 77,
+              "passes": 1,
+              "stalledPasses": 0,
+              "shardsWithResumedPasses": [],
+              "mutants": 78,
+              "statuses": {
+                "Survived": 5,
+                "Killed": 73
+              },
+              "score": 93.59,
+              "strongMsPerMutantRun": 35,
+              "strongCpuMsPerMutantRun": 286
+            },
+            "vsTruth": {
+              "joined": 78,
+              "supercovOnly": 0,
+              "supercovOnlyByMutator": {},
+              "strykerOnly": 3,
+              "strykerOnlyByMutator": {
+                "Regex": 3
+              },
+              "ambiguous": 0,
+              "compared": 78,
+              "scoreSupercov": 93.59,
+              "scoreTruth": 93.59,
+              "notCompared": {},
+              "soundnessViolations": [],
+              "extraKills": [],
+              "static": {
+                "joined": 0,
+                "supercovStatuses": {},
+                "truthStatuses": {}
+              }
+            },
+            "pr": {
+              "measureS": 1.296,
+              "diffS": 1.016,
+              "totalS": 2.31,
+              "exitCodes": [
+                0,
+                0
+              ],
+              "diffMutants": 1,
+              "reply": {
+                "mutants": 1,
+                "ran": 1,
+                "killed": 1,
+                "timeout": 0,
+                "survived": 0,
+                "noCoverage": 0,
+                "equivalent": 0,
+                "error": 0,
+                "mutationScore": 1,
+                "durationMs": 979,
+                "commandExitCode": 0,
+                "passes": [
+                  {
+                    "summary": true,
+                    "durationMs": 645,
+                    "isolated": true,
+                    "stalled": false,
+                    "left": 0
+                  }
+                ]
+              },
+              "statuses": {
+                "Killed": 1
+              },
+              "score": 100
+            }
+          }
+        },
+        "verdictsAcrossVariants": {
+          "own-vitest": {
+            "compared": 78,
+            "differ": 0,
+            "examples": []
+          }
         }
       },
       "pr": {
@@ -848,8 +1304,26 @@
           "vitest": "4.1.2",
           "vitestProject": "4.1.2"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "4.1.2",
+          "vitestProject": "4.1.2"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "4.1.2",
+          "vitestProject": "4.1.2"
+        },
+        "supercov-cold": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "10.33.0",
           "vitest": "4.1.2",
@@ -864,7 +1338,8 @@
         }
       },
       "notes": [
-        "Vitest upgraded in this job from 4.1.2 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+        "Vitest upgraded in this job from 4.1.2 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 8 files"
       ],
       "errors": [],
       "setup": {
@@ -891,12 +1366,25 @@
           "install": 1.096,
           "tool-install": 1.346
         },
+        "pr-supercov": {
+          "clone": 0.197,
+          "pnpm-setup": 1.212,
+          "install": 1.116,
+          "tool-install": 3.654
+        },
         "stryker-cold": {
           "clone": 0.248,
           "pnpm-setup": 1.322,
           "install": 1.062,
           "tool-install": 1.365,
           "tests": 0.392
+        },
+        "supercov-cold": {
+          "clone": 0.23,
+          "pnpm-setup": 1.288,
+          "install": 1.121,
+          "tool-install": 3.486,
+          "tests": 0.371
         },
         "truth": {
           "clone": 0.289,
@@ -1054,6 +1542,122 @@
           "extraKills": 0,
           "notInTruth": 57,
           "examples": []
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 1,
+          "measureS": 0.95,
+          "measureCpuS": 1.21,
+          "measureRssMiB": 145,
+          "measureExitCodes": [
+            0
+          ],
+          "strongS": 10.84,
+          "strongCpuS": 95.31,
+          "slowestStrongS": 10.837,
+          "totalS": 11.79,
+          "strongExitCodes": [
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 691,
+              "ran": 663,
+              "killed": 573,
+              "timeout": 32,
+              "survived": 84,
+              "noCoverage": 2,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8755426917510853,
+              "durationMs": 10771,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 10472,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 663,
+          "passes": 1,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 691,
+          "statuses": {
+            "Killed": 573,
+            "Timeout": 32,
+            "Survived": 84,
+            "NoCoverage": 2
+          },
+          "score": 87.55,
+          "strongMsPerMutantRun": 16,
+          "strongCpuMsPerMutantRun": 144
+        },
+        "vsTruth": {
+          "joined": 691,
+          "supercovOnly": 0,
+          "supercovOnlyByMutator": {},
+          "strykerOnly": 34,
+          "strykerOnlyByMutator": {
+            "Regex": 34
+          },
+          "ambiguous": 0,
+          "compared": 691,
+          "scoreSupercov": 87.55,
+          "scoreTruth": 87.55,
+          "notCompared": {},
+          "soundnessViolations": [],
+          "extraKills": [],
+          "static": {
+            "joined": 0,
+            "supercovStatuses": {},
+            "truthStatuses": {}
+          }
+        },
+        "pr": {
+          "measureS": 0.721,
+          "diffS": 0.893,
+          "totalS": 1.61,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 6,
+          "reply": {
+            "mutants": 6,
+            "ran": 6,
+            "killed": 4,
+            "timeout": 0,
+            "survived": 2,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 0.6666666666666666,
+            "durationMs": 823,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 566,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 4,
+            "Survived": 2
+          },
+          "score": 66.67
         }
       },
       "pr": {
@@ -1250,8 +1854,26 @@
           "vitest": "4.1.9",
           "vitestProject": "4.1.9"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "4.1.9",
+          "vitestProject": "4.1.9"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "4.1.9",
+          "vitestProject": "4.1.9"
+        },
+        "supercov-cold": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "11.10.0",
           "vitest": "4.1.9",
@@ -1266,7 +1888,8 @@
         }
       },
       "notes": [
-        "Vitest upgraded in this job from 4.1.9 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+        "Vitest upgraded in this job from 4.1.9 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 3 files"
       ],
       "errors": [],
       "setup": {
@@ -1293,12 +1916,25 @@
           "install": 1.088,
           "tool-install": 1.624
         },
+        "pr-supercov": {
+          "clone": 0.221,
+          "pnpm-setup": 1.377,
+          "install": 1.149,
+          "tool-install": 3.48
+        },
         "stryker-cold": {
           "clone": 0.264,
           "pnpm-setup": 1.658,
           "install": 1.136,
           "tool-install": 1.548,
           "tests": 2.581
+        },
+        "supercov-cold": {
+          "clone": 0.205,
+          "pnpm-setup": 1.649,
+          "install": 1.076,
+          "tool-install": 3.638,
+          "tests": 2.609
         },
         "truth": {
           "clone": 0.281,
@@ -1458,6 +2094,131 @@
           "extraKills": 0,
           "notInTruth": 47,
           "examples": []
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 1,
+          "measureS": 3.469,
+          "measureCpuS": 3.55,
+          "measureRssMiB": 312,
+          "measureExitCodes": [
+            0
+          ],
+          "strongS": 10.28,
+          "strongCpuS": 93.54,
+          "slowestStrongS": 10.283,
+          "totalS": 13.75,
+          "strongExitCodes": [
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 490,
+              "ran": 473,
+              "killed": 425,
+              "timeout": 4,
+              "survived": 60,
+              "noCoverage": 1,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8755102040816326,
+              "durationMs": 10149,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 9822,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 473,
+          "passes": 1,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 490,
+          "statuses": {
+            "Killed": 425,
+            "Survived": 60,
+            "NoCoverage": 1,
+            "Timeout": 4
+          },
+          "score": 87.55,
+          "strongMsPerMutantRun": 22,
+          "strongCpuMsPerMutantRun": 198
+        },
+        "vsTruth": {
+          "joined": 490,
+          "supercovOnly": 0,
+          "supercovOnlyByMutator": {},
+          "strykerOnly": 34,
+          "strykerOnlyByMutator": {
+            "Regex": 34
+          },
+          "ambiguous": 0,
+          "compared": 488,
+          "scoreSupercov": 87.5,
+          "scoreTruth": 87.5,
+          "notCompared": {
+            "Killed / RuntimeError": 2
+          },
+          "soundnessViolations": [],
+          "extraKills": [],
+          "static": {
+            "joined": 62,
+            "supercovStatuses": {
+              "Killed": 48,
+              "Survived": 14
+            },
+            "truthStatuses": {
+              "Killed": 46,
+              "Survived": 14,
+              "RuntimeError": 2
+            }
+          }
+        },
+        "pr": {
+          "measureS": 3.269,
+          "diffS": 1.462,
+          "totalS": 4.73,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 9,
+          "reply": {
+            "mutants": 9,
+            "ran": 9,
+            "killed": 7,
+            "timeout": 0,
+            "survived": 2,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 0.7777777777777778,
+            "durationMs": 1321,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 1045,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 7,
+            "Survived": 2
+          },
+          "score": 77.78
         }
       },
       "pr": {
@@ -1658,8 +2419,26 @@
           "vitest": "4.1.5",
           "vitestProject": "4.1.5"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "4.1.5",
+          "vitestProject": "4.1.5"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "4.1.5",
+          "vitestProject": "4.1.5"
+        },
+        "supercov-cold": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "10.33.2",
           "vitest": "4.1.5",
@@ -1674,7 +2453,8 @@
         }
       },
       "notes": [
-        "Vitest upgraded in this job from 4.1.5 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+        "Vitest upgraded in this job from 4.1.5 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 7 files"
       ],
       "errors": [],
       "setup": {
@@ -1701,12 +2481,25 @@
           "install": 0.894,
           "tool-install": 1.339
         },
+        "pr-supercov": {
+          "clone": 0.267,
+          "pnpm-setup": 1.237,
+          "install": 0.875,
+          "tool-install": 3.739
+        },
         "stryker-cold": {
           "clone": 0.266,
           "pnpm-setup": 1.348,
           "install": 0.872,
           "tool-install": 1.342,
           "tests": 0.405
+        },
+        "supercov-cold": {
+          "clone": 0.243,
+          "pnpm-setup": 1.202,
+          "install": 0.927,
+          "tool-install": 3.826,
+          "tests": 0.418
         },
         "truth": {
           "clone": 0.273,
@@ -1864,6 +2657,126 @@
           "extraKills": 0,
           "notInTruth": 170,
           "examples": []
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 1,
+          "measureS": 1.096,
+          "measureCpuS": 2.78,
+          "measureRssMiB": 175,
+          "measureExitCodes": [
+            0
+          ],
+          "strongS": 24.38,
+          "strongCpuS": 184.61,
+          "slowestStrongS": 24.384,
+          "totalS": 25.48,
+          "strongExitCodes": [
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 926,
+              "ran": 871,
+              "killed": 753,
+              "timeout": 11,
+              "survived": 141,
+              "noCoverage": 21,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8250539956803455,
+              "durationMs": 24282,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 23939,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 871,
+          "passes": 1,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 926,
+          "statuses": {
+            "Killed": 753,
+            "Survived": 141,
+            "NoCoverage": 21,
+            "Timeout": 11
+          },
+          "score": 82.51,
+          "strongMsPerMutantRun": 28,
+          "strongCpuMsPerMutantRun": 212
+        },
+        "vsTruth": {
+          "joined": 926,
+          "supercovOnly": 0,
+          "supercovOnlyByMutator": {},
+          "strykerOnly": 85,
+          "strykerOnlyByMutator": {
+            "Regex": 85
+          },
+          "ambiguous": 0,
+          "compared": 926,
+          "scoreSupercov": 82.51,
+          "scoreTruth": 82.51,
+          "notCompared": {},
+          "soundnessViolations": [],
+          "extraKills": [],
+          "static": {
+            "joined": 5,
+            "supercovStatuses": {
+              "Survived": 5
+            },
+            "truthStatuses": {
+              "Survived": 5
+            }
+          }
+        },
+        "pr": {
+          "measureS": 1.078,
+          "diffS": 1.42,
+          "totalS": 2.5,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 18,
+          "reply": {
+            "mutants": 18,
+            "ran": 17,
+            "killed": 16,
+            "timeout": 0,
+            "survived": 2,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 0.8888888888888888,
+            "durationMs": 1311,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 1019,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 16,
+            "Survived": 2
+          },
+          "score": 88.89
         }
       },
       "pr": {
@@ -2063,8 +2976,71 @@
           "vitest": "5.0.1",
           "vitestProject": "5.0.1"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
         "stryker-cold": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:1": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:2": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:3": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:4": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:5": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "supercov-cold:6": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "12.6.0",
           "vitest": "5.0.1",
@@ -2114,7 +3090,8 @@
         }
       },
       "notes": [
-        "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts"
+        "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 49 files"
       ],
       "errors": [],
       "setup": {
@@ -2137,12 +3114,55 @@
           "install": 0.755,
           "tool-install": 0.999
         },
+        "pr-supercov": {
+          "clone": 0.466,
+          "pnpm-setup": 1.802,
+          "install": 0.703,
+          "tool-install": 3.829
+        },
         "stryker-cold": {
           "clone": 0.468,
           "pnpm-setup": 1.678,
           "install": 0.777,
           "tool-install": 0.907,
           "tests": 6.586
+        },
+        "supercov-cold:1": {
+          "clone": 0.475,
+          "pnpm-setup": 1.608,
+          "install": 0.633,
+          "tool-install": 4.58,
+          "tests": 6.511
+        },
+        "supercov-cold:2": {
+          "clone": 0.436,
+          "pnpm-setup": 1.454,
+          "install": 0.761,
+          "tool-install": 3.46
+        },
+        "supercov-cold:3": {
+          "clone": 0.463,
+          "pnpm-setup": 1.745,
+          "install": 0.659,
+          "tool-install": 3.55
+        },
+        "supercov-cold:4": {
+          "clone": 0.447,
+          "pnpm-setup": 1.392,
+          "install": 0.707,
+          "tool-install": 4.005
+        },
+        "supercov-cold:5": {
+          "clone": 0.47,
+          "pnpm-setup": 1.506,
+          "install": 0.706,
+          "tool-install": 3.729
+        },
+        "supercov-cold:6": {
+          "clone": 0.401,
+          "pnpm-setup": 1.489,
+          "install": 0.723,
+          "tool-install": 3.873
         },
         "truth:s1": {
           "clone": 0.46,
@@ -2516,6 +3536,452 @@
           ]
         }
       },
+      "supercov": {
+        "cold": {
+          "shards": 6,
+          "measureS": 9.366,
+          "measureCpuS": 36.77,
+          "measureRssMiB": 1217,
+          "measureExitCodes": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "strongS": 1210.73,
+          "strongCpuS": 3851.74,
+          "slowestStrongS": 212.049,
+          "totalS": 1220.1,
+          "strongExitCodes": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 883,
+              "ran": 683,
+              "killed": 614,
+              "timeout": 14,
+              "survived": 177,
+              "noCoverage": 78,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.711211778029445,
+              "durationMs": 190494,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 189961,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 683,
+              "ran": 683,
+              "killed": 598,
+              "timeout": 17,
+              "survived": 68,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9004392386530015,
+              "durationMs": 193373,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 192831,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 683,
+              "ran": 683,
+              "killed": 601,
+              "timeout": 15,
+              "survived": 67,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9019033674963397,
+              "durationMs": 199104,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 198581,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 682,
+              "ran": 682,
+              "killed": 618,
+              "timeout": 9,
+              "survived": 55,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9193548387096774,
+              "durationMs": 205787,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 205221,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 682,
+              "ran": 682,
+              "killed": 594,
+              "timeout": 18,
+              "survived": 70,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8973607038123167,
+              "durationMs": 181980,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 181436,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 682,
+              "ran": 682,
+              "killed": 607,
+              "timeout": 14,
+              "survived": 61,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9105571847507331,
+              "durationMs": 204116,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 203547,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 4095,
+          "passes": 6,
+          "stalledPasses": 0,
+          "shardsWithResumedPasses": [],
+          "mutants": 4295,
+          "statuses": {
+            "Killed": 3632,
+            "Survived": 498,
+            "Timeout": 87,
+            "NoCoverage": 78
+          },
+          "score": 86.59,
+          "strongMsPerMutantRun": 296,
+          "strongCpuMsPerMutantRun": 941
+        },
+        "vsTruth": {
+          "joined": 4292,
+          "supercovOnly": 3,
+          "supercovOnlyByMutator": {
+            "BlockStatement": 3
+          },
+          "strykerOnly": 185,
+          "strykerOnlyByMutator": {
+            "Regex": 185
+          },
+          "ambiguous": 0,
+          "compared": 4290,
+          "scoreSupercov": 86.57,
+          "scoreTruth": 86.62,
+          "notCompared": {
+            "Killed / RuntimeError": 2
+          },
+          "soundnessViolations": [
+            {
+              "id": "src/router/smart-router/router.ts:14:24-16:6:BlockStatement:{}",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/hono.test.ts > c.var - with testing types > Should be a read-only"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "statement-ran",
+              "reason": "the statement around it ran (a proxy: removing it may change nothing)",
+              "original": "{ throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT) }",
+              "replacement": "{}"
+            },
+            {
+              "id": "src/router/smart-router/router.ts:15:7-15:56:CallExpression:empty",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/hono.test.ts > c.var - with testing types > Should be a read-only"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "statement-ran",
+              "reason": "the statement around it ran (a proxy: removing it may change nothing)",
+              "original": "throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT)",
+              "replacement": ";"
+            },
+            {
+              "id": "src/utils/html.ts:63:9-63:14:EqualityOperator:<=",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "not-infected",
+              "weakCode": "operands-never-equal",
+              "reason": "operands-never-equal",
+              "original": "i < 0",
+              "replacement": "i <= 0"
+            },
+            {
+              "id": "src/utils/html.ts:76:9-76:30:ConditionalExpression:true",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`typeof r === 'object'` was false at least once",
+              "original": "typeof r === 'object'",
+              "replacement": "true"
+            },
+            {
+              "id": "src/utils/html.ts:81:16-81:37:ConditionalExpression:true",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`typeof r === 'object'` was false at least once",
+              "original": "typeof r === 'object'",
+              "replacement": "true"
+            },
+            {
+              "id": "src/utils/html.ts:161:9-161:61:ConditionalExpression:true",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/jsx/streaming.test.tsx > Streaming > use() > render to stream"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`(str as string | Promise<string>) instanceof Promise` was false at least once",
+              "original": "(str as string | Promise<string>) instanceof Promise",
+              "replacement": "true"
+            },
+            {
+              "id": "src/utils/jwt/jwt.ts:156:77-156:94:EqualityOperator:<=",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (none)",
+                "src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (wrong - string)",
+                "src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (wrong - RegExp)",
+                "src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (correct - string)",
+                "src/utils/jwt/jwt.test.ts > JWT > JwtTokenIssuer (correct - RegExp)"
+              ],
+              "truthKillerCount": 5,
+              "supercovKilledBy": [],
+              "weak": "not-infected",
+              "weakCode": "operands-never-equal",
+              "reason": "`now` never equal to `payload.iat`",
+              "original": "now < payload.iat",
+              "replacement": "now <= payload.iat"
+            }
+          ],
+          "extraKills": [
+            {
+              "id": "src/router/smart-router/router.ts:14:9-14:22:ConditionalExpression:false",
+              "supercov": "Killed",
+              "truth": "Survived",
+              "static": true,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [
+                "vitest:-1282846912_39_4"
+              ],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`!this.#routes` was true at least once",
+              "original": "!this.#routes",
+              "replacement": "false"
+            },
+            {
+              "id": "src/utils/html.ts:83:64-83:66:ArrayDeclaration:[\"Stryker was here\"]",
+              "supercov": "Killed",
+              "truth": "NoCoverage",
+              "static": false,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [
+                "vitest:685104812_0_29_1"
+              ],
+              "weak": "infected",
+              "weakCode": "reached",
+              "reason": "the code ran, and this replacement differs wherever it is evaluated",
+              "original": "[]",
+              "replacement": "[\"Stryker was here\"]"
+            },
+            {
+              "id": "src/utils/html.ts:100:7-100:19:ConditionalExpression:false",
+              "supercov": "Killed",
+              "truth": "Survived",
+              "static": true,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [
+                "vitest:-2022380970_0_4_0"
+              ],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`match === -1` was true at least once",
+              "original": "match === -1",
+              "replacement": "false"
+            },
+            {
+              "id": "src/utils/html.ts:100:17-100:19:UnaryOperator:+",
+              "supercov": "Killed",
+              "truth": "Survived",
+              "static": true,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [
+                "vitest:-2022380970_0_4_0"
+              ],
+              "weak": "unknown",
+              "weakCode": "no-rule",
+              "reason": "no rule decides UnaryOperator mutants yet",
+              "original": "-1",
+              "replacement": "+1"
+            },
+            {
+              "id": "src/utils/html.ts:157:7-157:30:ConditionalExpression:true",
+              "supercov": "Killed",
+              "truth": "Survived",
+              "static": true,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [
+                "vitest:-2022380970_0_4_0"
+              ],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`typeof str === 'object'` was false at least once",
+              "original": "typeof str === 'object'",
+              "replacement": "true"
+            }
+          ],
+          "static": {
+            "joined": 320,
+            "supercovStatuses": {
+              "Killed": 299,
+              "Survived": 20,
+              "Timeout": 1
+            },
+            "truthStatuses": {
+              "Killed": 269,
+              "Timeout": 26,
+              "Survived": 24,
+              "RuntimeError": 1
+            }
+          }
+        },
+        "pr": {
+          "measureS": 9.002,
+          "diffS": 23.329,
+          "totalS": 32.33,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 11,
+          "reply": {
+            "mutants": 11,
+            "ran": 11,
+            "killed": 11,
+            "timeout": 0,
+            "survived": 0,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 1,
+            "durationMs": 17572,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 17188,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 11
+          },
+          "score": 100
+        }
+      },
       "pr": {
         "changedLines": [
           "src/utils/url.ts:144-144"
@@ -2772,6 +4238,15 @@
           "vitest": "5.1.0",
           "vitestProject": "5.1.0"
         },
+        "pr-supercov": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "6176aa9dd959d1da",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
         "stryker-cold:s1": {
           "stryker": "10.1.1",
           "node": "v24.22.2",
@@ -2823,6 +4298,294 @@
         },
         "stryker-cold:s8": {
           "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:1": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:10": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:11": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:12": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:13": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:14": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:15": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:16": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:17": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:18": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:19": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:2": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:20": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:21": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:22": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:23": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:24": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:25": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:26": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:27": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:28": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:29": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:3": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:30": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:31": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:32": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:4": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:5": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:6": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:7": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:8": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "supercov-cold:9": {
+          "supercovWrapper": "4.28.0",
+          "supercov": "supercov 4.28.0 (rust contract v1)",
+          "supercovBinaryKey": "f155046dc49afc31",
           "node": "v24.22.2",
           "pnpm": "12.4.1",
           "vitest": "5.1.0",
@@ -3070,7 +4833,8 @@
       "notes": [
         "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on trpc's TypeScript 7.1.0-beta: Package subpath './unstable/sync' is not defined by exports",
         "PR scenario base runs mutate [\"packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts\",\"packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts\",\"packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts\",\"packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts\",\"packages/server/src/unstable-core-do-not-import/http/abortError.ts\",\"packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts\"]: the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
-        "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default"
+        "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default",
+        "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 46 files"
       ],
       "errors": [],
       "setup": {
@@ -3147,6 +4911,12 @@
           "install": 4.076,
           "tool-install": 8.673
         },
+        "pr-supercov": {
+          "clone": 0.631,
+          "pnpm-setup": 1.432,
+          "install": 3.953,
+          "tool-install": 3.618
+        },
         "stryker-cold:s1": {
           "clone": 0.686,
           "pnpm-setup": 1.594,
@@ -3195,6 +4965,199 @@
           "pnpm-setup": 1.536,
           "install": 4.038,
           "tool-install": 9.472
+        },
+        "supercov-cold:1": {
+          "clone": 0.723,
+          "pnpm-setup": 1.428,
+          "install": 4.048,
+          "tool-install": 3.729,
+          "tests": 21.013
+        },
+        "supercov-cold:10": {
+          "clone": 0.655,
+          "pnpm-setup": 1.615,
+          "install": 3.901,
+          "tool-install": 3.474
+        },
+        "supercov-cold:11": {
+          "clone": 0.63,
+          "pnpm-setup": 1.339,
+          "install": 3.932,
+          "tool-install": 3.889
+        },
+        "supercov-cold:12": {
+          "clone": 0.695,
+          "pnpm-setup": 1.662,
+          "install": 3.783,
+          "tool-install": 3.697
+        },
+        "supercov-cold:13": {
+          "clone": 0.657,
+          "pnpm-setup": 1.449,
+          "install": 3.86,
+          "tool-install": 3.59
+        },
+        "supercov-cold:14": {
+          "clone": 0.683,
+          "pnpm-setup": 1.605,
+          "install": 3.997,
+          "tool-install": 3.562
+        },
+        "supercov-cold:15": {
+          "clone": 0.718,
+          "pnpm-setup": 1.49,
+          "install": 3.869,
+          "tool-install": 3.797
+        },
+        "supercov-cold:16": {
+          "clone": 0.68,
+          "pnpm-setup": 1.612,
+          "install": 3.892,
+          "tool-install": 3.876
+        },
+        "supercov-cold:17": {
+          "clone": 0.728,
+          "pnpm-setup": 1.374,
+          "install": 3.83,
+          "tool-install": 3.703
+        },
+        "supercov-cold:18": {
+          "clone": 0.652,
+          "pnpm-setup": 1.561,
+          "install": 4.114,
+          "tool-install": 3.66
+        },
+        "supercov-cold:19": {
+          "clone": 0.665,
+          "pnpm-setup": 1.829,
+          "install": 4.032,
+          "tool-install": 3.934
+        },
+        "supercov-cold:2": {
+          "clone": 0.67,
+          "pnpm-setup": 1.771,
+          "install": 3.962,
+          "tool-install": 3.609
+        },
+        "supercov-cold:20": {
+          "clone": 0.631,
+          "pnpm-setup": 1.562,
+          "install": 3.767,
+          "tool-install": 3.837
+        },
+        "supercov-cold:21": {
+          "clone": 0.673,
+          "pnpm-setup": 1.804,
+          "install": 4.171,
+          "tool-install": 3.571
+        },
+        "supercov-cold:22": {
+          "clone": 0.716,
+          "pnpm-setup": 1.742,
+          "install": 4.023,
+          "tool-install": 3.448
+        },
+        "supercov-cold:23": {
+          "clone": 1.733,
+          "pnpm-setup": 1.903,
+          "install": 3.891,
+          "tool-install": 4.084
+        },
+        "supercov-cold:24": {
+          "clone": 0.635,
+          "pnpm-setup": 1.367,
+          "install": 3.995,
+          "tool-install": 3.377
+        },
+        "supercov-cold:25": {
+          "clone": 0.654,
+          "pnpm-setup": 1.435,
+          "install": 4.026,
+          "tool-install": 4.337
+        },
+        "supercov-cold:26": {
+          "clone": 0.712,
+          "pnpm-setup": 1.355,
+          "install": 3.955,
+          "tool-install": 3.829
+        },
+        "supercov-cold:27": {
+          "clone": 0.747,
+          "pnpm-setup": 1.518,
+          "install": 4.099,
+          "tool-install": 3.343
+        },
+        "supercov-cold:28": {
+          "clone": 0.645,
+          "pnpm-setup": 1.813,
+          "install": 4.029,
+          "tool-install": 4.144
+        },
+        "supercov-cold:29": {
+          "clone": 0.714,
+          "pnpm-setup": 1.495,
+          "install": 3.83,
+          "tool-install": 3.398
+        },
+        "supercov-cold:3": {
+          "clone": 0.643,
+          "pnpm-setup": 1.34,
+          "install": 3.787,
+          "tool-install": 3.916
+        },
+        "supercov-cold:30": {
+          "clone": 0.681,
+          "pnpm-setup": 1.684,
+          "install": 3.792,
+          "tool-install": 3.275
+        },
+        "supercov-cold:31": {
+          "clone": 0.611,
+          "pnpm-setup": 1.338,
+          "install": 3.763,
+          "tool-install": 3.786
+        },
+        "supercov-cold:32": {
+          "clone": 0.66,
+          "pnpm-setup": 1.784,
+          "install": 4.038,
+          "tool-install": 3.662
+        },
+        "supercov-cold:4": {
+          "clone": 0.631,
+          "pnpm-setup": 1.57,
+          "install": 4.153,
+          "tool-install": 4.499
+        },
+        "supercov-cold:5": {
+          "clone": 0.693,
+          "pnpm-setup": 1.508,
+          "install": 3.813,
+          "tool-install": 3.599
+        },
+        "supercov-cold:6": {
+          "clone": 0.652,
+          "pnpm-setup": 1.827,
+          "install": 4.133,
+          "tool-install": 3.63
+        },
+        "supercov-cold:7": {
+          "clone": 0.691,
+          "pnpm-setup": 1.379,
+          "install": 3.831,
+          "tool-install": 4.105
+        },
+        "supercov-cold:8": {
+          "clone": 0.277,
+          "pnpm-setup": 1.715,
+          "install": 4.047,
+          "tool-install": 3.343
+        },
+        "supercov-cold:9": {
+          "clone": 0.668,
+          "pnpm-setup": 1.624,
+          "install": 4.03,
+          "tool-install": 4.68
         },
         "truth:s1": {
           "clone": 0.718,
@@ -4924,7 +6887,7 @@
           "meanKillersPerKilledMutant": 50.01,
           "medianKillers": 7,
           "killedByOneTestOnly": 339,
-          "distinctKillingTests": 868,
+          "distinctKillingTests": 858,
           "meanCoveringTests": 157.09
         }
       },
@@ -4989,6 +6952,941 @@
               "truthKillers": 1
             }
           ]
+        }
+      },
+      "supercov": {
+        "cold": {
+          "shards": 32,
+          "measureS": 22.4,
+          "measureCpuS": 86.87,
+          "measureRssMiB": 711,
+          "measureExitCodes": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "strongS": 9127.71,
+          "strongCpuS": 29097.11,
+          "slowestStrongS": 395.829,
+          "totalS": 9150.11,
+          "strongExitCodes": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "timedOut": false,
+          "complete": true,
+          "replies": [
+            {
+              "mutants": 327,
+              "ran": 77,
+              "killed": 65,
+              "timeout": 8,
+              "survived": 135,
+              "noCoverage": 119,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.22324159021406728,
+              "durationMs": 234987,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 234424,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 60,
+              "timeout": 5,
+              "survived": 11,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8552631578947368,
+              "durationMs": 281871,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 281306,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 53,
+              "timeout": 6,
+              "survived": 16,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.7866666666666666,
+              "durationMs": 326622,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 326045,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 61,
+              "timeout": 3,
+              "survived": 12,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8421052631578947,
+              "durationMs": 316131,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 315568,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 55,
+              "timeout": 6,
+              "survived": 15,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8026315789473685,
+              "durationMs": 342594,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 342042,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 60,
+              "timeout": 6,
+              "survived": 10,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.868421052631579,
+              "durationMs": 274341,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 273790,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 57,
+              "timeout": 4,
+              "survived": 15,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8026315789473685,
+              "durationMs": 225745,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 225187,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 64,
+              "timeout": 4,
+              "survived": 8,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8947368421052632,
+              "durationMs": 219658,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 219107,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 60,
+              "timeout": 4,
+              "survived": 12,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8421052631578947,
+              "durationMs": 304387,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 303826,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 58,
+              "timeout": 4,
+              "survived": 14,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8157894736842105,
+              "durationMs": 392736,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 392147,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 57,
+              "timeout": 6,
+              "survived": 13,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8289473684210527,
+              "durationMs": 301478,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 300918,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 77,
+              "ran": 77,
+              "killed": 61,
+              "timeout": 7,
+              "survived": 8,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.8947368421052632,
+              "durationMs": 300885,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 300317,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 52,
+              "timeout": 5,
+              "survived": 18,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.76,
+              "durationMs": 321276,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 320705,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 61,
+              "timeout": 4,
+              "survived": 11,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8552631578947368,
+              "durationMs": 198957,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 198389,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 56,
+              "timeout": 9,
+              "survived": 9,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 2,
+              "mutationScore": 0.8783783783783784,
+              "durationMs": 291423,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 290865,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 57,
+              "timeout": 11,
+              "survived": 8,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8947368421052632,
+              "durationMs": 360361,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 282063,
+                  "isolated": true,
+                  "stalled": true,
+                  "left": 10
+                },
+                {
+                  "summary": true,
+                  "durationMs": 77248,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 59,
+              "timeout": 5,
+              "survived": 11,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.8533333333333334,
+              "durationMs": 260175,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 259606,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 48,
+              "timeout": 10,
+              "survived": 16,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 2,
+              "mutationScore": 0.7837837837837838,
+              "durationMs": 331783,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 249004,
+                  "isolated": true,
+                  "stalled": true,
+                  "left": 18
+                },
+                {
+                  "summary": true,
+                  "durationMs": 81742,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 57,
+              "timeout": 5,
+              "survived": 13,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.8266666666666667,
+              "durationMs": 257720,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 257164,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 57,
+              "timeout": 7,
+              "survived": 12,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8421052631578947,
+              "durationMs": 295173,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 294615,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 59,
+              "timeout": 6,
+              "survived": 10,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.8666666666666667,
+              "durationMs": 251775,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 251221,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 64,
+              "timeout": 5,
+              "survived": 5,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 2,
+              "mutationScore": 0.9324324324324325,
+              "durationMs": 229056,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 228476,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 77,
+              "ran": 77,
+              "killed": 58,
+              "timeout": 6,
+              "survived": 13,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8311688311688312,
+              "durationMs": 235148,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 234588,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 58,
+              "timeout": 8,
+              "survived": 10,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.868421052631579,
+              "durationMs": 246110,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 245536,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 59,
+              "timeout": 9,
+              "survived": 7,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 1,
+              "mutationScore": 0.9066666666666666,
+              "durationMs": 293621,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 293070,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 61,
+              "timeout": 8,
+              "survived": 7,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.9078947368421053,
+              "durationMs": 244024,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 243455,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 77,
+              "ran": 77,
+              "killed": 59,
+              "timeout": 7,
+              "survived": 11,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8571428571428571,
+              "durationMs": 262017,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 261450,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 77,
+              "ran": 77,
+              "killed": 58,
+              "timeout": 9,
+              "survived": 10,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8701298701298701,
+              "durationMs": 366391,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 174656,
+                  "isolated": true,
+                  "stalled": true,
+                  "left": 30
+                },
+                {
+                  "summary": true,
+                  "durationMs": 190644,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 77,
+              "ran": 77,
+              "killed": 58,
+              "timeout": 5,
+              "survived": 14,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8181818181818182,
+              "durationMs": 255333,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 254770,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 58,
+              "timeout": 8,
+              "survived": 10,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.868421052631579,
+              "durationMs": 262217,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 261653,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 62,
+              "timeout": 2,
+              "survived": 12,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8421052631578947,
+              "durationMs": 210908,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 210350,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            },
+            {
+              "mutants": 76,
+              "ran": 76,
+              "killed": 56,
+              "timeout": 6,
+              "survived": 14,
+              "noCoverage": 0,
+              "equivalent": 0,
+              "error": 0,
+              "mutationScore": 0.8157894736842105,
+              "durationMs": 340296,
+              "commandExitCode": 0,
+              "passes": [
+                {
+                  "summary": true,
+                  "durationMs": 339747,
+                  "isolated": true,
+                  "stalled": false,
+                  "left": 0
+                }
+              ]
+            }
+          ],
+          "ran": 2438,
+          "passes": 35,
+          "stalledPasses": 3,
+          "shardsWithResumedPasses": [
+            "23",
+            "25",
+            "5"
+          ],
+          "mutants": 2688,
+          "statuses": {
+            "Killed": 1868,
+            "Timeout": 198,
+            "Survived": 490,
+            "NoCoverage": 119,
+            "RuntimeError": 13
+          },
+          "score": 77.23,
+          "strongMsPerMutantRun": 3744,
+          "strongCpuMsPerMutantRun": 11935
+        },
+        "vsTruth": {
+          "joined": 2664,
+          "supercovOnly": 24,
+          "supercovOnlyByMutator": {
+            "ObjectLiteral": 5,
+            "BlockStatement": 18,
+            "ArrayDeclaration": 1
+          },
+          "strykerOnly": 7,
+          "strykerOnlyByMutator": {
+            "Regex": 7
+          },
+          "ambiguous": 0,
+          "compared": 2646,
+          "scoreSupercov": 77.02,
+          "scoreTruth": 77.1,
+          "notCompared": {
+            "Killed / RuntimeError": 8,
+            "RuntimeError / Killed": 8,
+            "RuntimeError / Timeout": 1,
+            "Survived / RuntimeError": 1
+          },
+          "soundnessViolations": [
+            {
+              "id": "packages/server/src/unstable-core-do-not-import/http/contentType.ts:109:7-110:39:LogicalOperator:||",
+              "supercov": "Survived",
+              "truth": "Killed",
+              "static": false,
+              "truthKillers": [
+                "packages/tests/server/httpSubscriptionLink.test.ts > iterable event with bad yield"
+              ],
+              "truthKillerCount": 1,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "operands-differ",
+              "reason": "one operand was true and the other false",
+              "original": "isBatchCall && typeof maxBatchSize === 'number'",
+              "replacement": "isBatchCall || typeof maxBatchSize === 'number'"
+            },
+            {
+              "id": "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false",
+              "supercov": "Survived",
+              "truth": "Timeout",
+              "static": false,
+              "truthKillers": [],
+              "truthKillerCount": 0,
+              "supercovKilledBy": [],
+              "weak": "infected",
+              "weakCode": "opposite-value",
+              "reason": "`result.done` was true at least once",
+              "original": "result.done",
+              "replacement": "false"
+            }
+          ],
+          "extraKills": [],
+          "static": {
+            "joined": 399,
+            "supercovStatuses": {
+              "Killed": 290,
+              "Survived": 87,
+              "RuntimeError": 2,
+              "Timeout": 20
+            },
+            "truthStatuses": {
+              "Killed": 212,
+              "Timeout": 92,
+              "RuntimeError": 8,
+              "Survived": 87
+            }
+          }
+        },
+        "pr": {
+          "measureS": 22.935,
+          "diffS": 7.721,
+          "totalS": 30.66,
+          "exitCodes": [
+            0,
+            0
+          ],
+          "diffMutants": 1,
+          "reply": {
+            "mutants": 1,
+            "ran": 1,
+            "killed": 1,
+            "timeout": 0,
+            "survived": 0,
+            "noCoverage": 0,
+            "equivalent": 0,
+            "error": 0,
+            "mutationScore": 1,
+            "durationMs": 4843,
+            "commandExitCode": 0,
+            "passes": [
+              {
+                "summary": true,
+                "durationMs": 4344,
+                "isolated": true,
+                "stalled": false,
+                "left": 0
+              }
+            ]
+          },
+          "statuses": {
+            "Killed": 1
+          },
+          "score": 100
         }
       },
       "pr": {

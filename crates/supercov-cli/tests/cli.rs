@@ -21900,7 +21900,7 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
 /// run of the whole suite.
 #[cfg(unix)]
 #[test]
-fn a_test_that_fails_without_its_predecessor_kills_nothing() {
+fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     let project = vitest_mutants_project("strong-subset-false-kill");
     project.write(
         "src/items.js",
