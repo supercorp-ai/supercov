@@ -584,6 +584,9 @@ fn run_javascript(
             "test command must not be empty".into(),
         ));
     }
+    // A strong pass instruments its copy with the mutants behind switches,
+    // in this process and in the test's; set back when the run ends.
+    let _strong = StrongModeGuard::set(request.strong.is_some());
     let total_started = Instant::now();
     let initialization_started = Instant::now();
     let root = crate::workspace::canonicalize_simplified(&request.root)
@@ -975,6 +978,7 @@ fn run_javascript(
         project.playwright_test_export.clone(),
     );
     if let Some(strong) = &request.strong {
+        overrides.insert("SUPERCOV_STRONG".into(), "1".into());
         overrides.insert(
             "SUPERCOV_STRONG_PLAN".into(),
             strong.plan.display().to_string(),
@@ -2669,5 +2673,25 @@ pub fn run_strong_javascript(
         Finished::Run(_) => Err(DirectJavascriptRunError::Failed(
             "a strong pass published a run".into(),
         )),
+    }
+}
+
+/// Strong mode for the run's own instrumentation, set back when it ends.
+struct StrongModeGuard(bool);
+
+impl StrongModeGuard {
+    fn set(strong: bool) -> Self {
+        if strong {
+            crate::js_instrumenter::set_strong_mode(Some(true));
+        }
+        Self(strong)
+    }
+}
+
+impl Drop for StrongModeGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::js_instrumenter::set_strong_mode(None);
+        }
     }
 }

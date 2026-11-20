@@ -105,12 +105,40 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const started = Date.now();
     let last;
 
+    // The copy's own list: the mutant at each index must be the run's, and
+    // one the instrumenter could not place has no switch to turn on.
+    let listed = {};
+    try {
+        listed = JSON.parse(readFileSync(`${root}/.supercov/frontend-evidence/mutants.json`, "utf8")).files ?? {};
+    }
+    catch {
+        listed = {};
+    }
+    const placed = (mutant) => {
+        const entry = listed[mutant.file]?.[mutant.index];
+        if (!entry)
+            return "the copy lists no such mutant: the source changed since the run";
+        const [, , start, end] = /:(\d+:\d+)-(\d+:\d+):/.exec(mutant.id) ?? [];
+        const same = entry.mutator === mutant.mutator &&
+            (!start || `${entry.start?.[0]}:${entry.start?.[1]}` === start.replace(/^(\d+):/, "$1:")) ;
+        if (!same)
+            return "the copy's mutant at this index is another: the source changed since the run";
+        if (entry.unplaceable)
+            return `no switch could be placed (${entry.unplaceable})`;
+        return undefined;
+    };
+
     // Each mutant to run: its candidates grouped by test file, the cheapest
     // file first.
     const pending = [];
     for (const mutant of plan.mutants) {
         if (mutant.decided)
             continue;
+        const unplaced = placed(mutant);
+        if (unplaced) {
+            write({ id: mutant.id, status: "error", reason: unplaced, tests: 0, durationMs: 0 });
+            continue;
+        }
         const byFile = new Map();
         for (const candidate of mutant.candidates) {
             const test = tests[candidate.test];
