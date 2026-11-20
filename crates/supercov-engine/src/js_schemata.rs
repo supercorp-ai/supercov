@@ -1852,12 +1852,11 @@ mod tests {
                 "{name}"
             );
             for index in 0..golden.len() {
-                assert!(
-                    output
-                        .code
-                        .contains(&format!("__supercovStrong.a === {index} ")),
-                    "{name}: no switch for #{index}"
-                );
+                let test = format!("__supercovStrong.a === {index}");
+                let switched = output.code.match_indices(&test).any(|(at, _)| {
+                    !output.code[at + test.len()..].starts_with(|next: char| next.is_ascii_digit())
+                });
+                assert!(switched, "{name}: no switch for #{index}");
             }
         }
     }
