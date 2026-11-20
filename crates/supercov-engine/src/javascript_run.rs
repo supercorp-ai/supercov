@@ -586,7 +586,7 @@ fn run_javascript(
     }
     // A strong pass instruments its copy with the mutants behind switches,
     // in this process and in the test's; set back when the run ends.
-    let _strong = StrongModeGuard::set(request.strong.is_some());
+    let _strong = StrongModeGuard::set(request.strong.as_ref());
     let total_started = Instant::now();
     let initialization_started = Instant::now();
     let root = crate::workspace::canonicalize_simplified(&request.root)
@@ -987,6 +987,23 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
+        if let Some(files) = strong_files(strong) {
+            let mut files = files.into_iter().collect::<Vec<_>>();
+            files.sort();
+            let path = strong_files_path(strong);
+            crate::fault_fs::write(
+                &path,
+                serde_json::to_vec(&files).expect("plain data serializes"),
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] strong pass: switches in {} of {} source file(s)",
+                files.len(),
+                project.source_files.len()
+            );
+            overrides.insert("SUPERCOV_STRONG_FILES".into(), path.display().to_string());
+        }
     }
     overrides.insert(
         "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
@@ -2692,13 +2709,15 @@ pub fn run_strong_javascript(
     }
 }
 
-/// The mutants a strong pass's driver sent to run alone: each `restart`
-/// record in the results (`playwrightStrong.mjs`) starts the command again,
-/// with the job in `SUPERCOV_STRONG_RESTART` and, where the job says so,
-/// the mutant switched on in every process from its start
-/// (`SUPERCOV_ACTIVE_MUTANT`). The
-/// driver of that invocation runs the job's tests alone and writes the
-/// mutant's verdict. A Vitest pass writes none.
+/// The further invocations a strong pass's driver asks for, in `restart`
+/// records in the results (`playwrightStrong.mjs`): each starts the command
+/// again with the job in `SUPERCOV_STRONG_RESTART`, and a job that says
+/// `everywhere` (one mutant a server ran outside any request) with the
+/// mutant switched on in every process from its start
+/// (`SUPERCOV_ACTIVE_MUTANT`). A job's own invocation may ask for more (the
+/// survivors' other candidates, kills to confirm alone); they run in turn.
+/// Each invocation's output goes to a log beside the results. A Vitest pass
+/// asks for none.
 fn run_strong_restarts(
     strong: &StrongRun,
     command: &[String],
@@ -2707,83 +2726,99 @@ fn run_strong_restarts(
     supervisor: &ProcessSupervisor,
     diagnostics: &mut dyn std::io::Write,
 ) -> Result<(), DirectJavascriptRunError> {
-    let text = std::fs::read_to_string(&strong.results).unwrap_or_default();
-    let jobs = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|record| record.get("restart").cloned())
-        .collect::<Vec<_>>();
-    for (number, job) in jobs.iter().enumerate() {
-        let Some(mutant) = job["mutant"].as_str() else {
-            continue;
-        };
-        let path = strong
-            .results
-            .with_file_name(format!("restart-{number}.json"));
-        crate::fault_fs::write(
-            &path,
-            serde_json::to_vec(job).expect("plain data serializes"),
-        )
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-        // Switched on in every process from its start where a server ran its
-        // code outside any request; otherwise by its attempts alone.
-        let everywhere = job["everywhere"] != false;
-        let _ = writeln!(
-            diagnostics,
-            "[supercov] {}: running alone{} ({})",
-            job["id"].as_str().unwrap_or(mutant),
-            if everywhere {
-                ", with every process started with it switched on"
-            } else {
-                ""
-            },
-            job["reason"].as_str().unwrap_or("restart")
-        );
-        let mut environment = overrides.clone();
-        if everywhere {
-            environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
-        }
-        environment.insert("SUPERCOV_STRONG_RESTART".into(), path.display().to_string());
-        let plan = ExecutionPlan {
-            preparation: Vec::new(),
-            test: ExecutionPhase {
-                name: "test".into(),
-                kind: PhaseKind::Test,
-                command: CommandSpec {
-                    program: command[0].clone().into(),
-                    arguments: command[1..].iter().map(OsString::from).collect(),
-                    cwd: workspace.to_owned(),
-                    environment: Some(environment_with(environment)),
-                    captured_output: None,
-                    console: None,
-                },
-            },
-        };
-        let execution = execute_plan_with_supervisor(
-            supervisor,
-            &plan,
-            supervision_options()?,
-            diagnostics,
-            |_, _| Ok(()),
-        )
-        .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
-        // An interrupted pass ends here; the mutants left have no verdict.
-        if execution.interrupted_signal.is_some() {
+    let mut read = 0usize;
+    let mut number = 0usize;
+    // Every pass that can ask for more asks for fewer: a bound, all the same.
+    while number < 1_000 {
+        let text = std::fs::read_to_string(&strong.results).unwrap_or_default();
+        let lines = text.lines().collect::<Vec<_>>();
+        let jobs = lines[read.min(lines.len())..]
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| record.get("restart").cloned())
+            .collect::<Vec<_>>();
+        read = lines.len();
+        if jobs.is_empty() {
             break;
+        }
+        for job in jobs {
+            let path = strong
+                .results
+                .with_file_name(format!("restart-{number}.json"));
+            let log = strong
+                .results
+                .with_file_name(format!("restart-{number}.log"));
+            number += 1;
+            crate::fault_fs::write(
+                &path,
+                serde_json::to_vec(&job).expect("plain data serializes"),
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+            let everywhere = job["everywhere"] == true;
+            let mutants = job["mutants"].as_array().map_or(0, Vec::len);
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] strong pass {}: {} mutant(s), {}{} ({})",
+                path.file_stem().unwrap_or_default().to_string_lossy(),
+                mutants,
+                job["kind"].as_str().unwrap_or("alone"),
+                if everywhere {
+                    ", every process started with it switched on"
+                } else {
+                    ""
+                },
+                job["reason"].as_str().unwrap_or("restart")
+            );
+            let mut environment = overrides.clone();
+            if everywhere && let Some(mutant) = job["mutants"][0]["mutant"].as_str() {
+                environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
+            }
+            environment.insert("SUPERCOV_STRONG_RESTART".into(), path.display().to_string());
+            let plan = ExecutionPlan {
+                preparation: Vec::new(),
+                test: ExecutionPhase {
+                    name: "test".into(),
+                    kind: PhaseKind::Test,
+                    command: CommandSpec {
+                        program: command[0].clone().into(),
+                        arguments: command[1..].iter().map(OsString::from).collect(),
+                        cwd: workspace.to_owned(),
+                        environment: Some(environment_with(environment)),
+                        captured_output: Some(log),
+                        console: None,
+                    },
+                },
+            };
+            let execution = execute_plan_with_supervisor(
+                supervisor,
+                &plan,
+                supervision_options()?,
+                diagnostics,
+                |_, _| Ok(()),
+            )
+            .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+            // An interrupted pass ends here; the mutants left have no verdict.
+            if execution.interrupted_signal.is_some() {
+                return Ok(());
+            }
         }
     }
     Ok(())
 }
 
 /// Strong mode for the run's own instrumentation, set back when it ends.
+/// Only the files the plan has a mutant to run in get switches: written
+/// for the processes that instrument on their own beside the results
+/// (`SUPERCOV_STRONG_FILES`), and set for this one.
 struct StrongModeGuard(bool);
 
 impl StrongModeGuard {
-    fn set(strong: bool) -> Self {
-        if strong {
+    fn set(strong: Option<&StrongRun>) -> Self {
+        if let Some(strong) = strong {
             crate::js_instrumenter::set_strong_mode(Some(true));
+            crate::js_instrumenter::set_strong_files(strong_files(strong));
         }
-        Self(strong)
+        Self(strong.is_some())
     }
 }
 
@@ -2791,6 +2826,27 @@ impl Drop for StrongModeGuard {
     fn drop(&mut self) {
         if self.0 {
             crate::js_instrumenter::set_strong_mode(None);
+            crate::js_instrumenter::set_strong_files(None);
         }
     }
+}
+
+/// The files of the plan's mutants that run: `None` when the plan cannot
+/// be read, which switches every file.
+fn strong_files(strong: &StrongRun) -> Option<std::collections::HashSet<String>> {
+    let plan =
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&strong.plan).ok()?).ok()?;
+    Some(
+        plan["mutants"]
+            .as_array()?
+            .iter()
+            .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
+            .filter_map(|mutant| mutant["file"].as_str().map(str::to_owned))
+            .collect(),
+    )
+}
+
+/// Where a strong pass lists its files for other processes.
+fn strong_files_path(strong: &StrongRun) -> PathBuf {
+    strong.results.with_file_name("strong-files.json")
 }

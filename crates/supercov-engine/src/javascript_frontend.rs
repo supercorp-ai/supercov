@@ -1937,6 +1937,10 @@ fn instrument_source(
             });
         }
     };
+    // A strong pass's file with no switch runs as written.
+    if output.runtime.is_none() && output.code == source {
+        return Ok(InstrumentedSource::Measured(Box::new(output)));
+    }
     // A directly run TypeScript file names its helpers' types from the
     // runtime's declarations, which sit beside the runtime in the
     // workspace.

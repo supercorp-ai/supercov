@@ -4003,13 +4003,60 @@ thread_local! {
     /// In this crate's tests, on the thread that sets it: strong mode on or
     /// off whatever `SUPERCOV_STRONG` says.
     pub(crate) static STRONG_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// In this crate's tests, on the thread that sets it: the files a strong
+    /// pass switches.
+    pub(crate) static STRONG_FILES_FOR_TEST: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The probe and strong switches, for the frontend cache key:
 /// instrumentation cached with the probes off must not be reused once they
-/// are on, or the reverse, and a strong copy is never a measured one.
-pub(crate) fn probe_options() -> (bool, bool) {
-    (mutants_enabled(), strong_enabled())
+/// are on, or the reverse, and a strong copy is never a measured one, nor
+/// one that switched other files.
+pub(crate) fn probe_options() -> (bool, bool, Option<Vec<String>>) {
+    let files = strong_enabled().then(strong_files).flatten().map(|files| {
+        let mut files = files.iter().cloned().collect::<Vec<_>>();
+        files.sort();
+        files
+    });
+    (mutants_enabled(), strong_enabled(), files)
+}
+
+/// The files a strong pass writes switches into, set by the engine for
+/// this process: `None` inside when unset (the environment decides).
+static STRONG_FILES: std::sync::Mutex<Option<std::sync::Arc<HashSet<String>>>> =
+    std::sync::Mutex::new(None);
+
+/// The files the strong pass has mutants to run in, by their paths from
+/// the project root; every other file is left as written. `None` switches
+/// every file. A process that instruments on its own reads them from the
+/// JSON list `SUPERCOV_STRONG_FILES` names.
+pub fn set_strong_files(files: Option<HashSet<String>>) {
+    *STRONG_FILES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = files.map(std::sync::Arc::new);
+}
+
+fn strong_files() -> Option<std::sync::Arc<HashSet<String>>> {
+    #[cfg(test)]
+    if let Some(files) = STRONG_FILES_FOR_TEST.with(|files| files.borrow().clone()) {
+        return Some(std::sync::Arc::new(files));
+    }
+    if let Some(files) = STRONG_FILES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+    {
+        return Some(files);
+    }
+    static READ: std::sync::OnceLock<Option<std::sync::Arc<HashSet<String>>>> =
+        std::sync::OnceLock::new();
+    READ.get_or_init(|| {
+        let path = std::env::var_os("SUPERCOV_STRONG_FILES")?;
+        let bytes = std::fs::read(path).ok()?;
+        let files = serde_json::from_slice::<Vec<String>>(&bytes).ok()?;
+        Some(std::sync::Arc::new(files.into_iter().collect()))
+    })
+    .clone()
 }
 
 /// Whether instrumentation places the probes and enumerates StrykerJS's
@@ -6435,6 +6482,31 @@ fn instrument_candidate_with_binding(
     })
 }
 
+/// A strong pass's file left as written: its code unchanged, no runtime
+/// binding, and the mutants it lists (none for a file outside the pass).
+fn written_as_is(
+    source: &str,
+    file: &str,
+    mutants: Vec<crate::js_mutant_links::CandidateMutant>,
+) -> CandidateOutput {
+    CandidateOutput {
+        engine: "rust-oxc".to_string(),
+        complete: true,
+        supported_surface: "complete-js-instrumenter-v1".to_string(),
+        code: source.to_owned(),
+        map: None,
+        decisions: Vec::new(),
+        points: Vec::new(),
+        excluded_statements: Vec::new(),
+        branches: Vec::new(),
+        probe_table: Some(ProbeTable::new(file, Vec::new(), Vec::new(), Vec::new())),
+        runtime: None,
+        coverage_limitations: Vec::new(),
+        limitations: Vec::new(),
+        mutants,
+    }
+}
+
 /// Strong mode (`js_schemata`): the file's listed mutants written behind
 /// switches, and nothing measured. The file reads its record from the
 /// runtime once, `const __supercovStrong = strongSlot("<file>")`, after the
@@ -6448,6 +6520,11 @@ fn instrument_strong<'a>(
     runtime_binding: RuntimeBinding,
     capability_wrapper: Option<&str>,
 ) -> Result<CandidateOutput, CandidateError> {
+    // A file with no mutant to run in this pass runs as written: a strong
+    // build of a large app instruments the few files the pass needs.
+    if strong_files().is_some_and(|files| !files.contains(file)) {
+        return Ok(written_as_is(source, file, Vec::new()));
+    }
     let safety = analyze_safety(allocator, program, source, file);
     let ledger = crate::js_mutants::enumerate(program, source);
     let facts = crate::js_mutant_links::MutantFacts::collect(program, source, &[]);
@@ -6493,6 +6570,7 @@ fn instrument_strong<'a>(
     let placed = crate::js_schemata::place(
         allocator,
         program,
+        file,
         &ledger,
         &record,
         &safety.source_sensitive_functions,
@@ -6514,6 +6592,11 @@ fn instrument_strong<'a>(
     for (mutant, strong) in mutants.iter_mut().zip(placed) {
         mutant.is_static = strong.is_static;
         mutant.unplaceable = strong.unplaceable.map(str::to_owned);
+    }
+    // No switch, no runtime: a file the measured run left without one (an
+    // edge-runtime module) gets none from the strong pass either.
+    if !switched {
+        return Ok(written_as_is(source, file, mutants));
     }
     let ast = AstBuilder::new(allocator);
     // `(f) = function () {}` names nothing, and printing drops the
@@ -15450,9 +15533,16 @@ export function shapes(n: number): unknown {
         let strong = probe_options();
         STRONG_FOR_TEST.with(|flag| flag.set(None));
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        assert_eq!(on, (true, false));
-        assert_eq!(off, (false, false));
+        assert_eq!(on, (true, false, None));
+        assert_eq!(off, (false, false, None));
         assert_ne!(strong, off);
+        // A strong copy that switches other files is another copy.
+        STRONG_FOR_TEST.with(|flag| flag.set(Some(true)));
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = Some(["a.js".to_owned()].into()));
+        let some = probe_options();
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = None);
+        STRONG_FOR_TEST.with(|flag| flag.set(None));
+        assert_eq!(some.2, Some(vec!["a.js".to_owned()]));
     }
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are

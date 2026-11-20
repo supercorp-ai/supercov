@@ -40,6 +40,10 @@ pub struct PlannedTest {
     pub runner: String,
     /// How long it took in the measured run, when the runner said.
     pub duration_ms: Option<u64>,
+    /// When its first attempt ran, on the runner's clock, where the runner
+    /// said (Playwright): which tests the measured run ran at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<[i64; 2]>,
     /// Whether every attempt passed in the measured run: only such a test
     /// can be a candidate.
     pub runnable: bool,
@@ -342,6 +346,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 title: raw.title.clone(),
                 runner: raw.provenance.runner.clone(),
                 duration_ms: None,
+                span: raw.span,
                 runnable: true,
             });
             runnable.push(true);
