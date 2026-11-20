@@ -4054,7 +4054,10 @@ fn the_html_report_says_what_it_could_not_embed() {
         "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { big } from \"../src/big.js\";\n\ntest(\"big adds one\", () => assert.equal(big(1), 2));\n",
     );
     project.commit("big");
-    project.measure(&[]);
+    // Measured with the mutants' probes, so the report has their verdicts.
+    project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
     project
         .supercov(&["report", "--no-open", "--output", "fresh.html"])
         .succeeds();
@@ -15639,7 +15642,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2617 => main.rs:2617",
+            "fs.canonicalize#main.rs:2623 => main.rs:2623",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2036 => javascript_frontend.rs:2036",
         ],
@@ -17522,7 +17525,7 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1320,fs.read_from#evidence_archive.rs:676",
+            "fs.read#run_store.rs:1334,fs.read_from#evidence_archive.rs:676",
         )],
     );
     assert!(
@@ -21199,30 +21202,19 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         .supercov(&["runs", "latest", "mutants", "--format", "csv"])
         .exits(2);
 
-    // A run measured with them off has no mutants, and says how to get
-    // them.
-    project
-        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "0")])
-        .succeeds();
-    let none = project.supercov(&["runs", "latest", "mutants"]).succeeds();
-    contains_all(
-        &none,
-        &[
-            "This run did not list its mutants",
-            "Measure it again without SUPERCOV_MUTANTS=0",
-        ],
-    );
-    let none = project
-        .supercov(&["runs", "latest", "mutants", "--json"])
-        .json();
-    assert_eq!(none["data"]["mutantSet"], serde_json::Value::Null);
-    assert_eq!(none["data"]["levels"]["weak"], false);
-    assert_eq!(
-        none["data"]["summary"]["weakScore"],
-        serde_json::Value::Null
-    );
+    // A plain run lists no mutants and costs nothing for them. Asked for
+    // them, it lists them from its sources, decided from its coverage alone.
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     assert!(!summary.contains("Mutants "), "{summary}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json"])
+        .json();
+    assert_eq!(listed["data"]["mutantSet"], "stryker-js@10.1.1", "{listed}");
+    assert!(
+        listed["data"]["summary"]["mutants"].as_u64() > Some(0),
+        "{listed}"
+    );
 }
 
 /// node:test records its tests' evidence as a server process does, in

@@ -4225,7 +4225,7 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2475).
+// Below the lines tests name by number (main.rs:2481).
 mod mutants_export;
 mod mutants_test_command;
 

@@ -15620,7 +15620,7 @@ export function shapes(n: number): unknown {
         let source = "export function f(a: number, b: number, d: Date) {\n  const late = a <= b;\n  if (a > 0 && b >= a) return late;\n  return d < new Date();\n}\n";
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/compare.ts").unwrap();
-        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         assert!(
             !plain.code.contains("CompareV2"),
             "off with SUPERCOV_MUTANTS=0:\n{}",
@@ -15809,7 +15809,7 @@ export function shapes(n: number): unknown {
         );
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let plain = instrument_candidate(source, "src/infection.ts").unwrap();
-        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
         for helper in ["ArithV2", "AssignV2", "MethodV2", "ValueV2"] {
             assert!(
                 !plain.code.contains(helper),
