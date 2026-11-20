@@ -133,11 +133,14 @@ afterEach((context) => {
 // to stop the worker by force, and a run waiting on it never ends. A short
 // look after the tests tells that from code that runs now and then. Most
 // copies leave nothing evaluating the mutant: a brief probe that sees no
-// evaluation ends the look there, so only a copy whose mutant is still
-// being evaluated waits the whole window.
+// steady evaluation ends the look there, so only a copy whose mutant is
+// still being evaluated over and over waits the whole window.
 const LEFT_RUNNING_PROBE_MS = 25;
 const LEFT_RUNNING_WINDOW_MS = 300;
 const LEFT_RUNNING_EVALUATIONS = 100;
+// Half the rate the window looks for: a few late evaluations (a promise the
+// tests left settling) end the look; work that keeps going does not.
+const LEFT_RUNNING_PROBE_EVALUATIONS = Math.ceil(LEFT_RUNNING_EVALUATIONS * LEFT_RUNNING_PROBE_MS / LEFT_RUNNING_WINDOW_MS / 2);
 // Timers as they were when this file loaded: a test file that fakes the
 // clock (vi.useFakeTimers) and leaves it faked must not hold the look up.
 const realSetTimeout = globalThis.setTimeout;
@@ -148,7 +151,7 @@ afterAll(async () => {
     if (assignment.mutant && runtime.mutantHitCount) {
         const before = runtime.mutantHitCount();
         await pause(LEFT_RUNNING_PROBE_MS);
-        if (runtime.mutantHitCount() > before)
+        if (runtime.mutantHitCount() - before >= LEFT_RUNNING_PROBE_EVALUATIONS)
             await pause(LEFT_RUNNING_WINDOW_MS - LEFT_RUNNING_PROBE_MS);
         const evaluations = runtime.mutantHitCount() - before;
         if (limitReached && !limitReported) {
