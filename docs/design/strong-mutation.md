@@ -159,10 +159,39 @@ killers) on the same mutants: a mutant StrykerJS kills and the pass calls
 `survived` is a soundness violation, and the release keeps their count at 0.
 Speed is measured on the public benchmark in `benchmarks/mutation/`.
 
+## Browser tests against a server (Playwright)
+
+A Playwright test drives an app server in another process, and the browser.
+Supercov already scopes both to the test's attempt: every request a page or
+`request` fixture sends carries the attempt's scope (a header, or a cookie),
+and the server's runtime credits the work it does for that request to the
+attempt. The strong pass uses the same scope to choose the mutant:
+
+- The driver gives each attempt a mutant, as the Vitest driver gives each
+  file one, and the Playwright fixture announces it with the scope.
+- In the server, the switch's record reads the active mutant of the request
+  being served (the scope is already carried through the request's async
+  work); in the page, of the attempt the page belongs to.
+- So the workers of one Playwright run each test their own mutant against
+  one server, and the server is not restarted per mutant.
+
+That is exact only where nothing one request does reaches another: a
+module-level cache, a connection pool's state, a timer, work no request
+started. So:
+
+- A mutant whose code ran in work no request was credited with (start-up,
+  timers, between tests: the run's `background` records) is run alone, with
+  the server started with that mutant switched on everywhere.
+- Every run plants **canary** mutants: mutants no test can kill (a switch
+  around a statement that is never reached). A canary that comes back killed
+  means state leaked between requests, and the round's verdicts are run
+  again one mutant per server.
+- A mutant's candidates are the attempts its weak verdict names, as in
+  Vitest; a test that reached the mutant only through work credited by time
+  (`by-time`) keeps its mutant switched on server-wide for its duration.
+
 ## Not yet
 
 - Jest, Mocha and node:test drivers (Vitest first).
-- End-to-end tests against a server process (the next step: the server's
-  mutant chosen per request).
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
