@@ -64,7 +64,20 @@ const report = (record) => {
         appendFileSync(assignment.out, `${JSON.stringify(record)}\n`);
 };
 
+// An error no test catches -- work a test left running, a rejected promise
+// nobody awaited -- fails the run as Vitest reports it, and is the mutant's
+// doing where the same file without a mutant raised none. A mutant that
+// made a loop endless outside any test throws its timeout error there.
+function outsideTests(error) {
+    if (!assignment)
+        return;
+    const timeout = runtime.isMutantTimeout?.(error) ||
+        /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`);
+    report({ outside: true, timeout, message: `${error?.message ?? error}`.slice(0, 300) });
+}
 if (assignment) {
+    process.on("uncaughtException", outsideTests);
+    process.on("unhandledRejection", outsideTests);
     report({ claimed: true });
     if (assignment.mutant) {
         runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);

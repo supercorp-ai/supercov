@@ -189,7 +189,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             last = finished.result;
         // The outcome of each claim, whichever copy took it.
         return placedAt.map((out) => {
-            const outcome = { claimed: false, done: false, tests: [] };
+            const outcome = { claimed: false, done: false, tests: [], outside: [] };
             if (!existsSync(out))
                 return outcome;
             for (const line of readFileSync(out, "utf8").split("\n")) {
@@ -202,6 +202,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     outcome.done = true;
                 else if (record.test)
                     outcome.tests.push(record);
+                else if (record.outside)
+                    outcome.outside.push(record);
             }
             return outcome;
         });
@@ -228,6 +230,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         return assignments.map((assignment, at) => ({ assignment, outcome: outcomes[at] }));
     };
     const recordBaseline = ({ assignment, outcome }) => {
+        if (outcome.outside.length)
+            baselineFailed.add(`${assignment.file}#outside`);
         if (!outcome.done)
             baselineFailed.add(`${assignment.file}#file`);
         for (const test of outcome.tests)
@@ -331,7 +335,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
             job.ran += outcome.tests.length;
             const failed = outcome.tests.find((test) => test.failed && !baselineFailed.has(test.test));
-            if (failed) {
+            const outside = baselineFailed.has(`${group.file}#outside`) ? undefined : outcome.outside[0];
+            if (!failed && outside) {
+                finish(job, outside.timeout
+                    ? { status: "timeout", reason: "outside any test: the mutant's evaluations passed its limit" }
+                    : { status: "killed", killedBy: group.file, reason: `an error outside any test: ${outside.message}` });
+            }
+            else if (failed) {
                 if (failed.timeout && !group.retried) {
                     group.retried = true;
                     job.waiting.push(group);

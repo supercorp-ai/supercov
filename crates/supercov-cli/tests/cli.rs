@@ -21804,3 +21804,49 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
         .unwrap_or_else(|| panic!("{listed}"));
     assert_eq!(throw["strong"]["status"], "killed", "{throw}");
 }
+
+/// A mutant that makes work a test left running loop forever (a timer that
+/// fires after the test passed): its evaluations pass the limit outside any
+/// test, and the mutant is a timeout, not a survivor.
+#[cfg(unix)]
+#[test]
+fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
+    let project = vitest_mutants_project("strong-outside-tests");
+    project.write(
+        "src/poll.js",
+        "export function poll(items) {\n  setTimeout(() => {\n    let i = 0;\n    while (i < items.length) {\n      i++;\n    }\n  }, 1);\n  return items.length;\n}\n",
+    );
+    project.write(
+        "test/poll.test.js",
+        "import { expect, it } from \"vitest\";\nimport { poll } from \"../src/poll.js\";\nit(\"polls\", async () => {\n  expect(poll([1, 2])).toBe(2);\n  await new Promise((resolve) => setTimeout(resolve, 20));\n});\nit(\"waits\", async () => {\n  await new Promise((resolve) => setTimeout(resolve, 50));\n});\n",
+    );
+    project.commit("poll");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/poll.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let endless = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/poll.js:4:12-4:28:ConditionalExpression:true")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(
+        matches!(
+            endless["strong"]["status"].as_str(),
+            Some("timeout" | "killed")
+        ),
+        "{endless}"
+    );
+}
