@@ -21540,16 +21540,18 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     )
     .unwrap();
     project.write(".gitignore", "node_modules\n.supercov\n");
-    // What the server served, outside the project: its process, and the
-    // worker and mutant each request's attempt named.
+    // The server: its routes and files in support/, which is not measured,
+    // and the code under test in server/. It notes what it served, outside
+    // the project: its process, and the worker and mutant each request's
+    // attempt named.
     let served = project.root.with_extension("served.jsonl");
     project.write(
-        "support/served.js",
-        "import { appendFileSync } from \"node:fs\";\nexport function note(request) {\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  appendFileSync(process.env.SERVED_LOG, JSON.stringify({ pid: process.pid, worker: scope.get(\"w\"), mutant: scope.get(\"m\"), path: request.url }) + \"\\n\");\n}\n",
+        "support/server.js",
+        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\nimport { answer } from \"../server/app.js\";\nconst files = { \"/\": \"../public/index.html\", \"/page.js\": \"../public/page.js\" };\nhttp.createServer((request, response) => {\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  appendFileSync(process.env.SERVED_LOG, JSON.stringify({ pid: process.pid, worker: scope.get(\"w\"), mutant: scope.get(\"m\"), path: request.url }) + \"\\n\");\n  const url = new URL(request.url, \"http://local\");\n  try {\n    response.end(files[url.pathname] ? readFileSync(new URL(files[url.pathname], import.meta.url)) : answer(url));\n  } catch (error) {\n    response.statusCode = 500;\n    response.end(String(error));\n  }\n}).listen(Number(process.env.PORT));\n",
     );
     project.write(
         "server/app.js",
-        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nimport { note } from \"../support/served.js\";\nconst GREETING = \"hello\";\n\nexport function total(quantity) {\n  console.log(`served ${quantity}`);\n  return quantity >= 3 ? quantity * 9 : quantity * 10;\n}\n\nfunction handle(request, response) {\n  note(request);\n  try {\n    const url = new URL(request.url, \"http://local\");\n    const routes = {\n      \"/\": () => readFileSync(new URL(\"../public/index.html\", import.meta.url)),\n      \"/page.js\": () => readFileSync(new URL(\"../public/page.js\", import.meta.url)),\n      \"/greeting\": () => GREETING,\n      \"/total\": () => String(total(Number(url.searchParams.get(\"q\")))),\n    };\n    response.end(routes[url.pathname]());\n  } catch (error) {\n    response.statusCode = 500;\n    response.end(String(error));\n  }\n}\n\nhttp.createServer(handle).listen(Number(process.env.PORT));\n",
+        "const GREETING = \"hello\";\n\nexport function total(quantity) {\n  console.log(`served ${quantity}`);\n  return quantity >= 3 ? quantity * 9 : quantity * 10;\n}\n\nexport function answer(url) {\n  return url.pathname === \"/greeting\" ? GREETING : String(total(Number(url.searchParams.get(\"q\"))));\n}\n",
     );
     project.write(
         "public/index.html",
@@ -21562,7 +21564,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     project.write(
         "playwright.config.js",
         &format!(
-            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node server/app.js\", url: \"http://127.0.0.1:{port}/greeting\", reuseExistingServer: false, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/greeting\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
             served.display().to_string()
         ),
     );
@@ -21608,7 +21610,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     };
     assert_eq!(reply["summary"]["error"], 0, "{context}");
     // A server-side mutant, killed by its own requests.
-    let always = strong("server/app.js", 8, ":ConditionalExpression:true");
+    let always = strong("server/app.js", 5, ":ConditionalExpression:true");
     assert_eq!(always["status"], "killed", "{context}");
     assert!(always["reason"].is_null(), "{context}");
     // A page-side mutant, killed by the page.
@@ -21616,15 +21618,15 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert_eq!(lower["status"], "killed", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     // Run, and no test tells: the log line.
-    let logged = strong("server/app.js", 7, ":StringLiteral:empty");
+    let logged = strong("server/app.js", 4, ":StringLiteral:empty");
     assert_eq!(logged["status"], "survived", "{context}");
     assert!(logged["tests"].as_u64() > Some(0), "{context}");
     // No request gives `total` 3: decided without running.
-    let boundary = strong("server/app.js", 8, ":EqualityOperator:>");
+    let boundary = strong("server/app.js", 5, ":EqualityOperator:>");
     assert_eq!(boundary["status"], "survived", "{context}");
     assert_eq!(boundary["tests"], 0, "{context}");
     // The server's top level: run alone, the server started with it.
-    let greeting = strong("server/app.js", 4, ":StringLiteral:empty");
+    let greeting = strong("server/app.js", 1, ":StringLiteral:empty");
     assert_eq!(greeting["status"], "killed", "{context}");
     assert!(
         greeting["reason"]
