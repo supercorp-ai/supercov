@@ -85,8 +85,11 @@ function writeFileWork(file, testFile, title) {
         server: [],
     });
 }
-afterAll((context) => {
-    const file = context?.file ?? context;
+// The file this worker is running: hooks take no argument, since Vitest 3
+// and later read a hook's first parameter as a fixture context.
+let currentFile;
+afterAll(() => {
+    const file = currentFile;
     if (!file?.filepath)
         return;
     const testFile = relative(process.cwd(), file.filepath).split(sep).join("/");
@@ -95,6 +98,7 @@ afterAll((context) => {
 });
 beforeEach((context) => {
     const task = context.task;
+    currentFile = task.file;
     const testFile = relative(process.cwd(), task.file.filepath)
         .split(sep)
         .join("/");
