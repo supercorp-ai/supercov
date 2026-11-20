@@ -16,6 +16,7 @@ const WHY = {
     "unfinished": "not every candidate test ran in the shared pass",
     "confirm": "a test killed it beside other mutants' attempts",
     "stage": "its likeliest killer let it live",
+    "rest": "its first test let it live, and its other candidates ran one at a time",
 };
 // Outcomes that ended this long before a pass's first error outside any
 // test (a server that exited) are trusted; later ones may be its doing.
@@ -222,13 +223,16 @@ export default class SupercovPlaywrightStrongReporter {
         const alone = [];
         const stage = [];
         const serial = [];
-        const next = (entry, reason, tests, budgetFactor = 1) => {
+        const next = (entry, reason, tests, budgetFactor = 1, later = []) => {
             const runnable = tests.filter((test) => !baselineFailed.has(test));
-            if (!runnable.length) {
+            const rest = later.filter((test) => !baselineFailed.has(test));
+            if (!runnable.length && !rest.length) {
                 write({ id: entry.id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
                 return;
             }
-            const job = { id: entry.id, mutant: entry.mutant, tests: runnable, reason, budgetFactor };
+            const job = runnable.length
+                ? { id: entry.id, mutant: entry.mutant, tests: runnable, rest, reason, budgetFactor }
+                : { id: entry.id, mutant: entry.mutant, tests: rest, rest: [], reason, budgetFactor };
             if (EVERYWHERE.includes(reason) || reason === "canary")
                 alone.push(job);
             else if (reason === "stage")
@@ -266,11 +270,12 @@ export default class SupercovPlaywrightStrongReporter {
         }
         for (const job of rows.restarts)
             next(job, job.reason, job.tests);
-        // A serial pass that decided nothing would only ask for itself again.
+        // A serial pass that decided nothing would only ask for its
+        // unfinished mutants again.
         if (kind === "serial" && !decided) {
-            for (const job of serial)
-                write({ id: job.id, status: "error", reason: `its tests did not finish, run one at a time (${job.reason})`, tests: 0, durationMs: 0 });
-            serial.length = 0;
+            for (const job of serial.filter((job) => job.reason === "unfinished"))
+                write({ id: job.id, status: "error", reason: "its tests did not finish, run one at a time", tests: 0, durationMs: 0 });
+            serial.splice(0, serial.length, ...serial.filter((job) => job.reason !== "unfinished"));
         }
         for (const job of alone)
             write({ restart: { kind: "alone", everywhere: EVERYWHERE.includes(job.reason), reason: job.reason, mutants: [job], otherRunners: rows.otherRunners } });
@@ -323,7 +328,7 @@ export default class SupercovPlaywrightStrongReporter {
             // Its killing test ran beside other mutants' attempts (or after
             // the shared server failed): that test first, alone, then the rest.
             const first = failed[0].test;
-            next(entry, failed.some((outcome) => outcome.beside) ? "confirm" : "unfinished", [first, ...all.filter((test) => test !== first)]);
+            next(entry, failed.some((outcome) => outcome.beside) ? "confirm" : "unfinished", [first], 1, all.filter((test) => test !== first));
             return "confirm";
         }
         const slow = outcomes.find((outcome) => outcome.kind === "timed-out");
@@ -345,9 +350,10 @@ export default class SupercovPlaywrightStrongReporter {
         }
         if (outcomes.length && outcomes.every((outcome) => outcome.kind === "baseline-failed"))
             return { status: "error", reason: "its candidate tests fail without any mutant" };
-        // Its likeliest killer let it live: its other candidates next.
-        if (kind === "main" && entry.rest?.length) {
-            next(entry, "stage", entry.rest);
+        // Its likeliest killer let it live: its other candidates next, side
+        // by side after the main pass, one at a time after a serial one.
+        if (entry.rest?.length && kind !== "stage") {
+            next(entry, kind === "main" ? "stage" : "rest", entry.rest);
             return undefined;
         }
         const others = rows.otherRunners[entry.id];
