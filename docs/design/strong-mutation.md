@@ -114,14 +114,32 @@ which are kept by file path, so each copy claims its assignment from the
 round's directory and reports its tests' outcomes there itself. Supercov's
 setup file switches the copy's mutant on before the file's imports run, and
 skips every test the assignment did not choose. A round holds
-`SUPERCOV_STRONG_ROUND` (default 6) × the workers assignments: a round ends
-when its slowest copy does. One round is one call into the resident Vitest
+`SUPERCOV_STRONG_ROUND` (default 2) × the workers assignments: a round ends
+when its slowest copy does. Larger rounds measured slower on hono and tRPC
+(4×: +17% and +6%). One round is one call into the resident Vitest
 instance (`runTestSpecifications`): no new process, no new workers, the
 project's own pool, so a suite that gives each worker its own database keeps
 doing so.
 
 Where isolation is off (`isolate: false`, `--no-isolate`, a single-thread pool
 sharing modules) a round holds one mutant.
+
+`SUPERCOV_STRONG_WARM=1` (forks and threads pools) runs the copies in workers
+Vitest keeps between test files (`isolate: false` for the pass), and each
+copy's setup file resets the modules and mocks Vitest evaluated before its test
+file loads, so a copy starts from the project's modules as an isolated worker
+would; only packages Node itself loaded stay loaded. Its verdicts matched the
+isolated pass on every corpus measured (hono, tRPC, and a private
+application's unit and integration suites: 0 differences, 0 soundness
+violations), but its speed depends on the suite: the application's suites ran
+2.9× (unit) and 1.9× (integration) faster, hono the same, tRPC 30% slower. It
+is off by default.
+
+The time a copy spends is mostly not its tests: on tRPC a copy waits about
+0.5 s for its worker before its setup file runs and its tests take 0.1-0.4 s,
+and Vitest's own process is idle 95% of the pass (a CPU profile of it,
+`SUPERCOV_STRONG_CPU_PROFILE=<file>`). The pass summary's `profile` records
+rounds, copies, time loading and in copies, and the first rounds' timeline.
 
 ## Baselines
 
@@ -142,10 +160,23 @@ again with its file whole. The pass summary counts `confirmations` and
 `overturned`. On the public benchmark this removed every false kill of this
 kind (hono: 17 overturned of 2,155 confirmed) at 5-20% of strong-pass time.
 
+Running the baseline's earlier tests in the copy instead, so that every kill
+is certain without a confirmation, was tried and dropped: a test can fail with
+the mutant when its predecessors are left out and pass once they ran, and
+StrykerJS, which also runs only a mutant's covering tests, counts that kill
+(12 such kills on a private application's integration suite).
+
 ## Timeouts and runaway loops
 
 A mutant's test gets `factor × its measured duration + constant` (defaults
-1.5× and 5 s, as StrykerJS). A mutant switch counts its evaluations; past a
+1.5× and 5 s, as StrykerJS), applied in two steps. A round ends when its
+slowest copy does, so one mutant that hangs a test would hold every worker for
+its whole limit (on tRPC most rounds waited 6.5-13.5 s on one or two hanging
+copies). A mutant's first attempt therefore gets 1.5× and 1 s; a copy past that
+runs again with twice the full limit, in a round of such retries only, and is a
+`timeout` only if it passes that too. The short limit costs a retry, never a
+verdict (0 differences on hono and tRPC; hono 294 to 227 ms a mutant, tRPC
+3.4 to 2.8 s). A mutant switch counts its evaluations; past a
 fixed limit (1,000,000 per copy) it throws a timeout error, so a loop the
 mutant made endless ends in the file's worker rather than hanging it. Where
 the code under test catches that error and carries on, the limit having been
@@ -156,8 +187,7 @@ This differs from StrykerJS on purpose. StrykerJS also calls a mutant
 run, though every test passes and nothing hangs; a timeout counts as
 detected, so the suite gets credit no assertion earned (tRPC's
 `withPing.ts:37`: about 45,000 evaluations against 8, 37 of 37 tests pass).
-Supercov calls such a mutant `survived`: no test tells it apart. A test that runs out of time is run once more with twice
-the budget before it counts as `timeout`. An error no test catches (work a
+Supercov calls such a mutant `survived`: no test tells it apart. An error no test catches (work a
 test left running, a rejected promise nobody awaited) is the mutant's where
 the file raised none without it: a kill, or a `timeout` where it is the
 switch's own limit. A round past its deadline (twice its time limit plus 30 s:
