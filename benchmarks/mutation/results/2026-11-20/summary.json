@@ -1,0 +1,5156 @@
+{
+  "date": "2026-11-20",
+  "runs": [
+    "7918046463203622",
+    "6816238857423170",
+    "8402334254856692",
+    "6506939654971330",
+    "7095666567225085",
+    "7210302856247792",
+    "8297132922154682",
+    "6783811573326500"
+  ],
+  "tools": {
+    "node": "24",
+    "stryker": "10.1.1",
+    "mutator": "0.5.0",
+    "vitestForMutator": "5.1.1"
+  },
+  "projects": {
+    "defu": {
+      "commit": "82632b66f5914e9946edce300e10633a3d5c0cb7",
+      "machines": [
+        "c8a.4xlarge",
+        "m8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.6"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.6"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "4.1.6",
+          "vitestProject": "4.1.6"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "4.1.6",
+          "vitestProject": "4.1.6"
+        },
+        "truth": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.4",
+          "vitest": "4.1.6",
+          "vitestProject": "4.1.6"
+        }
+      },
+      "notes": [
+        "Vitest upgraded in this job from 4.1.6 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.419,
+          "pnpm-setup": 1.383,
+          "install": 1.038,
+          "vitest-plugins-remove": 1.339,
+          "vitest-upgrade": 1.331,
+          "tool-install": 1.726,
+          "tests": 0.372
+        },
+        "pr-mutator": {
+          "clone": 0.219,
+          "pnpm-setup": 1.647,
+          "install": 1.072,
+          "vitest-plugins-remove": 1.378,
+          "vitest-upgrade": 1.081,
+          "tool-install": 1.422
+        },
+        "pr-stryker": {
+          "clone": 0.209,
+          "pnpm-setup": 1.335,
+          "install": 1.06,
+          "tool-install": 1.569
+        },
+        "stryker-cold": {
+          "clone": 0.247,
+          "pnpm-setup": 1.609,
+          "install": 1.071,
+          "tool-install": 1.555,
+          "tests": 0.403
+        },
+        "truth": {
+          "clone": 0.179,
+          "pnpm-setup": 1.422,
+          "install": 1.039,
+          "tool-install": 1.394
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 0.403,
+          "cpuS": 0.45,
+          "maxRssMiB": 125,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 23,
+            "passed": 23,
+            "failed": 0,
+            "files": 3
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 0.372,
+          "cpuS": 0.44,
+          "maxRssMiB": 124,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 23,
+            "passed": 23,
+            "failed": 0,
+            "files": 3
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 3.36,
+          "cpuS": 21.39,
+          "maxRssMiB": 255,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.17,
+            "dryRunS": 0.39,
+            "mutantsS": 1.71,
+            "afterS": 0.09
+          },
+          "executed": {
+            "instrumented": 103,
+            "reused": 0,
+            "dryRunTests": 23
+          },
+          "mutants": 103,
+          "statuses": {
+            "NoCoverage": 1,
+            "Timeout": 7,
+            "Survived": 15,
+            "Killed": 80
+          },
+          "score": 84.47,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 3.929,
+          "cpuS": 14.8,
+          "maxRssMiB": 617,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.27,
+            "dryRunS": 0.1,
+            "typecheckAndPlanS": 1.99,
+            "mutantsS": 1.53,
+            "afterS": 0.02
+          },
+          "executed": {
+            "total": 107,
+            "toRun": 78,
+            "executed": 78,
+            "reused": 0
+          },
+          "mutants": 107,
+          "statuses": {
+            "Killed": 67,
+            "CompileError": 25,
+            "Survived": 14,
+            "NoCoverage": 1
+          },
+          "score": 81.71,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 76,
+        "sameSpanAndReplacement": 100,
+        "strykerOnly": 3,
+        "mutatorOnly": 7,
+        "scoreStryker": 80.26,
+        "scoreMutator": 80.26,
+        "verdictDifferences": 0
+      },
+      "truth": {
+        "shard": null,
+        "wallS": 3.454,
+        "cpuS": 26.35,
+        "maxRssMiB": 256,
+        "exitCode": 0,
+        "timedOut": false,
+        "stages": {
+          "setupS": 1.1,
+          "dryRunS": 0.33,
+          "mutantsS": 1.93,
+          "afterS": 0.09
+        },
+        "executed": {
+          "instrumented": 103,
+          "reused": 0,
+          "dryRunTests": 23
+        },
+        "mutants": 103,
+        "statuses": {
+          "NoCoverage": 1,
+          "Killed": 74,
+          "Survived": 15,
+          "Timeout": 13
+        },
+        "score": 84.47,
+        "complete": true,
+        "expectedShards": 1,
+        "killMatrix": {
+          "killedMutants": 74,
+          "meanKillersPerKilledMutant": 4.96,
+          "medianKillers": 2,
+          "killedByOneTestOnly": 35,
+          "distinctKillingTests": 22,
+          "meanCoveringTests": 12.4
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 103,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 0,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 76,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 7,
+          "examples": []
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/defu.ts:33-33"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 3.341,
+          "cpuS": 21.43,
+          "maxRssMiB": 247,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.21,
+            "dryRunS": 0.33,
+            "mutantsS": 1.71,
+            "afterS": 0.09
+          },
+          "executed": {
+            "instrumented": 103,
+            "reused": 0,
+            "dryRunTests": 23
+          },
+          "mutants": 103,
+          "statuses": {
+            "NoCoverage": 1,
+            "Survived": 15,
+            "Timeout": 7,
+            "Killed": 80
+          },
+          "score": 84.47
+        },
+        "strykerLines": {
+          "wallS": 1.657,
+          "cpuS": 3.3,
+          "maxRssMiB": 236,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.15,
+            "dryRunS": 0.14,
+            "mutantsS": 0.25,
+            "afterS": 0.11
+          },
+          "executed": {
+            "instrumented": 3,
+            "reused": 0,
+            "dryRunTests": 21
+          },
+          "mutants": 3,
+          "statuses": {
+            "Killed": 3
+          },
+          "score": 100
+        },
+        "strykerIncremental": {
+          "wallS": 1.683,
+          "cpuS": 3.69,
+          "maxRssMiB": 249,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.17,
+            "dryRunS": 0.23,
+            "mutantsS": 0.2,
+            "afterS": 0.08
+          },
+          "executed": {
+            "instrumented": 103,
+            "reused": 99,
+            "dryRunTests": 23
+          },
+          "mutants": 103,
+          "statuses": {
+            "Killed": 80,
+            "Timeout": 7,
+            "Survived": 15,
+            "NoCoverage": 1
+          },
+          "score": 84.47
+        },
+        "mutatorBase": {
+          "wallS": 4.132,
+          "cpuS": 15.49,
+          "maxRssMiB": 616,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.34,
+            "dryRunS": 0.1,
+            "typecheckAndPlanS": 2.03,
+            "mutantsS": 1.64,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 107,
+            "toRun": 78,
+            "executed": 78,
+            "reused": 0
+          },
+          "mutants": 107,
+          "statuses": {
+            "Killed": 67,
+            "CompileError": 25,
+            "Survived": 14,
+            "NoCoverage": 1
+          },
+          "score": 81.71
+        },
+        "mutatorSinceCold": {
+          "wallS": 1.51,
+          "cpuS": 3.34,
+          "maxRssMiB": 529,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.27,
+            "dryRunS": 0.12,
+            "typecheckAndPlanS": 0.85,
+            "mutantsS": 0.24,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 107,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 0
+          },
+          "mutants": 107,
+          "statuses": {
+            "Pending": 99,
+            "CompileError": 2,
+            "Killed": 6
+          },
+          "score": 100
+        },
+        "mutatorSinceWarm": {
+          "wallS": 1.519,
+          "cpuS": 3.35,
+          "maxRssMiB": 582,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.24,
+            "dryRunS": 0.28,
+            "typecheckAndPlanS": 0.72,
+            "mutantsS": 0.25,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 107,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 7
+          },
+          "mutants": 107,
+          "statuses": {
+            "Pending": 99,
+            "CompileError": 2,
+            "Killed": 6
+          },
+          "score": 100
+        }
+      }
+    },
+    "scule": {
+      "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+      "machines": [
+        "c8a.4xlarge",
+        "m8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        },
+        "truth": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "9.0.6",
+          "vitest": "5.1.1",
+          "vitestProject": "1.5.3"
+        }
+      },
+      "notes": [
+        "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+        "also added vite@8.3.8: scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)",
+        "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): StrykerJS 10's Vitest runner needs Vitest >= 2; scule pins Vitest 1.5.3"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.216,
+          "pnpm-setup": 1.234,
+          "install": 1.208,
+          "vitest-plugins-remove": 0.788,
+          "vitest-upgrade": 1.191,
+          "tool-install": 1.578,
+          "tests": 0.357
+        },
+        "pr-mutator": {
+          "clone": 0.231,
+          "pnpm-setup": 1.535,
+          "install": 1.235,
+          "vitest-plugins-remove": 0.806,
+          "vitest-upgrade": 1.227,
+          "tool-install": 1.003
+        },
+        "pr-stryker": {
+          "clone": 0.217,
+          "pnpm-setup": 1.008,
+          "install": 1.424,
+          "vitest-plugins-remove": 0.882,
+          "vitest-upgrade": 1.29,
+          "tool-install": 1.325
+        },
+        "stryker-cold": {
+          "clone": 0.193,
+          "pnpm-setup": 1.271,
+          "install": 1.355,
+          "vitest-plugins-remove": 0.781,
+          "vitest-upgrade": 1.715,
+          "tool-install": 1.282,
+          "tests": 0.35
+        },
+        "truth": {
+          "clone": 0.202,
+          "pnpm-setup": 1.323,
+          "install": 1.229,
+          "vitest-plugins-remove": 0.772,
+          "vitest-upgrade": 1.149,
+          "tool-install": 1.338
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 0.35,
+          "cpuS": 0.34,
+          "maxRssMiB": 129,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 63,
+            "passed": 63,
+            "failed": 0,
+            "files": 11
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 0.357,
+          "cpuS": 0.35,
+          "maxRssMiB": 128,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 63,
+            "passed": 63,
+            "failed": 0,
+            "files": 11
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 2.889,
+          "cpuS": 16.44,
+          "maxRssMiB": 261,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.17,
+            "dryRunS": 0.27,
+            "mutantsS": 1.36,
+            "afterS": 0.09
+          },
+          "executed": {
+            "instrumented": 81,
+            "reused": 0,
+            "dryRunTests": 63
+          },
+          "mutants": 81,
+          "statuses": {
+            "NoCoverage": 1,
+            "Killed": 75,
+            "Survived": 5
+          },
+          "score": 92.59,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 6.775,
+          "cpuS": 21.87,
+          "maxRssMiB": 670,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.26,
+            "dryRunS": 0.11,
+            "typecheckAndPlanS": 4.14,
+            "mutantsS": 2.24,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 153,
+            "toRun": 109,
+            "executed": 109,
+            "reused": 0
+          },
+          "mutants": 153,
+          "statuses": {
+            "Killed": 98,
+            "Survived": 12,
+            "NoCoverage": 4,
+            "CompileError": 39
+          },
+          "score": 85.96,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 62,
+        "sameSpanAndReplacement": 77,
+        "strykerOnly": 4,
+        "mutatorOnly": 76,
+        "scoreStryker": 90.32,
+        "scoreMutator": 90.32,
+        "verdictDifferences": 0
+      },
+      "truth": {
+        "shard": null,
+        "wallS": 3.918,
+        "cpuS": 27.25,
+        "maxRssMiB": 260,
+        "exitCode": 0,
+        "timedOut": false,
+        "stages": {
+          "setupS": 1.22,
+          "dryRunS": 0.31,
+          "mutantsS": 2.29,
+          "afterS": 0.09
+        },
+        "executed": {
+          "instrumented": 81,
+          "reused": 0,
+          "dryRunTests": 63
+        },
+        "mutants": 81,
+        "statuses": {
+          "NoCoverage": 1,
+          "Survived": 5,
+          "Killed": 75
+        },
+        "score": 92.59,
+        "complete": true,
+        "expectedShards": 1,
+        "killMatrix": {
+          "killedMutants": 75,
+          "meanKillersPerKilledMutant": 24.32,
+          "medianKillers": 18,
+          "killedByOneTestOnly": 5,
+          "distinctKillingTests": 63,
+          "meanCoveringTests": 36.29
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 81,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 0,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 62,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 76,
+          "examples": []
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/index.ts:84-84"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 3.108,
+          "cpuS": 17.08,
+          "maxRssMiB": 261,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.22,
+            "dryRunS": 0.26,
+            "mutantsS": 1.4,
+            "afterS": 0.23
+          },
+          "executed": {
+            "instrumented": 81,
+            "reused": 0,
+            "dryRunTests": 63
+          },
+          "mutants": 81,
+          "statuses": {
+            "NoCoverage": 1,
+            "Killed": 75,
+            "Survived": 5
+          },
+          "score": 92.59
+        },
+        "strykerLines": {
+          "wallS": 1.358,
+          "cpuS": 2.23,
+          "maxRssMiB": 221,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.11,
+            "dryRunS": 0.14,
+            "mutantsS": 0.01,
+            "afterS": 0.1
+          },
+          "executed": {
+            "instrumented": 0,
+            "reused": 0,
+            "dryRunTests": 63
+          },
+          "mutants": 0,
+          "statuses": {},
+          "score": null
+        },
+        "strykerIncremental": {
+          "wallS": 1.679,
+          "cpuS": 3.18,
+          "maxRssMiB": 262,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.18,
+            "dryRunS": 0.14,
+            "mutantsS": 0.12,
+            "afterS": 0.23
+          },
+          "executed": {
+            "instrumented": 81,
+            "reused": 80,
+            "dryRunTests": 63
+          },
+          "mutants": 81,
+          "statuses": {
+            "Killed": 75,
+            "NoCoverage": 1,
+            "Survived": 5
+          },
+          "score": 92.59
+        },
+        "mutatorBase": {
+          "wallS": 6.85,
+          "cpuS": 22.06,
+          "maxRssMiB": 703,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.32,
+            "dryRunS": 0.11,
+            "typecheckAndPlanS": 4.15,
+            "mutantsS": 2.24,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 153,
+            "toRun": 109,
+            "executed": 109,
+            "reused": 0
+          },
+          "mutants": 153,
+          "statuses": {
+            "Killed": 98,
+            "Survived": 12,
+            "NoCoverage": 4,
+            "CompileError": 39
+          },
+          "score": 85.96
+        },
+        "mutatorSinceCold": {
+          "wallS": 1.568,
+          "cpuS": 3.48,
+          "maxRssMiB": 528,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.27,
+            "dryRunS": 0.12,
+            "typecheckAndPlanS": 0.91,
+            "mutantsS": 0.24,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 154,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 0
+          },
+          "mutants": 154,
+          "statuses": {
+            "Pending": 146,
+            "CompileError": 2,
+            "Survived": 1,
+            "Killed": 5
+          },
+          "score": 83.33
+        },
+        "mutatorSinceWarm": {
+          "wallS": 1.491,
+          "cpuS": 3.54,
+          "maxRssMiB": 539,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.22,
+            "dryRunS": 0.26,
+            "typecheckAndPlanS": 0.75,
+            "mutantsS": 0.23,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 154,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 80
+          },
+          "mutants": 154,
+          "statuses": {
+            "Pending": 146,
+            "CompileError": 2,
+            "Survived": 1,
+            "Killed": 5
+          },
+          "score": 83.33
+        }
+      }
+    },
+    "cookie-es": {
+      "commit": "f89ede8b60204adfa84a97fb833e0cbae75d0478",
+      "machines": [
+        "c8a.4xlarge",
+        "m8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.2"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.2"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "4.1.2",
+          "vitestProject": "4.1.2"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "4.1.2",
+          "vitestProject": "4.1.2"
+        },
+        "truth": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.0",
+          "vitest": "4.1.2",
+          "vitestProject": "4.1.2"
+        }
+      },
+      "notes": [
+        "Vitest upgraded in this job from 4.1.2 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.208,
+          "pnpm-setup": 1.401,
+          "install": 1.106,
+          "vitest-plugins-remove": 1.282,
+          "vitest-upgrade": 1.003,
+          "tool-install": 1.149,
+          "tests": 0.39
+        },
+        "pr-mutator": {
+          "clone": 0.29,
+          "pnpm-setup": 1.365,
+          "install": 1.047,
+          "vitest-plugins-remove": 1.631,
+          "vitest-upgrade": 0.914,
+          "tool-install": 1.512
+        },
+        "pr-stryker": {
+          "clone": 0.313,
+          "pnpm-setup": 1.408,
+          "install": 1.096,
+          "tool-install": 1.346
+        },
+        "stryker-cold": {
+          "clone": 0.248,
+          "pnpm-setup": 1.322,
+          "install": 1.062,
+          "tool-install": 1.365,
+          "tests": 0.392
+        },
+        "truth": {
+          "clone": 0.289,
+          "pnpm-setup": 1.254,
+          "install": 1.056,
+          "tool-install": 1.338
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 0.392,
+          "cpuS": 0.72,
+          "maxRssMiB": 119,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 134,
+            "passed": 134,
+            "failed": 0,
+            "files": 25
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 0.39,
+          "cpuS": 0.66,
+          "maxRssMiB": 118,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 134,
+            "passed": 134,
+            "failed": 0,
+            "files": 25
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 10.429,
+          "cpuS": 119.38,
+          "maxRssMiB": 322,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.24,
+            "dryRunS": 0.58,
+            "mutantsS": 8.47,
+            "afterS": 0.14
+          },
+          "executed": {
+            "instrumented": 725,
+            "reused": 0,
+            "dryRunTests": 134
+          },
+          "mutants": 725,
+          "statuses": {
+            "NoCoverage": 3,
+            "Killed": 598,
+            "Timeout": 32,
+            "Survived": 92
+          },
+          "score": 86.9,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 17.668,
+          "cpuS": 91.5,
+          "maxRssMiB": 635,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.34,
+            "dryRunS": 0.13,
+            "typecheckAndPlanS": 6.84,
+            "mutantsS": 10.32,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 727,
+            "toRun": 541,
+            "executed": 541,
+            "reused": 0
+          },
+          "mutants": 727,
+          "statuses": {
+            "Killed": 441,
+            "Timeout": 29,
+            "Survived": 86,
+            "NoCoverage": 3,
+            "CompileError": 168
+          },
+          "score": 84.08,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 518,
+        "sameSpanAndReplacement": 670,
+        "strykerOnly": 55,
+        "mutatorOnly": 57,
+        "scoreStryker": 83.2,
+        "scoreMutator": 83.2,
+        "verdictDifferences": 0
+      },
+      "truth": {
+        "shard": null,
+        "wallS": 11.447,
+        "cpuS": 133.78,
+        "maxRssMiB": 323,
+        "exitCode": 0,
+        "timedOut": false,
+        "stages": {
+          "setupS": 1.27,
+          "dryRunS": 0.55,
+          "mutantsS": 9.47,
+          "afterS": 0.15
+        },
+        "executed": {
+          "instrumented": 725,
+          "reused": 0,
+          "dryRunTests": 134
+        },
+        "mutants": 725,
+        "statuses": {
+          "NoCoverage": 3,
+          "Killed": 596,
+          "Timeout": 34,
+          "Survived": 92
+        },
+        "score": 86.9,
+        "complete": true,
+        "expectedShards": 1,
+        "killMatrix": {
+          "killedMutants": 596,
+          "meanKillersPerKilledMutant": 9.1,
+          "medianKillers": 3,
+          "killedByOneTestOnly": 162,
+          "distinctKillingTests": 133,
+          "meanCoveringTests": 16.36
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 725,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 0,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 518,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 57,
+          "examples": []
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/_utils.ts:26-26"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 10.393,
+          "cpuS": 117.13,
+          "maxRssMiB": 317,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.28,
+            "dryRunS": 0.64,
+            "mutantsS": 8.33,
+            "afterS": 0.15
+          },
+          "executed": {
+            "instrumented": 725,
+            "reused": 0,
+            "dryRunTests": 134
+          },
+          "mutants": 725,
+          "statuses": {
+            "NoCoverage": 3,
+            "Killed": 598,
+            "Timeout": 32,
+            "Survived": 92
+          },
+          "score": 86.9
+        },
+        "strykerLines": {
+          "wallS": 1.74,
+          "cpuS": 4.87,
+          "maxRssMiB": 250,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.06,
+            "dryRunS": 0.4,
+            "mutantsS": 0.18,
+            "afterS": 0.1
+          },
+          "executed": {
+            "instrumented": 5,
+            "reused": 0,
+            "dryRunTests": 134
+          },
+          "mutants": 5,
+          "statuses": {
+            "Killed": 3,
+            "Survived": 2
+          },
+          "score": 60
+        },
+        "strykerIncremental": {
+          "wallS": 1.89,
+          "cpuS": 5.56,
+          "maxRssMiB": 336,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.14,
+            "dryRunS": 0.43,
+            "mutantsS": 0.23,
+            "afterS": 0.09
+          },
+          "executed": {
+            "instrumented": 726,
+            "reused": 721,
+            "dryRunTests": 134
+          },
+          "mutants": 726,
+          "statuses": {
+            "Killed": 598,
+            "Timeout": 32,
+            "Survived": 93,
+            "NoCoverage": 3
+          },
+          "score": 86.78
+        },
+        "mutatorBase": {
+          "wallS": 17.119,
+          "cpuS": 91.3,
+          "maxRssMiB": 645,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.37,
+            "dryRunS": 0.13,
+            "typecheckAndPlanS": 6.86,
+            "mutantsS": 9.72,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 727,
+            "toRun": 541,
+            "executed": 541,
+            "reused": 0
+          },
+          "mutants": 727,
+          "statuses": {
+            "Killed": 441,
+            "Timeout": 29,
+            "Survived": 86,
+            "NoCoverage": 3,
+            "CompileError": 168
+          },
+          "score": 84.08
+        },
+        "mutatorSinceCold": {
+          "wallS": 1.279,
+          "cpuS": 3.21,
+          "maxRssMiB": 413,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.32,
+            "dryRunS": 0.14,
+            "typecheckAndPlanS": 0.48,
+            "mutantsS": 0.31,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 728,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 0
+          },
+          "mutants": 728,
+          "statuses": {
+            "Pending": 722,
+            "Killed": 4,
+            "Survived": 2
+          },
+          "score": 66.67
+        },
+        "mutatorSinceWarm": {
+          "wallS": 1.234,
+          "cpuS": 2.84,
+          "maxRssMiB": 451,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.23,
+            "dryRunS": 0.3,
+            "typecheckAndPlanS": 0.34,
+            "mutantsS": 0.34,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 728,
+            "toRun": 6,
+            "executed": 6,
+            "reused": 466
+          },
+          "mutants": 728,
+          "statuses": {
+            "Pending": 722,
+            "Killed": 4,
+            "Survived": 2
+          },
+          "score": 66.67
+        }
+      }
+    },
+    "pathe": {
+      "commit": "bc7477a01f0bd60ada017add8142c9f9d69ccdc5",
+      "machines": [
+        "c8a.4xlarge",
+        "r8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.9"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.9"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "4.1.9",
+          "vitestProject": "4.1.9"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "4.1.9",
+          "vitestProject": "4.1.9"
+        },
+        "truth": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "11.10.0",
+          "vitest": "4.1.9",
+          "vitestProject": "4.1.9"
+        }
+      },
+      "notes": [
+        "Vitest upgraded in this job from 4.1.9 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.259,
+          "pnpm-setup": 1.315,
+          "install": 1.076,
+          "vitest-plugins-remove": 1.159,
+          "vitest-upgrade": 0.803,
+          "tool-install": 1.27,
+          "tests": 2.641
+        },
+        "pr-mutator": {
+          "clone": 0.225,
+          "pnpm-setup": 1.734,
+          "install": 1.107,
+          "vitest-plugins-remove": 1.319,
+          "vitest-upgrade": 0.977,
+          "tool-install": 1.146
+        },
+        "pr-stryker": {
+          "clone": 0.303,
+          "pnpm-setup": 1.753,
+          "install": 1.088,
+          "tool-install": 1.624
+        },
+        "stryker-cold": {
+          "clone": 0.264,
+          "pnpm-setup": 1.658,
+          "install": 1.136,
+          "tool-install": 1.548,
+          "tests": 2.581
+        },
+        "truth": {
+          "clone": 0.281,
+          "pnpm-setup": 1.42,
+          "install": 1.085,
+          "tool-install": 1.592
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 2.581,
+          "cpuS": 2.95,
+          "maxRssMiB": 225,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 483,
+            "passed": 467,
+            "failed": 0,
+            "files": 28
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 2.641,
+          "cpuS": 3.02,
+          "maxRssMiB": 244,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 483,
+            "passed": 467,
+            "failed": 0,
+            "files": 28
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 10.828,
+          "cpuS": 128.39,
+          "maxRssMiB": 394,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.27,
+            "dryRunS": 0.63,
+            "mutantsS": 8.8,
+            "afterS": 0.13
+          },
+          "executed": {
+            "instrumented": 524,
+            "reused": 0,
+            "dryRunTests": 439
+          },
+          "mutants": 524,
+          "statuses": {
+            "NoCoverage": 3,
+            "Killed": 452,
+            "Survived": 63,
+            "Timeout": 4,
+            "RuntimeError": 2
+          },
+          "score": 87.36,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 18.925,
+          "cpuS": 109.34,
+          "maxRssMiB": 952,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.4,
+            "dryRunS": 0.2,
+            "typecheckAndPlanS": 8.55,
+            "mutantsS": 9.73,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 547,
+            "toRun": 421,
+            "executed": 421,
+            "reused": 0
+          },
+          "mutants": 547,
+          "statuses": {
+            "Killed": 365,
+            "Survived": 59,
+            "CompileError": 116,
+            "NoCoverage": 3,
+            "Timeout": 4
+          },
+          "score": 85.61,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 399,
+        "sameSpanAndReplacement": 500,
+        "strykerOnly": 24,
+        "mutatorOnly": 47,
+        "scoreStryker": 84.96,
+        "scoreMutator": 84.96,
+        "verdictDifferences": 0
+      },
+      "truth": {
+        "shard": null,
+        "wallS": 14.414,
+        "cpuS": 187.99,
+        "maxRssMiB": 468,
+        "exitCode": 0,
+        "timedOut": false,
+        "stages": {
+          "setupS": 1.23,
+          "dryRunS": 0.57,
+          "mutantsS": 12.46,
+          "afterS": 0.15
+        },
+        "executed": {
+          "instrumented": 524,
+          "reused": 0,
+          "dryRunTests": 439
+        },
+        "mutants": 524,
+        "statuses": {
+          "NoCoverage": 3,
+          "Survived": 63,
+          "Killed": 451,
+          "Timeout": 5,
+          "RuntimeError": 2
+        },
+        "score": 87.36,
+        "complete": true,
+        "expectedShards": 1,
+        "killMatrix": {
+          "killedMutants": 451,
+          "meanKillersPerKilledMutant": 41.64,
+          "medianKillers": 16,
+          "killedByOneTestOnly": 55,
+          "distinctKillingTests": 472,
+          "meanCoveringTests": 71.06
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 522,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 0,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 399,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 47,
+          "examples": []
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/_path.ts:80-80"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 10.034,
+          "cpuS": 118.09,
+          "maxRssMiB": 399,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.23,
+            "dryRunS": 0.66,
+            "mutantsS": 8.01,
+            "afterS": 0.14
+          },
+          "executed": {
+            "instrumented": 524,
+            "reused": 0,
+            "dryRunTests": 439
+          },
+          "mutants": 524,
+          "statuses": {
+            "NoCoverage": 3,
+            "Killed": 452,
+            "Survived": 63,
+            "Timeout": 4,
+            "RuntimeError": 2
+          },
+          "score": 87.36
+        },
+        "strykerLines": {
+          "wallS": 1.996,
+          "cpuS": 6.61,
+          "maxRssMiB": 330,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.05,
+            "dryRunS": 0.42,
+            "mutantsS": 0.31,
+            "afterS": 0.21
+          },
+          "executed": {
+            "instrumented": 5,
+            "reused": 0,
+            "dryRunTests": 439
+          },
+          "mutants": 5,
+          "statuses": {
+            "Killed": 3,
+            "Survived": 2
+          },
+          "score": 60
+        },
+        "strykerIncremental": {
+          "wallS": 3.384,
+          "cpuS": 23.64,
+          "maxRssMiB": 361,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.16,
+            "dryRunS": 0.44,
+            "mutantsS": 1.64,
+            "afterS": 0.14
+          },
+          "executed": {
+            "instrumented": 524,
+            "reused": 472,
+            "dryRunTests": 439
+          },
+          "mutants": 524,
+          "statuses": {
+            "Killed": 452,
+            "Survived": 63,
+            "NoCoverage": 3,
+            "Timeout": 4,
+            "RuntimeError": 2
+          },
+          "score": 87.36
+        },
+        "mutatorBase": {
+          "wallS": 19.009,
+          "cpuS": 109.71,
+          "maxRssMiB": 964,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.4,
+            "dryRunS": 0.2,
+            "typecheckAndPlanS": 8.33,
+            "mutantsS": 10.04,
+            "afterS": 0.05
+          },
+          "executed": {
+            "total": 547,
+            "toRun": 421,
+            "executed": 421,
+            "reused": 0
+          },
+          "mutants": 547,
+          "statuses": {
+            "Killed": 365,
+            "Survived": 59,
+            "CompileError": 116,
+            "NoCoverage": 3,
+            "Timeout": 4
+          },
+          "score": 85.61
+        },
+        "mutatorSinceCold": {
+          "wallS": 1.918,
+          "cpuS": 5.39,
+          "maxRssMiB": 733,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.37,
+            "dryRunS": 0.2,
+            "typecheckAndPlanS": 0.8,
+            "mutantsS": 0.5,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 547,
+            "toRun": 7,
+            "executed": 7,
+            "reused": 0
+          },
+          "mutants": 547,
+          "statuses": {
+            "Pending": 537,
+            "CompileError": 3,
+            "Killed": 5,
+            "Survived": 2
+          },
+          "score": 71.43
+        },
+        "mutatorSinceWarm": {
+          "wallS": 1.851,
+          "cpuS": 5.27,
+          "maxRssMiB": 761,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.24,
+            "dryRunS": 0.38,
+            "typecheckAndPlanS": 0.67,
+            "mutantsS": 0.53,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 547,
+            "toRun": 7,
+            "executed": 7,
+            "reused": 293
+          },
+          "mutants": 547,
+          "statuses": {
+            "Pending": 537,
+            "CompileError": 3,
+            "Killed": 5,
+            "Survived": 2
+          },
+          "score": 71.43
+        }
+      }
+    },
+    "ufo": {
+      "commit": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+      "machines": [
+        "c8a.4xlarge",
+        "r8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.5"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "5.1.1",
+          "vitestProject": "4.1.5"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "4.1.5",
+          "vitestProject": "4.1.5"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "4.1.5",
+          "vitestProject": "4.1.5"
+        },
+        "truth": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "10.33.2",
+          "vitest": "4.1.5",
+          "vitestProject": "4.1.5"
+        }
+      },
+      "notes": [
+        "Vitest upgraded in this job from 4.1.5 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.245,
+          "pnpm-setup": 1.281,
+          "install": 0.88,
+          "vitest-plugins-remove": 1.066,
+          "vitest-upgrade": 0.86,
+          "tool-install": 0.937,
+          "tests": 0.438
+        },
+        "pr-mutator": {
+          "clone": 0.282,
+          "pnpm-setup": 1.364,
+          "install": 0.96,
+          "vitest-plugins-remove": 1.051,
+          "vitest-upgrade": 0.892,
+          "tool-install": 0.939
+        },
+        "pr-stryker": {
+          "clone": 0.291,
+          "pnpm-setup": 1.307,
+          "install": 0.894,
+          "tool-install": 1.339
+        },
+        "stryker-cold": {
+          "clone": 0.266,
+          "pnpm-setup": 1.348,
+          "install": 0.872,
+          "tool-install": 1.342,
+          "tests": 0.405
+        },
+        "truth": {
+          "clone": 0.273,
+          "pnpm-setup": 1.289,
+          "install": 0.885,
+          "tool-install": 1.378
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 0.405,
+          "cpuS": 1.63,
+          "maxRssMiB": 136,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 489,
+            "passed": 489,
+            "failed": 0,
+            "files": 54
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 0.438,
+          "cpuS": 1.59,
+          "maxRssMiB": 142,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 489,
+            "passed": 489,
+            "failed": 0,
+            "files": 54
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 16.919,
+          "cpuS": 207.93,
+          "maxRssMiB": 619,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.27,
+            "dryRunS": 1.31,
+            "mutantsS": 14.21,
+            "afterS": 0.12
+          },
+          "executed": {
+            "instrumented": 1011,
+            "reused": 0,
+            "dryRunTests": 489
+          },
+          "mutants": 1011,
+          "statuses": {
+            "NoCoverage": 64,
+            "Killed": 823,
+            "Survived": 112,
+            "Timeout": 12
+          },
+          "score": 82.59,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 33.115,
+          "cpuS": 194.82,
+          "maxRssMiB": 2084,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.38,
+            "dryRunS": 0.17,
+            "typecheckAndPlanS": 12.38,
+            "mutantsS": 20.14,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 1109,
+            "toRun": 864,
+            "executed": 864,
+            "reused": 0
+          },
+          "mutants": 1109,
+          "statuses": {
+            "Killed": 760,
+            "CompileError": 165,
+            "Survived": 111,
+            "NoCoverage": 63,
+            "Timeout": 10
+          },
+          "score": 81.57,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 779,
+        "sameSpanAndReplacement": 939,
+        "strykerOnly": 72,
+        "mutatorOnly": 170,
+        "scoreStryker": 79.72,
+        "scoreMutator": 79.72,
+        "verdictDifferences": 0
+      },
+      "truth": {
+        "shard": null,
+        "wallS": 27.879,
+        "cpuS": 392.23,
+        "maxRssMiB": 653,
+        "exitCode": 0,
+        "timedOut": false,
+        "stages": {
+          "setupS": 1.34,
+          "dryRunS": 1.43,
+          "mutantsS": 24.98,
+          "afterS": 0.14
+        },
+        "executed": {
+          "instrumented": 1011,
+          "reused": 0,
+          "dryRunTests": 489
+        },
+        "mutants": 1011,
+        "statuses": {
+          "NoCoverage": 64,
+          "Killed": 819,
+          "Survived": 112,
+          "Timeout": 16
+        },
+        "score": 82.59,
+        "complete": true,
+        "expectedShards": 1,
+        "killMatrix": {
+          "killedMutants": 819,
+          "meanKillersPerKilledMutant": 19.74,
+          "medianKillers": 6,
+          "killedByOneTestOnly": 120,
+          "distinctKillingTests": 487,
+          "meanCoveringTests": 34.29
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 1011,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 0,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 779,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 170,
+          "examples": []
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/utils.ts:328-328"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 16.379,
+          "cpuS": 201.59,
+          "maxRssMiB": 684,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.34,
+            "dryRunS": 1.44,
+            "mutantsS": 13.48,
+            "afterS": 0.13
+          },
+          "executed": {
+            "instrumented": 1011,
+            "reused": 0,
+            "dryRunTests": 489
+          },
+          "mutants": 1011,
+          "statuses": {
+            "NoCoverage": 64,
+            "Killed": 823,
+            "Survived": 112,
+            "Timeout": 12
+          },
+          "score": 82.59
+        },
+        "strykerLines": {
+          "wallS": 2.518,
+          "cpuS": 10.09,
+          "maxRssMiB": 250,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.04,
+            "dryRunS": 1.06,
+            "mutantsS": 0.33,
+            "afterS": 0.08
+          },
+          "executed": {
+            "instrumented": 16,
+            "reused": 0,
+            "dryRunTests": 465
+          },
+          "mutants": 16,
+          "statuses": {
+            "Killed": 14,
+            "Survived": 2
+          },
+          "score": 87.5
+        },
+        "strykerIncremental": {
+          "wallS": 2.943,
+          "cpuS": 10.4,
+          "maxRssMiB": 350,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.21,
+            "dryRunS": 1.2,
+            "mutantsS": 0.33,
+            "afterS": 0.19
+          },
+          "executed": {
+            "instrumented": 1016,
+            "reused": 1008,
+            "dryRunTests": 489
+          },
+          "mutants": 1016,
+          "statuses": {
+            "Killed": 826,
+            "Survived": 114,
+            "NoCoverage": 64,
+            "Timeout": 12
+          },
+          "score": 82.48
+        },
+        "mutatorBase": {
+          "wallS": 34.63,
+          "cpuS": 202.78,
+          "maxRssMiB": 2086,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.45,
+            "dryRunS": 0.18,
+            "typecheckAndPlanS": 12.26,
+            "mutantsS": 21.7,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 1109,
+            "toRun": 864,
+            "executed": 864,
+            "reused": 0
+          },
+          "mutants": 1109,
+          "statuses": {
+            "Killed": 760,
+            "CompileError": 165,
+            "Survived": 111,
+            "NoCoverage": 63,
+            "Timeout": 10
+          },
+          "score": 81.57
+        },
+        "mutatorSinceCold": {
+          "wallS": 2.151,
+          "cpuS": 6.92,
+          "maxRssMiB": 554,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.36,
+            "dryRunS": 0.2,
+            "typecheckAndPlanS": 0.81,
+            "mutantsS": 0.75,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 1114,
+            "toRun": 15,
+            "executed": 15,
+            "reused": 0
+          },
+          "mutants": 1114,
+          "statuses": {
+            "Pending": 1096,
+            "Killed": 14,
+            "CompileError": 2,
+            "Survived": 2
+          },
+          "score": 87.5
+        },
+        "mutatorSinceWarm": {
+          "wallS": 2.05,
+          "cpuS": 5.35,
+          "maxRssMiB": 569,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.25,
+            "dryRunS": 0.32,
+            "typecheckAndPlanS": 0.68,
+            "mutantsS": 0.77,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 1114,
+            "toRun": 15,
+            "executed": 15,
+            "reused": 903
+          },
+          "mutants": 1114,
+          "statuses": {
+            "Pending": 1096,
+            "Killed": 14,
+            "CompileError": 2,
+            "Survived": 2
+          },
+          "score": 87.5
+        }
+      }
+    },
+    "hono": {
+      "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+      "machines": [
+        "c8a.4xlarge",
+        "m8a.4xlarge",
+        "r8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "stryker-cold": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s1": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s2": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s3": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s4": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s5": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        },
+        "truth:s6": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.6.0",
+          "vitest": "5.0.1",
+          "vitestProject": "5.0.1"
+        }
+      },
+      "notes": [
+        "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold": {
+          "clone": 0.458,
+          "pnpm-setup": 1.256,
+          "install": 0.687,
+          "tool-install": 1.271,
+          "tests": 6.619
+        },
+        "pr-mutator": {
+          "clone": 0.416,
+          "pnpm-setup": 1.626,
+          "install": 0.706,
+          "tool-install": 0.801
+        },
+        "pr-stryker": {
+          "clone": 0.472,
+          "pnpm-setup": 1.955,
+          "install": 0.755,
+          "tool-install": 0.999
+        },
+        "stryker-cold": {
+          "clone": 0.468,
+          "pnpm-setup": 1.678,
+          "install": 0.777,
+          "tool-install": 0.907,
+          "tests": 6.586
+        },
+        "truth:s1": {
+          "clone": 0.46,
+          "pnpm-setup": 1.734,
+          "install": 0.674,
+          "tool-install": 0.939
+        },
+        "truth:s2": {
+          "clone": 0.486,
+          "pnpm-setup": 1.725,
+          "install": 0.759,
+          "tool-install": 0.785
+        },
+        "truth:s3": {
+          "clone": 0.406,
+          "pnpm-setup": 2.034,
+          "install": 0.688,
+          "tool-install": 0.792
+        },
+        "truth:s4": {
+          "clone": 0.376,
+          "pnpm-setup": 1.666,
+          "install": 0.668,
+          "tool-install": 0.777
+        },
+        "truth:s5": {
+          "clone": 0.452,
+          "pnpm-setup": 1.795,
+          "install": 0.745,
+          "tool-install": 0.788
+        },
+        "truth:s6": {
+          "clone": 0.505,
+          "pnpm-setup": 1.23,
+          "install": 0.751,
+          "tool-install": 1.313
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 6.586,
+          "cpuS": 23.96,
+          "maxRssMiB": 590,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 5111,
+            "passed": 5010,
+            "failed": 0,
+            "files": 1427
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 6.619,
+          "cpuS": 23.81,
+          "maxRssMiB": 621,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 5111,
+            "passed": 5010,
+            "failed": 0,
+            "files": 1427
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shard": null,
+          "wallS": 258.52,
+          "cpuS": 2782.71,
+          "maxRssMiB": 1474,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.98,
+            "dryRunS": 29.26,
+            "mutantsS": 227.06,
+            "afterS": 0.23
+          },
+          "executed": {
+            "instrumented": 4480,
+            "reused": 0,
+            "dryRunTests": 4882
+          },
+          "mutants": 4480,
+          "statuses": {
+            "NoCoverage": 115,
+            "Killed": 3789,
+            "Timeout": 64,
+            "Survived": 512
+          },
+          "score": 86,
+          "complete": true
+        },
+        "mutator": {
+          "shard": null,
+          "wallS": 301.397,
+          "cpuS": 2003.06,
+          "maxRssMiB": 4228,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.37,
+            "dryRunS": 4.73,
+            "typecheckAndPlanS": 0.67,
+            "mutantsS": 294.13,
+            "afterS": 0.5
+          },
+          "executed": {
+            "total": 4734,
+            "toRun": 4567,
+            "executed": 4567,
+            "reused": 0
+          },
+          "mutants": 4734,
+          "statuses": {
+            "Killed": 4035,
+            "Survived": 520,
+            "Ignored": 1,
+            "RuntimeError": 23,
+            "Timeout": 40,
+            "NoCoverage": 115
+          },
+          "score": 86.52,
+          "complete": true
+        }
+      },
+      "sharedCold": {
+        "shared": 3769,
+        "sameSpanAndReplacement": 3791,
+        "strykerOnly": 689,
+        "mutatorOnly": 943,
+        "scoreStryker": 86.76,
+        "scoreMutator": 86.68,
+        "verdictDifferences": 3
+      },
+      "truth": {
+        "shards": [
+          {
+            "shard": "s1",
+            "wallS": 159.7,
+            "cpuS": 1454.23,
+            "maxRssMiB": 6713,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.72,
+              "dryRunS": 17.44,
+              "mutantsS": 140.36,
+              "afterS": 0.17
+            },
+            "executed": {
+              "instrumented": 305,
+              "reused": 0,
+              "dryRunTests": 3158
+            },
+            "mutants": 305,
+            "statuses": {
+              "NoCoverage": 1,
+              "Killed": 264,
+              "Survived": 16,
+              "Timeout": 24
+            },
+            "score": 94.43
+          },
+          {
+            "shard": "s2",
+            "wallS": 144.817,
+            "cpuS": 1538.54,
+            "maxRssMiB": 798,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.77,
+              "dryRunS": 18.33,
+              "mutantsS": 124.53,
+              "afterS": 0.18
+            },
+            "executed": {
+              "instrumented": 256,
+              "reused": 0,
+              "dryRunTests": 3971
+            },
+            "mutants": 256,
+            "statuses": {
+              "Killed": 222,
+              "Survived": 25,
+              "Timeout": 9
+            },
+            "score": 90.23
+          },
+          {
+            "shard": "s3",
+            "wallS": 167.006,
+            "cpuS": 2063.27,
+            "maxRssMiB": 4665,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 2.03,
+              "dryRunS": 18.7,
+              "mutantsS": 146.06,
+              "afterS": 0.22
+            },
+            "executed": {
+              "instrumented": 1494,
+              "reused": 0,
+              "dryRunTests": 3956
+            },
+            "mutants": 1494,
+            "statuses": {
+              "NoCoverage": 42,
+              "Killed": 1188,
+              "Survived": 216,
+              "Timeout": 47,
+              "RuntimeError": 1
+            },
+            "score": 82.72
+          },
+          {
+            "shard": "s4",
+            "wallS": 224.571,
+            "cpuS": 2184.62,
+            "maxRssMiB": 6719,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.79,
+              "dryRunS": 23.8,
+              "mutantsS": 198.74,
+              "afterS": 0.24
+            },
+            "executed": {
+              "instrumented": 727,
+              "reused": 0,
+              "dryRunTests": 4144
+            },
+            "mutants": 727,
+            "statuses": {
+              "NoCoverage": 15,
+              "Killed": 604,
+              "Survived": 74,
+              "Timeout": 34
+            },
+            "score": 87.76
+          },
+          {
+            "shard": "s5",
+            "wallS": 212.856,
+            "cpuS": 2069.22,
+            "maxRssMiB": 6697,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.76,
+              "dryRunS": 17.25,
+              "mutantsS": 193.67,
+              "afterS": 0.18
+            },
+            "executed": {
+              "instrumented": 786,
+              "reused": 0,
+              "dryRunTests": 3703
+            },
+            "mutants": 786,
+            "statuses": {
+              "NoCoverage": 4,
+              "Killed": 651,
+              "Survived": 98,
+              "Timeout": 32,
+              "RuntimeError": 1
+            },
+            "score": 87.01
+          },
+          {
+            "shard": "s6",
+            "wallS": 283.185,
+            "cpuS": 3635.28,
+            "maxRssMiB": 6749,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.66,
+              "dryRunS": 17.84,
+              "mutantsS": 263.41,
+              "afterS": 0.27
+            },
+            "executed": {
+              "instrumented": 909,
+              "reused": 0,
+              "dryRunTests": 3405
+            },
+            "mutants": 909,
+            "statuses": {
+              "NoCoverage": 53,
+              "Killed": 718,
+              "Timeout": 55,
+              "Survived": 83
+            },
+            "score": 85.04
+          }
+        ],
+        "wallS": 1192.13,
+        "slowestShardS": 283.185,
+        "cpuS": 12945.16,
+        "maxRssMiB": 6749,
+        "timedOut": false,
+        "complete": true,
+        "mutants": 4477,
+        "statuses": {
+          "NoCoverage": 115,
+          "Killed": 3647,
+          "Survived": 512,
+          "Timeout": 201,
+          "RuntimeError": 2
+        },
+        "score": 85.99,
+        "expectedShards": 6,
+        "killMatrix": {
+          "killedMutants": 3647,
+          "meanKillersPerKilledMutant": 95.27,
+          "medianKillers": 17,
+          "killedByOneTestOnly": 453,
+          "distinctKillingTests": 3858,
+          "meanCoveringTests": 197.11
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 4475,
+          "missedKills": 0,
+          "extraKills": 0,
+          "notInTruth": 3,
+          "examples": []
+        },
+        "mutator": {
+          "compared": 3764,
+          "missedKills": 3,
+          "extraKills": 0,
+          "notInTruth": 946,
+          "examples": [
+            {
+              "file": "src/utils/html.ts",
+              "span": "63:9-63:14",
+              "mutator": "EqualityOperator",
+              "replacement": "i<=0",
+              "status": "Survived",
+              "truth": "Killed",
+              "truthKillers": 1,
+              "statusReason": "not infected: no covering test reaches it with a value it changes"
+            },
+            {
+              "file": "src/utils/html.ts",
+              "span": "76:9-76:30",
+              "mutator": "ConditionalExpression",
+              "replacement": "true",
+              "status": "Survived",
+              "truth": "Killed",
+              "truthKillers": 1
+            },
+            {
+              "file": "src/utils/html.ts",
+              "span": "81:16-81:37",
+              "mutator": "ConditionalExpression",
+              "replacement": "true",
+              "status": "Survived",
+              "truth": "Killed",
+              "truthKillers": 1
+            }
+          ]
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "src/utils/url.ts:144-144"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 257.906,
+          "cpuS": 2836.17,
+          "maxRssMiB": 1509,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 2.06,
+            "dryRunS": 29.78,
+            "mutantsS": 225.87,
+            "afterS": 0.2
+          },
+          "executed": {
+            "instrumented": 4480,
+            "reused": 0,
+            "dryRunTests": 4882
+          },
+          "mutants": 4480,
+          "statuses": {
+            "NoCoverage": 115,
+            "Killed": 3790,
+            "Timeout": 63,
+            "Survived": 512
+          },
+          "score": 86
+        },
+        "strykerLines": {
+          "wallS": 27.624,
+          "cpuS": 36.23,
+          "maxRssMiB": 646,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.36,
+            "dryRunS": 16.62,
+            "mutantsS": 9.5,
+            "afterS": 0.14
+          },
+          "executed": {
+            "instrumented": 7,
+            "reused": 0,
+            "dryRunTests": 3626
+          },
+          "mutants": 7,
+          "statuses": {
+            "Killed": 7
+          },
+          "score": 100
+        },
+        "strykerIncremental": {
+          "wallS": 37.86,
+          "cpuS": 56.8,
+          "maxRssMiB": 929,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.85,
+            "dryRunS": 28.41,
+            "mutantsS": 7.45,
+            "afterS": 0.15
+          },
+          "executed": {
+            "instrumented": 4480,
+            "reused": 4470,
+            "dryRunTests": 4882
+          },
+          "mutants": 4480,
+          "statuses": {
+            "Killed": 3790,
+            "Timeout": 63,
+            "Survived": 512,
+            "NoCoverage": 115
+          },
+          "score": 86
+        },
+        "mutatorBase": {
+          "wallS": 304.812,
+          "cpuS": 1998.15,
+          "maxRssMiB": 4232,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.45,
+            "dryRunS": 6.61,
+            "typecheckAndPlanS": 0.66,
+            "mutantsS": 295.53,
+            "afterS": 0.55
+          },
+          "executed": {
+            "total": 4734,
+            "toRun": 4567,
+            "executed": 4567,
+            "reused": 0
+          },
+          "mutants": 4734,
+          "statuses": {
+            "Killed": 4035,
+            "Survived": 513,
+            "Ignored": 1,
+            "RuntimeError": 29,
+            "Timeout": 41,
+            "NoCoverage": 115
+          },
+          "score": 86.65
+        },
+        "mutatorSinceCold": {
+          "wallS": 12.435,
+          "cpuS": 37.14,
+          "maxRssMiB": 840,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.27,
+            "dryRunS": 4.74,
+            "typecheckAndPlanS": 0.6,
+            "mutantsS": 5.78,
+            "afterS": 0.05
+          },
+          "executed": {
+            "total": 4734,
+            "toRun": 13,
+            "executed": 13,
+            "reused": 0
+          },
+          "mutants": 4734,
+          "statuses": {
+            "Pending": 4721,
+            "Killed": 13
+          },
+          "score": 100
+        },
+        "mutatorSinceWarm": {
+          "wallS": 11.744,
+          "cpuS": 19.57,
+          "maxRssMiB": 821,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.45,
+            "dryRunS": 4.96,
+            "typecheckAndPlanS": 0.52,
+            "mutantsS": 5.76,
+            "afterS": 0.05
+          },
+          "executed": {
+            "total": 4734,
+            "toRun": 13,
+            "executed": 13,
+            "reused": 3271
+          },
+          "mutants": 4734,
+          "statuses": {
+            "Pending": 4721,
+            "Killed": 13
+          },
+          "score": 100
+        }
+      }
+    },
+    "trpc": {
+      "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+      "machines": [
+        "c8a.4xlarge",
+        "m8a.4xlarge",
+        "r8a.4xlarge"
+      ],
+      "cpuModel": "AMD EPYC 9R45",
+      "versions": {
+        "mutator-cold:1": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:10": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:2": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:3": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:4": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:5": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:6": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:7": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:8": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "mutator-cold:9": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "pr-mutator": {
+          "mutator": "0.5.0",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "pr-stryker": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s1": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s2": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s3": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s4": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s5": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s6": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s7": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "stryker-cold:s8": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s1": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s10": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s11": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s12a": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s12b": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s13": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s14a1": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s14a2a": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s14a2b": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s14b": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s15a": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s15b": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s16": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s17": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s18": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s19": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s2": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s20": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s21a": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s21b1": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s21b2": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s21c": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s21d": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s22": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s23a": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s23b": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s24": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s3": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s4": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s5": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s6": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s7": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s8": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        },
+        "truth:s9": {
+          "stryker": "10.1.1",
+          "node": "v24.22.2",
+          "pnpm": "12.4.1",
+          "vitest": "5.1.0",
+          "vitestProject": "5.1.0"
+        }
+      },
+      "notes": [
+        "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on trpc's TypeScript 7.1.0-beta: Package subpath './unstable/sync' is not defined by exports",
+        "PR scenario base runs mutate [\"packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts\",\"packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts\",\"packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts\",\"packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts\",\"packages/server/src/unstable-core-do-not-import/http/abortError.ts\",\"packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts\"]: the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
+        "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default"
+      ],
+      "errors": [],
+      "setup": {
+        "mutator-cold:1": {
+          "clone": 0.698,
+          "pnpm-setup": 2.152,
+          "install": 4.164,
+          "tool-install": 7.486,
+          "tests": 20.6
+        },
+        "mutator-cold:10": {
+          "clone": 0.729,
+          "pnpm-setup": 1.826,
+          "install": 4.096,
+          "tool-install": 9.148
+        },
+        "mutator-cold:2": {
+          "clone": 0.271,
+          "pnpm-setup": 1.48,
+          "install": 3.771,
+          "tool-install": 9.334
+        },
+        "mutator-cold:3": {
+          "clone": 0.624,
+          "pnpm-setup": 1.745,
+          "install": 4.056,
+          "tool-install": 9.202
+        },
+        "mutator-cold:4": {
+          "clone": 0.622,
+          "pnpm-setup": 1.268,
+          "install": 4.016,
+          "tool-install": 8.984
+        },
+        "mutator-cold:5": {
+          "clone": 0.671,
+          "pnpm-setup": 1.891,
+          "install": 3.676,
+          "tool-install": 8.36
+        },
+        "mutator-cold:6": {
+          "clone": 0.722,
+          "pnpm-setup": 1.792,
+          "install": 4.171,
+          "tool-install": 9.132
+        },
+        "mutator-cold:7": {
+          "clone": 0.641,
+          "pnpm-setup": 1.433,
+          "install": 3.768,
+          "tool-install": 9.002
+        },
+        "mutator-cold:8": {
+          "clone": 1.654,
+          "pnpm-setup": 1.99,
+          "install": 3.885,
+          "tool-install": 9.695
+        },
+        "mutator-cold:9": {
+          "clone": 0.732,
+          "pnpm-setup": 1.997,
+          "install": 4.178,
+          "tool-install": 8.764
+        },
+        "pr-mutator": {
+          "clone": 0.674,
+          "pnpm-setup": 1.528,
+          "install": 3.825,
+          "tool-install": 10.581
+        },
+        "pr-stryker": {
+          "clone": 0.685,
+          "pnpm-setup": 1.813,
+          "install": 4.076,
+          "tool-install": 8.673
+        },
+        "stryker-cold:s1": {
+          "clone": 0.686,
+          "pnpm-setup": 1.594,
+          "install": 4.137,
+          "tool-install": 9.336,
+          "tests": 20.597
+        },
+        "stryker-cold:s2": {
+          "clone": 0.608,
+          "pnpm-setup": 1.183,
+          "install": 3.768,
+          "tool-install": 9.414
+        },
+        "stryker-cold:s3": {
+          "clone": 0.654,
+          "pnpm-setup": 1.473,
+          "install": 3.827,
+          "tool-install": 8.854
+        },
+        "stryker-cold:s4": {
+          "clone": 0.71,
+          "pnpm-setup": 1.52,
+          "install": 3.805,
+          "tool-install": 9.063
+        },
+        "stryker-cold:s5": {
+          "clone": 0.664,
+          "pnpm-setup": 1.716,
+          "install": 3.982,
+          "tool-install": 9.221
+        },
+        "stryker-cold:s6": {
+          "clone": 0.418,
+          "pnpm-setup": 1.487,
+          "install": 3.848,
+          "tool-install": 9.39
+        },
+        "stryker-cold:s7": {
+          "clone": 0.75,
+          "pnpm-setup": 1.615,
+          "install": 3.868,
+          "tool-install": 8.312
+        },
+        "stryker-cold:s8": {
+          "clone": 0.394,
+          "pnpm-setup": 1.536,
+          "install": 4.038,
+          "tool-install": 9.472
+        },
+        "truth:s1": {
+          "clone": 0.718,
+          "pnpm-setup": 1.858,
+          "install": 4.134,
+          "tool-install": 9.131
+        },
+        "truth:s10": {
+          "clone": 0.699,
+          "pnpm-setup": 2.075,
+          "install": 3.915,
+          "tool-install": 9.342
+        },
+        "truth:s11": {
+          "clone": 0.664,
+          "pnpm-setup": 1.586,
+          "install": 4.178,
+          "tool-install": 8.545
+        },
+        "truth:s12a": {
+          "clone": 0.738,
+          "pnpm-setup": 1.456,
+          "install": 4.143,
+          "tool-install": 8.311
+        },
+        "truth:s12b": {
+          "clone": 0.662,
+          "pnpm-setup": 1.719,
+          "install": 4.081,
+          "tool-install": 8.719
+        },
+        "truth:s13": {
+          "clone": 0.651,
+          "pnpm-setup": 1.596,
+          "install": 4.192,
+          "tool-install": 8.688
+        },
+        "truth:s14a1": {
+          "clone": 0.567,
+          "pnpm-setup": 1.578,
+          "install": 3.765,
+          "tool-install": 8.712
+        },
+        "truth:s14a2a": {
+          "clone": 0.77,
+          "pnpm-setup": 1.494,
+          "install": 3.807,
+          "tool-install": 8.799
+        },
+        "truth:s14a2b": {
+          "clone": 0.62,
+          "pnpm-setup": 1.417,
+          "install": 4.006,
+          "tool-install": 9.345
+        },
+        "truth:s14b": {
+          "clone": 0.626,
+          "pnpm-setup": 1.755,
+          "install": 3.759,
+          "tool-install": 8.39
+        },
+        "truth:s15a": {
+          "clone": 0.614,
+          "pnpm-setup": 1.698,
+          "install": 4.035,
+          "tool-install": 8.806
+        },
+        "truth:s15b": {
+          "clone": 0.632,
+          "pnpm-setup": 1.656,
+          "install": 3.824,
+          "tool-install": 9.313
+        },
+        "truth:s16": {
+          "clone": 0.726,
+          "pnpm-setup": 2.054,
+          "install": 4.145,
+          "tool-install": 9.117
+        },
+        "truth:s17": {
+          "clone": 0.665,
+          "pnpm-setup": 1.595,
+          "install": 3.875,
+          "tool-install": 9.066
+        },
+        "truth:s18": {
+          "clone": 0.647,
+          "pnpm-setup": 1.469,
+          "install": 3.981,
+          "tool-install": 8.71
+        },
+        "truth:s19": {
+          "clone": 0.724,
+          "pnpm-setup": 1.791,
+          "install": 3.988,
+          "tool-install": 9.957
+        },
+        "truth:s2": {
+          "clone": 0.671,
+          "pnpm-setup": 1.982,
+          "install": 4.143,
+          "tool-install": 9.523
+        },
+        "truth:s20": {
+          "clone": 0.653,
+          "pnpm-setup": 1.683,
+          "install": 4.027,
+          "tool-install": 9.002
+        },
+        "truth:s21a": {
+          "clone": 0.671,
+          "pnpm-setup": 1.966,
+          "install": 3.941,
+          "tool-install": 9.089
+        },
+        "truth:s21b1": {
+          "clone": 0.685,
+          "pnpm-setup": 1.636,
+          "install": 4.165,
+          "tool-install": 9.188
+        },
+        "truth:s21b2": {
+          "clone": 0.652,
+          "pnpm-setup": 1.285,
+          "install": 4.007,
+          "tool-install": 9.556
+        },
+        "truth:s21c": {
+          "clone": 0.751,
+          "pnpm-setup": 1.309,
+          "install": 3.906,
+          "tool-install": 8.63
+        },
+        "truth:s21d": {
+          "clone": 0.661,
+          "pnpm-setup": 1.567,
+          "install": 4.032,
+          "tool-install": 8.897
+        },
+        "truth:s22": {
+          "clone": 0.65,
+          "pnpm-setup": 1.525,
+          "install": 3.854,
+          "tool-install": 9.244
+        },
+        "truth:s23a": {
+          "clone": 0.651,
+          "pnpm-setup": 1.54,
+          "install": 4.016,
+          "tool-install": 8.777
+        },
+        "truth:s23b": {
+          "clone": 0.676,
+          "pnpm-setup": 1.596,
+          "install": 3.677,
+          "tool-install": 8.067
+        },
+        "truth:s24": {
+          "clone": 0.652,
+          "pnpm-setup": 1.455,
+          "install": 3.972,
+          "tool-install": 10.216
+        },
+        "truth:s3": {
+          "clone": 0.693,
+          "pnpm-setup": 1.67,
+          "install": 4.278,
+          "tool-install": 9.467
+        },
+        "truth:s4": {
+          "clone": 0.641,
+          "pnpm-setup": 1.296,
+          "install": 4.118,
+          "tool-install": 8.475
+        },
+        "truth:s5": {
+          "clone": 0.68,
+          "pnpm-setup": 1.672,
+          "install": 4.031,
+          "tool-install": 9.259
+        },
+        "truth:s6": {
+          "clone": 0.716,
+          "pnpm-setup": 1.566,
+          "install": 3.818,
+          "tool-install": 7.928
+        },
+        "truth:s7": {
+          "clone": 0.667,
+          "pnpm-setup": 1.735,
+          "install": 4.051,
+          "tool-install": 8.791
+        },
+        "truth:s8": {
+          "clone": 0.708,
+          "pnpm-setup": 1.534,
+          "install": 3.873,
+          "tool-install": 9.156
+        },
+        "truth:s9": {
+          "clone": 0.66,
+          "pnpm-setup": 1.409,
+          "install": 3.889,
+          "tool-install": 9.459
+        }
+      },
+      "plainTests": {
+        "strykerVitest": {
+          "wallS": 20.597,
+          "cpuS": 74.51,
+          "maxRssMiB": 454,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 1032,
+            "passed": 1032,
+            "failed": 0,
+            "files": 265
+          }
+        },
+        "mutatorVitest": {
+          "wallS": 20.6,
+          "cpuS": 74.7,
+          "maxRssMiB": 463,
+          "exitCode": 0,
+          "timedOut": false,
+          "tests": {
+            "total": 1032,
+            "passed": 1032,
+            "failed": 0,
+            "files": 265
+          }
+        }
+      },
+      "cold": {
+        "stryker": {
+          "shards": [
+            {
+              "shard": "s1",
+              "wallS": 214.234,
+              "cpuS": 555.3,
+              "maxRssMiB": 490,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.53,
+                "dryRunS": 92.09,
+                "mutantsS": 120.51,
+                "afterS": 0.1
+              },
+              "executed": {
+                "instrumented": 122,
+                "reused": 0,
+                "dryRunTests": 945
+              },
+              "mutants": 122,
+              "statuses": {
+                "NoCoverage": 11,
+                "Killed": 97,
+                "Survived": 8,
+                "Timeout": 6
+              },
+              "score": 84.43
+            },
+            {
+              "shard": "s2",
+              "wallS": 349.232,
+              "cpuS": 2202.9,
+              "maxRssMiB": 486,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.51,
+                "dryRunS": 91.31,
+                "mutantsS": 256.31,
+                "afterS": 0.1
+              },
+              "executed": {
+                "instrumented": 98,
+                "reused": 0,
+                "dryRunTests": 938
+              },
+              "mutants": 98,
+              "statuses": {
+                "NoCoverage": 11,
+                "Survived": 23,
+                "Killed": 58,
+                "RuntimeError": 6
+              },
+              "score": 63.04
+            },
+            {
+              "shard": "s3",
+              "wallS": 328.878,
+              "cpuS": 1947.78,
+              "maxRssMiB": 902,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.84,
+                "dryRunS": 92.73,
+                "mutantsS": 234.18,
+                "afterS": 0.13
+              },
+              "executed": {
+                "instrumented": 447,
+                "reused": 0,
+                "dryRunTests": 951
+              },
+              "mutants": 447,
+              "statuses": {
+                "NoCoverage": 18,
+                "Survived": 44,
+                "Killed": 372,
+                "Timeout": 12,
+                "RuntimeError": 1
+              },
+              "score": 86.1
+            },
+            {
+              "shard": "s4",
+              "wallS": 408.925,
+              "cpuS": 2816.07,
+              "maxRssMiB": 491,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.73,
+                "dryRunS": 92.62,
+                "mutantsS": 314.46,
+                "afterS": 0.11
+              },
+              "executed": {
+                "instrumented": 134,
+                "reused": 0,
+                "dryRunTests": 948
+              },
+              "mutants": 134,
+              "statuses": {
+                "NoCoverage": 2,
+                "Killed": 94,
+                "Survived": 36,
+                "RuntimeError": 2
+              },
+              "score": 71.21
+            },
+            {
+              "shard": "s5",
+              "wallS": 376.998,
+              "cpuS": 2138.8,
+              "maxRssMiB": 485,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.83,
+                "dryRunS": 93.2,
+                "mutantsS": 281.83,
+                "afterS": 0.13
+              },
+              "executed": {
+                "instrumented": 386,
+                "reused": 0,
+                "dryRunTests": 958
+              },
+              "mutants": 386,
+              "statuses": {
+                "NoCoverage": 51,
+                "Killed": 275,
+                "Survived": 60
+              },
+              "score": 71.24
+            },
+            {
+              "shard": "s6",
+              "wallS": 331.373,
+              "cpuS": 1578.01,
+              "maxRssMiB": 499,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.86,
+                "dryRunS": 91.78,
+                "mutantsS": 237.62,
+                "afterS": 0.11
+              },
+              "executed": {
+                "instrumented": 381,
+                "reused": 0,
+                "dryRunTests": 938
+              },
+              "mutants": 381,
+              "statuses": {
+                "NoCoverage": 17,
+                "Survived": 69,
+                "Killed": 289,
+                "Timeout": 6
+              },
+              "score": 77.43
+            },
+            {
+              "shard": "s7",
+              "wallS": 378.531,
+              "cpuS": 2596.46,
+              "maxRssMiB": 537,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.72,
+                "dryRunS": 91.78,
+                "mutantsS": 284.93,
+                "afterS": 0.1
+              },
+              "executed": {
+                "instrumented": 569,
+                "reused": 0,
+                "dryRunTests": 940
+              },
+              "mutants": 569,
+              "statuses": {
+                "NoCoverage": 41,
+                "Killed": 435,
+                "Survived": 93
+              },
+              "score": 76.45
+            },
+            {
+              "shard": "s8",
+              "wallS": 394.077,
+              "cpuS": 2304.2,
+              "maxRssMiB": 521,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.94,
+                "dryRunS": 91.32,
+                "mutantsS": 300.73,
+                "afterS": 0.09
+              },
+              "executed": {
+                "instrumented": 551,
+                "reused": 0,
+                "dryRunTests": 930
+              },
+              "mutants": 551,
+              "statuses": {
+                "NoCoverage": 38,
+                "Killed": 416,
+                "Survived": 88,
+                "Timeout": 9
+              },
+              "score": 77.13
+            }
+          ],
+          "wallS": 2782.25,
+          "slowestShardS": 408.925,
+          "cpuS": 16139.52,
+          "maxRssMiB": 902,
+          "timedOut": false,
+          "complete": true,
+          "mutants": 2688,
+          "statuses": {
+            "NoCoverage": 189,
+            "Killed": 2036,
+            "Survived": 421,
+            "Timeout": 33,
+            "RuntimeError": 9
+          },
+          "score": 77.23
+        },
+        "mutator": {
+          "shards": [
+            {
+              "shard": "1",
+              "wallS": 436.645,
+              "cpuS": 2440.18,
+              "maxRssMiB": 1093,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.12,
+                "dryRunS": 20.35,
+                "typecheckAndPlanS": 0.39,
+                "mutantsS": 414.73,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 292,
+                "toRun": 272,
+                "executed": 272,
+                "reused": 0
+              },
+              "mutants": 292,
+              "statuses": {
+                "Killed": 213,
+                "Survived": 59,
+                "NoCoverage": 18,
+                "RuntimeError": 1,
+                "Timeout": 1
+              },
+              "score": 73.54
+            },
+            {
+              "shard": "10",
+              "wallS": 381.606,
+              "cpuS": 2048.41,
+              "maxRssMiB": 1013,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.09,
+                "dryRunS": 20.37,
+                "typecheckAndPlanS": 0.4,
+                "mutantsS": 359.7,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 290,
+                "toRun": 269,
+                "executed": 269,
+                "reused": 0
+              },
+              "mutants": 290,
+              "statuses": {
+                "Killed": 220,
+                "Survived": 40,
+                "RuntimeError": 8,
+                "NoCoverage": 20,
+                "Timeout": 2
+              },
+              "score": 78.72
+            },
+            {
+              "shard": "2",
+              "wallS": 285.184,
+              "cpuS": 1541.26,
+              "maxRssMiB": 1294,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.19,
+                "dryRunS": 20.47,
+                "typecheckAndPlanS": 0.39,
+                "mutantsS": 263.08,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 304,
+                "toRun": 287,
+                "executed": 287,
+                "reused": 0
+              },
+              "mutants": 304,
+              "statuses": {
+                "Killed": 246,
+                "Survived": 42,
+                "NoCoverage": 15,
+                "RuntimeError": 1
+              },
+              "score": 81.19
+            },
+            {
+              "shard": "3",
+              "wallS": 388.317,
+              "cpuS": 2032.04,
+              "maxRssMiB": 1067,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.18,
+                "dryRunS": 20.32,
+                "typecheckAndPlanS": 0.39,
+                "mutantsS": 366.36,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 277,
+                "toRun": 258,
+                "executed": 258,
+                "reused": 0
+              },
+              "mutants": 277,
+              "statuses": {
+                "Killed": 205,
+                "Survived": 55,
+                "NoCoverage": 16,
+                "Timeout": 1
+              },
+              "score": 74.37
+            },
+            {
+              "shard": "4",
+              "wallS": 322.313,
+              "cpuS": 1755.89,
+              "maxRssMiB": 1113,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.19,
+                "dryRunS": 20.42,
+                "typecheckAndPlanS": 0.38,
+                "mutantsS": 300.27,
+                "afterS": 0.05
+              },
+              "executed": {
+                "total": 285,
+                "toRun": 276,
+                "executed": 276,
+                "reused": 0
+              },
+              "mutants": 285,
+              "statuses": {
+                "Killed": 229,
+                "Survived": 45,
+                "NoCoverage": 7,
+                "RuntimeError": 4
+              },
+              "score": 81.49
+            },
+            {
+              "shard": "5",
+              "wallS": 359.377,
+              "cpuS": 1918.41,
+              "maxRssMiB": 1148,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.07,
+                "dryRunS": 20.34,
+                "typecheckAndPlanS": 0.39,
+                "mutantsS": 337.52,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 276,
+                "toRun": 249,
+                "executed": 249,
+                "reused": 0
+              },
+              "mutants": 276,
+              "statuses": {
+                "Killed": 203,
+                "Survived": 45,
+                "NoCoverage": 24,
+                "RuntimeError": 2,
+                "Timeout": 2
+              },
+              "score": 74.82
+            },
+            {
+              "shard": "6",
+              "wallS": 324.082,
+              "cpuS": 1676.93,
+              "maxRssMiB": 1264,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.1,
+                "dryRunS": 20.39,
+                "typecheckAndPlanS": 0.4,
+                "mutantsS": 302.13,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 265,
+                "toRun": 242,
+                "executed": 242,
+                "reused": 0
+              },
+              "mutants": 265,
+              "statuses": {
+                "Killed": 193,
+                "Survived": 38,
+                "NoCoverage": 22,
+                "RuntimeError": 9,
+                "Timeout": 3
+              },
+              "score": 76.56
+            },
+            {
+              "shard": "7",
+              "wallS": 232.395,
+              "cpuS": 1183.67,
+              "maxRssMiB": 1108,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.2,
+                "dryRunS": 20.45,
+                "typecheckAndPlanS": 0.38,
+                "mutantsS": 210.31,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 279,
+                "toRun": 261,
+                "executed": 261,
+                "reused": 0
+              },
+              "mutants": 279,
+              "statuses": {
+                "Survived": 38,
+                "Killed": 222,
+                "NoCoverage": 14,
+                "RuntimeError": 5
+              },
+              "score": 81.02
+            },
+            {
+              "shard": "8",
+              "wallS": 353.059,
+              "cpuS": 1899.55,
+              "maxRssMiB": 1099,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.07,
+                "dryRunS": 20.32,
+                "typecheckAndPlanS": 0.39,
+                "mutantsS": 331.22,
+                "afterS": 0.06
+              },
+              "executed": {
+                "total": 288,
+                "toRun": 259,
+                "executed": 259,
+                "reused": 0
+              },
+              "mutants": 288,
+              "statuses": {
+                "Killed": 213,
+                "Survived": 51,
+                "NoCoverage": 24
+              },
+              "score": 73.96
+            },
+            {
+              "shard": "9",
+              "wallS": 362.935,
+              "cpuS": 2069.59,
+              "maxRssMiB": 1144,
+              "exitCode": 0,
+              "timedOut": false,
+              "stages": {
+                "setupS": 1.2,
+                "dryRunS": 20.49,
+                "typecheckAndPlanS": 0.4,
+                "mutantsS": 340.78,
+                "afterS": 0.07
+              },
+              "executed": {
+                "total": 285,
+                "toRun": 264,
+                "executed": 264,
+                "reused": 0
+              },
+              "mutants": 285,
+              "statuses": {
+                "Killed": 214,
+                "Survived": 50,
+                "NoCoverage": 18,
+                "RuntimeError": 3
+              },
+              "score": 75.89
+            }
+          ],
+          "wallS": 3445.91,
+          "slowestShardS": 436.645,
+          "cpuS": 18565.93,
+          "maxRssMiB": 1294,
+          "timedOut": false,
+          "complete": true,
+          "mutants": 2841,
+          "statuses": {
+            "Killed": 2158,
+            "Survived": 463,
+            "NoCoverage": 178,
+            "RuntimeError": 33,
+            "Timeout": 9
+          },
+          "score": 77.17
+        }
+      },
+      "sharedCold": {
+        "shared": 2086,
+        "sameSpanAndReplacement": 2112,
+        "strykerOnly": 581,
+        "mutatorOnly": 734,
+        "scoreStryker": 80.73,
+        "scoreMutator": 80.87,
+        "verdictDifferences": 3
+      },
+      "truth": {
+        "shards": [
+          {
+            "shard": "s1",
+            "wallS": 237.53,
+            "cpuS": 1020.63,
+            "maxRssMiB": 491,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.48,
+              "dryRunS": 91.68,
+              "mutantsS": 144.27,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 27,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 27,
+            "statuses": {
+              "Survived": 4,
+              "Killed": 19,
+              "Timeout": 4
+            },
+            "score": 85.19
+          },
+          {
+            "shard": "s10",
+            "wallS": 418.16,
+            "cpuS": 2263.36,
+            "maxRssMiB": 579,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.55,
+              "dryRunS": 90.12,
+              "mutantsS": 326.4,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 140,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 140,
+            "statuses": {
+              "NoCoverage": 7,
+              "Timeout": 34,
+              "Killed": 81,
+              "Survived": 18
+            },
+            "score": 82.14
+          },
+          {
+            "shard": "s11",
+            "wallS": 446.974,
+            "cpuS": 2443.51,
+            "maxRssMiB": 503,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.65,
+              "dryRunS": 91.95,
+              "mutantsS": 353.27,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 72,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 72,
+            "statuses": {
+              "NoCoverage": 16,
+              "Killed": 14,
+              "Survived": 22,
+              "Timeout": 16,
+              "RuntimeError": 4
+            },
+            "score": 44.12
+          },
+          {
+            "shard": "s12a",
+            "wallS": 339.981,
+            "cpuS": 1111.52,
+            "maxRssMiB": 1313,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.71,
+              "dryRunS": 94.41,
+              "mutantsS": 243.75,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 143,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 143,
+            "statuses": {
+              "NoCoverage": 14,
+              "Killed": 82,
+              "Survived": 31,
+              "Timeout": 16
+            },
+            "score": 68.53
+          },
+          {
+            "shard": "s12b",
+            "wallS": 409.524,
+            "cpuS": 2585.14,
+            "maxRssMiB": 484,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.59,
+              "dryRunS": 91.87,
+              "mutantsS": 315.97,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 36,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 36,
+            "statuses": {
+              "Survived": 30,
+              "Killed": 6
+            },
+            "score": 16.67
+          },
+          {
+            "shard": "s13",
+            "wallS": 354.541,
+            "cpuS": 1789.34,
+            "maxRssMiB": 508,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.62,
+              "dryRunS": 75.59,
+              "mutantsS": 277.22,
+              "afterS": 0.12
+            },
+            "executed": {
+              "instrumented": 155,
+              "reused": 0,
+              "dryRunTests": 730
+            },
+            "mutants": 155,
+            "statuses": {
+              "NoCoverage": 12,
+              "Survived": 33,
+              "Killed": 79,
+              "Timeout": 31
+            },
+            "score": 70.97
+          },
+          {
+            "shard": "s14a1",
+            "wallS": 223.65,
+            "cpuS": 1022.9,
+            "maxRssMiB": 492,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.49,
+              "dryRunS": 91.71,
+              "mutantsS": 130.35,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 74,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 74,
+            "statuses": {
+              "Killed": 62,
+              "Survived": 11,
+              "Timeout": 1
+            },
+            "score": 85.14
+          },
+          {
+            "shard": "s14a2a",
+            "wallS": 364.322,
+            "cpuS": 1180.93,
+            "maxRssMiB": 496,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.61,
+              "dryRunS": 91.12,
+              "mutantsS": 271.5,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 58,
+              "reused": 0,
+              "dryRunTests": 930
+            },
+            "mutants": 58,
+            "statuses": {
+              "NoCoverage": 3,
+              "Killed": 21,
+              "Survived": 12,
+              "Timeout": 22
+            },
+            "score": 74.14
+          },
+          {
+            "shard": "s14a2b",
+            "wallS": 341.05,
+            "cpuS": 1632.93,
+            "maxRssMiB": 493,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.49,
+              "dryRunS": 90.54,
+              "mutantsS": 248.93,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 52,
+              "reused": 0,
+              "dryRunTests": 930
+            },
+            "mutants": 52,
+            "statuses": {
+              "NoCoverage": 7,
+              "Killed": 31,
+              "Timeout": 10,
+              "Survived": 4
+            },
+            "score": 78.85
+          },
+          {
+            "shard": "s14b",
+            "wallS": 141.48,
+            "cpuS": 161.67,
+            "maxRssMiB": 501,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.57,
+              "dryRunS": 90.48,
+              "mutantsS": 49.33,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 26,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 26,
+            "statuses": {
+              "NoCoverage": 2,
+              "Survived": 6,
+              "Killed": 13,
+              "Timeout": 4,
+              "RuntimeError": 1
+            },
+            "score": 68
+          },
+          {
+            "shard": "s15a",
+            "wallS": 230.067,
+            "cpuS": 812.84,
+            "maxRssMiB": 514,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.51,
+              "dryRunS": 91.35,
+              "mutantsS": 137.11,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 77,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 77,
+            "statuses": {
+              "NoCoverage": 1,
+              "Killed": 65,
+              "Survived": 9,
+              "Timeout": 2
+            },
+            "score": 87.01
+          },
+          {
+            "shard": "s15b",
+            "wallS": 439.13,
+            "cpuS": 2049.15,
+            "maxRssMiB": 537,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.6,
+              "dryRunS": 93.06,
+              "mutantsS": 344.37,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 73,
+              "reused": 0,
+              "dryRunTests": 958
+            },
+            "mutants": 73,
+            "statuses": {
+              "NoCoverage": 23,
+              "Killed": 22,
+              "Survived": 9,
+              "Timeout": 19
+            },
+            "score": 56.16
+          },
+          {
+            "shard": "s16",
+            "wallS": 263.907,
+            "cpuS": 800.68,
+            "maxRssMiB": 497,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.56,
+              "dryRunS": 94.9,
+              "mutantsS": 167.34,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 44,
+              "reused": 0,
+              "dryRunTests": 945
+            },
+            "mutants": 44,
+            "statuses": {
+              "Survived": 7,
+              "Killed": 26,
+              "Timeout": 11
+            },
+            "score": 84.09
+          },
+          {
+            "shard": "s17",
+            "wallS": 375.664,
+            "cpuS": 468.09,
+            "maxRssMiB": 496,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.54,
+              "dryRunS": 92.09,
+              "mutantsS": 281.95,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 69,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 69,
+            "statuses": {
+              "NoCoverage": 8,
+              "Survived": 16,
+              "Killed": 21,
+              "Timeout": 24
+            },
+            "score": 65.22
+          },
+          {
+            "shard": "s18",
+            "wallS": 449.48,
+            "cpuS": 1245.39,
+            "maxRssMiB": 889,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.59,
+              "dryRunS": 90.36,
+              "mutantsS": 357.43,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 189,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 189,
+            "statuses": {
+              "NoCoverage": 8,
+              "Survived": 24,
+              "Killed": 129,
+              "Timeout": 28
+            },
+            "score": 83.07
+          },
+          {
+            "shard": "s19",
+            "wallS": 408.937,
+            "cpuS": 2903.68,
+            "maxRssMiB": 575,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.71,
+              "dryRunS": 92.93,
+              "mutantsS": 314.18,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 128,
+              "reused": 0,
+              "dryRunTests": 951
+            },
+            "mutants": 128,
+            "statuses": {
+              "NoCoverage": 2,
+              "Survived": 11,
+              "Killed": 108,
+              "Timeout": 7
+            },
+            "score": 89.84
+          },
+          {
+            "shard": "s2",
+            "wallS": 217.62,
+            "cpuS": 584.33,
+            "maxRssMiB": 496,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.62,
+              "dryRunS": 92.06,
+              "mutantsS": 123.85,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 20,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 20,
+            "statuses": {
+              "Killed": 9,
+              "Survived": 2,
+              "Timeout": 9
+            },
+            "score": 90
+          },
+          {
+            "shard": "s20",
+            "wallS": 417.957,
+            "cpuS": 1231.78,
+            "maxRssMiB": 509,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.52,
+              "dryRunS": 91.5,
+              "mutantsS": 324.85,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 88,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 88,
+            "statuses": {
+              "NoCoverage": 5,
+              "Killed": 49,
+              "Survived": 5,
+              "Timeout": 29
+            },
+            "score": 88.64
+          },
+          {
+            "shard": "s21a",
+            "wallS": 210.555,
+            "cpuS": 591.45,
+            "maxRssMiB": 515,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.51,
+              "dryRunS": 91.27,
+              "mutantsS": 117.68,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 50,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 50,
+            "statuses": {
+              "NoCoverage": 1,
+              "Killed": 30,
+              "Timeout": 8,
+              "Survived": 11
+            },
+            "score": 76
+          },
+          {
+            "shard": "s21b1",
+            "wallS": 315.884,
+            "cpuS": 2139.47,
+            "maxRssMiB": 488,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.65,
+              "dryRunS": 91.37,
+              "mutantsS": 222.75,
+              "afterS": 0.12
+            },
+            "executed": {
+              "instrumented": 103,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 103,
+            "statuses": {
+              "NoCoverage": 3,
+              "Killed": 73,
+              "Survived": 16,
+              "Timeout": 11
+            },
+            "score": 81.55
+          },
+          {
+            "shard": "s21b2",
+            "wallS": 383.293,
+            "cpuS": 2756.39,
+            "maxRssMiB": 536,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.54,
+              "dryRunS": 90.59,
+              "mutantsS": 291.02,
+              "afterS": 0.14
+            },
+            "executed": {
+              "instrumented": 122,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 122,
+            "statuses": {
+              "NoCoverage": 11,
+              "Killed": 75,
+              "Survived": 17,
+              "Timeout": 19
+            },
+            "score": 77.05
+          },
+          {
+            "shard": "s21c",
+            "wallS": 255.236,
+            "cpuS": 767.04,
+            "maxRssMiB": 498,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.66,
+              "dryRunS": 90.5,
+              "mutantsS": 162.98,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 101,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 101,
+            "statuses": {
+              "NoCoverage": 15,
+              "Killed": 66,
+              "Survived": 16,
+              "Timeout": 4
+            },
+            "score": 69.31
+          },
+          {
+            "shard": "s21d",
+            "wallS": 168.257,
+            "cpuS": 761.35,
+            "maxRssMiB": 556,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.62,
+              "dryRunS": 89.93,
+              "mutantsS": 76.61,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 77,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 77,
+            "statuses": {
+              "NoCoverage": 3,
+              "Killed": 51,
+              "Survived": 18,
+              "Timeout": 5
+            },
+            "score": 72.73
+          },
+          {
+            "shard": "s22",
+            "wallS": 297.792,
+            "cpuS": 1372.72,
+            "maxRssMiB": 578,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.7,
+              "dryRunS": 91.13,
+              "mutantsS": 204.86,
+              "afterS": 0.1
+            },
+            "executed": {
+              "instrumented": 78,
+              "reused": 0,
+              "dryRunTests": 933
+            },
+            "mutants": 78,
+            "statuses": {
+              "NoCoverage": 2,
+              "Killed": 57,
+              "Survived": 2,
+              "Timeout": 15,
+              "RuntimeError": 2
+            },
+            "score": 94.74
+          },
+          {
+            "shard": "s23a",
+            "wallS": 236.182,
+            "cpuS": 731.88,
+            "maxRssMiB": 493,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.6,
+              "dryRunS": 75.06,
+              "mutantsS": 159.43,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 60,
+              "reused": 0,
+              "dryRunTests": 714
+            },
+            "mutants": 60,
+            "statuses": {
+              "NoCoverage": 1,
+              "Killed": 30,
+              "Timeout": 21,
+              "Survived": 8
+            },
+            "score": 85
+          },
+          {
+            "shard": "s23b",
+            "wallS": 444.226,
+            "cpuS": 2733.63,
+            "maxRssMiB": 503,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.51,
+              "dryRunS": 91.59,
+              "mutantsS": 351.03,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 85,
+              "reused": 0,
+              "dryRunTests": 940
+            },
+            "mutants": 85,
+            "statuses": {
+              "NoCoverage": 2,
+              "Survived": 14,
+              "Killed": 60,
+              "Timeout": 9
+            },
+            "score": 81.18
+          },
+          {
+            "shard": "s24",
+            "wallS": 284.085,
+            "cpuS": 1305.3,
+            "maxRssMiB": 521,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.55,
+              "dryRunS": 91.52,
+              "mutantsS": 190.93,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 61,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 61,
+            "statuses": {
+              "NoCoverage": 4,
+              "Killed": 46,
+              "Survived": 8,
+              "Timeout": 3
+            },
+            "score": 80.33
+          },
+          {
+            "shard": "s3",
+            "wallS": 218.601,
+            "cpuS": 1034.68,
+            "maxRssMiB": 618,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.63,
+              "dryRunS": 91.76,
+              "mutantsS": 125.1,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 37,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 37,
+            "statuses": {
+              "NoCoverage": 8,
+              "Timeout": 6,
+              "Survived": 3,
+              "Killed": 20
+            },
+            "score": 70.27
+          },
+          {
+            "shard": "s4",
+            "wallS": 230.225,
+            "cpuS": 941.7,
+            "maxRssMiB": 1276,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.62,
+              "dryRunS": 95.89,
+              "mutantsS": 132.62,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 28,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 28,
+            "statuses": {
+              "Killed": 21,
+              "Timeout": 6,
+              "Survived": 1
+            },
+            "score": 96.43
+          },
+          {
+            "shard": "s5",
+            "wallS": 239.737,
+            "cpuS": 1130.5,
+            "maxRssMiB": 490,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.61,
+              "dryRunS": 91.64,
+              "mutantsS": 146.39,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 27,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 27,
+            "statuses": {
+              "Killed": 24,
+              "Timeout": 1,
+              "Survived": 1,
+              "RuntimeError": 1
+            },
+            "score": 96.15
+          },
+          {
+            "shard": "s6",
+            "wallS": 289.583,
+            "cpuS": 872.48,
+            "maxRssMiB": 480,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.66,
+              "dryRunS": 91.73,
+              "mutantsS": 196.09,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 52,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 52,
+            "statuses": {
+              "NoCoverage": 7,
+              "Survived": 9,
+              "Killed": 24,
+              "Timeout": 12
+            },
+            "score": 69.23
+          },
+          {
+            "shard": "s7",
+            "wallS": 198.381,
+            "cpuS": 1060.72,
+            "maxRssMiB": 496,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.62,
+              "dryRunS": 91.5,
+              "mutantsS": 105.18,
+              "afterS": 0.09
+            },
+            "executed": {
+              "instrumented": 20,
+              "reused": 0,
+              "dryRunTests": 938
+            },
+            "mutants": 20,
+            "statuses": {
+              "NoCoverage": 1,
+              "Killed": 16,
+              "Survived": 2,
+              "RuntimeError": 1
+            },
+            "score": 84.21
+          },
+          {
+            "shard": "s8",
+            "wallS": 485.405,
+            "cpuS": 3180.13,
+            "maxRssMiB": 490,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.74,
+              "dryRunS": 90.96,
+              "mutantsS": 392.59,
+              "afterS": 0.11
+            },
+            "executed": {
+              "instrumented": 180,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 180,
+            "statuses": {
+              "NoCoverage": 16,
+              "Killed": 126,
+              "Survived": 26,
+              "Timeout": 12
+            },
+            "score": 76.67
+          },
+          {
+            "shard": "s9",
+            "wallS": 424.382,
+            "cpuS": 2522.26,
+            "maxRssMiB": 948,
+            "exitCode": 0,
+            "timedOut": false,
+            "stages": {
+              "setupS": 1.56,
+              "dryRunS": 90.42,
+              "mutantsS": 332.26,
+              "afterS": 0.14
+            },
+            "executed": {
+              "instrumented": 119,
+              "reused": 0,
+              "dryRunTests": 923
+            },
+            "mutants": 119,
+            "statuses": {
+              "NoCoverage": 7,
+              "Killed": 76,
+              "Survived": 14,
+              "Timeout": 22
+            },
+            "score": 82.35
+          }
+        ],
+        "wallS": 10761.8,
+        "slowestShardS": 485.405,
+        "cpuS": 49209.57,
+        "maxRssMiB": 1313,
+        "timedOut": false,
+        "complete": true,
+        "mutants": 2671,
+        "statuses": {
+          "Survived": 420,
+          "Killed": 1632,
+          "Timeout": 421,
+          "NoCoverage": 189,
+          "RuntimeError": 9
+        },
+        "score": 77.12,
+        "expectedShards": 34,
+        "killMatrix": {
+          "killedMutants": 1632,
+          "meanKillersPerKilledMutant": 50.01,
+          "medianKillers": 7,
+          "killedByOneTestOnly": 339,
+          "distinctKillingTests": 868,
+          "meanCoveringTests": 157.09
+        }
+      },
+      "vsTruth": {
+        "stryker": {
+          "compared": 2661,
+          "missedKills": 1,
+          "extraKills": 0,
+          "notInTruth": 18,
+          "examples": [
+            {
+              "file": "packages/server/src/unstable-core-do-not-import/http/contentType.ts",
+              "span": "109:7-110:39",
+              "mutator": "LogicalOperator",
+              "replacement": "isBatchCall||typeofmaxBatchSize==='number'",
+              "status": "Survived",
+              "truth": "Killed",
+              "truthKillers": 1
+            }
+          ]
+        },
+        "mutator": {
+          "compared": 2069,
+          "missedKills": 1,
+          "extraKills": 3,
+          "notInTruth": 751,
+          "examples": [
+            {
+              "file": "packages/server/src/unstable-core-do-not-import/rootConfig.ts",
+              "span": "49:3-49:50",
+              "mutator": "BooleanLiteral",
+              "replacement": "!globalThis.process?.env?.['VITEST_WORKER_ID']",
+              "status": "Killed",
+              "truth": "NoCoverage",
+              "truthKillers": 0
+            },
+            {
+              "file": "packages/server/src/unstable-core-do-not-import/rootConfig.ts",
+              "span": "44:3-49:50",
+              "mutator": "LogicalOperator",
+              "replacement": "(typeofwindow==='undefined'||'Deno'inwindow||//oxlint-disable-next-linetypescript/dot-notationglobalThis.process?.env?.['NODE_ENV']==='test'||!!globalThis.process?.env?.['JEST_WORKER_ID'])&&!!globalThis.process?.env?.['VITEST_WORKER_ID']",
+              "status": "Killed",
+              "truth": "Survived",
+              "truthKillers": 0
+            },
+            {
+              "file": "packages/server/src/unstable-core-do-not-import/rootConfig.ts",
+              "span": "49:4-49:50",
+              "mutator": "BooleanLiteral",
+              "replacement": "globalThis.process?.env?.['VITEST_WORKER_ID']",
+              "status": "Killed",
+              "truth": "NoCoverage",
+              "truthKillers": 0
+            },
+            {
+              "file": "packages/server/src/unstable-core-do-not-import/http/contentType.ts",
+              "span": "109:7-110:39",
+              "mutator": "LogicalOperator",
+              "replacement": "isBatchCall||typeofmaxBatchSize==='number'",
+              "status": "Survived",
+              "truth": "Killed",
+              "truthKillers": 1
+            }
+          ]
+        }
+      },
+      "pr": {
+        "changedLines": [
+          "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts:80-80"
+        ],
+        "strykerIncrementalBase": {
+          "wallS": 207.253,
+          "cpuS": 528.19,
+          "maxRssMiB": 493,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.67,
+            "dryRunS": 92.23,
+            "mutantsS": 113.26,
+            "afterS": 0.1
+          },
+          "executed": {
+            "instrumented": 139,
+            "reused": 0,
+            "dryRunTests": 948
+          },
+          "mutants": 139,
+          "statuses": {
+            "NoCoverage": 13,
+            "Killed": 102,
+            "Survived": 20,
+            "RuntimeError": 1,
+            "Timeout": 3
+          },
+          "score": 76.09
+        },
+        "strykerLines": {
+          "wallS": 92.988,
+          "cpuS": 71.96,
+          "maxRssMiB": 492,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.45,
+            "dryRunS": 91.42,
+            "mutantsS": 0.02,
+            "afterS": 0.11
+          },
+          "executed": {
+            "instrumented": 0,
+            "reused": 0,
+            "dryRunTests": 938
+          },
+          "mutants": 0,
+          "statuses": {},
+          "score": null
+        },
+        "strykerIncremental": {
+          "wallS": 94.495,
+          "cpuS": 73.85,
+          "maxRssMiB": 480,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 1.69,
+            "dryRunS": 92.11,
+            "mutantsS": 0.58,
+            "afterS": 0.11
+          },
+          "executed": {
+            "instrumented": 138,
+            "reused": 137,
+            "dryRunTests": 948
+          },
+          "mutants": 138,
+          "statuses": {
+            "Killed": 101,
+            "Survived": 20,
+            "Timeout": 3,
+            "RuntimeError": 1,
+            "NoCoverage": 13
+          },
+          "score": 75.91
+        },
+        "mutatorBase": {
+          "wallS": 375.24,
+          "cpuS": 1944.83,
+          "maxRssMiB": 770,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.85,
+            "dryRunS": 20.27,
+            "typecheckAndPlanS": 0.14,
+            "mutantsS": 353.94,
+            "afterS": 0.04
+          },
+          "executed": {
+            "total": 170,
+            "toRun": 156,
+            "executed": 156,
+            "reused": 0
+          },
+          "mutants": 170,
+          "statuses": {
+            "Killed": 114,
+            "Survived": 42,
+            "NoCoverage": 13,
+            "RuntimeError": 1
+          },
+          "score": 67.46
+        },
+        "mutatorSinceCold": {
+          "wallS": 21.851,
+          "cpuS": 77.68,
+          "maxRssMiB": 582,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.81,
+            "dryRunS": 20.29,
+            "typecheckAndPlanS": 0.13,
+            "mutantsS": 0.6,
+            "afterS": 0.03
+          },
+          "executed": {
+            "total": 168,
+            "toRun": 2,
+            "executed": 2,
+            "reused": 0
+          },
+          "mutants": 168,
+          "statuses": {
+            "Pending": 166,
+            "Killed": 2
+          },
+          "score": 100
+        },
+        "mutatorSinceWarm": {
+          "wallS": 2.807,
+          "cpuS": 21.9,
+          "maxRssMiB": 492,
+          "exitCode": 0,
+          "timedOut": false,
+          "stages": {
+            "setupS": 0.33,
+            "dryRunS": 1.72,
+            "typecheckAndPlanS": 0.12,
+            "mutantsS": 0.62,
+            "afterS": 0.02
+          },
+          "executed": {
+            "total": 168,
+            "toRun": 2,
+            "executed": 2,
+            "reused": 98
+          },
+          "mutants": 168,
+          "statuses": {
+            "Pending": 166,
+            "Killed": 2
+          },
+          "score": 100
+        }
+      }
+    }
+  }
+}

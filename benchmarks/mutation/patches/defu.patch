@@ -1,0 +1,13 @@
+diff --git a/src/defu.ts b/src/defu.ts
+index 1b2b84e..62f92dc 100644
+--- a/src/defu.ts
++++ b/src/defu.ts
+@@ -30,7 +30,7 @@ function _defu<T>(baseObject: T, defaults: any, namespace = ".", merger?: Merger
+       object[key] = _defu(
+         value,
+         object[key],
+-        (namespace ? `${namespace}.` : "") + key.toString(),
++        (namespace ? `${namespace}.` : "") + String(key),
+         merger,
+       );
+     } else {

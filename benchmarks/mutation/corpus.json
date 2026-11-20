@@ -1,0 +1,624 @@
+{
+  "description": "Mutation-testing benchmark corpus: the five libraries mizchi/mutator's docs/benchmark.md measures (same commits and edits), plus two larger Vitest projects. Every field is read by run-job.mjs.",
+  "tools": {
+    "node": "24",
+    "stryker": "10.1.1",
+    "mutator": "0.5.0",
+    "vitestForMutator": "5.1.1"
+  },
+  "projects": [
+    {
+      "name": "defu",
+      "repo": "https://github.com/unjs/defu",
+      "commit": "82632b66f5914e9946edce300e10633a3d5c0cb7",
+      "pnpm": "10.33.4",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run",
+      "vitest": "4.1.6",
+      "mutate": {
+        "include": [
+          "src/**/*.ts"
+        ],
+        "exclude": []
+      },
+      "patch": "patches/defu.patch",
+      "edit": "_defu: key.toString() to String(key) (refactor; mutator benchmark edit)"
+    },
+    {
+      "name": "scule",
+      "repo": "https://github.com/unjs/scule",
+      "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+      "pnpm": "9.0.6",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run",
+      "vitest": "1.5.3",
+      "vitestForStryker": "5.1.1",
+      "vitestForStrykerReason": "StrykerJS 10's Vitest runner needs Vitest >= 2; scule pins Vitest 1.5.3",
+      "mutate": {
+        "include": [
+          "src/**/*.ts"
+        ],
+        "exclude": []
+      },
+      "patch": "patches/scule.patch",
+      "edit": "upperFirst: str[0] to str.charAt(0) (refactor; mutator benchmark edit)",
+      "vitestUpgradeAlso": [
+        "vite@8.3.8"
+      ],
+      "vitestUpgradeAlsoReason": "scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)"
+    },
+    {
+      "name": "cookie-es",
+      "repo": "https://github.com/unjs/cookie-es",
+      "commit": "f89ede8b60204adfa84a97fb833e0cbae75d0478",
+      "pnpm": "10.33.0",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run",
+      "vitest": "4.1.2",
+      "mutate": {
+        "include": [
+          "src/**/*.ts"
+        ],
+        "exclude": []
+      },
+      "patch": "patches/cookie-es.patch",
+      "edit": "valueSlice: min === max to max - min === 0 (refactor; mutator benchmark edit)"
+    },
+    {
+      "name": "pathe",
+      "repo": "https://github.com/unjs/pathe",
+      "commit": "bc7477a01f0bd60ada017add8142c9f9d69ccdc5",
+      "pnpm": "11.10.0",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run",
+      "vitest": "4.1.9",
+      "mutate": {
+        "include": [
+          "src/_path.ts",
+          "src/utils.ts",
+          "src/_internal.ts"
+        ],
+        "exclude": []
+      },
+      "mutateNote": "src/_glob.ts left out, as in the mutator benchmark (mutants there loop while allocating)",
+      "patch": "patches/pathe.patch",
+      "edit": "join: template literal to concatenation (refactor; mutator benchmark edit)"
+    },
+    {
+      "name": "ufo",
+      "repo": "https://github.com/unjs/ufo",
+      "commit": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+      "pnpm": "10.33.2",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run",
+      "vitest": "4.1.5",
+      "mutate": {
+        "include": [
+          "src/**/*.ts"
+        ],
+        "exclude": []
+      },
+      "patch": "patches/ufo.patch",
+      "edit": "withoutBase: also treat '#' as a base boundary (semantic; mutator benchmark edit)"
+    },
+    {
+      "name": "hono",
+      "repo": "https://github.com/honojs/hono",
+      "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+      "pnpm": "12.6.0",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run --config vitest.bench.config.ts",
+      "vitestConfig": "vitest.bench.config.ts",
+      "configFile": "configs/hono.vitest.bench.config.ts",
+      "vitest": "5.0.1",
+      "mutate": {
+        "include": [
+          "src/*.ts",
+          "src/router/**/*.ts",
+          "src/utils/**/*.ts"
+        ],
+        "exclude": [
+          "src/**/*.test.ts",
+          "src/**/types.ts",
+          "src/utils/http-status.ts",
+          "src/**/*.d.ts"
+        ]
+      },
+      "shards": [
+        {
+          "name": "s1",
+          "estimatedTestRuns": 442510,
+          "include": [
+            "src/hono-base.ts",
+            "src/router/reg-exp-router/matcher.ts",
+            "src/utils/body.ts",
+            "src/utils/mime.ts"
+          ]
+        },
+        {
+          "name": "s2",
+          "estimatedTestRuns": 445573,
+          "include": [
+            "src/router/pattern-router/router.ts",
+            "src/router/utils.ts",
+            "src/utils/constants.ts",
+            "src/utils/encode.ts",
+            "src/utils/url.ts:1-144"
+          ]
+        },
+        {
+          "name": "s3",
+          "estimatedTestRuns": 442349,
+          "include": [
+            "src/router.ts",
+            "src/router/smart-router/router.ts",
+            "src/router/trie-router/node.ts",
+            "src/utils/accept.ts",
+            "src/utils/cookie.ts",
+            "src/utils/crypto.ts",
+            "src/utils/filepath.ts",
+            "src/utils/ipaddr.ts",
+            "src/utils/mount.ts"
+          ]
+        },
+        {
+          "name": "s4",
+          "estimatedTestRuns": 442459,
+          "include": [
+            "src/hono.ts",
+            "src/request.ts",
+            "src/router/reg-exp-router/trie.ts",
+            "src/router/trie-router/router.ts",
+            "src/utils/basic-auth.ts",
+            "src/utils/color.ts",
+            "src/utils/html.ts",
+            "src/utils/jwt/jwt.ts"
+          ]
+        },
+        {
+          "name": "s5",
+          "estimatedTestRuns": 443483,
+          "include": [
+            "src/context.ts",
+            "src/router/reg-exp-router/prepared-router.ts",
+            "src/utils/buffer.ts",
+            "src/utils/compress.ts",
+            "src/utils/handler.ts",
+            "src/utils/stream.ts",
+            "src/utils/url.ts:145-99999"
+          ]
+        },
+        {
+          "name": "s6",
+          "estimatedTestRuns": 442308,
+          "include": [
+            "src/compose.ts",
+            "src/http-exception.ts",
+            "src/router/linear-router/router.ts",
+            "src/router/reg-exp-router/node.ts",
+            "src/router/reg-exp-router/router.ts",
+            "src/utils/concurrent.ts",
+            "src/utils/jwt/index.ts",
+            "src/utils/jwt/jws.ts"
+          ]
+        }
+      ],
+      "mutatorArgs": [
+        "--no-typecheck"
+      ],
+      "mutatorArgsReason": "mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts",
+      "patch": "patches/hono.patch",
+      "edit": "getPath: '?'/'#' char codes written as hex literals (refactor on the routing hot path; every request test covers it)",
+      "shardsNote": "planned by plan-shards.mjs from a StrykerJS cold report: 2658682 test runs under disableBail split 6 ways"
+    },
+    {
+      "name": "trpc",
+      "repo": "https://github.com/trpc/trpc",
+      "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+      "pnpm": "12.4.1",
+      "install": "pnpm install --frozen-lockfile",
+      "test": "vitest run --config vitest.bench.config.ts",
+      "vitestConfig": "vitest.bench.config.ts",
+      "configFile": "configs/trpc.vitest.bench.config.ts",
+      "vitest": "5.1.0",
+      "mutate": {
+        "include": [
+          "packages/server/src/unstable-core-do-not-import/**/*.ts",
+          "packages/server/src/adapters/node-http/**/*.ts"
+        ],
+        "exclude": [
+          "packages/server/src/**/*.test.ts",
+          "packages/server/src/**/*.d.ts"
+        ]
+      },
+      "shards": [
+        {
+          "name": "s1",
+          "estimatedTestRuns": 18849,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/router.ts:262-371"
+          ]
+        },
+        {
+          "name": "s2",
+          "estimatedTestRuns": 15325,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:619-730"
+          ]
+        },
+        {
+          "name": "s3",
+          "estimatedTestRuns": 15285,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/router.ts:1-261"
+          ]
+        },
+        {
+          "name": "s4",
+          "estimatedTestRuns": 15168,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/router.ts:372-434"
+          ]
+        },
+        {
+          "name": "s5",
+          "estimatedTestRuns": 15450,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/abortError.ts",
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:579-618"
+          ]
+        },
+        {
+          "name": "s6",
+          "estimatedTestRuns": 15818,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts",
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:1-578"
+          ]
+        },
+        {
+          "name": "s7",
+          "estimatedTestRuns": 15883,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts",
+            "packages/server/src/unstable-core-do-not-import/initTRPC.ts:1-180"
+          ]
+        },
+        {
+          "name": "s8",
+          "estimatedTestRuns": 16661,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/contentType.ts:1-251",
+            "packages/server/src/unstable-core-do-not-import/stream/tracked.ts"
+          ]
+        },
+        {
+          "name": "s9",
+          "estimatedTestRuns": 16161,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/stream/jsonl.ts:1-286",
+            "packages/server/src/unstable-core-do-not-import/stream/sse.types.ts"
+          ]
+        },
+        {
+          "name": "s10",
+          "estimatedTestRuns": 15872,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/error/getErrorShape.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/jsonl.ts:287-545"
+          ]
+        },
+        {
+          "name": "s11",
+          "estimatedTestRuns": 17495,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:731-99999",
+            "packages/server/src/unstable-core-do-not-import/rootConfig.ts"
+          ]
+        },
+        {
+          "name": "s12a",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/router.ts:435-99999"
+          ]
+        },
+        {
+          "name": "s12b",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/rpc/codes.ts"
+          ]
+        },
+        {
+          "name": "s13",
+          "estimatedTestRuns": 16328,
+          "include": [
+            "packages/server/src/adapters/node-http/incomingMessageToRequest.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/envelopes.ts"
+          ]
+        },
+        {
+          "name": "s14a1",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/error/TRPCError.ts"
+          ]
+        },
+        {
+          "name": "s14a2a",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/stream/utils/mergeAsyncIterables.ts:1-127"
+          ]
+        },
+        {
+          "name": "s14a2b",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/stream/utils/mergeAsyncIterables.ts:128-99999"
+          ]
+        },
+        {
+          "name": "s14b",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/stream/utils/timerResource.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts"
+          ]
+        },
+        {
+          "name": "s15a",
+          "include": [
+            "packages/server/src/adapters/node-http/index.ts",
+            "packages/server/src/unstable-core-do-not-import/middleware.ts"
+          ]
+        },
+        {
+          "name": "s15b",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/utils.ts"
+          ]
+        },
+        {
+          "name": "s16",
+          "estimatedTestRuns": 15882,
+          "include": [
+            "packages/server/src/adapters/node-http/nodeHTTPRequestHandler.ts",
+            "packages/server/src/unstable-core-do-not-import/procedure.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/createDeferred.ts"
+          ]
+        },
+        {
+          "name": "s17",
+          "estimatedTestRuns": 16713,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/clientish/serialize.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/index.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/parseTRPCMessage.ts"
+          ]
+        },
+        {
+          "name": "s18",
+          "estimatedTestRuns": 16599,
+          "include": [
+            "packages/server/src/adapters/node-http/types.ts",
+            "packages/server/src/unstable-core-do-not-import/clientish/inferrable.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/sse.ts"
+          ]
+        },
+        {
+          "name": "s19",
+          "estimatedTestRuns": 16676,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/createProxy.ts",
+            "packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts",
+            "packages/server/src/unstable-core-do-not-import/initTRPC.ts:181-99999"
+          ]
+        },
+        {
+          "name": "s20",
+          "estimatedTestRuns": 17074,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts",
+            "packages/server/src/unstable-core-do-not-import/transformer.ts",
+            "packages/server/src/unstable-core-do-not-import/types.ts"
+          ]
+        },
+        {
+          "name": "s21a",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/error/formatter.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/asyncIterable.ts"
+          ]
+        },
+        {
+          "name": "s21b1",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts:1-275"
+          ]
+        },
+        {
+          "name": "s21b2",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts:276-471"
+          ]
+        },
+        {
+          "name": "s21c",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts:472-654"
+          ]
+        },
+        {
+          "name": "s21d",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts:655-99999"
+          ]
+        },
+        {
+          "name": "s22",
+          "estimatedTestRuns": 17527,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/types.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/jsonl.ts:546-99999",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/disposable.ts"
+          ]
+        },
+        {
+          "name": "s23a",
+          "include": [
+            "packages/server/src/adapters/node-http/writeResponse.ts"
+          ]
+        },
+        {
+          "name": "s23b",
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/parser.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/readableStreamFrom.ts"
+          ]
+        },
+        {
+          "name": "s24",
+          "estimatedTestRuns": 17379,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/clientish/inference.ts",
+            "packages/server/src/unstable-core-do-not-import/http/contentType.ts:252-99999",
+            "packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts"
+          ]
+        }
+      ],
+      "mutatorArgs": [
+        "--no-typecheck"
+      ],
+      "mutatorArgsReason": "mutator 0.5.0's type check crashes on trpc's TypeScript 7.1.0-beta: Package subpath './unstable/sync' is not defined by exports",
+      "strykerOptions": {
+        "tsconfigFile": "tsconfig.stryker-none.json",
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        }
+      },
+      "strykerOptionsReason": "StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default",
+      "strykerIgnorePatterns": [
+        ".claude",
+        ".agents",
+        "www",
+        "examples"
+      ],
+      "patch": "patches/trpc.patch",
+      "edit": "getHTTPStatusCode: Array.isArray ternary to [].concat (refactor; every HTTP response goes through it)",
+      "shardsNote": "planned by plan-shards.mjs from StrykerJS reports of an earlier sharded run (files without a report costed by code lines): 393205 test runs under disableBail split 24 ways; s12, s14, s15, s21 and s23 were then cut by hand, in three rounds, after they ran out of time (resolveResponse.ts and mergeAsyncIterables.ts by line ranges, so the few mutants that span a cut, such as a function body, are in no shard)",
+      "coldShards": [
+        {
+          "name": "s1",
+          "estimatedTestRuns": 49048,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts",
+            "packages/server/src/unstable-core-do-not-import/router.ts:1-398",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/createDeferred.ts"
+          ]
+        },
+        {
+          "name": "s2",
+          "estimatedTestRuns": 49371,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts",
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:1-727",
+            "packages/server/src/unstable-core-do-not-import/rootConfig.ts"
+          ]
+        },
+        {
+          "name": "s3",
+          "estimatedTestRuns": 49027,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/createProxy.ts",
+            "packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/envelopes.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/jsonl.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/withPing.ts"
+          ]
+        },
+        {
+          "name": "s4",
+          "estimatedTestRuns": 48920,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/clientish/serialize.ts",
+            "packages/server/src/unstable-core-do-not-import/initTRPC.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/codes.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/index.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/disposable.ts",
+            "packages/server/src/unstable-core-do-not-import/transformer.ts"
+          ]
+        },
+        {
+          "name": "s5",
+          "estimatedTestRuns": 49087,
+          "include": [
+            "packages/server/src/adapters/node-http/index.ts",
+            "packages/server/src/unstable-core-do-not-import/http/contentType.ts",
+            "packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts",
+            "packages/server/src/unstable-core-do-not-import/http/types.ts",
+            "packages/server/src/unstable-core-do-not-import/rpc/parseTRPCMessage.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/tracked.ts",
+            "packages/server/src/unstable-core-do-not-import/utils.ts"
+          ]
+        },
+        {
+          "name": "s6",
+          "estimatedTestRuns": 49371,
+          "include": [
+            "packages/server/src/adapters/node-http/nodeHTTPRequestHandler.ts",
+            "packages/server/src/unstable-core-do-not-import/error/TRPCError.ts",
+            "packages/server/src/unstable-core-do-not-import/error/getErrorShape.ts",
+            "packages/server/src/unstable-core-do-not-import/http/abortError.ts",
+            "packages/server/src/unstable-core-do-not-import/parser.ts",
+            "packages/server/src/unstable-core-do-not-import/router.ts:399-99999",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/asyncIterable.ts",
+            "packages/server/src/unstable-core-do-not-import/types.ts"
+          ]
+        },
+        {
+          "name": "s7",
+          "estimatedTestRuns": 49042,
+          "include": [
+            "packages/server/src/unstable-core-do-not-import/clientish/inferrable.ts",
+            "packages/server/src/unstable-core-do-not-import/error/formatter.ts",
+            "packages/server/src/unstable-core-do-not-import/http/resolveResponse.ts",
+            "packages/server/src/unstable-core-do-not-import/middleware.ts",
+            "packages/server/src/unstable-core-do-not-import/procedure.ts",
+            "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:728-99999",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/readableStreamFrom.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/timerResource.ts"
+          ]
+        },
+        {
+          "name": "s8",
+          "estimatedTestRuns": 49338,
+          "include": [
+            "packages/server/src/adapters/node-http/incomingMessageToRequest.ts",
+            "packages/server/src/adapters/node-http/types.ts",
+            "packages/server/src/adapters/node-http/writeResponse.ts",
+            "packages/server/src/unstable-core-do-not-import/clientish/inference.ts",
+            "packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/sse.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/sse.types.ts",
+            "packages/server/src/unstable-core-do-not-import/stream/utils/mergeAsyncIterables.ts"
+          ]
+        }
+      ],
+      "coldShardsNote": "planned by plan-shards.mjs from StrykerJS reports of an earlier sharded run (files without a report costed by code lines): 393205 test runs under disableBail split 8 ways",
+      "prMutate": {
+        "include": [
+          "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts",
+          "packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts",
+          "packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts",
+          "packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts",
+          "packages/server/src/unstable-core-do-not-import/http/abortError.ts",
+          "packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts"
+        ],
+        "exclude": [
+          "packages/server/src/**/*.test.ts",
+          "packages/server/src/**/*.d.ts"
+        ]
+      },
+      "prMutateNote": "the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
+      "mutatorColdShards": 10,
+      "mutatorColdShardsNote": "mutator runs its own --shard i/10 partition: with 8, two of the partitions needed more than 8 minutes"
+    }
+  ]
+}
