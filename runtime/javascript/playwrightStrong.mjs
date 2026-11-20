@@ -417,6 +417,10 @@ export function strongFinish(testInfo, claimed, details) {
     const pass = strongPass();
     if (!pass || !claimed)
         return;
+    // A kill is marked here, before the worker starts its next test: the
+    // reporter hears of it later, and the next test of the row would run.
+    if (claimed.kind === "mutant" && testInfo.status !== undefined && testInfo.status !== "passed" && testInfo.status !== "skipped")
+        writeJson(`${pass.round}/killed/${key(claimed.id)}`, claimed.original);
     writeJson(`${pass.round}/attempts/${key(testInfo.testId)}.json`, { ...claimed, ...details, endedAt: Date.now() });
     if (claimed.lock)
         rmSync(claimed.lock, { recursive: true, force: true });
