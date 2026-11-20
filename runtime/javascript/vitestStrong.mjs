@@ -1,19 +1,36 @@
 // Strong mutation's setup file for Vitest (docs/design/strong-mutation.md).
 //
-// The strong reporter (vitestStrongReporter.mjs) runs the suite in rounds,
-// and in each round gives every test file at most one mutant and the tests
-// that may kill it. This file runs in the test file's isolated module graph
-// before the test file's imports: it switches that file's mutant on, so a
-// mutant evaluated while a module loads is in place too, and skips every test
-// the round did not choose. After the file's first chosen test fails, the
-// rest are skipped: the mutant is killed.
+// The strong reporter (vitestStrongReporter.mjs) runs the suite in rounds. A
+// round can run one test file several times, each copy with its own mutant;
+// the copies cannot be told apart by Vitest's own results (they share the
+// file's path), so each copy claims its assignment from the round's
+// directory, and reports its tests' outcomes there itself.
+//
+// This file runs in the test file's isolated module graph before the test
+// file's imports: it switches the copy's mutant on, so a mutant evaluated
+// while a module loads is in place too, and skips every test the assignment
+// did not choose. After the copy's first chosen test fails, the rest are
+// skipped: the mutant is killed.
+import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, inject } from "vitest";
 import * as localRuntime from "./runtime.mjs";
 
 const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? localRuntime;
 
-/** The round's assignment for this test file, if any. */
-function assignmentForThisFile() {
+/** The test file's path from the project root, as the plan names it. */
+function thisFile(root) {
+    const state = globalThis.__vitest_worker__;
+    const filepath = state?.filepath ?? state?.current?.file?.filepath;
+    if (!filepath)
+        return undefined;
+    return filepath.startsWith(root)
+        ? filepath.slice(root.length).replace(/^[\\/]+/, "").split("\\").join("/")
+        : filepath;
+}
+
+/** This copy's assignment: the first of the file's that no other copy took. */
+function claim() {
     let provided;
     try {
         provided = inject("supercovStrong");
@@ -21,44 +38,73 @@ function assignmentForThisFile() {
     catch {
         return undefined;
     }
-    if (!provided)
+    if (!provided?.round)
         return undefined;
-    const state = globalThis.__vitest_worker__;
-    const filepath = state?.filepath ?? state?.current?.file?.filepath;
-    if (!filepath)
+    const file = thisFile(provided.root);
+    if (!file)
         return undefined;
-    const relative = filepath.startsWith(provided.root)
-        ? filepath.slice(provided.root.length).replace(/^[\\/]+/, "").split("\\").join("/")
-        : filepath;
-    return provided.files?.[relative];
+    const directory = `${provided.round}/${createHash("sha256").update(file).digest("hex").slice(0, 24)}`;
+    for (let index = 0; existsSync(`${directory}/${index}.json`); index += 1) {
+        try {
+            closeSync(openSync(`${directory}/${index}.claim`, "wx"));
+        }
+        catch {
+            continue;
+        }
+        return { ...JSON.parse(readFileSync(`${directory}/${index}.json`, "utf8")), out: `${directory}/${index}.out` };
+    }
+    return undefined;
 }
 
-const assignment = assignmentForThisFile();
+const assignment = claim();
 const chosen = new Set(assignment?.tests ?? []);
 let killed = false;
+const report = (record) => {
+    if (assignment)
+        appendFileSync(assignment.out, `${JSON.stringify(record)}\n`);
+};
 
-if (assignment?.mutant) {
-    runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
-    runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
+if (assignment) {
+    report({ claimed: true });
+    if (assignment.mutant) {
+        runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
+        runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
+    }
 }
 
 beforeEach((context) => {
-    if (!assignment)
-        return;
-    const id = `vitest:${context.task.id}`;
-    if (killed || (!assignment.wholeFile && !chosen.has(id))) {
+    if (!assignment) {
+        // A copy with nothing to do (more copies than assignments).
         context.skip();
+        return;
     }
+    const id = `vitest:${context.task.id}`;
+    if (killed || (!assignment.wholeFile && !chosen.has(id)))
+        context.skip();
 });
 
 afterEach((context) => {
-    if (!assignment?.mutant)
+    if (!assignment)
         return;
-    if (context.task.result?.state === "fail")
+    const result = context.task.result;
+    if (result?.state === "skip")
+        return;
+    // `state` is not final before the hooks after a test are done; an error
+    // already recorded is what failed it.
+    const errors = result?.errors ?? [];
+    const failed = result?.state === "fail" || errors.length > 0;
+    const timeout = errors.some((error) => runtime.isMutantTimeout?.(error) ||
+        /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`) ||
+        /Test timed out in \d+ms/.test(`${error?.message}`));
+    report({ test: `vitest:${context.task.id}`, failed, timeout });
+    if (failed && assignment.mutant)
         killed = true;
 });
 
 afterAll(() => {
-    if (assignment?.mutant)
+    if (!assignment)
+        return;
+    report({ done: true });
+    if (assignment.mutant)
         runtime.clearActiveMutant();
 });

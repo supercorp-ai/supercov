@@ -12,7 +12,9 @@
 // several files runs one file per round, cheapest file first, and stops at
 // its first kill. Where the project does not isolate files, a round holds
 // one mutant.
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { availableParallelism } from "node:os";
 import { relative, sep } from "node:path";
 
 const TIMEOUT_FACTOR = 1.5;
@@ -21,14 +23,6 @@ const HIT_LIMIT_FLOOR = 1_000;
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
-}
-
-function collectTests(task, out = []) {
-    if (task.type === "test" || task.type === "custom")
-        out.push(task);
-    for (const child of task.tasks ?? [])
-        collectTests(child, out);
-    return out;
 }
 
 function isolated(vitest) {
@@ -60,19 +54,6 @@ function setTestTimeout(vitest, ms) {
     }
     if (vitest.config)
         vitest.config.testTimeout = ms;
-}
-
-/** Why a failed test failed: a mutant timeout, a time limit, or a test. */
-function failureKind(task) {
-    const errors = task.result?.errors ?? [];
-    for (const error of errors) {
-        const text = `${error?.name ?? ""} ${error?.message ?? ""}`;
-        if (/SupercovMutantTimeout/.test(text))
-            return "timeout";
-        if (/Test timed out in \d+ms/.test(text))
-            return "timeout";
-    }
-    return "killed";
 }
 
 export default class SupercovStrongReporter {
@@ -169,6 +150,47 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         pending.push({ mutant, files, next: 0, ran: 0, retried: false, started: 0 });
     }
 
+    // Rounds run through claims: each assignment is a file in the round's
+    // directory, and each copy of a test file Vitest runs takes the next one
+    // for its file (vitestStrong.mjs) and reports its tests' outcomes beside it.
+    const roundsDirectory = `${root}/.supercov/strong-rounds`;
+    rmSync(roundsDirectory, { recursive: true, force: true });
+    let roundNumber = 0;
+    async function runRound(assignments, timeoutMs) {
+        const directory = `${roundsDirectory}/${roundNumber++}`;
+        const counts = new Map();
+        const placedAt = [];
+        for (const assignment of assignments) {
+            const key = createHash("sha256").update(assignment.file).digest("hex").slice(0, 24);
+            const index = counts.get(key) ?? 0;
+            counts.set(key, index + 1);
+            mkdirSync(`${directory}/${key}`, { recursive: true });
+            writeFileSync(`${directory}/${key}/${index}.json`, JSON.stringify(assignment.claim));
+            placedAt.push(`${directory}/${key}/${index}.out`);
+        }
+        provide(vitest, { root, round: directory });
+        setTestTimeout(vitest, Math.ceil(timeoutMs));
+        last = await runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false);
+        // The outcome of each claim, whichever copy took it.
+        return placedAt.map((out) => {
+            const outcome = { claimed: false, done: false, tests: [] };
+            if (!existsSync(out))
+                return outcome;
+            for (const line of readFileSync(out, "utf8").split("\n")) {
+                if (!line.trim())
+                    continue;
+                const record = JSON.parse(line);
+                if (record.claimed)
+                    outcome.claimed = true;
+                else if (record.done)
+                    outcome.done = true;
+                else if (record.test)
+                    outcome.tests.push(record);
+            }
+            return outcome;
+        });
+    }
+
     // A baseline: each file with the union of its candidates, no mutant.
     // A test that fails there cannot count as a kill.
     const union = new Map();
@@ -182,97 +204,122 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     }
     const baselineFailed = new Set();
     if (union.size) {
-        const files = {};
-        for (const [file, entry] of union)
-            files[file] = { tests: [...entry.tests], wholeFile: entry.whole };
-        provide(vitest, { root, files });
-        setTestTimeout(vitest, 60_000);
-        last = await runFiles([...union.keys()].map((file) => specOf.get(file)), false);
-        for (const fileTask of vitest.state.getFiles([...union.keys()].map((file) => specOf.get(file).moduleId))) {
-            const file = toRelative(root, fileTask.filepath);
-            if (fileTask.result?.state === "fail" && !collectTests(fileTask).some((t) => t.result?.state === "fail"))
-                baselineFailed.add(`${file}#file`);
-            for (const test of collectTests(fileTask)) {
-                if (test.result?.state === "fail")
-                    baselineFailed.add(`vitest:${test.id}`);
+        const assignments = [...union].map(([file, entry]) => ({
+            file,
+            claim: { mutant: null, tests: [...entry.tests], wholeFile: entry.whole },
+        }));
+        const outcomes = await runRound(assignments, 60_000);
+        assignments.forEach((assignment, at) => {
+            const outcome = outcomes[at];
+            if (!outcome.done)
+                baselineFailed.add(`${assignment.file}#file`);
+            for (const test of outcome.tests) {
+                if (test.failed)
+                    baselineFailed.add(test.test);
             }
-        }
+        });
     }
 
     const oneAtATime = !isolated(vitest);
+    const workers = Math.max(1, Number(vitest.config.maxWorkers) || availableParallelism());
+    // Copies of one test file in a round, and assignments in all: enough to
+    // keep every worker busy while the slowest copy finishes.
+    const perFile = oneAtATime ? 1 : workers;
+    const perRound = oneAtATime ? 1 : workers * 2;
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));
     while (pending.length) {
-        // Pack a round: each file at most once.
-        const used = new Set();
+        const used = new Map();
         const round = [];
         for (const job of pending) {
-            if (oneAtATime && round.length)
+            if (round.length >= perRound)
                 break;
             const group = job.files[job.next];
-            if (used.has(group.file))
+            if ((used.get(group.file) ?? 0) >= perFile || baselineFailed.has(`${group.file}#file`) && !job.skipped)
                 continue;
-            used.add(group.file);
+            used.set(group.file, (used.get(group.file) ?? 0) + 1);
             round.push(job);
         }
-        const files = {};
+        // A job whose next file cannot run (it failed without any mutant)
+        // moves on, or ends.
+        for (const job of pending) {
+            const group = job.files[job.next];
+            if (!round.includes(job) && baselineFailed.has(`${group.file}#file`)) {
+                if (job.next + 1 < job.files.length)
+                    job.next += 1;
+                else {
+                    write({ id: job.mutant.id, status: "error", reason: `${group.file} fails without any mutant`, tests: job.ran, durationMs: 0 });
+                    job.done = true;
+                }
+            }
+        }
         let limit = 0;
-        for (const job of round) {
+        const assignments = round.map((job) => {
             const group = job.files[job.next];
             const chosen = group.tests.filter((id) => !baselineFailed.has(id));
             const budget = Math.max(...chosen.map((id) => durationOf.get(id) ?? 1_000), 1_000);
-            const factor = job.retried ? 2 : 1;
-            limit = Math.max(limit, (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * factor);
-            files[group.file] = {
-                mutant: { file: job.mutant.file, index: job.mutant.index },
-                tests: chosen,
-                wholeFile: group.whole,
-                hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000),
-            };
+            limit = Math.max(limit, (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * (job.retried ? 2 : 1));
             if (!job.started)
                 job.started = Date.now();
-        }
-        provide(vitest, { root, files });
-        setTestTimeout(vitest, Math.ceil(limit));
-        const roundSpecs = Object.keys(files).map((file) => specOf.get(file));
-        last = await runFiles(roundSpecs, false);
-        const results = new Map(vitest.state
-            .getFiles(roundSpecs.map((spec) => spec.moduleId))
-            .map((fileTask) => [toRelative(root, fileTask.filepath), fileTask]));
-        for (const job of round) {
+            return {
+                file: group.file,
+                claim: {
+                    mutant: { file: job.mutant.file, index: job.mutant.index },
+                    tests: chosen,
+                    wholeFile: group.whole,
+                    hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000),
+                },
+            };
+        });
+        const outcomes = round.length ? await runRound(assignments, limit) : [];
+        round.forEach((job, at) => {
             const group = job.files[job.next];
-            const fileTask = results.get(group.file);
-            const ran = fileTask ? collectTests(fileTask).filter((t) => t.result?.state && t.result.state !== "skip") : [];
-            job.ran += ran.length;
-            const failed = ran.find((t) => t.result?.state === "fail" && !baselineFailed.has(`vitest:${t.id}`));
-            const loadFailed = fileTask?.result?.state === "fail" && !ran.length && !baselineFailed.has(`${group.file}#file`);
+            const outcome = outcomes[at];
+            if (!outcome.claimed) {
+                // No copy took it: run it again in a later round.
+                job.unclaimed = (job.unclaimed ?? 0) + 1;
+                if (job.unclaimed > 2) {
+                    write({ id: job.mutant.id, status: "error", reason: "no copy of its test file ran it", tests: job.ran, durationMs: Date.now() - job.started });
+                    job.done = true;
+                }
+                return;
+            }
+            job.ran += outcome.tests.length;
+            const failed = outcome.tests.find((test) => test.failed && !baselineFailed.has(test.test));
             let verdict;
             if (failed) {
-                const kind = failureKind(failed);
-                if (kind === "timeout" && !job.retried) {
+                if (failed.timeout && !job.retried) {
                     job.retried = true;
-                    continue;
+                    return;
                 }
-                verdict = { status: kind, killedBy: `vitest:${failed.id}` };
+                verdict = { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test };
             }
-            else if (loadFailed) {
-                verdict = { status: "killed", killedBy: `${group.file}`, reason: "module-load" };
+            else if (!outcome.done) {
+                // The copy started and its file did not finish: the mutant
+                // broke it while it loaded or ran.
+                verdict = { status: "killed", killedBy: group.file, reason: "the test file did not finish" };
             }
             else if (job.next + 1 < job.files.length) {
                 job.next += 1;
                 job.retried = false;
-                continue;
+                return;
             }
             else {
                 verdict = { status: "survived" };
             }
             write({ id: job.mutant.id, ...verdict, tests: job.ran, durationMs: Date.now() - job.started });
             job.done = true;
-        }
+        });
         for (let index = pending.length - 1; index >= 0; index--) {
             if (pending[index].done)
                 pending.splice(index, 1);
         }
+        if (!round.length && pending.length) {
+            for (const job of pending)
+                write({ id: job.mutant.id, status: "error", reason: "could not be scheduled", tests: job.ran, durationMs: 0 });
+            break;
+        }
     }
+    rmSync(roundsDirectory, { recursive: true, force: true });
     write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime });
     return last;
 }
