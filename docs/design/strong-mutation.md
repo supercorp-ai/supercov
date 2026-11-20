@@ -218,33 +218,78 @@ A Playwright test drives an app server in another process, and the browser.
 Supercov already scopes both to the test's attempt: every request a page or
 `request` fixture sends carries the attempt's scope (a header, or a cookie),
 and the server's runtime credits the work it does for that request to the
-attempt. The strong pass uses the same scope to choose the mutant:
+attempt. The strong pass uses the same scope to choose the mutant.
 
-- The driver gives each attempt a mutant, as the Vitest driver gives each
-  file one, and the Playwright fixture announces it with the scope.
-- In the server, the switch's record reads the active mutant of the request
-  being served (the scope is already carried through the request's async
-  work); in the page, of the attempt the page belongs to.
-- So the workers of one Playwright run each test their own mutant against
-  one server, and the server is not restarted per mutant.
+**The mutant travels in the scope.** A strong attempt's scope names its
+mutant (`m=<file>#<index>`, `m=-` for none) beside the attempt's id. So it
+reaches the server by every way the scope already does -- the `request`
+fixture's header, the page's cookies and fetch header, a child process's
+`SUPERCOV_CONTEXT`, a request the server sends on -- and stays with the
+request's async work as the scope does. A separate `x-supercov-mutant` header
+would have reached only what a header reaches: a page's first navigation
+carries cookies, not the fetch patch's header.
 
-That is exact only where nothing one request does reaches another: a
-module-level cache, a connection pool's state, a timer, work no request
-started. So:
+**In the server**, the first scope that names a mutant turns the process's
+switches into accessors: each switch's `a` is read from the request being
+served (its scope's mutant), and outside any attempt's work from the
+process-wide mutant -- none, unless the process was started with
+`SUPERCOV_ACTIVE_MUTANT=<file>#<index>`. Each attempt's evaluations are
+counted on their own against the hit limit. A process that never sees such a
+scope (every Vitest pass) keeps plain switches, set process-wide as before.
 
-- A mutant whose code ran in work no request was credited with (start-up,
-  timers, between tests: the run's `background` records) is run alone, with
-  the server started with that mutant switched on everywhere.
-- Every run plants **canary** mutants: mutants no test can kill (a switch
-  around a statement that is never reached). A canary that comes back killed
-  means state leaked between requests, and the round's verdicts are run
-  again one mutant per server.
-- A mutant's candidates are the attempts its weak verdict names, as in
-  Vitest; a test that reached the mutant only through work credited by time
-  (`by-time`) keeps its mutant switched on server-wide for its duration.
+**In the page**, the attempt's init script switches the document's mutant on
+before the page's scripts run, as it already announces the attempt. A page
+whose mutant passes the hit limit writes a marker to its console; a server
+appends the attempt to `<results>.timeouts.jsonl`. Either makes the verdict
+`timeout`, whether or not a test failed.
+
+**One invocation, rows of repetitions.** The generated config, on
+`SUPERCOV_STRONG_PLAN`, works out each test file's rows: row 0 is the
+baseline (every test of the file some mutant needs, no mutant), then one row
+per mutant with candidates in the file (its candidates there), with canaries
+among them. It sets `repeatEach` to the most rows a file has, `retries: 0`
+and no failure limit; the k-th repetition of a test runs its file's row k if
+the row names the test, and skips otherwise. A row is found from the file
+and `repeatEachIndex` -- nothing is claimed at run time, so no two
+repetitions can take one job. (The Vitest driver claims because Vitest's
+copies of a file cannot be told apart; Playwright's repetitions can.) A
+row after the baseline waits for the test's own baseline: a test that fails
+without a mutant is no candidate. Once a test kills a mutant, its rows not
+yet started skip (early exit). A mutant's test gets `1.5 × its measured
+duration + 5 s` (the duration from the attempt's span); a test that runs out
+of time is run again alone, with twice that, before it counts as `timeout`.
+
+Playwright gives every repetition index its own worker (worker fixtures are
+per repetition), so each row of a file starts a worker and, for page tests,
+a browser. That is the price of rows; the server is not restarted.
+
+**Run alone, the server started with the mutant.** That per-request
+switching is exact only where nothing one request does reaches another, and
+a server keeps what its top level made. So the plan marks a mutant
+`serverWide` where a server ran its code in work no request named (start-up,
+timers: `background`), at a server module's top level (`module-level`), or
+for a request that named no test, credited by time (`by-time`). Such a
+mutant gets no row: the engine starts the command again for it, alone, with
+`SUPERCOV_ACTIVE_MUTANT` set in every process and only its candidate tests,
+and its verdict's reason says so. The same runs the timeouts' second try and
+every verdict a canary puts in doubt.
+
+**Canaries.** Every pass puts rows with no mutant among the mutated ones (in
+the middle and at the end of the busiest files' rows). A canary is a test
+that passed its baseline, run again after other attempts' mutants used the
+server: one that fails means state leaked between attempts (or the test is
+flaky), and every mutant that started before it ended is run again, one
+mutant per server start. (A planted mutant no test can reach would tell the
+same, at the cost of a switch.) The pass's summary line says how many ran
+and which failed.
+
+A mutant's candidates are the attempts its weak verdict names, as in Vitest.
+Candidates under another runner (a Vitest test of the same run) are not run
+by this pass: a mutant no Playwright test kills is then an `error`, never a
+`survived` it has not earned.
 
 ## Not yet
 
-- Jest, Mocha and node:test drivers (Vitest first).
+- Jest, Mocha and node:test drivers (Vitest and Playwright first).
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
