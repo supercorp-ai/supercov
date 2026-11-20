@@ -21617,7 +21617,35 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
         .collect::<Vec<_>>()
         .join("\n");
-    let context = format!("{reply}\n{shown}\n{said}");
+    // What each pass wrote and each attempt claimed, for a failure to show.
+    let mut passes = String::new();
+    for work in std::fs::read_dir(project.root.join(".supercov/strong"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        passes.push_str(
+            &std::fs::read_to_string(work.path().join("results.jsonl")).unwrap_or_default(),
+        );
+        for pass in std::fs::read_dir(work.path().join("playwright"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for attempt in std::fs::read_dir(pass.path().join("attempts"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                passes.push_str(&format!(
+                    "{} {}\n",
+                    pass.file_name().to_string_lossy(),
+                    std::fs::read_to_string(attempt.path()).unwrap_or_default()
+                ));
+            }
+        }
+    }
+    let context = format!("{reply}\n{shown}\n{said}\n{passes}");
     // The one mutant on a line, by its file, line, mutator and descriptor.
     let strong = |file: &str, line: u32, ending: &str| {
         let found = mutants
@@ -21768,7 +21796,7 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|mutant| mutant["id"] == "src/registry.js:6:15-8:4:BlockStatement:{}")
+        .find(|mutant| mutant["id"] == "src/registry.js:6:14-8:4:BlockStatement:{}")
         .unwrap_or_else(|| panic!("{listed}"));
     assert_eq!(throw["strong"]["status"], "killed", "{throw}");
 }
