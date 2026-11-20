@@ -276,7 +276,17 @@ fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWi
     });
     let first = ran.next()?;
     if !matches!(role_of(raw), "test" | "setup") {
-        return Some(ServerWide::Background);
+        // Work for a request that named no test and ran while none did (a
+        // web server's readiness check) ran without any mutant in the pass,
+        // as each request runs with its own; only work no request started
+        // (start-up, timers) needs the server started with the mutant.
+        if std::iter::once(first)
+            .chain(ran)
+            .any(|record| record.request.is_none())
+        {
+            return Some(ServerWide::Background);
+        }
+        return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
     }
     if mutant.function.is_none() {
         return Some(ServerWide::ModuleLevel);
