@@ -114,9 +114,26 @@ afterEach((context) => {
         killed = true;
 });
 
-afterAll(() => {
+// Work a mutant left going after the tests (a loop that never ends between
+// awaits, timers that re-arm) keeps evaluating the mutant: Vitest would have
+// to stop the worker by force, and a run waiting on it never ends. A short
+// look after the tests tells that from code that runs now and then.
+const LEFT_RUNNING_WINDOW_MS = 300;
+const LEFT_RUNNING_EVALUATIONS = 100;
+afterAll(async () => {
     if (!assignment)
         return;
+    if (assignment.mutant && runtime.mutantHitCount) {
+        const before = runtime.mutantHitCount();
+        await new Promise((resolve) => setTimeout(resolve, LEFT_RUNNING_WINDOW_MS));
+        const evaluations = runtime.mutantHitCount() - before;
+        if (evaluations > LEFT_RUNNING_EVALUATIONS)
+            report({
+                outside: true,
+                timeout: true,
+                message: `the mutant was evaluated ${evaluations} times in ${LEFT_RUNNING_WINDOW_MS} ms after the tests ended`,
+            });
+    }
     report({ done: true });
     if (assignment.mutant)
         runtime.clearActiveMutant();

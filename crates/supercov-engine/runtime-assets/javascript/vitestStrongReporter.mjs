@@ -267,8 +267,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // A round ends when its slowest copy does, and the workers wait: the
     // more a round holds, the less of that wait there is per assignment.
     // SUPERCOV_STRONG_ROUND sets how many a round holds, as a multiple of
-    // the workers.
-    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || 6);
+    // the workers (default 2: larger rounds load the machine, and timing-
+    // sensitive tests slow down with it).
+    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || 2);
     const perFile = oneAtATime ? 1 : workers * Math.min(roundFactor, 4);
     const perRound = oneAtATime ? 1 : workers * roundFactor;
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));

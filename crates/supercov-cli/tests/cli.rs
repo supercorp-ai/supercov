@@ -21850,3 +21850,50 @@ fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
         "{endless}"
     );
 }
+
+/// A mutant that leaves work re-arming itself after the tests (a ticker that
+/// should stop after three ticks and never does): no single evaluation runs
+/// away, but the mutant keeps running after the tests ended, as a run
+/// waiting on its worker would never end. It is a timeout.
+#[cfg(unix)]
+#[test]
+fn a_mutant_whose_work_keeps_rearming_after_the_tests_is_a_timeout() {
+    let project = vitest_mutants_project("strong-left-running");
+    project.write(
+        "src/ticker.js",
+        "export function tick(done) {\n  let n = 0;\n  const step = () => {\n    n++;\n    if (n < 3) {\n      setImmediate(step);\n    } else {\n      done(n);\n    }\n  };\n  setImmediate(step);\n}\n",
+    );
+    project.write(
+        "test/ticker.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tick } from \"../src/ticker.js\";\nit(\"ticks\", async () => {\n  const seen = [];\n  tick((n) => seen.push(n));\n  await new Promise((resolve) => setTimeout(resolve, 20));\n  expect(seen.length).toBeLessThan(2);\n});\n",
+    );
+    project.commit("ticker");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/ticker.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let endless = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/ticker.js:5:9-5:14:ConditionalExpression:true")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(
+        matches!(
+            endless["strong"]["status"].as_str(),
+            Some("timeout" | "killed")
+        ),
+        "{endless}"
+    );
+}
