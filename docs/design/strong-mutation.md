@@ -174,7 +174,26 @@ names it keeps the name (`({ "f": <it> })["f"]`). A mutant with nowhere to
 go, or in code the instrumenter keeps as written (a function whose source
 the program reads, a `with` body), gets no switch: `mutants.json` says
 `"unplaceable": "<reason>"` (`no-placeable-ancestor`, `function-source`,
-`with-statement`), and the driver reports it `error`.
+`with-statement`, `next-segment-config`), and the driver reports it `error`.
+
+Next.js reads some exports from a file's source without running it: a
+route's segment config (`dynamic`, `dynamicParams`, `revalidate`,
+`fetchCache`, `runtime`, `preferredRegion`, `maxDuration`,
+`experimental_ppr`) in any file, and `config` in middleware, a proxy and
+under `pages/`. A switch there is code where Next.js wants a literal, and
+`next build` refuses it ("needs to be a static string"), so their values
+(outside a function) stay as written: `next-segment-config`. StrykerJS has
+no ignorer for them.
+
+**Only what the pass runs.** A strong pass switches only the files that
+hold a mutant it runs (the plan's undecided mutants): the engine sets them
+for its own process (`set_strong_files`) and lists them for others in
+`SUPERCOV_STRONG_FILES` (a JSON list's path); both are in the cache key.
+Every other file, and a file whose mutants all have no switch, is left as
+written, with no runtime binding: the strong copy of a large app differs
+from the project in a handful of files, and a file the measured run could
+leave without the runtime (an edge-runtime module) does not gain it. The
+command's log says `switches in N of M source file(s)`.
 
 **Static mutants.** A mutant whose switch is evaluated while the module
 loads (no function or instance field initializer around it) carries
@@ -246,22 +265,52 @@ appends the attempt to `<results>.timeouts.jsonl`. Either makes the verdict
 **One invocation, rows of repetitions.** The generated config, on
 `SUPERCOV_STRONG_PLAN`, works out each test file's rows: row 0 is the
 baseline (every test of the file some mutant needs, no mutant), then one row
-per mutant with candidates in the file (its candidates there), with canaries
-among them. It sets `repeatEach` to the most rows a file has, `retries: 0`
-and no failure limit; the k-th repetition of a test runs its file's row k if
-the row names the test, and skips otherwise. A row is found from the file
-and `repeatEachIndex` -- nothing is claimed at run time, so no two
-repetitions can take one job. (The Vitest driver claims because Vitest's
-copies of a file cannot be told apart; Playwright's repetitions can.) A
-row after the baseline waits for the test's own baseline: a test that fails
-without a mutant is no candidate. Once a test kills a mutant, its rows not
-yet started skip (early exit). A mutant's test gets `1.5 × its measured
-duration + 5 s` (the duration from the attempt's span); a test that runs out
-of time is run again alone, with twice that, before it counts as `timeout`.
+per mutant with a candidate in the file, with canaries among them. It sets
+`repeatEach` to the most rows a file has, `retries: 0` and no failure limit,
+and keeps the project's workers; the k-th repetition of a test runs its
+file's row k if the row names the test, and skips otherwise. A row is found
+from the file and `repeatEachIndex` -- nothing is claimed at run time, so
+no two repetitions can take one job. (The Vitest driver claims because
+Vitest's copies of a file cannot be told apart; Playwright's repetitions
+can.) A row after the baseline waits for the test's own baseline: a test
+that fails without a mutant is no candidate.
 
 Playwright gives every repetition index its own worker (worker fixtures are
 per repetition), so each row of a file starts a worker and, for page tests,
 a browser. That is the price of rows; the server is not restarted.
+
+**Concurrency as the project runs it.** Repetitions of one file are separate
+groups, which Playwright runs side by side where the project ran the file's
+tests one after another. A suite whose tests share a server's state (a
+harness's fault rules for one server slot, rewritten by each test) then
+fails for reasons no mutant made. So a file whose tests the measured run
+never ran at once (by their spans) runs one test at a time here too: each
+attempt holds the file's lock from its start to its end, across workers.
+The workers are the project's own.
+
+**Kills are confirmed.** A test that fails beside another mutant's attempt
+(their times overlap) may have failed for the other's doing. Such a kill is
+not recorded: the mutant goes to a **serial pass** (one worker, one test at
+a time), which runs its killing test alone first and its other candidates
+only if that test lets it live. What a serial pass kills, nothing beside it
+did. On the fixture of the CLI test, 14 of 15 per-request kills ran beside
+another mutant and were confirmed: the serial pass took about as long as
+the main pass (30 s against 33 s), most of it two page kills waiting out an
+8 s `expect`; a project with one worker confirms nothing. A failing
+attempt's error (its first line, ANSI stripped) is the verdict's reason.
+
+**Likeliest killer first.** The main pass runs each mutant against one test:
+its candidate whose own evidence infected it, cheapest first (the plan's
+order). A mutant it lets live goes to a **stage pass** with its other
+candidates, side by side; a kill stops a mutant at its first test.
+
+**Time.** A mutant's test gets `1.5 × its measured duration + 5 s` (the
+duration from the attempt's span), plus the project's `expect` timeout
+(default 5 s) and `actionTimeout`: an assertion that fails waits out its
+own timeout first, and the budget must not cut it short. A test that fails
+on an assertion or an action, even as its time runs out, is a kill; one
+that only ran out of time is run again in a serial pass with twice the
+budget before it counts as `timeout`.
 
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
@@ -279,10 +328,11 @@ mutant from running alone. That is the one place the pass trusts that a
 request's work does not reach the tests' through shared state without a
 canary to check it.
 
-Also run alone, but switched on by their attempts only (so a server whose
-every answer the mutant breaks still starts): a timeout's second try, every
-verdict a canary puts in doubt, and every mutant whose rows did not all run
-or ended after an error outside any test (a shared server that exited).
+Each further pass a driver asks for (a `restart` record in the results: one
+mutant alone, a stage pass, a serial pass) is a new invocation of the
+command, its output in a log beside the results, run in turn until none
+asks for more. A serial pass also takes every mutant whose rows did not all
+run or ended after an error outside any test (a shared server that exited).
 
 **Canaries.** Every pass puts rows with no mutant among the mutated ones (in
 the middle and at the end of the busiest files' rows). A canary is a test
