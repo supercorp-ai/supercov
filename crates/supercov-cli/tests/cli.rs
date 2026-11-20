@@ -21928,7 +21928,7 @@ fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|mutant| mutant["id"] == "src/poll.js:4:12-4:28:ConditionalExpression:true")
+        .find(|mutant| mutant["id"] == "src/poll.js:5:7-5:10:UpdateOperator:--")
         .unwrap_or_else(|| panic!("{listed}"));
     assert!(
         matches!(
