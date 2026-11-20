@@ -22137,10 +22137,7 @@ fn supercov_mutants_measures_when_it_must_and_plain_runs_know_no_mutants() {
         reply["summary"]["killed"].as_u64().unwrap_or(0) > 0,
         "{reply}"
     );
-    // A plain run lists no mutants and its summary says nothing of them.
-    let plain = project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
-    assert!(!plain.contains("Mutants "), "{plain}");
-    // The run is current: read as it is, nothing measured again.
+    // Its run is current and has its mutants' values: read as it is.
     let again = project.supercov(&["mutants", "--json"]);
     assert!(
         !again.stderr().contains("measuring first"),
@@ -22148,6 +22145,18 @@ fn supercov_mutants_measures_when_it_must_and_plain_runs_know_no_mutants() {
         again.stderr()
     );
     assert!(again.json()["summary"]["killed"].as_u64().unwrap_or(0) > 0);
+    // A plain run lists no mutants and its summary says nothing of them;
+    // `supercov mutants` after it measures with the mutants' probes.
+    let plain = project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    assert!(!plain.contains("Mutants "), "{plain}");
+    let valued = project.supercov(&["mutants", "--json"]);
+    assert!(
+        valued
+            .stderr()
+            .contains("measuring first (the latest run recorded no values for its mutants)"),
+        "{}",
+        valued.stderr()
+    );
     // A changed source is measured again, with the latest run's command.
     project.write(
         "src/double.js",

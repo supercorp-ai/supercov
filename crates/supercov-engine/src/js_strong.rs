@@ -193,6 +193,31 @@ pub fn list_run_mutants(
     Ok(listed_or_list(request, root, listed, &points)?.1)
 }
 
+/// Whether the run at `archive_path` listed its mutants as it measured, and
+/// so recorded the values their probes see: a run `supercov mutants` can
+/// plan from as it is. A plain run's mutants, listed after it, have no
+/// values, and their plan runs more tests.
+pub fn run_recorded_mutant_values(archive_path: &std::path::Path) -> bool {
+    let listed_after = archive_path.with_file_name(crate::coverage_report::LISTED_MUTANTS_FILE);
+    if let Ok(bytes) = std::fs::read(&listed_after)
+        && let Ok(listed) = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&bytes)
+    {
+        // An empty list there marks a run that had its own.
+        return listed.mutant_set.is_none();
+    }
+    let mut listed = false;
+    let _ = crate::evidence_archive::read_archive_each(
+        archive_path,
+        |path| path == "mutants.json",
+        |entry| {
+            listed = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&entry.contents)
+                .is_ok_and(|mutants| mutants.mutant_set.is_some());
+            Ok(())
+        },
+    );
+    listed
+}
+
 fn beside(request: &ArchiveReportRequest) -> std::path::PathBuf {
     request
         .archive_path

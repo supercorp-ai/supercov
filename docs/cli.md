@@ -313,8 +313,11 @@ would have differed there. Nothing runs again. A plain run does nothing for
 mutants and costs nothing more for them: a JavaScript or TypeScript run lists
 its mutants from its sources the first time they are asked for (by `mutants`,
 `mutants test` or `supercov mutants`), and keeps them beside the run. A source
-changed since the run is left out until the run is measured again, which
-`supercov mutants` does by itself. Listed this way, a mutant whose verdict
+changed since the run is left out until the run is measured again.
+`supercov mutants` does all of it: it measures a run of the checkout with the
+mutants' probes where the latest run is of other sources or is a plain one,
+lists the mutants, and runs `mutants test`; while the checkout is unchanged it
+reads that run again. Listed this way, a mutant whose verdict
 needs the values its expression took is `unknown`, and `mutants test` runs it;
 a run measured with `SUPERCOV_MUTANTS=1` records those values (the mutants'
 probes) and decides more of them without running anything.

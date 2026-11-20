@@ -135,9 +135,12 @@ Mutation-tests the project: lists the mutants of every JavaScript and
 TypeScript source the tests ran, runs each against only the tests that run
 its code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
-command or the one after --, when there is none or the checkout changed
-since. A plain run (supercov -- <tests>) does nothing for mutants and costs
-nothing more for them.
+command or the one after --, when there is none, the checkout changed since,
+or it is a plain run (supercov -- <tests>), which does nothing for mutants
+and costs nothing more for them. Its own run records the values the mutants'
+expressions take, which spares the strong pass the tests that cannot tell a
+mutant apart; while the checkout is unchanged, the next supercov mutants
+reads that run again.
 
 Options are those of `supercov runs <run-id> mutants test`; the ones asked
 most:
@@ -171,10 +174,18 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
     let latest = discover_runs(&root)
         .ok()
         .and_then(|inventory| select_run(&inventory, Some("latest")).ok().cloned());
-    let current = latest
+    // A run of this checkout that recorded its mutants' values plans as it
+    // is; otherwise one is measured with them: its probes cost a few percent
+    // of the run, and spare the strong pass a quarter of its tests where
+    // they decide what reach alone cannot.
+    let stale = latest
         .as_ref()
-        .filter(|run| !crate::checkout_comparison(&root, run).stale);
-    if current.is_none() {
+        .is_none_or(|run| crate::checkout_comparison(&root, run).stale);
+    let valued = !stale
+        && latest.as_ref().is_some_and(|run| {
+            supercov_engine::js_strong::run_recorded_mutant_values(&run.evidence_path)
+        });
+    if !valued {
         let Some(command) = given
             .clone()
             .or_else(|| latest.as_ref().map(|run| run.metadata.command.clone()))
@@ -187,10 +198,12 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         };
         eprintln!(
             "[supercov] measuring first ({}): {}",
-            if latest.is_some() {
+            if latest.is_none() {
+                "no run yet"
+            } else if stale {
                 "the checkout changed since the latest run"
             } else {
-                "no run yet"
+                "the latest run recorded no values for its mutants"
             },
             command.join(" ")
         );
@@ -201,6 +214,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
             std::process::Command::new(program)
                 .arg("--")
                 .args(&command)
+                .env("SUPERCOV_MUTANTS", "1")
                 .stdout(std::io::stderr())
                 .status()
         });
