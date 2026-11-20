@@ -210,7 +210,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let stalled = false;
     // Where the pass's time goes: each round's wall time against what its
     // copies spent loading (round start to claim), in tests, and after them.
-    const profile = { rounds: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, loadMs: 0, testMs: 0, copyMs: 0, tailMs: 0, testsRun: 0 };
+    const profile = { rounds: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, loadMs: 0, testMs: 0, copyMs: 0, tailMs: 0, testsRun: 0, timeline: [] };
     async function runRound(assignments, timeoutMs) {
         const directory = `${roundsDirectory}/${roundNumber++}`;
         const counts = new Map();
@@ -245,7 +245,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         profile.wallMs += roundEnded - roundStarted;
         let lastDone = roundStarted;
         // The outcome of each claim, whichever copy took it.
-        return placedAt.map((out) => {
+        const outcomesOf = placedAt.map((out) => {
             const outcome = { claimed: false, done: false, tests: [], outside: [] };
             if (!existsSync(out))
                 return outcome;
@@ -257,6 +257,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     outcome.claimed = true;
                     outcome.claimedAt = record.at;
                 }
+                else if (record.started)
+                    outcome.startedAt = record.at;
                 else if (record.done) {
                     outcome.done = true;
                     outcome.doneAt = record.at;
@@ -287,6 +289,19 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 profile.tailMs += roundEnded - lastDone;
             return outcome;
         });
+        // The first rounds' copies, each as [file, claimed, tests started, done] in ms from
+        // the round's start, and the round's end.
+        if (profile.timeline.length < 12)
+            profile.timeline.push({
+                endMs: roundEnded - roundStarted,
+                copies: outcomesOf.map((outcome, at) => [
+                    assignments[at].file.split("/").pop(),
+                    outcome.claimedAt ? outcome.claimedAt - roundStarted : null,
+                    outcome.startedAt ? outcome.startedAt - roundStarted : null,
+                    outcome.doneAt ? outcome.doneAt - roundStarted : null,
+                ]),
+            });
+        return outcomesOf;
     }
 
     // A baseline: each file with the union of its candidates, no mutant.

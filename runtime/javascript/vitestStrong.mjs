@@ -13,7 +13,7 @@
 // skipped: the mutant is killed.
 import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { afterAll, afterEach, beforeEach, inject, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, inject, vi } from "vitest";
 import * as localRuntime from "./runtime.mjs";
 
 const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? localRuntime;
@@ -115,6 +115,12 @@ if (assignment) {
             };
     }
 }
+
+// When the file's tests start: what came before was loading it.
+beforeAll(() => {
+    if (assignment)
+        report({ started: true, at: realNow() });
+});
 
 beforeEach((context) => {
     if (!assignment) {
