@@ -73,35 +73,42 @@ function budgetOf(durations, factor = 1) {
 }
 
 /**
- * The files whose tests the measured run never ran side by side, from their
- * spans: a project that runs a file's tests one at a time (not
- * `fullyParallel`), perhaps because they share a server's state. The strong
- * pass runs those files' repetitions one test at a time too; its workers
- * are the project's own.
+ * The files whose tests must not run side by side: those whose tests the
+ * measured run ran, two or more of them, and never at once (by their
+ * spans), and, where the spans tell nothing (a file with one test, or none
+ * spanned), those the project runs one test at a time (not
+ * `fullyParallel`). A file whose tests overlapped runs side by side. The
+ * strong pass runs the others one test at a time; its workers are the
+ * project's own.
  */
-function serialFilesOf(plan, tests) {
+function serialFilesOf(plan, tests, fullyParallel) {
     const byFile = new Map();
-    for (const test of plan.tests) {
-        if (!tests[test.id] || !Array.isArray(test.span))
-            continue;
-        const file = tests[test.id].file;
-        if (!byFile.has(file))
-            byFile.set(file, []);
-        byFile.get(file).push(test.span);
-    }
-    const serialFiles = new Set();
-    for (const [file, fileSpans] of byFile) {
-        fileSpans.sort((a, b) => a[0] - b[0]);
-        if (fileSpans.every((span, at) => at === 0 || fileSpans[at - 1][1] <= span[0]))
-            serialFiles.add(file);
-    }
-    // A file the measured run gave no span to is not known to run in
-    // parallel: one at a time.
     for (const { file } of Object.values(tests)) {
         if (!byFile.has(file))
-            serialFiles.add(file);
+            byFile.set(file, []);
     }
-    return [...serialFiles].sort();
+    for (const test of plan.tests) {
+        if (tests[test.id] && Array.isArray(test.span))
+            byFile.get(tests[test.id].file).push(test.span);
+    }
+    const serialFiles = [];
+    for (const [file, spans] of byFile) {
+        if (spans.length < 2) {
+            if (!fullyParallel)
+                serialFiles.push(file);
+            continue;
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        if (spans.every((span, at) => at === 0 || spans[at - 1][1] <= span[0]))
+            serialFiles.push(file);
+    }
+    return serialFiles.sort();
+}
+
+/** Whether the project runs a file's tests side by side: every project, or the config, says `fullyParallel`. */
+function fullyParallelOf(config) {
+    const projects = Array.isArray(config?.projects) && config.projects.length ? config.projects : [{}];
+    return projects.every((project) => project.fullyParallel ?? config?.fullyParallel ?? false);
 }
 
 /** A mutant's rows: one per file its tests are in, each with its tests there. */
@@ -129,7 +136,7 @@ function mutantRows(tests, entry) {
  * (a test that infected it, cheapest first): its other candidates run in a
  * later pass only if that one survives.
  */
-function buildRows(pass, root) {
+function buildRows(pass, root, config) {
     const plan = readJson(pass.planPath);
     const tests = {};
     plan.tests.forEach((test) => {
@@ -137,7 +144,7 @@ function buildRows(pass, root) {
             tests[test.id] = { file: test.file, durationMs: test.durationMs ?? null };
     });
     // `workers` set only where the pass runs one test at a time.
-    const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests) };
+    const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests, fullyParallelOf(config)) };
     if (pass.restart) {
         const job = readJson(pass.restart);
         const files = {};
@@ -267,7 +274,7 @@ export function strongConfig(normalized, root, reporterPath) {
     const pass = strongPass();
     let rows;
     if (process.env.TEST_WORKER_INDEX === undefined) {
-        rows = buildRows(pass, root);
+        rows = buildRows(pass, root, normalized);
         rmSync(pass.round, { recursive: true, force: true });
         writeJson(`${pass.round}/rows.json`, rows);
         rowsCache = rows;
@@ -403,7 +410,12 @@ export async function strongClaim(testInfo) {
     if (row.kind === "mutant") {
         const expectTimeout = testInfo.project?.expect?.timeout ?? 5_000;
         const actionTimeout = testInfo.project?.use?.actionTimeout ?? 0;
-        testInfo.setTimeout(Date.now() - started + row.budgetMs + expectTimeout + actionTimeout);
+        // Playwright itself ends the test at its configured timeout (the
+        // project's, or its own `test.slow()` / `describe.configure`), and an
+        // assertion may wait up to there with a timeout of its own: that is
+        // the floor.
+        const budget = Math.max(row.budgetMs + expectTimeout + actionTimeout, configured > 0 ? configured : 0);
+        testInfo.setTimeout(Date.now() - started + budget);
     }
     else if (configured > 0)
         testInfo.setTimeout(Date.now() - started + configured);

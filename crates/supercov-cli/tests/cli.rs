@@ -21586,7 +21586,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     project.write(
         "playwright.config.js",
         &format!(
-            "export default {{\n  testDir: \"tests\",\n  workers: 4,\n  reporter: \"line\",\n  expect: {{ timeout: 8000 }},\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/greeting\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
+            "export default {{\n  testDir: \"tests\",\n  workers: 4,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/greeting\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
             served.display().to_string()
         ),
     );
@@ -21596,7 +21596,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     );
     project.write(
         "tests/page.spec.js",
-        "import { test, expect } from \"@playwright/test\";\ntest(\"shouts\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#out\")).toHaveText(\"HI\");\n});\n",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"shouts\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#out\")).toHaveText(\"HI\", { timeout: 12000 });\n});\n",
     );
     project.git(&["init", "-q"]);
     project.commit("strong playwright");
@@ -21689,9 +21689,10 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     let route = strong("server/app.js", 9, ":EqualityOperator:!==");
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
-    // A page-side mutant, killed by the page: its assertion fails within
-    // the project's expect timeout (8 s), which the budget makes room for,
-    // so it is a kill, not a timeout.
+    // A page-side mutant, killed by the page: its assertion waits 12 s, its
+    // own timeout, longer than its measured time and the project's expect
+    // timeout allow (1.5 x under a second, + 5 s, + 5 s); the test's own
+    // timeout (30 s) is the floor, so it is a kill, not a timeout.
     let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
     assert_eq!(lower["status"], "killed", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
@@ -21760,6 +21761,93 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     });
     let _ = std::fs::remove_file(&served);
     assert!(shared, "{log}\n{context}");
+}
+
+/// A measured Playwright run's plan carries each test's span, from the
+/// fixture's record of the attempt (the reporter's record of the same
+/// attempt has none), and a file whose tests ran side by side in a
+/// `fullyParallel` project runs its strong attempts side by side too.
+#[cfg(unix)]
+#[test]
+fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-spans");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-spans", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { double } from \"../server/app.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  response.end(String(double(Number(url.searchParams.get(\"n\")))));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "server/app.js",
+        "export function double(n) {\n  return n * 2;\n}\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  fullyParallel: true,\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/?n=1\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // Each holds its worker a while: the two run at once.
+    project.write(
+        "tests/double.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (const n of [2, 3]) {\n  test(`doubles ${n}`, async ({ request }) => {\n    await new Promise((done) => setTimeout(done, 1500));\n    expect(await (await request.get(`/?n=${n}`)).text()).toBe(String(n * 2));\n  });\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("spans");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server")];
+    project
+        .supercov_with(&["--", "npx", "playwright", "test"], &roots)
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &roots,
+        )
+        .json();
+    let spans = plan["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|test| {
+            let span = &test["span"];
+            (
+                span[0]
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("no span: {plan}")),
+                span[1].as_i64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(spans.len(), 2, "{plan}");
+    assert!(
+        spans[0].0 < spans[1].1 && spans[1].0 < spans[0].1,
+        "the two tests ran at once: {spans:?}"
+    );
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let reply = ran.json();
+    let main = reply["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pass| pass["pass"] == "main")
+        .unwrap_or_else(|| panic!("no main pass\n{reply}\n{}", ran.stderr()))
+        .clone();
+    assert_eq!(main["serialFiles"], 0, "{main}\n{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
 }
 
 /// A test that passes only after an earlier test of its file ran: its file
@@ -21840,7 +21928,7 @@ fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|mutant| mutant["id"] == "src/poll.js:4:12-4:28:ConditionalExpression:true")
+        .find(|mutant| mutant["id"] == "src/poll.js:5:7-5:10:UpdateOperator:--")
         .unwrap_or_else(|| panic!("{listed}"));
     assert!(
         matches!(
