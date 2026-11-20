@@ -81,6 +81,27 @@ function warmUp(vitest) {
     vitest.__supercovWarm = true;
 }
 
+// SUPERCOV_STRONG_CPU_PROFILE=<file>: a CPU profile of this process -- the
+// one that schedules the copies and serves its workers' modules -- for the
+// whole pass, to see what holds the workers up.
+async function profileMainProcess() {
+    const path = process.env["SUPERCOV_STRONG_CPU_PROFILE"];
+    if (!path)
+        return async () => { };
+    const { Session } = await import("node:inspector");
+    const session = new Session();
+    session.connect();
+    const post = (method, params) => new Promise((resolve, reject) => session.post(method, params, (error, result) => error ? reject(error) : resolve(result)));
+    await post("Profiler.enable");
+    await post("Profiler.setSamplingInterval", { interval: 1000 });
+    await post("Profiler.start");
+    return async () => {
+        const { profile } = await post("Profiler.stop");
+        writeFileSync(path, JSON.stringify(profile));
+        session.disconnect();
+    };
+}
+
 export default class SupercovStrongReporter {
     constructor(configureProjects) {
         this.configureProjects = configureProjects;
@@ -94,7 +115,9 @@ export default class SupercovStrongReporter {
             return;
         const original = vitest.runFiles.bind(vitest);
         vitest.runFiles = async (specs) => {
+            const stopProfile = await profileMainProcess();
             const last = await drive(vitest, original, specs, JSON.parse(readFileSync(planPath, "utf8")), resultsPath);
+            await stopProfile();
             // A killed mutant fails its test, and that is the point: the
             // command's exit code is the pass's, not the rounds'.
             process.exitCode = 0;
