@@ -51,7 +51,7 @@ function pathComponent(value) {
   return safe || "unscoped";
 }
 function encodeCoverageScope(scope) {
-  return new URLSearchParams({
+  return new URLSearchParams(Object.assign({
     v: String(scope.version),
     r: scope.runId,
     w: scope.workerId,
@@ -59,7 +59,7 @@ function encodeCoverageScope(scope) {
     k: scope.testKey,
     a: String(scope.retry),
     i: scope.attemptId
-  }).toString();
+  }, scope.mutant ? { m: scope.mutant } : {})).toString();
 }
 function decodeCoverageScope(encoded) {
   if (!encoded)
@@ -72,9 +72,13 @@ function decodeCoverageScope(encoded) {
     const testKey = values.get("k");
     const attemptId = values.get("i");
     const retry = Number(values.get("a"));
-    if (values.get("v") !== "1" || !nonEmpty(runId) || !nonEmpty(workerId) || !nonEmpty(testId2) || !nonEmpty(testKey) || !safeKey(testKey) || !nonEmpty(attemptId) || !safeKey(attemptId) || !Number.isSafeInteger(retry) || retry < 0)
+    // A strong pass's attempt names its mutant (`file#index`, `-` for none).
+    const mutant = values.get("m");
+    if (values.get("v") !== "1" || !nonEmpty(runId) || !nonEmpty(workerId) || !nonEmpty(testId2) || !nonEmpty(testKey) || !safeKey(testKey) || !nonEmpty(attemptId) || !safeKey(attemptId) || !Number.isSafeInteger(retry) || retry < 0 || mutant !== null && parseMutant(mutant) === void 0)
       return void 0;
-    return {
+    if (mutant !== null)
+      enablePerRequestMutants();
+    return __spreadValues({
       version: 1,
       runId,
       workerId,
@@ -82,7 +86,7 @@ function decodeCoverageScope(encoded) {
       testKey,
       retry,
       attemptId
-    };
+    }, mutant !== null ? { mutant } : {});
   } catch (e) {
     return void 0;
   }
@@ -2637,16 +2641,140 @@ function strongState() {
   }
   return strong;
 }
+// `file#index`, or `-` for no mutant: what a strong pass's attempt names in
+// its scope, and what SUPERCOV_ACTIVE_MUTANT names for a whole process.
+const parsedMutants = /* @__PURE__ */ new Map();
+function parseMutant(text) {
+  if (typeof text !== "string")
+    return void 0;
+  let parsed = parsedMutants.get(text);
+  if (parsed !== void 0)
+    return parsed;
+  if (text === "-") {
+    parsed = { file: void 0, index: -1, key: text };
+  } else {
+    const at = text.lastIndexOf("#");
+    const index = Number(text.slice(at + 1));
+    if (at <= 0 || !/^\d+$/.test(text.slice(at + 1)) || !Number.isSafeInteger(index))
+      return void 0;
+    parsed = { file: text.slice(0, at), index, key: text };
+  }
+  parsedMutants.set(text, parsed);
+  return parsed;
+}
+// The mutant of the attempt whose request is being served: a strong pass of
+// browser tests gives each attempt its own mutant in its scope, which comes
+// with every request the attempt sends and stays with the request's work.
+// `undefined` outside any such attempt's work: the process's own mutant
+// applies there.
+function requestMutant(strong) {
+  for (const resolve of strong.resolvers) {
+    const scope = resolve();
+    if (scope !== void 0)
+      return parseMutant(scope.mutant);
+  }
+  return void 0;
+}
+function slotIndex(file) {
+  const strong = strongState();
+  if (strong.perRequest) {
+    const mutant = requestMutant(strong);
+    if (mutant !== void 0)
+      return mutant.file === file ? mutant.index : -1;
+  }
+  return strong.file === file ? strong.index : -1;
+}
+// Each switch reads the slot's `a`. Where requests carry their own mutants
+// it is read from the request being served, so one server runs several
+// attempts' mutants at once; everywhere else it is a plain value, as cheap
+// as a switch can be.
+function requestSlot(slot, file) {
+  Object.defineProperty(slot, "a", {
+    configurable: true,
+    enumerable: true,
+    get: () => slotIndex(file),
+    set: () => {
+    }
+  });
+  return slot;
+}
+function enablePerRequestMutants() {
+  if (isBrowser)
+    return;
+  const strong = strongState();
+  if (strong.resolvers === void 0)
+    strong.resolvers = /* @__PURE__ */ new Set();
+  strong.resolvers.add(requestScopeOfThisRuntime);
+  if (strong.perRequest)
+    return;
+  strong.perRequest = true;
+  strong.requestHits = /* @__PURE__ */ new Map();
+  for (const [file, slot] of strong.slots)
+    requestSlot(slot, file);
+}
+function requestScopeOfThisRuntime() {
+  const scope = currentRequestContext().scope;
+  return scope !== void 0 && scope.mutant !== void 0 ? scope : void 0;
+}
+// A mutant evaluated past the limit: a loop it made endless. The process
+// says so where the strong pass reads it (SUPERCOV_STRONG_RESULTS beside),
+// since the error may never reach a test.
+function noteMutantTimeout(file, index, attemptId) {
+  const strong = strongState();
+  try {
+    if (typeof strong.onTimeout === "function") {
+      strong.onTimeout(file, index, attemptId);
+      return;
+    }
+    if (isBrowser || typeof process === "undefined")
+      return;
+    const results = process.env["SUPERCOV_STRONG_RESULTS"];
+    const fs = results ? getFs() : void 0;
+    if (!fs)
+      return;
+    fs.appendFileSync(`${results}.timeouts.jsonl`, JSON.stringify({
+      mutant: `${file}#${index}`,
+      attemptId: attemptId != null ? attemptId : null,
+      pass: process.env["SUPERCOV_STRONG_RESTART"] || "main"
+    }) + "\n");
+  } catch (e) {
+  }
+}
 function strongHit() {
   const strong = strongState();
-  if (++strong.hits > strong.limit)
+  if (strong.perRequest) {
+    let attemptId;
+    for (const resolve of strong.resolvers) {
+      const scope = resolve();
+      if (scope !== void 0) {
+        attemptId = scope.attemptId;
+        break;
+      }
+    }
+    const mutant = attemptId !== void 0 ? requestMutant(strong) : void 0;
+    if (mutant !== void 0 && mutant.file !== void 0) {
+      const key = `${attemptId}\0${mutant.key}`;
+      const hits = (strong.requestHits.get(key) || 0) + 1;
+      strong.requestHits.set(key, hits);
+      if (hits > strong.limit) {
+        noteMutantTimeout(mutant.file, mutant.index, attemptId);
+        throw new MutantTimeoutError(mutant.file, mutant.index, hits);
+      }
+      return;
+    }
+  }
+  if (++strong.hits > strong.limit) {
+    noteMutantTimeout(strong.file, strong.index);
     throw new MutantTimeoutError(strong.file, strong.index, strong.hits);
+  }
 }
 function strongSlot(file) {
   const strong = strongState();
   let slot = strong.slots.get(file);
   if (slot === void 0) {
     slot = { a: strong.file === file ? strong.index : -1, h: strongHit };
+    if (strong.perRequest)
+      requestSlot(slot, file);
     strong.slots.set(file, slot);
   }
   return slot;
@@ -2672,6 +2800,22 @@ function setMutantHitLimit(limit) {
 function mutantHitCount() {
   return strongState().hits;
 }
+// A process a strong pass starts with a mutant switched on everywhere
+// (SUPERCOV_ACTIVE_MUTANT=<file>#<index>: a server whose module-level code
+// or background work the mutant changes), or a child started for one
+// attempt's work, whose context names the attempt's mutant.
+(function activateProcessMutant() {
+  if (isBrowser || typeof process === "undefined" || !process.env)
+    return;
+  try {
+    const named = parseMutant(process.env["SUPERCOV_ACTIVE_MUTANT"]);
+    const carried = named === void 0 ? environmentRequestContext() : void 0;
+    const mutant = named !== void 0 ? named : parseMutant(carried && carried.scope && carried.scope.mutant);
+    if (mutant !== void 0 && mutant.file !== void 0 && strongState().file !== mutant.file)
+      setActiveMutant(mutant.file, mutant.index);
+  } catch (e) {
+  }
+})();
 function isMutantTimeout(error) {
   return error instanceof MutantTimeoutError || error != null && error.code === "SUPERCOV_MUTANT_TIMEOUT";
 }

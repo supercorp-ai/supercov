@@ -61,6 +61,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "playwright.mjs",
     "playwrightCacheThread.mjs",
     "playwrightReporter.mjs",
+    "playwrightStrong.mjs",
+    "playwrightStrongReporter.mjs",
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
@@ -1731,7 +1733,13 @@ fn write_playwright_config(
            ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))\n\
            : [['list']];\n\
          const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.mjs');\n\
-         export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
+         // Strong mutation (`supercov runs <id> mutants test`): the plan runs as\n\
+         // repetitions of each test, each with its own mutant, and the strong\n\
+         // reporter turns their outcomes into verdicts.\n\
+         const supercovStrong = Boolean(process.env.SUPERCOV_STRONG_PLAN);\n\
+         export default supercovStrong\n\
+           ? (await import('./node_modules/playwrightStrong.mjs')).strongConfig(normalized, runtimeProjectRoot, resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightStrongReporter.mjs'))\n\
+           : {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
         // Relative to the copy, as it is seen from where the config runs: a
         // test runner `docker exec` starts in a container the copy is mounted
         // into sees it elsewhere, and found no tests in the host's path.
@@ -2291,9 +2299,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:468",
-            "javascript-source-path#javascript_frontend.rs:1879",
-            "javascript-source-path#javascript_frontend.rs:1809",
+            "javascript-source-path#javascript_frontend.rs:470",
+            "javascript-source-path#javascript_frontend.rs:1887",
+            "javascript-source-path#javascript_frontend.rs:1817",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2404,8 +2412,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:512",
-            "javascript-source-path#javascript_frontend.rs:468",
+            "fs.read_to_string#javascript_frontend.rs:514",
+            "javascript-source-path#javascript_frontend.rs:470",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

@@ -70,6 +70,23 @@ pub struct Candidate {
     pub reason: CandidateReason,
 }
 
+/// Why a mutant must be switched on in a whole server process, from its
+/// start, rather than for the requests of one test's attempt
+/// (`docs/design/strong-mutation.md`, browser tests against a server).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerWide {
+    /// Its code ran in a server's work no request named: start-up, timers,
+    /// work between tests.
+    Background,
+    /// Its code is a server module's top level, which runs once and keeps
+    /// what it made for every later request.
+    ModuleLevel,
+    /// Its code ran for a request that named no test, credited to a test by
+    /// the time it ran.
+    ByTime,
+}
+
 /// What the plan says of a mutant without running it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -106,6 +123,11 @@ pub struct PlannedMutant {
     /// Test files that must run whole for it (module-load candidates).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub whole_files: Vec<String>,
+    /// Set where a server process ran its code in a way a request's own
+    /// mutant cannot reach: such a mutant runs with the server started with
+    /// it switched on. Drivers that run no server ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_wide: Option<ServerWide>,
     /// How many tests ran its code: what a pass by coverage alone would run
     /// it against. The candidates are those of them that infected it.
     pub covering: usize,
@@ -242,6 +264,39 @@ fn could_infect(
     }
 }
 
+/// Whether a server process ran the mutant's code in this record in a way
+/// a request's own mutant cannot reach, and how.
+fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWide> {
+    let points = [&mutant.statement, &mutant.function]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut ran = raw.server.iter().filter(|record| {
+        record.record_type == "hit" && record.id.as_ref().is_some_and(|id| points.contains(&id))
+    });
+    let first = ran.next()?;
+    if !matches!(role_of(raw), "test" | "setup") {
+        // Work for a request that named no test and ran while none did (a
+        // web server's readiness check) ran without any mutant in the pass,
+        // as each request runs with its own; only work no request started
+        // (start-up, timers) needs the server started with the mutant.
+        if std::iter::once(first)
+            .chain(ran)
+            .any(|record| record.request.is_none())
+        {
+            return Some(ServerWide::Background);
+        }
+        return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
+    }
+    if mutant.function.is_none() {
+        return Some(ServerWide::ModuleLevel);
+    }
+    std::iter::once(first)
+        .chain(ran)
+        .any(|record| record.request.is_some())
+        .then_some(ServerWide::ByTime)
+}
+
 fn weak_name(status: Status) -> &'static str {
     match status {
         Status::NotReached => "not-reached",
@@ -299,7 +354,13 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             tests.len() - 1
         });
         runnable[index] &= passed(raw);
-        if let Some(ms) = raw.duration_ms {
+        // A runner that says no duration (Playwright) gives the attempt's
+        // first and last moment.
+        let measured = raw.duration_ms.or_else(|| {
+            raw.span
+                .and_then(|[start, end]| u64::try_from(end.saturating_sub(start)).ok())
+        });
+        if let Some(ms) = measured {
             let duration = &mut tests[index].duration_ms;
             *duration = Some(duration.map_or(ms, |seen| seen.max(ms)));
         }
@@ -372,6 +433,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 reason: None,
                 candidates: Vec::new(),
                 whole_files: Vec::new(),
+                server_wide: None,
                 covering: 0,
                 statement: mutant.statement.clone(),
                 function: mutant.function.clone(),
@@ -435,6 +497,9 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                             could_infect(mutant, own, &whole)
                         };
                         let Some(why) = why else { continue };
+                        if planned.server_wide.is_none() {
+                            planned.server_wide = server_wide(raw, mutant);
+                        }
                         match role_of(raw) {
                             "test" => {
                                 let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());

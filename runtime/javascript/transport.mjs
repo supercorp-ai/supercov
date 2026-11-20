@@ -75,6 +75,8 @@ export function encodeCoverageScope(scope) {
         k: scope.testKey,
         a: String(scope.retry),
         i: scope.attemptId,
+        // A strong pass's attempt names its mutant (`file#index`, `-` for none).
+        ...(scope.mutant ? { m: scope.mutant } : {}),
     }).toString();
 }
 export function decodeCoverageScope(encoded) {
@@ -88,7 +90,9 @@ export function decodeCoverageScope(encoded) {
         const testKey = values.get("k");
         const attemptId = values.get("i");
         const retry = Number(values.get("a"));
+        const mutant = values.get("m");
         if (values.get("v") !== "1" ||
+            (mutant !== null && !/^(?:-|.+#\d+)$/.test(mutant)) ||
             !nonEmpty(runId) ||
             !nonEmpty(workerId) ||
             !nonEmpty(testId) ||
@@ -107,6 +111,7 @@ export function decodeCoverageScope(encoded) {
             testKey,
             retry,
             attemptId,
+            ...(mutant !== null ? { mutant } : {}),
         };
     }
     catch {

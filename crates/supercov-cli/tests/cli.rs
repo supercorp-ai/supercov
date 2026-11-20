@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1198")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1201")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1198"),
+        seen.contains("test fault at fs (javascript_run.rs:1201"),
         "{seen}"
     );
 }
@@ -15641,7 +15641,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2617 => main.rs:2617",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2022 => javascript_frontend.rs:2022",
+            "fs.read_to_string#javascript_frontend.rs:2030 => javascript_frontend.rs:2030",
         ],
     );
 }
@@ -17208,15 +17208,15 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:758",
         "fs.write#javascript_run.rs:1075",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1146",
-        "fs.create_dir_all#javascript_run.rs:1328",
+        "fs.create_dir_all#javascript_run.rs:1149",
+        "fs.create_dir_all#javascript_run.rs:1339",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1603",
-        "fs.create_dir_all#javascript_run.rs:1605",
+        "fs.create_dir_all#javascript_run.rs:1614",
+        "fs.create_dir_all#javascript_run.rs:1616",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1705",
-        "fs.create_dir_all#javascript_run.rs:1707",
+        "fs.create_dir_all#javascript_run.rs:1716",
+        "fs.create_dir_all#javascript_run.rs:1718",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17382,19 +17382,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@37", "runtime.d.mts"),
-        ("fs.rename@38", "playwright.mjs"),
-        ("fs.rename@40", "playwright.config.mjs"),
-        ("fs.rename@41", "vitest.config.mjs"),
-        ("fs.rename@44", "vitestCommands.mjs"),
+        ("fs.rename@39", "runtime.d.mts"),
+        ("fs.rename@40", "playwright.mjs"),
+        ("fs.rename@42", "playwright.config.mjs"),
+        ("fs.rename@43", "vitest.config.mjs"),
+        ("fs.rename@46", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@46", "test/cart.test.js"),
-        ("fs.rename@47", "authored-sources.json"),
-        ("fs.rename@48", "statement-exclusions.json"),
-        ("fs.rename@49", "mutants.json"),
-        ("fs.rename@50", "manifest.json"),
-        ("fs.rename@51", "instrumentation-complete"),
-        ("fs.rename@52", "injected fault at fs"),
+        ("fs.rename@48", "test/cart.test.js"),
+        ("fs.rename@49", "authored-sources.json"),
+        ("fs.rename@50", "statement-exclusions.json"),
+        ("fs.rename@51", "mutants.json"),
+        ("fs.rename@52", "manifest.json"),
+        ("fs.rename@53", "instrumentation-complete"),
+        ("fs.rename@54", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17714,12 +17714,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:356",
-            "javascript_frontend.rs:356",
+            "fs.read#javascript_frontend.rs:358",
+            "javascript_frontend.rs:358",
         ),
         (
-            "fs.read#javascript_frontend.rs:368",
-            "javascript_frontend.rs:368",
+            "fs.read#javascript_frontend.rs:370",
+            "javascript_frontend.rs:370",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17749,12 +17749,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1811@2",
+            "fs.read_to_string#javascript_frontend.rs:1819@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1811"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1819"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -21519,4 +21519,177 @@ fn inline_snapshots_and_faked_clocks_measure_and_mutate_as_the_suite_runs() {
         .json();
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     assert!(reply["summary"]["killed"].as_u64().unwrap() >= 8, "{reply}");
+}
+
+/// `mutants test` over a Playwright run against a Node server: the workers
+/// of one Playwright invocation each test their own mutant against one
+/// server, the mutant carried with each attempt's requests and switched on
+/// in its pages; a mutant of the server's top level runs alone, with the
+/// server started with it switched on; canaries, repetitions with no
+/// mutant, pass.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // The server: its routes and files in support/, which is not measured,
+    // and the code under test in server/. It notes what it served, outside
+    // the project: its process, and the worker and mutant each request's
+    // attempt named.
+    let served = project.root.with_extension("served.jsonl");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\nimport { answer } from \"../server/app.js\";\nconst files = { \"/\": \"../public/index.html\", \"/page.js\": \"../public/page.js\" };\nhttp.createServer((request, response) => {\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  appendFileSync(process.env.SERVED_LOG, JSON.stringify({ pid: process.pid, worker: scope.get(\"w\"), mutant: scope.get(\"m\"), path: request.url }) + \"\\n\");\n  const url = new URL(request.url, \"http://local\");\n  try {\n    response.end(files[url.pathname] ? readFileSync(new URL(files[url.pathname], import.meta.url)) : answer(url));\n  } catch (error) {\n    response.statusCode = 500;\n    response.end(String(error));\n  }\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "server/app.js",
+        "const GREETING = \"hello\";\n\nexport function total(quantity) {\n  console.log(`served ${quantity}`);\n  return quantity >= 3 ? quantity * 9 : quantity * 10;\n}\n\nexport function answer(url) {\n  return url.pathname === \"/greeting\" ? GREETING : String(total(Number(url.searchParams.get(\"q\"))));\n}\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><p id=\"out\"></p><script src=\"/page.js\"></script>\n",
+    );
+    project.write(
+        "public/page.js",
+        "function shout(text) {\n  return text.toUpperCase();\n}\ndocument.getElementById(\"out\").textContent = shout(\"hi\");\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/greeting\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\", SERVED_LOG: {:?} }} }},\n}};\n",
+            served.display().to_string()
+        ),
+    );
+    project.write(
+        "tests/api.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"totals\", async ({ request }) => {\n  expect(await (await request.get(\"/total?q=5\")).text()).toBe(\"45\");\n  expect(await (await request.get(\"/total?q=1\")).text()).toBe(\"10\");\n});\ntest(\"greets\", async ({ request }) => {\n  expect(await (await request.get(\"/greeting\")).text()).toBe(\"hello\");\n});\n",
+    );
+    project.write(
+        "tests/page.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"shouts\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#out\")).toHaveText(\"HI\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "server,public")];
+    project
+        .supercov_with(&["--", "npx", "playwright", "test"], &roots)
+        .succeeds();
+    let _ = std::fs::remove_file(&served);
+    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let shown = mutants
+        .iter()
+        .map(|mutant| format!("{} {} {}", mutant["id"], mutant["status"], mutant["strong"]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = format!("{reply}\n{shown}\n{said}");
+    // The one mutant on a line, by its file, line, mutator and descriptor.
+    let strong = |file: &str, line: u32, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("{file}:{line}:")) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{file}:{line} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    assert_eq!(reply["summary"]["error"], 0, "{context}");
+    // A server-side mutant, killed by its own requests.
+    let always = strong("server/app.js", 5, ":ConditionalExpression:true");
+    assert_eq!(always["status"], "killed", "{context}");
+    assert!(always["reason"].is_null(), "{context}");
+    // A page-side mutant, killed by the page.
+    let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
+    assert_eq!(lower["status"], "killed", "{context}");
+    assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
+    // Run, and no test tells: the log line.
+    let logged = strong("server/app.js", 4, ":StringLiteral:empty");
+    assert_eq!(logged["status"], "survived", "{context}");
+    assert!(logged["tests"].as_u64() > Some(0), "{context}");
+    // No request gives `total` 3: decided without running.
+    let boundary = strong("server/app.js", 5, ":EqualityOperator:>");
+    assert_eq!(boundary["status"], "survived", "{context}");
+    assert_eq!(boundary["tests"], 0, "{context}");
+    // The server's top level: run alone, the server started with it.
+    let greeting = strong("server/app.js", 1, ":StringLiteral:empty");
+    assert_eq!(greeting["status"], "killed", "{context}");
+    assert!(
+        greeting["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("ran alone")),
+        "{context}"
+    );
+    // Canaries ran, and none failed.
+    let main = reply["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pass| pass["pass"] == "main")
+        .unwrap_or_else(|| panic!("no main pass\n{context}"))
+        .clone();
+    assert!(
+        main["canaries"]["ran"].as_u64() > Some(0),
+        "{main}\n{context}"
+    );
+    assert_eq!(
+        main["canaries"]["failed"],
+        serde_json::json!([]),
+        "{context}"
+    );
+    // One server process served two workers' attempts, each with a mutant
+    // of its own.
+    let log = std::fs::read_to_string(&served).unwrap_or_default();
+    let requests = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|request| {
+            request["mutant"]
+                .as_str()
+                .is_some_and(|mutant| mutant != "-")
+        })
+        .collect::<Vec<_>>();
+    let shared = requests.iter().any(|one| {
+        requests.iter().any(|other| {
+            one["pid"] == other["pid"]
+                && one["worker"] != other["worker"]
+                && one["mutant"] != other["mutant"]
+        })
+    });
+    let _ = std::fs::remove_file(&served);
+    assert!(shared, "{log}\n{context}");
 }

@@ -20,6 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
+import { PAGE_TIMEOUT_MARKER, activatePageMutant, strongClaim, strongFinish } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -557,6 +558,13 @@ class CoveragePhaseController {
         page.on("worker", (worker) => {
             void this.registerWorker(worker);
         });
+        // A strong pass's page whose mutant ran past its hit limit says so.
+        if (this.scope.mutant && this.scope.mutant !== "-") {
+            page.on("console", (message) => {
+                if (message.text().includes(PAGE_TIMEOUT_MARKER))
+                    this.mutantRanAway = true;
+            });
+        }
         for (const worker of page.workers())
             void this.registerWorker(worker);
     }
@@ -593,6 +601,15 @@ class CoveragePhaseController {
         // removed once this one is in place, so a document runs one copy:
         // they accumulated to some fifty per context on a long suite, each
         // sent to every new page and frame and run by every document.
+        // A strong pass's attempt: its mutant on in every document, before
+        // the page's own scripts.
+        const mutant = this.scope.mutant;
+        if (mutant) {
+            const at = mutant.lastIndexOf("#");
+            parts.push(`(${activatePageMutant})(${JSON.stringify(mutant === "-"
+                ? { file: null, index: -1, marker: PAGE_TIMEOUT_MARKER }
+                : { file: mutant.slice(0, at), index: Number(mutant.slice(at + 1)), marker: PAGE_TIMEOUT_MARKER })});`);
+        }
         parts.push(`(${announceAttempt})(${JSON.stringify({
             attemptId: this.scope.attemptId,
             scopeHeader: COVERAGE_SCOPE_HEADER,
@@ -1735,8 +1752,13 @@ function executionScope(testInfo) {
         testKey,
         retry: testInfo.retry,
         attemptId,
+        // A strong pass's attempt names its mutant; the scope carries it to
+        // the app's server with every request.
+        ...(strongMutants.has(testInfo) ? { mutant: strongMutants.get(testInfo) } : {}),
     };
 }
+// Each strong attempt's mutant (`file#index`, `-` for none), by its TestInfo.
+const strongMutants = new WeakMap();
 function phaseSourceLine(source) {
     return source?.replace(/:\d+$/, "");
 }
@@ -1834,6 +1856,12 @@ const instrumentedFixtures = {
     },
     mcdcAutoCollect: [
         async ({}, use, testInfo) => {
+            // A strong pass: what this repetition runs, or a skip.
+            const strong = await strongClaim(testInfo);
+            if (strong === null)
+                testInfo.skip(true, "Supercov strong mutation: nothing for this repetition");
+            if (strong)
+                strongMutants.set(testInfo, strong.mutant);
             const scope = executionScope(testInfo);
             const configuredHeaders = Object.fromEntries(Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(([name, value]) => [name, String(value)]));
             const setupStarted = performance.now();
@@ -1911,6 +1939,7 @@ const instrumentedFixtures = {
                     appendEvidenceLine(`${JSON.stringify(payload)}\n`);
                 }
                 finally {
+                    strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true });
                     await timed("controller.dispose", () => controller.dispose());
                     timingCount("fixture.testTeardown", performance.now() - teardownStarted);
                     timingReport(testInfo.title);

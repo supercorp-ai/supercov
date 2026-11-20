@@ -615,8 +615,12 @@ fn credit_by_time(
                 raw.server.push(record);
             }
             None => {
+                // Which request it was is left out, so a request's work is
+                // counted once; that it was a request's is kept (`Some(0)`):
+                // strong mutation switches a request's mutant per request,
+                // and start-up work only by starting the server with it.
                 let mut record = record;
-                record.request = None;
+                record.request = record.request.map(|_| 0);
                 if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
                     unattributed.push(record);
                 }
