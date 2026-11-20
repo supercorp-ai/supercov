@@ -73,8 +73,69 @@ function budgetOf(durations, factor = 1) {
 }
 
 /**
+ * How the measured run ran its tests side by side, from their spans: the
+ * most it ran at once (the strong pass runs no more workers), and the files
+ * whose tests never overlapped (a project that runs a file's tests one at a
+ * time, perhaps because they share a server's state: the strong pass runs
+ * that file's repetitions one at a time too).
+ */
+function measuredConcurrency(plan, tests) {
+    const spans = plan.tests.filter((test) => tests[test.id] && Array.isArray(test.span));
+    const events = spans.flatMap((test) => [[test.span[0], 1], [test.span[1], -1]]);
+    // An end before a start at the same moment: touching is not overlapping.
+    events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let running = 0;
+    let most = 0;
+    for (const [, step] of events) {
+        running += step;
+        most = Math.max(most, running);
+    }
+    const byFile = new Map();
+    for (const test of spans) {
+        const file = tests[test.id].file;
+        if (!byFile.has(file))
+            byFile.set(file, []);
+        byFile.get(file).push(test.span);
+    }
+    const serialFiles = [];
+    for (const [file, fileSpans] of byFile) {
+        fileSpans.sort((a, b) => a[0] - b[0]);
+        if (fileSpans.every((span, at) => at === 0 || fileSpans[at - 1][1] <= span[0]))
+            serialFiles.push(file);
+    }
+    // Files the measured run gave no span to are not known to run in
+    // parallel: one at a time.
+    for (const { file } of Object.values(tests)) {
+        if (!byFile.has(file) && !serialFiles.includes(file))
+            serialFiles.push(file);
+    }
+    return { workers: Math.max(1, most), serialFiles: serialFiles.sort() };
+}
+
+/** A mutant's rows: one per file its tests are in, each with its tests there. */
+function mutantRows(tests, entry) {
+    const grouped = new Map();
+    for (const id of entry.tests) {
+        const file = tests[id].file;
+        if (!grouped.has(file))
+            grouped.set(file, []);
+        grouped.get(file).push(id);
+    }
+    return [...grouped].map(([file, ids]) => [file, {
+        kind: "mutant",
+        id: entry.id,
+        mutant: entry.mutant,
+        tests: ids,
+        budgetMs: budgetOf(ids.map((id) => tests[id].durationMs), entry.budgetFactor ?? 1),
+    }]);
+}
+
+/**
  * The pass's rows: for each test file, what each repetition of its tests
- * does. Worked out once, in the runner, from the plan (or the restart job).
+ * does. Worked out once, in the runner, from the plan (or the job the pass
+ * runs). The main pass runs each mutant against its likeliest killer alone
+ * (a test that infected it, cheapest first): its other candidates run in a
+ * later pass only if that one survives.
  */
 function buildRows(pass, root) {
     const plan = readJson(pass.planPath);
@@ -83,19 +144,22 @@ function buildRows(pass, root) {
         if (test.runner === "playwright" && test.file)
             tests[test.id] = { file: test.file, durationMs: test.durationMs ?? null };
     });
+    const concurrency = measuredConcurrency(plan, tests);
     if (pass.restart) {
         const job = readJson(pass.restart);
         const files = {};
-        for (const id of job.tests) {
-            const test = tests[id];
-            if (!test)
-                continue;
-            files[test.file] ??= [{ kind: "mutant", id: job.id, mutant: job.mutant, tests: [], budgetMs: 0 }];
-            files[test.file][0].tests.push(id);
+        const entries = {};
+        for (const entry of job.mutants) {
+            const known = { ...entry, tests: entry.tests.filter((id) => tests[id]) };
+            entries[entry.id] = known;
+            for (const [file, row] of mutantRows(tests, known))
+                (files[file] ??= []).push(row);
         }
-        for (const [, [row]] of Object.entries(files))
-            row.budgetMs = budgetOf(row.tests.map((id) => tests[id].durationMs), job.budgetFactor ?? 1);
-        return { pass: pass.name, job, tests, files, immediate: [], restarts: [], otherRunners: {} };
+        // A serial pass runs one test at a time: what it kills, nothing
+        // beside it did.
+        if (job.kind === "serial")
+            concurrency.workers = 1;
+        return { pass: pass.name, kind: job.kind, job, tests, files, entries, concurrency, immediate: [], restarts: [], otherRunners: job.otherRunners ?? {} };
     }
 
     // The copy's own list: the mutant at each index must be the run's, and
@@ -116,7 +180,7 @@ function buildRows(pass, root) {
     const immediate = [];
     const restarts = [];
     const otherRunners = {};
-    // Each file's mutants, in the plan's order, with their candidates there.
+    const entries = {};
     const byFile = new Map();
     const baseline = new Map();
     const needBaseline = (file, id) => {
@@ -138,12 +202,14 @@ function buildRows(pass, root) {
             });
             continue;
         }
+        // Its candidates, cheapest first (the plan's order), those whose own
+        // evidence shows it infected first of all.
         const own = [];
         const others = new Set();
         for (const candidate of mutant.candidates) {
             const test = plan.tests[candidate.test];
             if (test && tests[test.id])
-                own.push(test.id);
+                own.push({ id: test.id, infected: candidate.reason === "infected" });
             else if (test)
                 others.add(test.runner);
         }
@@ -155,30 +221,20 @@ function buildRows(pass, root) {
                 : { id: mutant.id, status: "survived", reason: "no-runnable-candidate", tests: 0, durationMs: 0 });
             continue;
         }
+        const ordered = [...own.filter((test) => test.infected), ...own.filter((test) => !test.infected)].map((test) => test.id);
         const switched = `${mutant.file}#${found.index}`;
-        for (const id of own)
+        for (const id of ordered)
             needBaseline(tests[id].file, id);
         if (mutant.serverWide) {
-            restarts.push({ id: mutant.id, mutant: switched, tests: own, reason: mutant.serverWide, budgetFactor: 1 });
+            restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide, budgetFactor: 1 });
             continue;
         }
-        const grouped = new Map();
-        for (const id of own) {
-            const file = tests[id].file;
-            if (!grouped.has(file))
-                grouped.set(file, []);
-            grouped.get(file).push(id);
-        }
-        for (const [file, ids] of grouped) {
+        const entry = { id: mutant.id, mutant: switched, tests: [ordered[0]], rest: ordered.slice(1), budgetFactor: 1 };
+        entries[mutant.id] = entry;
+        for (const [file, row] of mutantRows(tests, entry)) {
             if (!byFile.has(file))
                 byFile.set(file, []);
-            byFile.get(file).push({
-                kind: "mutant",
-                id: mutant.id,
-                mutant: switched,
-                tests: ids,
-                budgetMs: budgetOf(ids.map((id) => tests[id].durationMs)),
-            });
+            byFile.get(file).push(row);
         }
     }
     const files = {};
@@ -198,7 +254,7 @@ function buildRows(pass, root) {
             rows.splice(1 + Math.floor(mutated.length / 2), 0, canary());
         rows.push(canary());
     }
-    return { pass: pass.name, tests, files, immediate, restarts, otherRunners };
+    return { pass: pass.name, kind: "main", job: null, tests, files, entries, concurrency, immediate, restarts, otherRunners };
 }
 
 /** The rows of this pass: built and written by the runner, read elsewhere. */
@@ -211,7 +267,8 @@ export function loadRows(pass) {
 /**
  * The generated config in strong mode: every test repeated once per row,
  * no retries (a retry would be a repetition of its own), no failure limit
- * (a killed mutant fails a test), and the strong reporter alone.
+ * (a killed mutant fails a test), no more workers than the measured run ran
+ * tests at once, and the strong reporter alone.
  */
 export function strongConfig(normalized, root, reporterPath) {
     const pass = strongPass();
@@ -227,12 +284,14 @@ export function strongConfig(normalized, root, reporterPath) {
     }
     const repeatEach = Math.max(1, ...Object.values(rows.files).map((fileRows) => fileRows.length));
     const strongProject = (project) => ({ ...project, repeatEach, retries: 0 });
+    const configured = typeof normalized.workers === "number" ? normalized.workers : Infinity;
     return {
         ...normalized,
         ...(Array.isArray(normalized.projects) ? { projects: normalized.projects.map(strongProject) } : {}),
         repeatEach,
         retries: 0,
         maxFailures: 0,
+        workers: Math.max(1, Math.min(configured, rows.concurrency.workers)),
         // The strong reporter alone: `mutants test --json` owns stdout.
         reporter: [[reporterPath]],
     };
@@ -265,11 +324,53 @@ async function originalTestId(pass, testInfo) {
     return undefined;
 }
 
+function alive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (error) {
+        return error?.code === "EPERM";
+    }
+}
+
+/**
+ * One test of `file` at a time, across the pass's workers: the file's lock,
+ * a directory, held by this worker's process until the test ends. A lock
+ * whose holder died is taken over.
+ */
+async function lockFile(pass, file) {
+    const lock = `${pass.round}/locks/${key(file)}`;
+    mkdirSync(`${pass.round}/locks`, { recursive: true });
+    for (;;) {
+        try {
+            mkdirSync(lock);
+            writeFileSync(`${lock}/owner`, String(process.pid));
+            return lock;
+        }
+        catch (error) {
+            if (error?.code !== "EEXIST")
+                throw error;
+        }
+        let owner;
+        try {
+            owner = Number(readFileSync(`${lock}/owner`, "utf8"));
+        }
+        catch {
+            owner = undefined;
+        }
+        if (owner && owner !== process.pid && !alive(owner))
+            rmSync(lock, { recursive: true, force: true });
+        await sleep(POLL_MS);
+    }
+}
+
 /**
  * What this repetition of a test does: `undefined` outside strong mode,
  * `null` to skip, else the mutant (`file#index`, `-` for none) and its time
  * budget. A row after the baseline waits for the test's own baseline: a test
- * that fails with no mutant cannot tell one.
+ * that fails with no mutant cannot tell one. A file whose tests the measured
+ * run never ran side by side runs one at a time here too.
  */
 export async function strongClaim(testInfo) {
     const pass = strongPass();
@@ -283,26 +384,38 @@ export async function strongClaim(testInfo) {
     if (!row || !row.tests.includes(original))
         return null;
     const configured = testInfo.timeout;
+    // Waiting is not the test's time.
+    testInfo.setTimeout(0);
     if (row.kind !== "baseline" && !rows.job) {
-        // Waiting is not the test's time.
-        testInfo.setTimeout(0);
         const deadline = Date.now() + Math.max(120_000, budgetOf([test.durationMs]) * 4);
         while (baselineOf(pass, original) === undefined && Date.now() < deadline)
             await sleep(POLL_MS);
         if (baselineOf(pass, original) !== "passed")
             return null;
     }
-    if (row.kind === "mutant" && existsSync(`${pass.round}/killed/${key(row.id)}`))
+    const killed = () => row.kind === "mutant" && existsSync(`${pass.round}/killed/${key(row.id)}`);
+    if (killed())
         return null;
+    const lock = rows.concurrency.workers > 1 && rows.concurrency.serialFiles.includes(test.file)
+        ? await lockFile(pass, test.file)
+        : undefined;
+    if (killed()) {
+        if (lock)
+            rmSync(lock, { recursive: true, force: true });
+        return null;
+    }
     // The test's time from here: a mutant's from the test's measured
-    // duration, a canary's as configured.
-    if (row.kind === "mutant")
-        testInfo.setTimeout(Date.now() - started + row.budgetMs);
+    // duration and the time Playwright gives an assertion and an action to
+    // fail in (a failing `expect` waits for its own timeout), a canary's as
+    // configured.
+    if (row.kind === "mutant") {
+        const expectTimeout = testInfo.project?.expect?.timeout ?? 5_000;
+        const actionTimeout = testInfo.project?.use?.actionTimeout ?? 0;
+        testInfo.setTimeout(Date.now() - started + row.budgetMs + expectTimeout + actionTimeout);
+    }
     else if (configured > 0)
         testInfo.setTimeout(Date.now() - started + configured);
-    else
-        testInfo.setTimeout(0);
-    const claimed = { original, kind: row.kind, id: row.id, mutant: row.mutant ?? "-", startedAt: Date.now() };
+    const claimed = { original, kind: row.kind, id: row.id, mutant: row.mutant ?? "-", startedAt: Date.now(), lock };
     writeJson(`${pass.round}/attempts/${key(testInfo.testId)}.json`, claimed);
     return claimed;
 }
@@ -313,6 +426,8 @@ export function strongFinish(testInfo, claimed, details) {
     if (!pass || !claimed)
         return;
     writeJson(`${pass.round}/attempts/${key(testInfo.testId)}.json`, { ...claimed, ...details, endedAt: Date.now() });
+    if (claimed.lock)
+        rmSync(claimed.lock, { recursive: true, force: true });
 }
 
 /**
