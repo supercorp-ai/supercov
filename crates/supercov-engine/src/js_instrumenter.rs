@@ -5,11 +5,8 @@
 //! fallback. It remains private until its generated runtime import, evidence
 //! transport, and attribution behavior are defined by Supercov's frozen contracts.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-    sync::Arc,
-};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::{path::Path, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use oxc_allocator::{Allocator, CloneIn, TakeIn};
@@ -890,7 +887,7 @@ fn restore_function_source(
         })
         .collect::<Vec<_>>();
     printed_from.sort_unstable();
-    let mut used = HashSet::new();
+    let mut used = HashSet::default();
     // (generated start, generated end, source start, source end)
     let mut edits = Vec::<(usize, usize, usize, usize)>::new();
     // The output holds the functions whose source is read.
@@ -1637,8 +1634,8 @@ impl<'a> Visit<'a> for CapabilityCallCollector<'_> {
 fn capability_import_roots(program: &Program<'_>, source: &str) -> HashSet<String> {
     let mut collector = CapabilityCallCollector {
         source,
-        mapping_variables: HashSet::new(),
-        roots: HashSet::new(),
+        mapping_variables: HashSet::default(),
+        roots: HashSet::default(),
     };
     // Mapping variables must be known before calls are inspected because a
     // declaration may appear after a function that closes over it.
@@ -2915,7 +2912,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             file,
             bindings: &bindings,
             scoping: semantic.scoping(),
-            sites: HashMap::new(),
+            sites: HashMap::default(),
         };
         collector.visit_program(&parsed.program);
         assertions = collector.sites.len();
@@ -3626,9 +3623,9 @@ fn collect_points<'a>(
             file,
             pass,
             points: Vec::new(),
-            statement_targets: HashMap::new(),
-            function_targets: HashMap::new(),
-            rendered_targets: HashMap::new(),
+            statement_targets: HashMap::default(),
+            function_targets: HashMap::default(),
+            rendered_targets: HashMap::default(),
             source_sensitive_functions,
             erased_imports,
             unsafe_function_depth: 0,
@@ -3652,9 +3649,9 @@ impl<'s> SafetyScanner<'s> {
             source,
             file,
             scoping,
-            source_reads: HashSet::new(),
-            source_read_properties: HashSet::new(),
-            source_sensitive_functions: HashSet::new(),
+            source_reads: HashSet::default(),
+            source_read_properties: HashSet::default(),
+            source_sensitive_functions: HashSet::default(),
             function_limitations: Vec::new(),
             with_limitations: Vec::new(),
             dynamic_limitations: Vec::new(),
@@ -3827,8 +3824,8 @@ fn analyze_safety<'a>(
         .into_scoping();
     let mut reads = SourceReads {
         scoping: &scoping,
-        symbols: HashSet::new(),
-        properties: HashSet::new(),
+        symbols: HashSet::default(),
+        properties: HashSet::default(),
     };
     reads.visit_program(program);
     let mut scanner = SafetyScanner::new(source, file, &scoping);
@@ -4005,7 +4002,7 @@ thread_local! {
     pub(crate) static STRONG_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// In this crate's tests, on the thread that sets it: the files a strong
     /// pass switches.
-    pub(crate) static STRONG_FILES_FOR_TEST: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static STRONG_FILES_FOR_TEST: std::cell::RefCell<Option<std::collections::HashSet<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The probe and strong switches, for the frontend cache key:
@@ -4023,20 +4020,20 @@ pub(crate) fn probe_options() -> (bool, bool, Option<Vec<String>>) {
 
 /// The files a strong pass writes switches into, set by the engine for
 /// this process: `None` inside when unset (the environment decides).
-static STRONG_FILES: std::sync::Mutex<Option<std::sync::Arc<HashSet<String>>>> =
+static STRONG_FILES: std::sync::Mutex<Option<std::sync::Arc<std::collections::HashSet<String>>>> =
     std::sync::Mutex::new(None);
 
 /// The files the strong pass has mutants to run in, by their paths from
 /// the project root; every other file is left as written. `None` switches
 /// every file. A process that instruments on its own reads them from the
 /// JSON list `SUPERCOV_STRONG_FILES` names.
-pub fn set_strong_files(files: Option<HashSet<String>>) {
+pub fn set_strong_files(files: Option<std::collections::HashSet<String>>) {
     *STRONG_FILES
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = files.map(std::sync::Arc::new);
 }
 
-fn strong_files() -> Option<std::sync::Arc<HashSet<String>>> {
+fn strong_files() -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
     #[cfg(test)]
     if let Some(files) = STRONG_FILES_FOR_TEST.with(|files| files.borrow().clone()) {
         return Some(std::sync::Arc::new(files));
@@ -4048,7 +4045,7 @@ fn strong_files() -> Option<std::sync::Arc<HashSet<String>>> {
     {
         return Some(files);
     }
-    static READ: std::sync::OnceLock<Option<std::sync::Arc<HashSet<String>>>> =
+    static READ: std::sync::OnceLock<Option<std::sync::Arc<std::collections::HashSet<String>>>> =
         std::sync::OnceLock::new();
     READ.get_or_init(|| {
         let path = std::env::var_os("SUPERCOV_STRONG_FILES")?;
@@ -5514,11 +5511,11 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         source,
         file,
         decisions: Vec::new(),
-        decision_logical_nodes: HashSet::new(),
+        decision_logical_nodes: HashSet::default(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        value_decisions: HashMap::new(),
+        value_decisions: HashMap::default(),
         logical_root: None,
-        value_logical_nodes: HashSet::new(),
+        value_logical_nodes: HashSet::default(),
     };
     collector.visit_program(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
@@ -5774,11 +5771,11 @@ fn instrument_candidate_with_binding(
         source,
         file,
         decisions: Vec::new(),
-        decision_logical_nodes: HashSet::new(),
+        decision_logical_nodes: HashSet::default(),
         source_sensitive_functions: &safety.source_sensitive_functions,
-        value_decisions: HashMap::new(),
+        value_decisions: HashMap::default(),
         logical_root: None,
-        value_logical_nodes: HashSet::new(),
+        value_logical_nodes: HashSet::default(),
     };
     collector.visit_program(&parsed.program);
     let mut equality_values = EqualityValueSites::default();
@@ -6106,7 +6103,7 @@ fn instrument_candidate_with_binding(
         parameter_targets: default_analysis.parameter_targets,
         binding_targets: default_analysis.binding_targets,
         function_entries: Vec::new(),
-        declaration_entries: HashMap::new(),
+        declaration_entries: HashMap::default(),
         active_declaration: Vec::new(),
         parameter_pattern_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
@@ -6128,7 +6125,7 @@ fn instrument_candidate_with_binding(
         ast,
         decisions: &collector.decisions,
         value_decisions: &collector.value_decisions,
-        pending_values: HashMap::new(),
+        pending_values: HashMap::default(),
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
@@ -9581,7 +9578,7 @@ impl<'s> CandidateNames<'s> {
         Self {
             source,
             underscored,
-            allocated: HashSet::new(),
+            allocated: HashSet::default(),
             suffix: 0,
             namespace: namespace.to_owned(),
         }
@@ -9593,7 +9590,7 @@ impl<'s> CandidateNames<'s> {
         Self {
             source: self.source,
             underscored: self.underscored.clone(),
-            allocated: HashSet::new(),
+            allocated: HashSet::default(),
             suffix: 0,
             namespace: self.namespace.clone(),
         }
@@ -16759,7 +16756,7 @@ export function shapes(n: number): unknown {
         let program = Parser::new(&allocator, source, SourceType::mjs())
             .parse()
             .program;
-        let sensitive = HashSet::from([(0, 26)]);
+        let sensitive = HashSet::from_iter([(0, 26)]);
         let put_back = |generated: &str, tokens: &[(u32, u32, u32, u32, Option<u32>)]| {
             restore_function_source(&program, &sensitive, generated, source_map(tokens))
                 .map(|(code, _)| code)

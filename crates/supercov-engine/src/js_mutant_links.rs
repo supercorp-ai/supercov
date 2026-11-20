@@ -15,7 +15,8 @@
 //! `js_weak_mutation` turns these links and a run's observations into one
 //! status per mutant.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, BinaryExpression, CallExpression,
@@ -860,8 +861,8 @@ pub(crate) fn link(
     let statements = Nested::new(spanned("statement"));
     let functions = Nested::new(spanned("function"));
 
-    let mut whole_decisions = HashMap::<SpanKey, &str>::new();
-    let mut decision_nodes = HashMap::<SpanKey, (&str, usize, usize, bool)>::new();
+    let mut whole_decisions = HashMap::<SpanKey, &str>::default();
+    let mut decision_nodes = HashMap::<SpanKey, (&str, usize, usize, bool)>::default();
     for decision in evidence.decisions {
         let Some(span) = lines.span(decision.line, decision.column, &decision.source) else {
             continue;
@@ -877,9 +878,9 @@ pub(crate) fn link(
         }
     }
 
-    let mut selections = HashMap::<SpanKey, (&str, BranchRole, &str)>::new();
-    let mut operands = HashMap::<SpanKey, (&str, BranchRole, &str)>::new();
-    let mut chains = HashMap::<SpanKey, &str>::new();
+    let mut selections = HashMap::<SpanKey, (&str, BranchRole, &str)>::default();
+    let mut operands = HashMap::<SpanKey, (&str, BranchRole, &str)>::default();
+    let mut chains = HashMap::<SpanKey, &str>::default();
     for branch in evidence.branches {
         let Some(span) = lines.span(branch.line, branch.column, &branch.source) else {
             continue;
@@ -907,7 +908,7 @@ pub(crate) fn link(
     }
 
     // A site two different comparisons share decides neither.
-    let mut compared = HashMap::<&str, HashSet<SpanKey>>::new();
+    let mut compared = HashMap::<&str, HashSet<SpanKey>>::default();
     for (span, site) in evidence.comparisons {
         compared.entry(site).or_default().insert(key(*span));
     }

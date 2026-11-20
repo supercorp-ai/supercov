@@ -40,7 +40,7 @@
 //! The same grammar is implemented in JavaScript in the parity script; keep
 //! the two in step.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
@@ -736,7 +736,7 @@ impl<'s, 'a> Enumerator<'s, 'a> {
             skipped: 0,
             in_type: 0,
             statements: Vec::new(),
-            chain_calls: HashSet::new(),
+            chain_calls: HashSet::default(),
         }
     }
 

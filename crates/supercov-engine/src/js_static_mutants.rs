@@ -9,7 +9,7 @@
 //! status. `docs/design/mutants.md` lists each rule and why it is sound, and
 //! the rules considered and left out.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::{

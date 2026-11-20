@@ -50,7 +50,7 @@
 //! while the module loads: no function, and no instance field's
 //! initializer, is around it.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use oxc_allocator::{Address, Allocator, CloneIn, GetAddress, TakeIn};
 use oxc_ast::{
@@ -751,7 +751,7 @@ fn plans<'a>(
     let static_exports = next_static_exports(file);
     let mut slots = Slots::default();
     slots.visit_program(program);
-    let mut pending = HashMap::<(u32, u32), Vec<usize>>::new();
+    let mut pending = HashMap::<(u32, u32), Vec<usize>>::default();
     for (index, mutant) in mutants.iter().enumerate() {
         pending
             .entry((mutant.span.start, mutant.span.end))
@@ -1210,7 +1210,7 @@ fn replacements<'a>(
     program: &oxc_ast::ast::Program<'a>,
     mutants: &[LedgerMutant],
 ) -> Vec<Option<Replacement<'a>>> {
-    let mut pending = HashMap::<(u32, u32), Vec<usize>>::new();
+    let mut pending = HashMap::<(u32, u32), Vec<usize>>::default();
     for (index, mutant) in mutants.iter().enumerate() {
         pending
             .entry((mutant.span.start, mutant.span.end))
@@ -1771,7 +1771,7 @@ pub(crate) fn place<'a>(
     kept: &HashSet<(u32, u32)>,
 ) -> Vec<StrongMutant> {
     let plans = plans(program, program.source_text, file, mutants, kept);
-    let mut places = HashMap::<PlaceKey, Vec<usize>>::new();
+    let mut places = HashMap::<PlaceKey, Vec<usize>>::default();
     for (index, plan) in plans.iter().enumerate() {
         if let Ok(placement) = &plan.placement {
             places.entry(placement.key).or_default().push(index);
