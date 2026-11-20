@@ -24,6 +24,7 @@ npx supercov --help
 | See what one test is judged to catch | `npx supercov runs latest assertions --test <name>` |
 | List what is asserted on a weak answer | `npx supercov runs latest assertions --weak` |
 | See how far the tests got toward killing each mutant | `npx supercov runs latest mutants` |
+| Run the tests against the mutants they infected | `npx supercov runs latest mutants test` |
 | Read matching current source code | `npx supercov runs latest source <path>` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Open an interactive report | `npx supercov report` |
@@ -427,6 +428,48 @@ codes are as before. In GitHub Actions, after the tests are measured:
     GH_TOKEN: ${{ github.token }}
 - run: npx supercov runs latest mutants --diff origin/${{ github.base_ref }} --fail-on not-infected
 ```
+
+### Strong mutation: run the tests against the mutants
+
+```bash
+npx supercov runs latest mutants test                       # every mutant the run's tests infected
+npx supercov runs latest mutants test --diff origin/main    # only the change's mutants
+npx supercov runs latest mutants test --file src/billing.ts
+npx supercov runs latest mutants test --plan --json         # what would run, nothing run
+npx supercov runs latest mutants test --critical "src/auth/**" --fail-on survived
+```
+
+`mutants test` reruns the measured run's command (or the one after `--`) with
+every mutant behind a switch and saves StrykerJS's verdicts into the run:
+`killed`, `survived`, `timeout`, `no-coverage`, and `error` for a mutant that
+could not be switched on. `mutants` then shows them beside the weak statuses,
+and the mutation score appears.
+
+It runs far less than StrykerJS: no dry run (the measured run is one), no
+mutant no test infected (decided `survived`) or reached (`no-coverage`), and
+each mutant only against the tests whose own evidence shows they infected it.
+Vitest suites run in rounds through one resident Vitest: each test file can
+carry its own mutant, several copies of a file run side by side, a mutant is
+switched on before the test file's imports, and it stops at its first failing
+test. Playwright suites carry each attempt's mutant with its requests, so one
+server serves different mutants to different workers; mutants of a server's
+start-up run with the server restarted for them. See
+`docs/design/strong-mutation.md`.
+
+- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--critical <glob>` (repeatable): every mutant there must be killed or
+  accepted, or the command fails.
+- `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with
+  one of these.
+- Accepted equivalents: `supercov.accepted.json` at the project root, a list of
+  `{ "id": "<mutant id>", "reason": "<why no test can tell it apart>" }`. An
+  accepted mutant still runs, shows as accepted, and never fails the command;
+  an entry whose mutant is killed or gone is listed as stale.
+- A second `mutants test` over the same run runs only what has no verdict yet.
+  A pass that stops early (a test worker that never ended) keeps its verdicts,
+  and the next pass runs the rest.
+- The command's own output goes to a log beside the pass's results; stdout is
+  the answer alone.
 
 ## Fail CI below a coverage floor
 
