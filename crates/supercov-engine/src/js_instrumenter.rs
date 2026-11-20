@@ -3997,24 +3997,66 @@ thread_local! {
     /// With the mutants on, their probes left out, so a test can see which
     /// links only the probes make.
     pub(crate) static PROBES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// In this crate's tests, on the thread that sets it: strong mode on or
+    /// off whatever `SUPERCOV_STRONG` says.
+    pub(crate) static STRONG_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// The probe switch, for the frontend cache key: instrumentation cached with
-/// the probes off must not be reused once they are on, or the reverse.
-pub(crate) fn probe_options() -> bool {
-    mutants_enabled()
+/// The probe and strong switches, for the frontend cache key:
+/// instrumentation cached with the probes off must not be reused once they
+/// are on, or the reverse, and a strong copy is never a measured one.
+pub(crate) fn probe_options() -> (bool, bool) {
+    (mutants_enabled(), strong_enabled())
 }
 
 /// Whether instrumentation places the probes and enumerates StrykerJS's
 /// mutants, each linked to its evidence: unless `SUPERCOV_MUTANTS=0`. Each
 /// probe's helper is imported only by a file with a site of its kind, so a
-/// file without one is instrumented byte for byte as with them off.
+/// file without one is instrumented byte for byte as with them off. Strong
+/// mode lists the mutants whatever `SUPERCOV_MUTANTS` says.
 pub(crate) fn mutants_enabled() -> bool {
     #[cfg(test)]
     if let Some(on) = MUTANTS_FOR_TEST.with(std::cell::Cell::get) {
         return on;
     }
-    std::env::var("SUPERCOV_MUTANTS").map_or(true, |value| !matches!(value.trim(), "0" | "false"))
+    strong_enabled()
+        || std::env::var("SUPERCOV_MUTANTS")
+            .map_or(true, |value| !matches!(value.trim(), "0" | "false"))
+}
+
+/// Strong mode set by the engine for this process: 0 when unset (the
+/// environment decides), 1 off, 2 on.
+static STRONG_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Switches strong mode on or off for every file this process instruments
+/// from now on, whatever `SUPERCOV_STRONG` says; `None` leaves it to
+/// `SUPERCOV_STRONG` again. A strong pass sets it before it prepares its
+/// instrumented copy, and passes `SUPERCOV_STRONG=1` to the processes it
+/// starts.
+pub fn set_strong_mode(on: Option<bool>) {
+    let value = match on {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    STRONG_MODE.store(value, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether instrumentation writes the mutants behind switches (strong
+/// mutation, `js_schemata`) instead of placing coverage and weak-mutation
+/// probes: `set_strong_mode`, or else `SUPERCOV_STRONG=1`.
+pub(crate) fn strong_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = STRONG_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    match STRONG_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => false,
+        2 => true,
+        _ => {
+            std::env::var("SUPERCOV_STRONG").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
+        }
+    }
 }
 
 /// Whether the mutants' probes are placed: the comparison probe and those
@@ -5226,6 +5268,7 @@ impl<'a> InfectionProbeTransformer<'a, '_> {
 struct AssignmentNameSafetyTransformer<'a> {
     ast: AstBuilder<'a>,
     parenthesized_assignment_value: String,
+    used: bool,
 }
 
 impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
@@ -5240,6 +5283,7 @@ impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
         {
             return;
         }
+        self.used = true;
         let right = assignment.right.take_in(self.ast.allocator);
         assignment.right = self.ast.expression_call(
             Span::default(),
@@ -5637,6 +5681,16 @@ fn instrument_candidate_with_binding(
         ));
     }
 
+    if strong_enabled() {
+        return instrument_strong(
+            &allocator,
+            &mut parsed.program,
+            source,
+            file,
+            runtime_binding,
+            capability_wrapper,
+        );
+    }
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
     let erased = erased_imports(&parsed.program, elide_type_imports);
     let excluded_statements = parsed
@@ -5825,6 +5879,7 @@ fn instrument_candidate_with_binding(
     let mut assignment_name_safety = AssignmentNameSafetyTransformer {
         ast,
         parenthesized_assignment_value: parenthesized_assignment_value.clone(),
+        used: false,
     };
     assignment_name_safety.visit_program(&mut parsed.program);
     let point_indices = point_analysis
@@ -6287,80 +6342,13 @@ fn instrument_candidate_with_binding(
         .iter()
         .map(|(_, local)| (*local).clone())
         .collect::<Vec<_>>();
-    if runtime_binding == RuntimeBinding::DirectGlobal || parsed.program.source_type.is_script() {
-        // Read off an untyped global, every helper is `any` to TypeScript,
-        // whatever the runtime's declarations say, and so is each value that
-        // passes through one. A directly run TypeScript file names each
-        // helper's type where it binds it. Declaring the global's type for
-        // the program instead collided with the declaration every rewritten
-        // test file carries for its assertion helpers.
-        let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
-        let declarators =
-            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
-                let annotation = typed
-                    .then(|| runtime_helper_type(&allocator, parsed.program.source_type, imported))
-                    .flatten();
-                let global_runtime =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
-                        ast.identifier_name(
-                            Span::default(),
-                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
-                                "__SUPERCOV_DIRECT_RUNTIME__"
-                            } else {
-                                "__supercovRuntime"
-                            }),
-                        ),
-                        false,
-                    ));
-                let runtime_helper =
-                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
-                        Span::default(),
-                        global_runtime,
-                        ast.identifier_name(Span::default(), ast.ident(imported)),
-                        false,
-                    ));
-                ast.variable_declarator(
-                    Span::default(),
-                    runtime_declaration_kind,
-                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
-                    annotation,
-                    Some(runtime_helper),
-                    false,
-                )
-            }));
-        parsed.program.body.insert(
-            0,
-            Statement::VariableDeclaration(ast.alloc_variable_declaration(
-                Span::default(),
-                runtime_declaration_kind,
-                declarators,
-                false,
-            )),
-        );
-    } else {
-        let import_specifiers =
-            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
-                ast.import_declaration_specifier_import_specifier(
-                    Span::default(),
-                    ast.module_export_name_identifier_name(Span::default(), ast.ident(imported)),
-                    ast.binding_identifier(Span::default(), ast.ident(local)),
-                    oxc_ast::ast::ImportOrExportKind::Value,
-                )
-            }));
-        parsed.program.body.insert(
-            0,
-            Statement::ImportDeclaration(ast.alloc_import_declaration(
-                Span::default(),
-                Some(import_specifiers),
-                ast.string_literal(Span::default(), ast.str("virtual:supercov-runtime"), None),
-                None,
-                NONE,
-                oxc_ast::ast::ImportOrExportKind::Value,
-            )),
-        );
-    }
+    insert_runtime_bindings(
+        &allocator,
+        &mut parsed.program,
+        runtime_binding,
+        runtime_declaration_kind,
+        runtime_imports,
+    );
 
     if let Some(wrapper) = capability_wrapper {
         transform_capability_imports(&allocator, &mut parsed.program, source, wrapper);
@@ -6442,6 +6430,277 @@ fn instrument_candidate_with_binding(
         limitations,
         mutants,
     })
+}
+
+/// Strong mode (`js_schemata`): the file's listed mutants written behind
+/// switches, and nothing measured. The file reads its record from the
+/// runtime once, `const __supercovStrong = strongSlot("<file>")`, after the
+/// runtime's binding, which keeps `mcdcBegin` first so the loaders the
+/// JavaScript frontend adds find it as they find a measured file's.
+fn instrument_strong<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &'a str,
+    file: &str,
+    runtime_binding: RuntimeBinding,
+    capability_wrapper: Option<&str>,
+) -> Result<CandidateOutput, CandidateError> {
+    let safety = analyze_safety(allocator, program, source, file);
+    let ledger = crate::js_mutants::enumerate(program, source);
+    let facts = crate::js_mutant_links::MutantFacts::collect(program, source, &[]);
+    let module_syntax = program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+        )
+    });
+    let (namespace, runtime_declaration_kind) = if runtime_binding == RuntimeBinding::DirectGlobal {
+        (
+            if module_syntax {
+                String::new()
+            } else {
+                format!(
+                    "_{}",
+                    &stable_id("", file, "runtime", Span::default(), "")[..8]
+                )
+            },
+            VariableDeclarationKind::Var,
+        )
+    } else {
+        (String::new(), VariableDeclarationKind::Const)
+    };
+    // The record first: the switches name it, so it is the shortest.
+    let mut names = CandidateNames::within(source, &namespace);
+    let record = names.allocate("__supercovStrong");
+    let strong_slot = names.allocate("__supercovStrongSlot");
+    let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
+    let mcdc_begin = names.allocate("__supercovMcdcBegin");
+    let mcdc_condition = names.allocate("__supercovMcdcCondition");
+    let mcdc_end = names.allocate("__supercovMcdcEnd");
+    let coverage_hit = names.allocate("__supercovCoverageHit");
+    let register_probe_v2 = names.allocate("__supercovRegisterProbeV2");
+    let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
+    let coverage_hit_v2 = names.allocate("__supercovHit");
+    let probe_file_v2 = names.allocate("__supercovFile");
+    let probe_clock_v2 = names.allocate("__supercovClock");
+    let probe_hits_v2 = names.allocate("__supercovHits");
+    let placed = crate::js_schemata::place(
+        allocator,
+        program,
+        &ledger,
+        &record,
+        &safety.source_sensitive_functions,
+    );
+    let switched = placed.iter().any(|mutant| mutant.unplaceable.is_none());
+    let mut mutants = crate::js_mutant_links::link(
+        file,
+        source,
+        ledger,
+        &facts,
+        &crate::js_mutant_links::Evidence {
+            points: &[],
+            decisions: &[],
+            branches: &[],
+            comparisons: &[],
+            probes: &[],
+        },
+    );
+    for (mutant, strong) in mutants.iter_mut().zip(placed) {
+        mutant.is_static = strong.is_static;
+        mutant.unplaceable = strong.unplaceable.map(str::to_owned);
+    }
+    let ast = AstBuilder::new(allocator);
+    // `(f) = function () {}` names nothing, and printing drops the
+    // parentheses: the value keeps its own name, as a measured file's does.
+    // Where a switch took the value's place, it names nothing already.
+    let mut assignment_name_safety = AssignmentNameSafetyTransformer {
+        ast,
+        parenthesized_assignment_value: parenthesized_assignment_value.clone(),
+        used: false,
+    };
+    assignment_name_safety.visit_program(program);
+    let mut runtime_imports = vec![("mcdcBegin", &mcdc_begin)];
+    if assignment_name_safety.used {
+        runtime_imports.push((
+            "parenthesizedAssignmentValue",
+            &parenthesized_assignment_value,
+        ));
+    }
+    if switched {
+        let slot = ast.expression_call(
+            Span::default(),
+            ast.expression_identifier(Span::default(), ast.ident(&strong_slot)),
+            NONE,
+            ast.vec1(Argument::from(ast.expression_string_literal(
+                Span::default(),
+                ast.str(file),
+                None,
+            ))),
+            false,
+        );
+        program.body.insert(
+            0,
+            Statement::VariableDeclaration(ast.alloc_variable_declaration(
+                Span::default(),
+                runtime_declaration_kind,
+                ast.vec1(ast.variable_declarator(
+                    Span::default(),
+                    runtime_declaration_kind,
+                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&record)),
+                    NONE,
+                    Some(slot),
+                    false,
+                )),
+                false,
+            )),
+        );
+        runtime_imports.push(("strongSlot", &strong_slot));
+    }
+    insert_runtime_bindings(
+        allocator,
+        program,
+        runtime_binding,
+        runtime_declaration_kind,
+        runtime_imports,
+    );
+    if let Some(wrapper) = capability_wrapper {
+        transform_capability_imports(allocator, program, source, wrapper);
+    }
+    mark_generated_statements(ast, program);
+    let (code, map) = generate_candidate(program, file, &safety.source_sensitive_functions)?;
+    Ok(CandidateOutput {
+        engine: "rust-oxc".to_string(),
+        complete: true,
+        supported_surface: "complete-js-instrumenter-v1".to_string(),
+        code,
+        map,
+        decisions: Vec::new(),
+        points: Vec::new(),
+        excluded_statements: Vec::new(),
+        branches: Vec::new(),
+        probe_table: Some(ProbeTable::new(file, Vec::new(), Vec::new(), Vec::new())),
+        runtime: Some(CandidateRuntime {
+            coverage_hit,
+            mcdc_begin,
+            mcdc_condition,
+            mcdc_end,
+            register_probe_v2,
+            mcdc_end_v2,
+            coverage_hit_v2,
+            probe_file_v2,
+            probe_clock_v2,
+            probe_hits_v2,
+            parenthesized_assignment_value,
+            with_request_phase: String::new(),
+            optional_select_v2: String::new(),
+            select_short_v2: String::new(),
+            select_right_v2: String::new(),
+            select_named_right_v2: String::new(),
+            select_assign_end_v2: String::new(),
+            select_path_v2: String::new(),
+            select_end2_v2: String::new(),
+            select_end_v2: String::new(),
+            select_next_v2: String::new(),
+            rendered_value_v2: String::new(),
+            optional_call_end_v2: String::new(),
+            default_selected_v2: String::new(),
+            default_entered_v2: String::new(),
+        }),
+        coverage_limitations: Vec::new(),
+        limitations: Vec::new(),
+        mutants,
+    })
+}
+
+/// Binds each runtime helper the file uses to its local name, at the top of
+/// the program: read off the runtime's global by a script or a directly run
+/// file, imported from `virtual:supercov-runtime` by a module.
+fn insert_runtime_bindings<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    runtime_binding: RuntimeBinding,
+    runtime_declaration_kind: VariableDeclarationKind,
+    runtime_imports: Vec<(&str, &String)>,
+) {
+    let ast = AstBuilder::new(allocator);
+    let typescript = program.source_type.is_typescript();
+    if runtime_binding == RuntimeBinding::DirectGlobal || program.source_type.is_script() {
+        // Read off an untyped global, every helper is `any` to TypeScript,
+        // whatever the runtime's declarations say, and so is each value that
+        // passes through one. A directly run TypeScript file names each
+        // helper's type where it binds it. Declaring the global's type for
+        // the program instead collided with the declaration every rewritten
+        // test file carries for its assertion helpers.
+        let typed = typescript && runtime_binding == RuntimeBinding::DirectGlobal;
+        let declarators =
+            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+                let annotation = typed
+                    .then(|| runtime_helper_type(allocator, program.source_type, imported))
+                    .flatten();
+                let global_runtime =
+                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                        Span::default(),
+                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
+                        ast.identifier_name(
+                            Span::default(),
+                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
+                                "__SUPERCOV_DIRECT_RUNTIME__"
+                            } else {
+                                "__supercovRuntime"
+                            }),
+                        ),
+                        false,
+                    ));
+                let runtime_helper =
+                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                        Span::default(),
+                        global_runtime,
+                        ast.identifier_name(Span::default(), ast.ident(imported)),
+                        false,
+                    ));
+                ast.variable_declarator(
+                    Span::default(),
+                    runtime_declaration_kind,
+                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
+                    annotation,
+                    Some(runtime_helper),
+                    false,
+                )
+            }));
+        program.body.insert(
+            0,
+            Statement::VariableDeclaration(ast.alloc_variable_declaration(
+                Span::default(),
+                runtime_declaration_kind,
+                declarators,
+                false,
+            )),
+        );
+    } else {
+        let import_specifiers =
+            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+                ast.import_declaration_specifier_import_specifier(
+                    Span::default(),
+                    ast.module_export_name_identifier_name(Span::default(), ast.ident(imported)),
+                    ast.binding_identifier(Span::default(), ast.ident(local)),
+                    oxc_ast::ast::ImportOrExportKind::Value,
+                )
+            }));
+        program.body.insert(
+            0,
+            Statement::ImportDeclaration(ast.alloc_import_declaration(
+                Span::default(),
+                Some(import_specifiers),
+                ast.string_literal(Span::default(), ast.str("virtual:supercov-runtime"), None),
+                None,
+                NONE,
+                oxc_ast::ast::ImportOrExportKind::Value,
+            )),
+        );
+    }
 }
 
 /// `hits[index] === clock.e || hit(index);`, the probe of a statement in a
@@ -15184,9 +15443,13 @@ export function shapes(n: number): unknown {
         let on = probe_options();
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(false)));
         let off = probe_options();
+        STRONG_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let strong = probe_options();
+        STRONG_FOR_TEST.with(|flag| flag.set(None));
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        assert!(on);
-        assert!(!off);
+        assert_eq!(on, (true, false));
+        assert_eq!(off, (false, false));
+        assert_ne!(strong, off);
     }
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are

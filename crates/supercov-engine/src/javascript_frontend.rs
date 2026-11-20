@@ -2213,6 +2213,7 @@ const RUNTIME_DECLARATIONS_HEAD: &str = concat!(
     "export declare function assignV2<T>(site: string, current: any, value: T, op: number): T;\n",
     "export declare function methodV2<T>(site: string, receiver: T, method: string, arrow?: string, copy?: (...args: any[]) => unknown): T;\n",
     "export declare function valueV2<T>(site: string, value: T): T;\n",
+    "export declare function strongSlot(file: string): { a: number; h(): void };\n",
 );
 
 #[cfg(test)]

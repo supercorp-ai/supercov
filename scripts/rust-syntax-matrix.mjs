@@ -222,6 +222,9 @@ const probeHelpers = {
   valueV2(_site, value) {
     return value;
   },
+  strongSlot() {
+    return { a: -1, h() {} };
+  },
 };
 
 function applyInferredName(value, inferredName) {
@@ -411,6 +414,7 @@ async function runBrowser(name) {
               assignV2(_site, _current, value) { return value; },
               methodV2(_site, receiver) { return receiver; },
               valueV2(_site, value) { return value; },
+              strongSlot() { return { a: -1, h() {} }; },
               selectShortV2(_file, _first, value) { return value; },
               selectRightV2(_file, _first, value) { return value; },
               selectNamedRightV2(_file, _first, value, inferredName) { return applyInferredName(value, inferredName); },

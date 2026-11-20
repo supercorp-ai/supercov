@@ -207,6 +207,14 @@ pub struct CandidateMutant {
     /// test's reach (`clock`, `random`): a hint that changes no status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untestable: Option<StaticNote>,
+    /// Strong mode (`js_schemata`): its switch is evaluated while the module
+    /// loads, so a strong pass runs whole files for it.
+    #[serde(default, rename = "static", skip_serializing_if = "std::ops::Not::not")]
+    pub is_static: bool,
+    /// Strong mode: why the mutant has no switch (`no-placeable-ancestor`,
+    /// `function-source`, `with-statement`, `node-not-found`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unplaceable: Option<String>,
 }
 
 /// A rule's stable code and the sentence that says why it applies.
@@ -1016,6 +1024,8 @@ pub(crate) fn link(
                 arrow,
                 equivalent,
                 untestable,
+                is_static: false,
+                unplaceable: None,
             }
         })
         .collect()

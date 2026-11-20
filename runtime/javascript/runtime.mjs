@@ -2606,6 +2606,71 @@ function valueV2(site, value) {
   }
   return value;
 }
+// Strong mutation (mutant schemata). A file instrumented in strong mode has
+// every listed mutant behind a switch and reads one record from here when
+// it loads, `strongSlot(file)`, with `file` its path from the project root
+// as mutants.json keys it. Each switch reads the record's `a`, the index of
+// the active mutant in the file's list (-1 for none), every time it is
+// evaluated, and the active mutant's branch calls `h()`, which counts its
+// evaluations and throws MutantTimeoutError past the limit, so a loop the
+// mutant made endless ends where it runs. The state is kept on the global
+// object, so copies of this runtime in one realm agree on it.
+class MutantTimeoutError extends Error {
+  constructor(file, index, hits) {
+    super(`Supercov: mutant ${index} of ${file} was evaluated more than ${hits - 1} times`);
+    this.name = "MutantTimeoutError";
+    this.code = "SUPERCOV_MUTANT_TIMEOUT";
+    this.file = file;
+    this.index = index;
+  }
+}
+const strongStateKey = Symbol.for("supercov.strongMutation");
+function strongState() {
+  let strong = globalThis[strongStateKey];
+  if (strong === void 0) {
+    strong = { slots: /* @__PURE__ */ new Map(), file: void 0, index: -1, hits: 0, limit: 1e6 };
+    Object.defineProperty(globalThis, strongStateKey, { value: strong, configurable: true });
+  }
+  return strong;
+}
+function strongHit() {
+  const strong = strongState();
+  if (++strong.hits > strong.limit)
+    throw new MutantTimeoutError(strong.file, strong.index, strong.hits);
+}
+function strongSlot(file) {
+  const strong = strongState();
+  let slot = strong.slots.get(file);
+  if (slot === void 0) {
+    slot = { a: strong.file === file ? strong.index : -1, h: strongHit };
+    strong.slots.set(file, slot);
+  }
+  return slot;
+}
+function setActiveMutant(file, index) {
+  const strong = strongState();
+  const previous = strong.slots.get(strong.file);
+  if (previous !== void 0)
+    previous.a = -1;
+  strong.file = file;
+  strong.index = index;
+  strong.hits = 0;
+  const slot = strong.slots.get(file);
+  if (slot !== void 0)
+    slot.a = index;
+}
+function clearActiveMutant() {
+  setActiveMutant(void 0, -1);
+}
+function setMutantHitLimit(limit) {
+  strongState().limit = limit;
+}
+function mutantHitCount() {
+  return strongState().hits;
+}
+function isMutantTimeout(error) {
+  return error instanceof MutantTimeoutError || error != null && error.code === "SUPERCOV_MUTANT_TIMEOUT";
+}
 const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype;
 const probeBuiltins = {
   array: new Map(["some", "every", "filter", "reverse", "slice", "sort", "find", "findIndex", "findLast", "findLastIndex"].filter((name) => typeof probeArray[name] === "function").map((name) => [name, probeArray[name]])),
@@ -3085,6 +3150,13 @@ const directRuntimeApi = {
   assignV2,
   methodV2,
   valueV2,
+  strongSlot,
+  setActiveMutant,
+  clearActiveMutant,
+  setMutantHitLimit,
+  mutantHitCount,
+  isMutantTimeout,
+  MutantTimeoutError,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -3160,6 +3232,13 @@ export {
   assignV2,
   methodV2,
   valueV2,
+  strongSlot,
+  setActiveMutant,
+  clearActiveMutant,
+  setMutantHitLimit,
+  mutantHitCount,
+  isMutantTimeout,
+  MutantTimeoutError,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

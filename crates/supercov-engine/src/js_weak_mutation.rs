@@ -1552,6 +1552,8 @@ mod tests {
             arrow: None,
             equivalent: None,
             untestable: None,
+            is_static: false,
+            unplaceable: None,
         }
     }
 

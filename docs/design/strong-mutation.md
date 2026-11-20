@@ -126,12 +126,65 @@ run once more too before it counts as a kill.
 
 In strong mode the instrumenter writes every listed mutant into the copy
 behind a switch (mutant schemata, Untch 1992), as StrykerJS does, with
-Supercov's own ids. An expression mutant becomes
-`(__sc.m(17) ? <replacement> : __sc.m(18) ? <replacement> : <original>)`,
-a statement mutant `if (__sc.m(19)) { <replacement> } else { <original> }`.
-`__sc.m(n)` is true when `n` is the file's active mutant, and counts. The
-replacement text is checked against StrykerJS's own for every mutant of the
-parity fixtures: same text, byte for byte.
+Supercov's own ids, and places no coverage or weak-mutation probe
+(`crates/supercov-engine/src/js_schemata.rs`).
+
+**Switching it on.** `js_instrumenter::set_strong_mode(Some(true))` for the
+engine's own process (the frontend instruments in process), and
+`SUPERCOV_STRONG=1` in the environment of any process that instruments
+(`set_strong_mode(None)` defers to the variable). Either is part of the
+instrumented copy's cache key (`probe_options()`), so a strong copy and a
+measured one never share it. Strong mode lists the mutants whatever
+`SUPERCOV_MUTANTS` says.
+
+**Addressing a mutant.** A mutant is `(file, index)`: `file` is the key of
+its file in `mutants.json` (its path from the project root, as in mutant
+ids), `index` its place in that file's list, the list the weak enumeration
+writes, in its order. Each file reads one record from the runtime when it
+loads, `const __supercovStrong = strongSlot("src/a.ts")` (names follow the
+file's allocator, so a clash or a classic script's namespace renames
+them), and every switch reads the record's `a` when it is evaluated:
+
+- an expression: `(__supercovStrong.a === 17 ? (__supercovStrong.h(),
+  <replacement>) : __supercovStrong.a === 18 ? ... : <original>)`;
+- a statement: `if (__supercovStrong.a === 19) { __supercovStrong.h();
+  <replacement> } else { <original> }`, and the same around a function
+  body's or a `case`'s statements.
+
+The runtime (`runtime/javascript/runtime.mjs`, also on
+`__SUPERCOV_DIRECT_RUNTIME__`) has `setActiveMutant(file, index)`,
+`clearActiveMutant()`, `setMutantHitLimit(n)` (default 1,000,000),
+`mutantHitCount()`, `MutantTimeoutError` and `isMutantTimeout(error)`.
+`h()` counts the active mutant's evaluations and throws
+`MutantTimeoutError` (`code: "SUPERCOV_MUTANT_TIMEOUT"`) past the limit.
+The state lives on the global object, so the active mutant can change while
+a server runs and copies of the runtime in one realm agree.
+
+**Placement.** StrykerJS's placers decide where a switch goes: on the
+mutated node where an expression, statement or `case` can be wrapped, else
+on its nearest ancestor that can, with the mutant applied to a copy of that
+ancestor (holding the switches StrykerJS's copy holds: those placed before
+the node). Its rules are kept (no switch on an object key, a chain's inner
+link, a template's tag, `delete`'s operand, an assignment target), and
+Supercov also refuses where wrapping changes the program: declarations
+(`let`, `const`, functions, classes, imports, exports), a label's body, a
+`case` that declares lexically, a key written without brackets, anything
+not in an expression slot. An anonymous function wrapped where its place
+names it keeps the name (`({ "f": <it> })["f"]`). A mutant with nowhere to
+go, or in code the instrumenter keeps as written (a function whose source
+the program reads, a `with` body), gets no switch: `mutants.json` says
+`"unplaceable": "<reason>"` (`no-placeable-ancestor`, `function-source`,
+`with-statement`), and the driver reports it `error`.
+
+**Static mutants.** A mutant whose switch is evaluated while the module
+loads (no function or instance field initializer around it) carries
+`"static": true` in `mutants.json`.
+
+**Parity.** Each replacement is checked against StrykerJS's own replacement
+code (`text` in the parity goldens) for every mutant of the parity
+fixtures, printed as `@babel/generator` prints it: same text, byte for byte.
+And on the fixtures Node runs as they are, the strong copy with each
+mutant switched on behaves as StrykerJS's mutated program does.
 
 ## Results
 
