@@ -598,7 +598,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
         rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, closed: closedCopies, workers, perRound, profile });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, warm: Boolean(vitest.__supercovWarm), stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, closed: closedCopies, workers, perRound, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
         // left run in the next pass `mutants test` starts.

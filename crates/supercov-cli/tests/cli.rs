@@ -21905,12 +21905,21 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     // Each way a kill is made certain: its copy runs the predecessors the
     // baseline ran (1), or the kill is confirmed without the mutant (0).
     for prefix in ["1", "0"] {
-        a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix);
+        a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix, "0");
     }
 }
 
-fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str) {
-    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{prefix}"));
+/// Copies in warm workers (SUPERCOV_STRONG_WARM=1) start from fresh modules:
+/// an item an earlier copy registered in the same worker would let the
+/// count pass without its predecessor, and no kill would be overturned.
+#[cfg(unix)]
+#[test]
+fn a_copy_in_a_warm_worker_starts_from_fresh_modules() {
+    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("0", "1");
+}
+
+fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, warm: &str) {
+    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{prefix}-{warm}"));
     // `if (item)` gives the first test mutants of its own, so the file's
     // baseline runs both tests and the second passes there.
     project.write(
@@ -21926,11 +21935,15 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str) 
     let reply = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--json"],
-            &[("SUPERCOV_STRONG_PREFIX", prefix)],
+            &[
+                ("SUPERCOV_STRONG_PREFIX", prefix),
+                ("SUPERCOV_STRONG_WARM", warm),
+            ],
         )
         .json();
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     let pass = &reply["passes"][0];
+    assert_eq!(pass["warm"], warm == "1", "{reply}");
     if prefix == "1" {
         assert_eq!(pass["confirmations"], 0, "{reply}");
     } else {
