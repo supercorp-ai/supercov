@@ -21646,6 +21646,8 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         }
     }
     let context = format!("{reply}\n{shown}\n{said}\n{passes}");
+    // Each pass's time, for whoever weighs the cost of confirming kills.
+    eprintln!("strong passes: {}", reply["passes"]);
     // The one mutant on a line, by its file, line, mutator and descriptor.
     let strong = |file: &str, line: u32, ending: &str| {
         let found = mutants
