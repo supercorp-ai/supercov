@@ -21902,11 +21902,7 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
 #[cfg(unix)]
 #[test]
 fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
-    // Each way a kill is made certain: its copy runs the predecessors the
-    // baseline ran (1), or the kill is confirmed without the mutant (0).
-    for prefix in ["1", "0"] {
-        a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix, "0");
-    }
+    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("0");
 }
 
 /// Copies in warm workers (SUPERCOV_STRONG_WARM=1) start from fresh modules:
@@ -21915,12 +21911,12 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
 #[cfg(unix)]
 #[test]
 fn a_copy_in_a_warm_worker_starts_from_fresh_modules() {
-    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("0", "1");
+    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("1");
 }
 
 #[cfg(unix)]
-fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, warm: &str) {
-    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{prefix}-{warm}"));
+fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(warm: &str) {
+    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{warm}"));
     // `if (item)` gives the first test mutants of its own, so the file's
     // baseline runs both tests and the second passes there.
     project.write(
@@ -21936,20 +21932,13 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, 
     let reply = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--json"],
-            &[
-                ("SUPERCOV_STRONG_PREFIX", prefix),
-                ("SUPERCOV_STRONG_WARM", warm),
-            ],
+            &[("SUPERCOV_STRONG_WARM", warm)],
         )
         .json();
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     let pass = &reply["passes"][0];
     assert_eq!(pass["warm"], warm == "1", "{reply}");
-    if prefix == "1" {
-        assert_eq!(pass["confirmations"], 0, "{reply}");
-    } else {
-        assert!(pass["overturned"].as_u64().unwrap_or(0) > 0, "{reply}");
-    }
+    assert!(pass["overturned"].as_u64().unwrap_or(0) > 0, "{reply}");
     let listed = project
         .supercov(&[
             "runs",
@@ -21970,7 +21959,7 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, 
             id.starts_with("src/items.js:6:") && id.contains(":EqualityOperator:")
         })
         .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(equal["strong"]["status"], "survived", "{prefix}: {equal}");
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
     // `items.length > 0 ? ... : 0` to `... false ...`: the count is 0, and
     // the test fails with its predecessor run too.
     let never = mutants
@@ -21980,7 +21969,7 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str, 
             id.starts_with("src/items.js:6:") && id.ends_with(":ConditionalExpression:false")
         })
         .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(never["strong"]["status"], "killed", "{prefix}: {never}");
+    assert_eq!(never["strong"]["status"], "killed", "{never}");
 }
 
 /// A mutant that makes work a test left running loop forever (a timer that

@@ -392,16 +392,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         job.later = job.files.slice(1);
         job.open = 0;
     }
-    // Kills among the verdicts so far: how likely a copy is to need a
-    // confirmation (withPredecessors below).
-    let killedFirst = 0;
-    let decidedFirst = 0;
     const finish = (job, verdict) => {
         write({ id: job.mutant.id, ...verdict, tests: job.ran, durationMs: Date.now() - (job.started || Date.now()) });
         job.done = true;
-        decidedFirst += 1;
-        if (verdict.status === "killed" || verdict.status === "timeout")
-            killedFirst += 1;
     };
     // A copy runs only a mutant's candidates, and a test can lean on one
     // the copy left out (state an earlier test built): it fails then with
@@ -459,39 +452,6 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 baselineFailed.add(evidence.test);
         }
     };
-    // A kill whose copy ran every test its file's baseline ran before the
-    // killing one needs no confirmation. Where those tests cost less than
-    // the confirmation a kill would likely need (a copy of its own: loading
-    // the file, then the tests up to the kill), the copy runs them too, in
-    // the baseline's order, and any kill it finds is certain.
-    let closedCopies = 0;
-    const copyOverheadMs = () => profile.copies
-        ? (profile.loadMs + profile.copyMs - profile.testMs) / profile.copies
-        : 300;
-    const withPredecessors = (group, chosen) => {
-        if (group.whole || process.env["SUPERCOV_STRONG_PREFIX"] === "0")
-            return chosen;
-        const order = baselineOrder.get(group.file);
-        if (!order)
-            return chosen;
-        const wanted = new Set(chosen);
-        let lastAt = -1;
-        order.forEach((id, at) => {
-            if (wanted.has(id))
-                lastAt = at;
-        });
-        const extra = order.slice(0, lastAt + 1).filter((id) => !wanted.has(id));
-        if (!extra.length)
-            return chosen;
-        const cost = (ids) => ids.reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
-        // Half the chosen tests' time: where in them a kill falls, on average.
-        const killRate = (killedFirst + 1) / (decidedFirst + 2);
-        const confirmation = killRate * (copyOverheadMs() + cost(chosen) / 2);
-        if (process.env["SUPERCOV_STRONG_PREFIX"] !== "1" && cost(extra) > confirmation)
-            return chosen;
-        closedCopies += 1;
-        return order.slice(0, lastAt + 1);
-    };
     while (pending.length && !stalled) {
         const used = new Map();
         const round = [];
@@ -532,7 +492,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
         let limit = 0;
         const assignments = round.map(({ job, group }) => {
-            const chosen = withPredecessors(group, group.tests.filter((id) => !baselineFailed.has(id)));
+            const chosen = group.tests.filter((id) => !baselineFailed.has(id));
             const budget = Math.max(...chosen.map((id) => durationOf.get(id) ?? 1_000), 1_000);
             limit = Math.max(limit, group.retried
                 ? (budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2
@@ -651,7 +611,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
         rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, warm: Boolean(vitest.__supercovWarm), stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, closed: closedCopies, workers, perRound, profile });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, warm: Boolean(vitest.__supercovWarm), stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, perRound, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
         // left run in the next pass `mutants test` starts.
