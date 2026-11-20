@@ -47,9 +47,12 @@ pub mod integrity;
 pub mod interned;
 pub mod javascript_frontend;
 pub mod javascript_run;
+#[cfg(test)]
+mod js_babel_print;
 pub mod js_instrumenter;
 mod js_mutant_links;
 mod js_mutants;
+mod js_schemata;
 mod js_static_mutants;
 mod js_weak_mutation;
 pub mod jvm_instrumenter;
