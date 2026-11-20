@@ -21901,10 +21901,20 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
 #[cfg(unix)]
 #[test]
 fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
-    let project = vitest_mutants_project("strong-subset-false-kill");
+    // Each way a kill is made certain: its copy runs the predecessors the
+    // baseline ran (1), or the kill is confirmed without the mutant (0).
+    for prefix in ["1", "0"] {
+        a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix);
+    }
+}
+
+fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(prefix: &str) {
+    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{prefix}"));
+    // `if (item)` gives the first test mutants of its own, so the file's
+    // baseline runs both tests and the second passes there.
     project.write(
         "src/items.js",
-        "const items = [];\nexport function register(item) {\n  items.push(item);\n}\nexport function count() {\n  return items.length > 0 ? items.length : 0;\n}\n",
+        "const items = [];\nexport function register(item) {\n  if (item) items.push(item);\n}\nexport function count() {\n  return items.length > 0 ? items.length : 0;\n}\n",
     );
     project.write(
         "test/items.test.js",
@@ -21913,9 +21923,18 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     project.commit("items");
     project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
     let reply = project
-        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--json"],
+            &[("SUPERCOV_STRONG_PREFIX", prefix)],
+        )
         .json();
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let pass = &reply["passes"][0];
+    if prefix == "1" {
+        assert_eq!(pass["confirmations"], 0, "{reply}");
+    } else {
+        assert!(pass["overturned"].as_u64().unwrap_or(0) > 0, "{reply}");
+    }
     let listed = project
         .supercov(&[
             "runs",
@@ -21936,7 +21955,7 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
             id.starts_with("src/items.js:6:") && id.contains(":EqualityOperator:")
         })
         .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+    assert_eq!(equal["strong"]["status"], "survived", "{prefix}: {equal}");
     // `items.length > 0 ? ... : 0` to `... false ...`: the count is 0, and
     // the test fails with its predecessor run too.
     let never = mutants
@@ -21946,7 +21965,7 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
             id.starts_with("src/items.js:6:") && id.ends_with(":ConditionalExpression:false")
         })
         .unwrap_or_else(|| panic!("{listed}"));
-    assert_eq!(never["strong"]["status"], "killed", "{never}");
+    assert_eq!(never["strong"]["status"], "killed", "{prefix}: {never}");
 }
 
 /// A mutant that makes work a test left running loop forever (a timer that
