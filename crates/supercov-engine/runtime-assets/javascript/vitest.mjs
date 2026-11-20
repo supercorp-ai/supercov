@@ -85,7 +85,11 @@ function writeFileWork(file, testFile, title) {
         server: [],
     });
 }
-afterAll((context) => {
+// Declared without parameters: Vitest 4 reads a hook's first parameter as
+// its fixtures and refuses one that is not destructured. Vitest 1-3 pass
+// the file's suite, Vitest 4 a context holding it.
+afterAll(function () {
+    const context = arguments[0];
     const file = context?.file ?? context;
     if (!file?.filepath)
         return;
