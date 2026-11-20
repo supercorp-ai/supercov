@@ -13,7 +13,11 @@ const WHY = {
     "by-time": "its code ran for a request that named no test",
     "timeout-retry": "a test ran out of time with it switched on, and ran again alone with twice the time",
     "canary": "a canary failed in the server it shared",
+    "unfinished": "not every candidate test ran in the shared pass",
 };
+// Outcomes that ended this long before a pass's first error outside any
+// test (a server that exited) are trusted; later ones may be its doing.
+const ERROR_MARGIN_MS = 1_000;
 
 function readLines(path) {
     if (!existsSync(path))
@@ -78,6 +82,11 @@ export default class SupercovPlaywrightStrongReporter {
         catch {
             return undefined;
         }
+    }
+    onError(error) {
+        // Outside any test: a web server that exited, a global setup that
+        // threw. The first one's time and words.
+        this.globalError ??= { at: Date.now(), message: String(error?.message ?? error).split("\n")[0] };
     }
     onTestEnd(test, result) {
         if (!this.pass)
@@ -190,12 +199,23 @@ export default class SupercovPlaywrightStrongReporter {
         const doubtUntil = failedCanaries.length
             ? Math.max(...failedCanaries.map((canary) => canary.endedAt))
             : -Infinity;
+        // After an error outside any test (the shared server exited), what
+        // ended later may be its doing: such a mutant runs again alone.
+        const trustedUntil = this.globalError ? this.globalError.at - ERROR_MARGIN_MS : Infinity;
         let perRequest = 0;
         for (const [id, { row, tests, outcomes }] of mutants) {
             const ran = outcomes.filter((outcome) => outcome.startedAt !== undefined);
             if (!rows.job && ran.some((outcome) => outcome.startedAt <= doubtUntil)) {
                 restart(id, row.mutant, tests, "canary");
                 continue;
+            }
+            if (!rows.job) {
+                const trusted = outcomes.filter((outcome) => outcome.startedAt === undefined || outcome.endedAt < trustedUntil);
+                const killedBefore = trusted.some((outcome) => outcome.kind === "failed" || outcome.kind === "hit-limit");
+                if (!killedBefore && outcomes.some((outcome) => outcome.kind === "unrun" || (outcome.endedAt !== undefined && outcome.endedAt >= trustedUntil))) {
+                    restart(id, row.mutant, tests, "unfinished");
+                    continue;
+                }
             }
             perRequest += 1;
             const verdict = this.verdict(id, row, outcomes, tests, restart);
@@ -213,6 +233,7 @@ export default class SupercovPlaywrightStrongReporter {
             summary: true,
             runner: "playwright",
             pass: pass.name,
+            ...(this.globalError ? { error: this.globalError.message } : {}),
             durationMs: Date.now() - this.started,
             mutants: perRequest,
             restarts: restarts.length,
@@ -241,6 +262,10 @@ export default class SupercovPlaywrightStrongReporter {
             }
             return { status: "timeout", killedBy: slow.test, reason: `ran out of time${alone}` };
         }
+        // Run alone, and the command failed outside any test (the server
+        // it started with the mutant exited): the mutant broke the app.
+        if (job && this.globalError && !outcomes.every((outcome) => outcome.kind === "passed"))
+            return { status: "killed", reason: `the command failed with it switched on (${this.globalError.message})${alone}` };
         const unrun = outcomes.filter((outcome) => outcome.kind === "unrun");
         if (unrun.length)
             return { status: "error", reason: `${unrun.length} of its candidate test(s) did not run${alone}` };

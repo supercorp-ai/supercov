@@ -233,7 +233,8 @@ export function strongConfig(normalized, root, reporterPath) {
         repeatEach,
         retries: 0,
         maxFailures: 0,
-        reporter: [["dot"], [reporterPath]],
+        // The strong reporter alone: `mutants test --json` owns stdout.
+        reporter: [[reporterPath]],
     };
 }
 
