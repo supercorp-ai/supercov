@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1198")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1201")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1198"),
+        seen.contains("test fault at fs (javascript_run.rs:1201"),
         "{seen}"
     );
 }
@@ -15641,7 +15641,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2617 => main.rs:2617",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2022 => javascript_frontend.rs:2022",
+            "fs.read_to_string#javascript_frontend.rs:2030 => javascript_frontend.rs:2030",
         ],
     );
 }
@@ -17208,15 +17208,15 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:758",
         "fs.write#javascript_run.rs:1075",
         "fs.canonicalize#process_supervision.rs:1795",
-        "fs.create_dir_all#javascript_run.rs:1146",
-        "fs.create_dir_all#javascript_run.rs:1328",
+        "fs.create_dir_all#javascript_run.rs:1149",
+        "fs.create_dir_all#javascript_run.rs:1339",
         "fs.read_dir#evidence_archive.rs:262",
         "fs.create_dir_all#evidence_archive.rs:483",
-        "fs.create_dir_all#javascript_run.rs:1603",
-        "fs.create_dir_all#javascript_run.rs:1605",
+        "fs.create_dir_all#javascript_run.rs:1614",
+        "fs.create_dir_all#javascript_run.rs:1616",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1705",
-        "fs.create_dir_all#javascript_run.rs:1707",
+        "fs.create_dir_all#javascript_run.rs:1716",
+        "fs.create_dir_all#javascript_run.rs:1718",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17382,19 +17382,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@37", "runtime.d.mts"),
-        ("fs.rename@38", "playwright.mjs"),
-        ("fs.rename@40", "playwright.config.mjs"),
-        ("fs.rename@41", "vitest.config.mjs"),
-        ("fs.rename@44", "vitestCommands.mjs"),
+        ("fs.rename@39", "runtime.d.mts"),
+        ("fs.rename@40", "playwright.mjs"),
+        ("fs.rename@42", "playwright.config.mjs"),
+        ("fs.rename@43", "vitest.config.mjs"),
+        ("fs.rename@46", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@46", "test/cart.test.js"),
-        ("fs.rename@47", "authored-sources.json"),
-        ("fs.rename@48", "statement-exclusions.json"),
-        ("fs.rename@49", "mutants.json"),
-        ("fs.rename@50", "manifest.json"),
-        ("fs.rename@51", "instrumentation-complete"),
-        ("fs.rename@52", "injected fault at fs"),
+        ("fs.rename@48", "test/cart.test.js"),
+        ("fs.rename@49", "authored-sources.json"),
+        ("fs.rename@50", "statement-exclusions.json"),
+        ("fs.rename@51", "mutants.json"),
+        ("fs.rename@52", "manifest.json"),
+        ("fs.rename@53", "instrumentation-complete"),
+        ("fs.rename@54", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17714,12 +17714,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:356",
-            "javascript_frontend.rs:356",
+            "fs.read#javascript_frontend.rs:358",
+            "javascript_frontend.rs:358",
         ),
         (
-            "fs.read#javascript_frontend.rs:368",
-            "javascript_frontend.rs:368",
+            "fs.read#javascript_frontend.rs:370",
+            "javascript_frontend.rs:370",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -17749,12 +17749,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1811@2",
+            "fs.read_to_string#javascript_frontend.rs:1819@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1811"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1819"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 

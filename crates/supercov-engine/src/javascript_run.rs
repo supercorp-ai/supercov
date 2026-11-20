@@ -1080,6 +1080,9 @@ fn run_javascript(
     // What the tools of a command before this one changed in the source has
     // been applied or let go; this command starts from the project as it is.
     let _ = crate::source_tools::clear_source_changes(&workspace);
+    // A strong pass may start the command again for a mutant that must run
+    // alone (`run_strong_restarts`), with these settings and its own.
+    let strong_overrides = request.strong.as_ref().map(|_| overrides.clone());
     // The command, and nothing before it.
     let plan = ExecutionPlan {
         preparation: Vec::new(),
@@ -1214,7 +1217,15 @@ fn run_javascript(
     }
     // A strong pass publishes no run and leaves the working tree alone: its
     // verdicts are in the results file the driver wrote.
-    if request.strong.is_some() {
+    if let (Some(strong), Some(overrides)) = (&request.strong, strong_overrides) {
+        run_strong_restarts(
+            strong,
+            &request.command,
+            &workspace,
+            overrides,
+            &supervisor,
+            diagnostics,
+        )?;
         update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
@@ -2674,6 +2685,78 @@ pub fn run_strong_javascript(
             "a strong pass published a run".into(),
         )),
     }
+}
+
+/// The mutants a strong pass's driver sent to run alone: each `restart`
+/// record in the results (`playwrightStrong.mjs`) starts the command again,
+/// with the mutant switched on in every process from its start
+/// (`SUPERCOV_ACTIVE_MUTANT`) and the job in `SUPERCOV_STRONG_RESTART`. The
+/// driver of that invocation runs the job's tests alone and writes the
+/// mutant's verdict. A Vitest pass writes none.
+fn run_strong_restarts(
+    strong: &StrongRun,
+    command: &[String],
+    workspace: &Path,
+    overrides: BTreeMap<String, String>,
+    supervisor: &ProcessSupervisor,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<(), DirectJavascriptRunError> {
+    let text = std::fs::read_to_string(&strong.results).unwrap_or_default();
+    let jobs = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| record.get("restart").cloned())
+        .collect::<Vec<_>>();
+    for (number, job) in jobs.iter().enumerate() {
+        let Some(mutant) = job["mutant"].as_str() else {
+            continue;
+        };
+        let path = strong
+            .results
+            .with_file_name(format!("restart-{number}.json"));
+        crate::fault_fs::write(
+            &path,
+            serde_json::to_vec(job).expect("plain data serializes"),
+        )
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] {}: running alone, with every process started with it switched on ({})",
+            job["id"].as_str().unwrap_or(mutant),
+            job["reason"].as_str().unwrap_or("restart")
+        );
+        let mut environment = overrides.clone();
+        environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
+        environment.insert("SUPERCOV_STRONG_RESTART".into(), path.display().to_string());
+        let plan = ExecutionPlan {
+            preparation: Vec::new(),
+            test: ExecutionPhase {
+                name: "test".into(),
+                kind: PhaseKind::Test,
+                command: CommandSpec {
+                    program: command[0].clone().into(),
+                    arguments: command[1..].iter().map(OsString::from).collect(),
+                    cwd: workspace.to_owned(),
+                    environment: Some(environment_with(environment)),
+                    captured_output: None,
+                    console: None,
+                },
+            },
+        };
+        let execution = execute_plan_with_supervisor(
+            supervisor,
+            &plan,
+            supervision_options()?,
+            diagnostics,
+            |_, _| Ok(()),
+        )
+        .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+        // An interrupted pass ends here; the mutants left have no verdict.
+        if execution.interrupted_signal.is_some() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Strong mode for the run's own instrumentation, set back when it ends.

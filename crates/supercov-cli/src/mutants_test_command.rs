@@ -523,6 +523,9 @@ fn execute(
     }
     let to_run = plan.mutants.iter().filter(|m| m.decided.is_none()).count();
     let mut command_exit = None;
+    // What each invocation's driver said of itself: a Playwright pass's
+    // canaries, and how many mutants ran alone.
+    let mut passes = Vec::new();
     if to_run > 0 {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -568,6 +571,10 @@ fn execute(
             let Ok(record) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            if record["summary"] == true {
+                passes.push(record);
+                continue;
+            }
             let Some(id) = record["id"].as_str() else {
                 continue;
             };
@@ -617,6 +624,7 @@ fn execute(
             "durationMs": started.elapsed().as_millis() as u64,
             "commandExitCode": command_exit,
         },
+        "passes": passes,
     }))
 }
 
