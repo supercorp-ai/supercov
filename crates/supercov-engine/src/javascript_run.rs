@@ -2689,8 +2689,9 @@ pub fn run_strong_javascript(
 
 /// The mutants a strong pass's driver sent to run alone: each `restart`
 /// record in the results (`playwrightStrong.mjs`) starts the command again,
-/// with the mutant switched on in every process from its start
-/// (`SUPERCOV_ACTIVE_MUTANT`) and the job in `SUPERCOV_STRONG_RESTART`. The
+/// with the job in `SUPERCOV_STRONG_RESTART` and, where the job says so,
+/// the mutant switched on in every process from its start
+/// (`SUPERCOV_ACTIVE_MUTANT`). The
 /// driver of that invocation runs the job's tests alone and writes the
 /// mutant's verdict. A Vitest pass writes none.
 fn run_strong_restarts(
@@ -2719,14 +2720,24 @@ fn run_strong_restarts(
             serde_json::to_vec(job).expect("plain data serializes"),
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;
+        // Switched on in every process from its start where a server ran its
+        // code outside any request; otherwise by its attempts alone.
+        let everywhere = job["everywhere"] != false;
         let _ = writeln!(
             diagnostics,
-            "[supercov] {}: running alone, with every process started with it switched on ({})",
+            "[supercov] {}: running alone{} ({})",
             job["id"].as_str().unwrap_or(mutant),
+            if everywhere {
+                ", with every process started with it switched on"
+            } else {
+                ""
+            },
             job["reason"].as_str().unwrap_or("restart")
         );
         let mut environment = overrides.clone();
-        environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
+        if everywhere {
+            environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
+        }
         environment.insert("SUPERCOV_STRONG_RESTART".into(), path.display().to_string());
         let plan = ExecutionPlan {
             preparation: Vec::new(),

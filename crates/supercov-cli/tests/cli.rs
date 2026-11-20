@@ -21616,7 +21616,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert_eq!(lower["status"], "killed", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     // Run, and no test tells: the log line.
-    let logged = strong("server/app.js", 7, ":StringLiteral:``");
+    let logged = strong("server/app.js", 7, ":StringLiteral:empty");
     assert_eq!(logged["status"], "survived", "{context}");
     assert!(logged["tests"].as_u64() > Some(0), "{context}");
     // No request gives `total` 3: decided without running.
@@ -21624,7 +21624,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert_eq!(boundary["status"], "survived", "{context}");
     assert_eq!(boundary["tests"], 0, "{context}");
     // The server's top level: run alone, the server started with it.
-    let greeting = strong("server/app.js", 4, ":StringLiteral:\"\"");
+    let greeting = strong("server/app.js", 4, ":StringLiteral:empty");
     assert_eq!(greeting["status"], "killed", "{context}");
     assert!(
         greeting["reason"]

@@ -43,8 +43,10 @@ export default class SupercovPlaywrightStrongReporter {
         this.repetitions = {};
         this.byOriginal = new Map();
     }
+    // It prints nothing, and says it prints: Playwright adds a reporter of
+    // its own where none does, and `mutants test --json` owns stdout.
     printsToStdio() {
-        return false;
+        return true;
     }
     onBegin(_config, suite) {
         if (!this.pass)
@@ -191,7 +193,12 @@ export default class SupercovPlaywrightStrongReporter {
                 write({ id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
                 return;
             }
-            restarts.push({ id, mutant, tests: runnable, reason, budgetFactor });
+            // Only what a server ran outside any request needs the mutant on in
+            // every process from its start; the rest run alone with their
+            // attempts' own mutant, so a server whose every answer the mutant
+            // breaks still starts.
+            const everywhere = ["background", "module-level", "by-time"].includes(reason);
+            restarts.push({ id, mutant, tests: runnable, reason, budgetFactor, everywhere });
         };
         // A canary that failed: every mutant that ran before it ended is run
         // again, one mutant per server start.
@@ -247,7 +254,9 @@ export default class SupercovPlaywrightStrongReporter {
     verdict(id, row, outcomes, tests, restart) {
         const { rows } = this;
         const job = rows.job;
-        const alone = job ? `; ran alone, with the server started with it switched on: ${WHY[job.reason] ?? job.reason}` : "";
+        const alone = job
+            ? `; ran alone${job.everywhere ? ", with the server started with it switched on" : ""}: ${WHY[job.reason] ?? job.reason}`
+            : "";
         const killer = outcomes.find((outcome) => outcome.kind === "failed");
         if (killer)
             return { status: "killed", killedBy: killer.test, ...(alone ? { reason: alone.slice(2) } : {}) };
