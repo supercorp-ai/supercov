@@ -2603,8 +2603,8 @@ mod tests {
 
     /// The listed mutants with their verdicts: a hint of a rule this build
     /// does not know is left out, tests listed without values that are not
-    /// among the results change nothing, and a list of no files gives no
-    /// mutants.
+    /// among the results change nothing, a list of no files gives no
+    /// mutants, and one of no mutant set no results.
     #[test]
     fn results_list_each_mutant_with_only_the_hints_this_build_knows() {
         let listed = |files: Vec<(&str, Vec<CandidateMutant>)>| MutantsFile {
@@ -2633,6 +2633,12 @@ mod tests {
         );
         let none = super::results(&[], Some(listed(vec![]))).unwrap();
         assert!(none.mutants.is_empty());
+        // A list that names no mutant set lists none.
+        let unnamed = MutantsFile {
+            mutant_set: None,
+            ..listed(vec![])
+        };
+        assert!(super::results(&[], Some(unnamed)).is_none());
     }
 
     /// `_` and `$` are word characters: a cut beside one would split a
