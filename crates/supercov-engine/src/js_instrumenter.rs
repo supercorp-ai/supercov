@@ -2866,16 +2866,8 @@ impl Prologue {
         let code_start = match (first_directive, first_statement) {
             (Some(directive), Some(statement)) => directive.min(statement),
             (Some(at), None) | (None, Some(at)) => at,
-            (None, None) => {
-                // A file of comments: past them all.
-                let after_comments = program
-                    .comments
-                    .iter()
-                    .map(|comment| comment.span.end as usize)
-                    .max();
-                let after_hashbang = program.hashbang.as_ref().map(|h| h.span.end as usize);
-                after_comments.max(after_hashbang).unwrap_or(0)
-            }
+            // No code at all: it starts at the end.
+            (None, None) => source.len(),
         };
         let last_directive = program.directives.last();
         let statements_start = last_directive.map_or(code_start, |d| d.span.end as usize);
@@ -12550,6 +12542,28 @@ export function shapes(n: number): unknown {
             }
         }
         assert!(checked > 10_000, "{checked}");
+    }
+
+    /// Where code starts in a file with directives and statements, either
+    /// alone, or neither.
+    #[test]
+    fn a_prologue_is_read_from_directives_statements_or_neither() {
+        let of = |source: &str| {
+            let prologue = prologue_of(source, "a.js");
+            (
+                prologue.code_start,
+                prologue.statements_start,
+                prologue.directive_needs_semicolon,
+            )
+        };
+        assert_eq!(of("/* a */ 'use strict';\nf();\n"), (8, 21, false));
+        assert_eq!(of("/* a */ 'use strict'\n"), (8, 20, true));
+        assert_eq!(of("// a\nf();\n"), (5, 5, false));
+        assert_eq!(
+            of("#!/usr/bin/env node\n// only comments\n"),
+            (37, 37, false)
+        );
+        assert_eq!(of(""), (0, 0, false));
     }
 
     /// The file of #235: a Jest docblock that picks the test's environment.

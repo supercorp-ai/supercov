@@ -1726,7 +1726,7 @@ fn running_line(
             "unittests "
         },
         source.display(),
-        cargo_path(&executable, std::path::MAIN_SEPARATOR)
+        cargo_path(&executable.display().to_string(), std::path::MAIN_SEPARATOR)
     )
 }
 
@@ -1735,36 +1735,14 @@ fn running_line(
 /// hash as one component, so on Windows Cargo prints them with a `/` between
 /// them and `\` everywhere else: Supercov's line printed `\` there too, and
 /// differed from Cargo's.
-fn cargo_path(path: &Path, separator: char) -> String {
-    use std::path::Component;
-    let hash = |text: &str| text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
-    let components = path.components().collect::<Vec<_>>();
-    let name = |at: usize| match components.get(at) {
-        Some(Component::Normal(name)) => Some(name.to_string_lossy()),
-        _ => None,
-    };
-    let mut printed = String::new();
-    let mut index = 0;
-    while index < components.len() {
-        match components[index] {
-            Component::Prefix(prefix) => printed.push_str(&prefix.as_os_str().to_string_lossy()),
-            Component::RootDir => printed.push(separator),
-            other => {
-                if !printed.is_empty() && !printed.ends_with(separator) {
-                    printed.push(separator);
-                }
-                printed.push_str(&other.as_os_str().to_string_lossy());
-                let unit = index >= 1
-                    && name(index - 1).as_deref() == Some("build")
-                    && name(index + 1).is_some_and(|next| hash(&next));
-                if unit {
-                    printed.push('/');
-                    printed.push_str(&name(index + 1).unwrap_or_default());
-                    index += 1;
-                }
-            }
-        }
-        index += 1;
+fn cargo_path(text: &str, separator: char) -> String {
+    let hash = |part: &str| part.len() == 16 && part.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let parts = text.split(separator).collect::<Vec<_>>();
+    let mut printed = parts[0].to_owned();
+    for (index, part) in parts.iter().enumerate().skip(1) {
+        let unit = index >= 2 && parts[index - 2] == "build" && hash(part);
+        printed.push(if unit { '/' } else { separator });
+        printed.push_str(part);
     }
     printed
 }
@@ -3782,36 +3760,42 @@ mod tests {
         );
         // Cargo's per-unit build directory: the package and its hash are one
         // component, printed with `/` between them whatever the separator.
-        assert_eq!(
-            cargo_path(
-                Path::new("target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"),
-                '\\'
+        for (text, separator, printed) in [
+            (
+                "target\\debug\\build\\shop\\f036352577a492b6\\out\\outside-0123456789abcdef",
+                '\\',
+                "target\\debug\\build\\shop/f036352577a492b6\\out\\outside-0123456789abcdef",
             ),
-            "target\\debug\\build\\shop/f036352577a492b6\\out\\outside-0123456789abcdef"
-        );
-        assert_eq!(
-            cargo_path(
-                Path::new("target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"),
-                '/'
+            (
+                "C:\\work\\target\\debug\\build\\shop\\f036352577a492b6\\out\\x.exe",
+                '\\',
+                "C:\\work\\target\\debug\\build\\shop/f036352577a492b6\\out\\x.exe",
             ),
-            "target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"
-        );
-        assert_eq!(
-            cargo_path(
-                Path::new("/work/target/debug/build/shop/f036352577a492b6/out/x"),
-                '/'
+            (
+                "/work/target/debug/build/shop/f036352577a492b6/out/x",
+                '/',
+                "/work/target/debug/build/shop/f036352577a492b6/out/x",
             ),
-            "/work/target/debug/build/shop/f036352577a492b6/out/x"
-        );
-        // Not a unit's directory: a hash-like name elsewhere, the old layout.
-        assert_eq!(
-            cargo_path(Path::new("target/debug/deps/shop-0123456789abcdef"), '\\'),
-            "target\\debug\\deps\\shop-0123456789abcdef"
-        );
-        assert_eq!(
-            cargo_path(Path::new("target/debug/build/shop/notahash/out/x"), '\\'),
-            "target\\debug\\build\\shop\\notahash\\out\\x"
-        );
+            // The old layout, and names that are no unit's hash.
+            (
+                "target\\debug\\deps\\shop-0123456789abcdef",
+                '\\',
+                "target\\debug\\deps\\shop-0123456789abcdef",
+            ),
+            (
+                "target\\debug\\build\\shop\\notahash\\out",
+                '\\',
+                "target\\debug\\build\\shop\\notahash\\out",
+            ),
+            (
+                "target\\debug\\build\\shop\\sixteen-letters!\\out",
+                '\\',
+                "target\\debug\\build\\shop\\sixteen-letters!\\out",
+            ),
+            ("shop", '\\', "shop"),
+        ] {
+            assert_eq!(cargo_path(text, separator), printed);
+        }
         // As Windows gives them: the package resolved, the workspace not.
         let windows = running_line(
             Path::new("C:\\work\\copy"),
