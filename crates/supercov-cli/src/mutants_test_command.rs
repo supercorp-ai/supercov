@@ -211,12 +211,13 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         // standard error: the standard output is this command's answer.
         // Failing tests still leave a run; their tests kill nothing.
         let measured = std::env::current_exe().and_then(|program| {
+            use supercov_engine::fault_process::Launch;
             std::process::Command::new(program)
                 .arg("--")
                 .args(&command)
                 .env("SUPERCOV_MUTANTS", "1")
                 .stdout(std::io::stderr())
-                .status()
+                .launch_status()
         });
         if let Err(error) = measured {
             eprintln!("[supercov] could not measure: {error}");
@@ -619,7 +620,7 @@ fn save(
     let path = results_path(run);
     std::fs::write(
         &path,
-        serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
+        serde_json::to_vec_pretty(&document).expect("plain data serializes"),
     )
     .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -694,9 +695,9 @@ fn execute(
                 tests: plan.tests.clone(),
                 mutants: remaining.clone(),
             };
-            std::fs::write(
+            supercov_engine::fault_fs::write(
                 &plan_path,
-                serde_json::to_vec(&pass_plan).map_err(|e| e.to_string())?,
+                serde_json::to_vec(&pass_plan).expect("plain data serializes"),
             )
             .map_err(|e| format!("{}: {e}", plan_path.display()))?;
             let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
@@ -787,6 +788,11 @@ mod tests {
         assert!(critical("lib/money.ts", &globs));
         assert!(!critical("lib/deep/money.ts", &globs));
         assert!(!critical("src/other.ts", &globs));
+        // `?` is one character of a name, never a `/`.
+        assert!(critical("src/cart.js", &["src/cart.j?".to_owned()]));
+        assert!(!critical("src/cart.js", &["src?cart.js".to_owned()]));
+        // A `*` that reached the end of the name with the glob left over.
+        assert!(!critical("src/cart.js", &["src/*z".to_owned()]));
     }
 
     #[test]
@@ -796,6 +802,10 @@ mod tests {
             span_lines("c:/x/a.ts:12:1-12:7:BlockStatement:{}"),
             (12, 12)
         );
+        // An id with no span is read as spanning every line.
+        assert_eq!(span_lines("src/a.ts"), (0, u32::MAX));
+        assert_eq!(span_lines("src/a.ts:3:Mutator"), (0, u32::MAX));
+        assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
     }
 
     #[test]

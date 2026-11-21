@@ -18,8 +18,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
     let mut passed = Vec::new();
     let mut output = None;
     let mut format = None;
+    // Dispatch sends `<run> mutants ... --format ...` here: never nothing.
     let mut index = 0;
-    while index < arguments.len() {
+    loop {
         match arguments[index].as_str() {
             "--format" => {
                 index += 1;
@@ -35,6 +36,9 @@ pub fn command(arguments: &[String]) -> ExitCode {
             other => passed.push(other.to_owned()),
         }
         index += 1;
+        if index >= arguments.len() {
+            break;
+        }
     }
     let markdown = match format.as_deref() {
         Some("jsonl") => false,
@@ -220,8 +224,8 @@ pub(crate) fn markdown(
         return text;
     }
     text.push_str("\n| Where | Mutant | Status | Why |\n| --- | --- | --- | --- |\n");
-    for mutant in rows.iter().take(MARKDOWN_ROWS) {
-        text.push_str(&format!(
+    text.extend(rows.iter().take(MARKDOWN_ROWS).map(|mutant| {
+        format!(
             "| {} | {} | {} | {} |\n",
             code(&format!(
                 "{}:{}:{}",
@@ -237,8 +241,8 @@ pub(crate) fn markdown(
                     .map_or_else(String::new, |kind| format!(" ({} boundary)", kind.name()))
             )),
             cell(&mutant.weak.reason),
-        ));
-    }
+        )
+    }));
     if rows.len() > MARKDOWN_ROWS {
         let mut asked = request.clone();
         asked.mutants.statuses = wanted.clone();
@@ -265,4 +269,36 @@ fn printed(out: &mut dyn Write, lines: &str) -> ExitCode {
         return ExitCode::from(2);
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A standard output whose every write fails with this kind of error.
+    struct Failing(std::io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mutants_that_cannot_be_printed_end_the_export_with_two() {
+        // A reader that stopped early, and a standard output that failed.
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            assert_eq!(printed(&mut Failing(kind), "{}\n"), ExitCode::from(2));
+        }
+        let mut written = Vec::new();
+        assert_eq!(printed(&mut written, "{}\n"), ExitCode::SUCCESS);
+        assert_eq!(written, b"{}\n");
+    }
 }
