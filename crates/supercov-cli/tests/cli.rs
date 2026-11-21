@@ -15644,7 +15644,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2623 => main.rs:2623",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2036 => javascript_frontend.rs:2036",
+            "fs.read_to_string#javascript_frontend.rs:2040 => javascript_frontend.rs:2040",
         ],
     );
 }
@@ -17752,12 +17752,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1819@2",
+            "fs.read_to_string#javascript_frontend.rs:1823@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1819"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1823"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
