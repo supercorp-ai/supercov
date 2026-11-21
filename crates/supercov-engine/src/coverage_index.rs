@@ -4479,19 +4479,14 @@ struct MutantText {
 }
 
 impl MutantText {
-    fn put(
-        &mut self,
-        record: &mut [u8],
-        offset: usize,
-        text: &str,
-    ) -> Result<(), CoverageIndexError> {
+    /// Offsets and lengths are stored in 32 bits, as `usize_u32`'s are: no
+    /// run lists four gigabytes of mutant text.
+    fn put(&mut self, record: &mut [u8], offset: usize, text: &str) {
         let (at, length) = match self.known.get(text) {
             Some(known) => *known,
             None => {
-                let at = u32::try_from(self.bytes.len())
-                    .map_err(|_| CoverageIndexError::SizeOverflow)?;
-                let length =
-                    u32::try_from(text.len()).map_err(|_| CoverageIndexError::SizeOverflow)?;
+                let at = usize_u32(self.bytes.len());
+                let length = usize_u32(text.len());
                 self.bytes.extend_from_slice(text.as_bytes());
                 self.known.insert(text.to_owned(), (at, length));
                 (at, length)
@@ -4499,7 +4494,6 @@ impl MutantText {
         };
         put_u32(record, offset, at);
         put_u32(record, offset + 4, length);
-        Ok(())
     }
 }
 
@@ -4514,7 +4508,7 @@ pub(crate) fn mutation_sections(
     let mut mutants = Vec::new();
     if let Some(results) = results {
         run[0] = 1;
-        text.put(&mut run, 8, &results.mutant_set)?;
+        text.put(&mut run, 8, &results.mutant_set);
         let mut file_numbers = HashMap::<&str, usize>::new();
         let mut file_records = Vec::<([u8; MUTATION_FILE_RECORD_SIZE], MutantCounts, usize)>::new();
         for (index, mutant) in results.mutants.iter().enumerate() {
@@ -4527,7 +4521,7 @@ pub(crate) fn mutation_sections(
                 }
                 None => {
                     let mut record = [0_u8; MUTATION_FILE_RECORD_SIZE];
-                    text.put(&mut record, 0, &mutant.file)?;
+                    text.put(&mut record, 0, &mutant.file);
                     put_u32(&mut record, 24, usize_u32(index));
                     file_numbers.insert(&mutant.file, file_records.len());
                     file_records.push((record, MutantCounts::default(), 0));
@@ -4556,14 +4550,14 @@ pub(crate) fn mutation_sections(
                 (56, &mutant.code),
                 (64, &mutant.reason),
             ] {
-                text.put(&mut record, offset, value)?;
+                text.put(&mut record, offset, value);
             }
             if let Some((_, reason)) = &mutant.untestable {
-                text.put(&mut record, 72, reason)?;
+                text.put(&mut record, 72, reason);
             }
             if let Some((from, to)) = &mutant.changed {
-                text.put(&mut record, 80, from)?;
-                text.put(&mut record, 88, to)?;
+                text.put(&mut record, 80, from);
+                text.put(&mut record, 88, to);
             }
             mutants.extend_from_slice(&record);
         }
@@ -4880,6 +4874,207 @@ mod tests {
         let index = CoverageIndex::new(&container).unwrap();
         assert_eq!(index.mutation().unwrap(), None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The test report with one mutant that names every text a mutant
+    /// record can: a changed span and a clock boundary.
+    fn mutated_report() -> CoverageReport {
+        let mut report = report();
+        report.mutation = Some(MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants: vec![IndexedMutant {
+                file: "src/a.js".into(),
+                start: (1, 3),
+                end: (1, 9),
+                mutator: "EqualityOperator".into(),
+                descriptor: "<=".into(),
+                original: "a < b".into(),
+                replacement: "a <= b".into(),
+                changed: Some(("<".into(), "<=".into())),
+                status: MutantStatus::NotInfected,
+                proxy: false,
+                code: "operands-never-equal".into(),
+                reason: "the operands were never equal".into(),
+                untestable: Some((Untestable::Clock, "reads the clock".into())),
+            }],
+        });
+        report
+    }
+
+    /// Whatever a run's mutation records say against each other, or of text
+    /// the index does not hold, is refused by the reader that reads it, by
+    /// what it is; so is a page of them damaged on disk.
+    #[test]
+    fn mutation_records_that_do_not_agree_are_refused_by_what_they_say() {
+        let report = mutated_report();
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&report, edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            match index.mutation() {
+                Ok(Some(mutation)) => match index.mutants_of(&mutation.files[0]) {
+                    Ok(mutants) => format!("accepted {}", mutants.len()),
+                    Err(error) => format!("{error:?}"),
+                },
+                Ok(None) => "none".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted 1");
+        let set = |kind: u32, size: usize, at: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| patch(s, kind, 0, size, at, &bytes))
+        };
+        let file = |at: usize, value: u32| {
+            set(
+                SECTION_MUTATION_FILES,
+                MUTATION_FILE_RECORD_SIZE,
+                at,
+                value.to_le_bytes().to_vec(),
+            )
+        };
+        let mutant =
+            |at: usize, bytes: Vec<u8>| set(SECTION_MUTANTS, MUTANT_RECORD_SIZE, at, bytes);
+        // A text whose length runs past the text the index holds.
+        let past = |at: usize| mutant(at + 4, u32::MAX.to_le_bytes().to_vec());
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "mutation record count",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    duplicate(s, SECTION_MUTATION, 0, MUTATION_RECORD_SIZE);
+                }),
+            ),
+            // The file's first mutant, its count, its untestable mutants and
+            // its end, each in turn out of line.
+            ("mutation file range", file(24, 1)),
+            ("mutation file range", file(28, 2)),
+            ("mutation file range", file(36, 2)),
+            (
+                "mutation file range",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    for at in [16, 28] {
+                        let size = MUTATION_FILE_RECORD_SIZE;
+                        let value = u64_at(s, SECTION_MUTATION_FILES, 0, size, at) as u32;
+                        patch(
+                            s,
+                            SECTION_MUTATION_FILES,
+                            0,
+                            size,
+                            at,
+                            &(value + 1).to_le_bytes(),
+                        );
+                    }
+                }),
+            ),
+            // A mutant no file's range holds.
+            (
+                "mutation file range",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    duplicate(s, SECTION_MUTANTS, 0, MUTANT_RECORD_SIZE);
+                }),
+            ),
+            ("OutOfBounds", file(4, u32::MAX)),
+            ("mutant reserved bytes", mutant(96, vec![1])),
+            ("mutant untestable", mutant(2, vec![3])),
+            ("mutant changed", mutant(3, vec![2])),
+            ("mutant status", mutant(0, vec![200])),
+            ("boolean", mutant(1, vec![2])),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        for text in [72, 80, 88, 24, 32, 40, 48, 56, 64] {
+            let got = read(past(text).as_ref());
+            assert!(got.contains("OutOfBounds"), "{text}: {got}");
+        }
+
+        // A page damaged on disk, of each mutation section in turn.
+        let (root, container) = index_of(&report, &|_| {});
+        let index = CoverageIndex::new(&container).unwrap();
+        let file = index.mutation().unwrap().unwrap().files.remove(0);
+        // A test fault fails each reader where it starts.
+        assert!(crate::fault::during("coverage-index-read", || index.mutation()).is_err());
+        assert!(crate::fault::during("coverage-index-read", || index.mutants_of(&file)).is_err());
+        // A file of no mutants reads none of them.
+        let none = IndexedFileMutation {
+            count: 0,
+            counts: MutantCounts::default(),
+            ..file.clone()
+        };
+        assert_eq!(index.mutants_of(&none).unwrap(), []);
+        let descriptors = [
+            SECTION_MUTATION,
+            SECTION_MUTATION_FILES,
+            SECTION_MUTANTS,
+            SECTION_MUTANT_TEXT,
+        ]
+        .map(|kind| container.descriptor(kind).unwrap());
+        drop(container);
+        let path = root.join("query-index.v1.bin");
+        let pristine = fs::read(&path).unwrap();
+        for descriptor in descriptors {
+            let mut bytes = pristine.clone();
+            bytes[descriptor.offset as usize] ^= 0xff;
+            fs::write(&path, &bytes).unwrap();
+            let container = QueryIndex::open(&path, &identity()).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let refused = match descriptor.kind {
+                SECTION_MUTANTS => index.mutants_of(&file).map(|_| ()),
+                _ => index.mutation().map(|_| ()),
+            };
+            assert!(
+                matches!(
+                    refused,
+                    Err(CoverageIndexError::Container(
+                        QueryIndexError::CorruptPage { .. }
+                    ))
+                ),
+                "{}: {refused:?}",
+                descriptor.kind
+            );
+        }
+    }
+
+    /// A run that listed no mutant still has its mutant set, with no file;
+    /// one whose files' mutants are apart builds no index.
+    #[test]
+    fn a_run_of_no_mutants_keeps_its_set_and_one_of_scattered_mutants_builds_none() {
+        let mut report = report();
+        report.mutation = Some(MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants: Vec::new(),
+        });
+        let (_root, container) = index_of(&report, &|_| {});
+        let mutation = CoverageIndex::new(&container)
+            .unwrap()
+            .mutation()
+            .unwrap()
+            .unwrap();
+        assert_eq!(mutation.mutant_set, "stryker-js@10.1.1");
+        assert!(mutation.files.is_empty());
+
+        let mut scattered = mutated_report();
+        let mutation = scattered.mutation.as_mut().unwrap();
+        let first = mutation.mutants[0].clone();
+        mutation.mutants.push(IndexedMutant {
+            file: "src/b.js".into(),
+            ..first.clone()
+        });
+        mutation.mutants.push(first);
+        assert!(matches!(
+            coverage_index_sections(&scattered),
+            Err(CoverageIndexError::InvalidRecord(
+                "a file's mutants are not together"
+            ))
+        ));
+    }
+
+    #[test]
+    fn untestable_kinds_are_named_and_parsed_by_their_names() {
+        for kind in [Untestable::Clock, Untestable::Random] {
+            assert_eq!(Untestable::parse(kind.name()), Some(kind));
+        }
+        assert_eq!(Untestable::Random.name(), "random");
+        assert_eq!(Untestable::parse("other"), None);
     }
 
     /// The test report, its test's attempt holding these phases.
@@ -6503,6 +6698,17 @@ mod tests {
         assert!(matches!(
             query_indexed(&index, None, &request("diff", "all", None), None),
             Err(E::MissingNewerRun)
+        ));
+        // A page of no mutants is no page.
+        let no_page: IndexedQueryRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run", "filter": "all", "command": "mutants", "limit": 0,
+        }))
+        .unwrap();
+        assert!(matches!(
+            query_indexed(&index, None, &no_page, None),
+            Err(E::Query(
+                crate::coverage_query::QueryError::InvalidPagination
+            ))
         ));
         assert!(matches!(
             crate::indexed_query::execute_indexed_query(

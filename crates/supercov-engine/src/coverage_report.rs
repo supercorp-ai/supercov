@@ -3597,22 +3597,17 @@ fn fold_server_values(raw_results: &mut [RawTestResult]) -> Result<(), ReportErr
         ("RT", true, true),
     ];
     for raw in raw_results.iter_mut() {
-        if !raw
-            .server
-            .iter()
-            .any(|record| matches!(record.record_type.as_str(), "comparison" | "logical"))
-        {
-            continue;
-        }
         let mut comparisons = BTreeMap::<String, BTreeSet<String>>::new();
         let mut logicals = BTreeMap::<String, BTreeSet<(bool, bool)>>::new();
         let mut kept = Vec::with_capacity(raw.server.len());
+        let mut folded = false;
         for record in std::mem::take(&mut raw.server) {
             let kind = record.record_type.as_str();
             if kind != "comparison" && kind != "logical" {
                 kept.push(record);
                 continue;
             }
+            folded = true;
             let (Some(id), Some(outcome)) = (record.id, record.outcome) else {
                 return Err(ReportError::InvalidServerRecord(format!(
                     "{kind} without its id or outcome"
@@ -3631,6 +3626,11 @@ fn fold_server_values(raw_results: &mut [RawTestResult]) -> Result<(), ReportErr
             logicals.entry(id).or_default().insert((right, truthy));
         }
         raw.server = kept;
+        // A test whose server recorded no value keeps its snapshots as they
+        // were.
+        if !folded {
+            continue;
+        }
         raw.runtime.push(RuntimeSnapshot {
             logicals: logicals
                 .into_iter()
@@ -7346,6 +7346,61 @@ mod tests {
                 crate::coverage_index::MutantStatus::Unknown,
                 "server-process".into()
             )
+        );
+    }
+
+    /// A server's value record without its outcome, or a `mutants.json`
+    /// that does not read, fails the archive's analysis, by what it is.
+    #[test]
+    fn an_archive_whose_server_values_or_mutants_do_not_read_is_refused() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("s", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let analyze = |path: &str, contents: &[u8]| {
+            let archive_path = archive(vec![
+                EvidenceArchiveEntry {
+                    path: "manifest.json".into(),
+                    contents: serde_json::to_vec(&manifest).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: "worker/mcdc.json".into(),
+                    contents: serde_json::to_vec(&raw("t", 0, "passed", &["s"])).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: path.into(),
+                    contents: contents.to_vec(),
+                },
+            ]);
+            let report = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: archive_path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
+            });
+            fs::remove_dir_all(archive_path.parent().unwrap()).unwrap();
+            report.err()
+        };
+        let unvalued = analyze(
+            "server/background/process-1-a1b2c3d4-0.jsonl",
+            b"{\"type\":\"comparison\",\"id\":\"c\"}\n",
+        );
+        assert!(
+            matches!(unvalued, Some(ReportError::InvalidServerRecord(_))),
+            "{unvalued:?}"
+        );
+        let unread = analyze("mutants.json", b"not json");
+        assert!(
+            matches!(&unread, Some(ReportError::InvalidJson { path, .. }) if path == "mutants.json"),
+            "{unread:?}"
         );
     }
 }
