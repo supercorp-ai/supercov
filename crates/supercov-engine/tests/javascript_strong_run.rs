@@ -3,7 +3,8 @@
 //!
 //! The command here is a shell script that writes the records a driver
 //! writes, so no runner is needed: what is tested is what the engine does
-//! with them.
+//! with them. The script is a POSIX shell's, so the file is Unix only.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 
