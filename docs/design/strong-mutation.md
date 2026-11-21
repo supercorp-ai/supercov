@@ -133,22 +133,26 @@ doing so.
 Where isolation is off (`isolate: false`, `--no-isolate`, a single-thread pool
 sharing modules) a round holds one mutant.
 
-`SUPERCOV_STRONG_WARM=1` (forks and threads pools) runs the copies in workers
-Vitest keeps between test files (`isolate: false` for the pass), and each
-copy's setup file resets the modules and mocks Vitest evaluated before its test
-file loads, so a copy starts from the project's modules as an isolated worker
-would; only packages Node itself loaded stay loaded. Its verdicts matched the
-isolated pass on every corpus measured (hono, tRPC, and a private
-application's unit and integration suites: 0 differences, 0 soundness
-violations), but its speed depends on the suite: the application's suites ran
-2.9× (unit) and 1.9× (integration) faster, hono the same, tRPC 30% slower. It
-is off by default. A later comparison against StrykerJS's ground truth found
-kills it should not make, from state a module reset does not undo: a
-process-wide value one test file changed (pathe's `process.cwd`), a fake clock
-left on (hono's JWT tests), and a copy that did not finish (hono, tRPC: 37
-extra kills there). It halved the strong pass on the small corpus projects
-(ufo 26 to 12 s) and used 2.3-2.6× less CPU on hono and tRPC, but their wall
-time did not drop.
+Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
+between test files (`isolate: false` for the pass), and the copy's setup file
+reset the modules and mocks Vitest had evaluated, so only the packages Node
+itself loaded stayed loaded. That cannot be made sound: whatever a test file
+leaves in its process outlives a module reset, and against StrykerJS's ground
+truth it made kills no isolated copy makes. Examples: a process-wide value one file
+changed (pathe's `process.cwd`), a fake clock left on (hono's JWT tests), and
+work a timed-out copy left running (37 extra kills on tRPC). Telling such kills
+apart would mean running each one again in a fresh worker, which costs more than
+warm workers save. They did not pay on the suites where time matters either:
+the strong pass halved on the small corpus projects (ufo 26 to 12 s) and
+used 2.3-2.6× less CPU on hono and tRPC, but hono's and tRPC's wall time did
+not drop, because their copies wait on their tests' own timers, not on
+starting.
+
+Node's compile cache (`NODE_COMPILE_CACHE`, which Vitest does not turn on) was
+tried as a sound way to start copies faster, and also dropped: the strong pass
+was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
+the measured run the same everywhere. What warm workers saved is starting a
+process and Vitest for each copy, not compiling.
 
 The time a copy spends is mostly not its tests: on tRPC a copy waits about
 0.5 s for its worker before its setup file runs and its tests take 0.1-0.4 s,
@@ -205,10 +209,22 @@ detected, so the suite gets credit no assertion earned (tRPC's
 Supercov calls such a mutant `survived`: no test tells it apart. An error no test catches (work a
 test left running, a rejected promise nobody awaited) is the mutant's where
 the file raised none without it: a kill, or a `timeout` where it is the
-switch's own limit. A round past its deadline (twice its time limit plus 30 s:
-a worker that will not end) ends the pass: its unfinished copies are
-timeouts, every verdict so far is saved, and `mutants test` starts another
-pass for the mutants left.
+switch's own limit. A copy can also stop where no test's limit reaches: a mutant that leaves a
+module's top-level `await` waiting forever never lets its test file load. A
+round's copies report as they go (their claim, each test, their end), and
+the driver looks at them every 0.5 s. Once every copy still going has run
+past its own limit, the round's run is cancelled: its workers are asked to
+stop, and 3 s later stopped by force. A copy's limit is three times its
+file's baseline copy and 10 s more, twice StrykerJS's. The round is also
+cancelled once nothing has reported for twice the longest test or hook
+limit and 30 s more. The copies that did not end are timeouts, unless their
+tests left out hang the same way without the mutant (the confirmation
+above). Copies no worker had taken run in a later round, and the pass goes
+on. On tRPC, such a hang used to hold the round for its whole deadline and
+then end the pass: the next pass started Vitest and ran every baseline
+again (3 of 32 shards, about a minute each). Only workers that do not stop
+even when forced still end the pass, and `mutants test` starts another for
+the mutants left.
 
 ## Instrumentation
 
@@ -301,6 +317,12 @@ reason }`, where `tests` is how many ran. Statuses: `killed`, `survived`,
 `timeout`, `no-coverage`, `error`. The mutation score is
 `(killed + timeout) / (killed + timeout + survived + no-coverage)`, as
 StrykerJS's.
+
+While a pass runs, a line on stderr every 15 s says how far it got: the
+mutants with a verdict of those it runs, how many are killed, timed out,
+survived and errors, the time so far, and the time left at this pace. The
+CLI reads it from the pass's results as the driver writes them, so it works
+the same for every driver.
 
 ## Gate
 

@@ -681,12 +681,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1614",
+            "fs.open_with#process_supervision.rs:1615",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1614");
+    terminal.wait_for("test fault at fs (process_supervision.rs:1615");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -15043,7 +15043,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1526", watchdog),
+        ("fs.read_dir#process_supervision.rs:1527", watchdog),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -17210,7 +17210,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#lifecycle.rs:1364",
         "fs.create_dir_all#javascript_run.rs:758",
         "fs.write#javascript_run.rs:1092",
-        "fs.canonicalize#process_supervision.rs:1795",
+        "fs.canonicalize#process_supervision.rs:1796",
         "fs.create_dir_all#javascript_run.rs:1171",
         "fs.create_dir_all#javascript_run.rs:1361",
         "fs.read_dir#evidence_archive.rs:262",
@@ -21907,21 +21907,7 @@ fn a_test_that_leans_on_an_earlier_one_still_kills_its_mutants() {
 #[cfg(unix)]
 #[test]
 fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
-    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("0");
-}
-
-/// Copies in warm workers (SUPERCOV_STRONG_WARM=1) start from fresh modules:
-/// an item an earlier copy registered in the same worker would let the
-/// count pass without its predecessor, and no kill would be overturned.
-#[cfg(unix)]
-#[test]
-fn a_copy_in_a_warm_worker_starts_from_fresh_modules() {
-    a_test_that_fails_without_its_predecessor_kills_no_mutant_with("1");
-}
-
-#[cfg(unix)]
-fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(warm: &str) {
-    let project = vitest_mutants_project(&format!("strong-subset-false-kill-{warm}"));
+    let project = vitest_mutants_project("strong-subset-false-kill");
     // `if (item)` gives the first test mutants of its own, so the file's
     // baseline runs both tests and the second passes there.
     project.write(
@@ -21935,14 +21921,10 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant_with(warm: &str) {
     project.commit("items");
     project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
     let reply = project
-        .supercov_with(
-            &["runs", "latest", "mutants", "test", "--json"],
-            &[("SUPERCOV_STRONG_WARM", warm)],
-        )
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
         .json();
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     let pass = &reply["passes"][0];
-    assert_eq!(pass["warm"], warm == "1", "{reply}");
     assert!(pass["overturned"].as_u64().unwrap_or(0) > 0, "{reply}");
     let listed = project
         .supercov(&[
@@ -22021,6 +22003,142 @@ fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
         ),
         "{endless}"
     );
+}
+
+/// A mutant that leaves a module's top-level `await` waiting forever: its
+/// test file never loads, so no test's limit can end it. Once the copies
+/// still going are past their limit (three times their file's baseline, and
+/// ten seconds), the round is cancelled and those mutants are timeouts, in
+/// the same pass: no deadline to wait out, no second pass.
+#[cfg(unix)]
+#[test]
+fn a_mutant_that_leaves_an_import_waiting_forever_is_a_timeout_in_the_same_pass() {
+    let project = vitest_mutants_project("strong-import-waits");
+    project.write(
+        "src/ready.js",
+        "export const ready = await new Promise((resolve) => {\n  if (globalThis.Date) resolve(true);\n});\n\nexport function double(n) {\n  return n * 2;\n}\n",
+    );
+    project.write(
+        "test/ready.test.js",
+        "import { expect, it } from \"vitest\";\nimport { double, ready } from \"../src/ready.js\";\nit(\"is ready\", () => expect(ready).toBe(true));\nit(\"doubles\", () => expect(double(2)).toBe(4));\n",
+    );
+    project.commit("ready");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let passes = reply["passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 1, "{reply}");
+    assert_eq!(passes[0]["stalled"], false, "{reply}");
+    assert!(
+        passes[0]["profile"]["cancelledRounds"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "{reply}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/ready.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let never = mutants
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/ready.js:2:") && id.ends_with(":ConditionalExpression:false")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(never["strong"]["status"], "timeout", "{never}");
+    // The copies the cancel left to no worker ran later: every mutant of
+    // the file has a verdict of its own.
+    let doubled = mutants
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/ready.js:6:") && id.contains(":ArithmeticOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(doubled["strong"]["status"], "killed", "{doubled}");
+}
+
+/// A pass says how far it got while it runs (here every 100 ms): before any
+/// verdict, how many mutants it has to run; once there are verdicts, how
+/// they stand and the time left at this pace. `inc`'s mutants survive the
+/// quick file, which runs first, and run again in the slow one in a later
+/// round, after `dbl`'s verdicts.
+#[cfg(unix)]
+#[test]
+fn a_running_pass_says_how_far_it_got() {
+    let project = vitest_mutants_project("strong-progress");
+    project.write(
+        "src/steps.js",
+        "export function inc(n) {\n  return n + 1;\n}\n\nexport function dbl(n) {\n  return n * 2;\n}\n",
+    );
+    project.write(
+        "test/quick.test.js",
+        "import { expect, it } from \"vitest\";\nimport { dbl, inc } from \"../src/steps.js\";\nit(\"runs inc\", () => {\n  inc(1);\n});\nit(\"doubles\", () => expect(dbl(2)).toBe(4));\n",
+    );
+    project.write(
+        "test/slow.test.js",
+        "import { expect, it } from \"vitest\";\nimport { inc } from \"../src/steps.js\";\nit(\"increments\", async () => {\n  await new Promise((resolve) => setTimeout(resolve, 400));\n  expect(inc(1)).toBe(2);\n});\n",
+    );
+    project.commit("steps");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[("SUPERCOV_PROGRESS_INTERVAL_MS", "100")],
+    );
+    let reply = ran.json();
+    let said = ran.stderr();
+    let lines = said
+        .lines()
+        .filter(|line| line.starts_with("[supercov] strong pass: ") && line.contains(" mutants ("))
+        .collect::<Vec<_>>();
+    let to_run = reply["summary"]["ran"].as_u64().unwrap();
+    assert!(
+        lines.iter().any(|line| line.starts_with(&format!(
+            "[supercov] strong pass: 0 of {to_run} mutants (0 killed, 0 timed out, 0 survived, 0 errors), "
+        )) && !line.contains(" left")),
+        "{said}"
+    );
+    assert!(
+        lines.iter().any(|line| !line.contains(": 0 of ")
+            && line.contains("; about ")
+            && line.ends_with(" left")),
+        "{said}"
+    );
+}
+
+/// A test file that does not finish without a mutant (here it throws while
+/// it loads, in the strong pass only) cannot test the mutants it alone
+/// covers: they are errors, not survivors.
+#[cfg(unix)]
+#[test]
+fn mutants_only_an_unfinished_test_file_covers_are_errors() {
+    let project = vitest_mutants_project("strong-baseline-unfinished");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nif (process.env.SUPERCOV_STRONG) throw new Error(\"not in a strong pass\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("unfinished");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert!(reply["summary"]["ran"].as_u64().unwrap_or(0) > 0, "{reply}");
+    assert_eq!(
+        reply["summary"]["error"], reply["summary"]["ran"],
+        "{reply}"
+    );
+    assert_eq!(reply["summary"]["killed"], 0, "{reply}");
 }
 
 /// A mutant that leaves work re-arming itself after the tests (a ticker that
@@ -22502,12 +22620,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:698",
+            "fs.write#mutants_test_command.rs:769",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:698"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:769"),
         "{}",
         unwritten.stderr()
     );

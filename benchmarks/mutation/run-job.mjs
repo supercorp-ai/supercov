@@ -341,10 +341,6 @@ async function installSupercov() {
     process.env.SUPERCOV_STRONG_ROUND = round[1];
     note(`variant round-N: SUPERCOV_STRONG_ROUND set per job (assignments per Vitest worker in a strong round)`);
   }
-  if (args.variant === 'warm') {
-    process.env.SUPERCOV_STRONG_WARM = '1';
-    note('variant warm: SUPERCOV_STRONG_WARM=1 (one Vitest instance per copy, modules reset between assignments)');
-  }
   if (firstWorkers) note(`variant first-w${firstWorkers}: the first variant with Vitest's --maxWorkers=${firstWorkers}`);
   if (args.variant === 'first') note('variant first: no measured run; `supercov mutants -- <test command>` measures what it needs, then tests the mutants');
   process.env.SUPERCOV_RUST_BINARY = binary;

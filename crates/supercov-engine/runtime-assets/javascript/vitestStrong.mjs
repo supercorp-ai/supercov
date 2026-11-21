@@ -13,7 +13,7 @@
 // skipped: the mutant is killed.
 import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { afterAll, afterEach, beforeAll, beforeEach, inject, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, inject } from "vitest";
 import * as localRuntime from "./runtime.mjs";
 
 const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? localRuntime;
@@ -55,24 +55,6 @@ function claim() {
     }
     return undefined;
 }
-
-// A copy in a warm worker (SUPERCOV_STRONG_WARM) starts as an isolated one
-// would: the modules an earlier copy evaluated, and the mocks it registered,
-// are evaluated afresh. Packages Node itself loaded stay loaded.
-function resetWarmWorker() {
-    let provided;
-    try {
-        provided = inject("supercovStrong");
-    }
-    catch {
-        return;
-    }
-    if (!provided?.warm)
-        return;
-    globalThis.__vitest_mocker__?.reset?.();
-    vi.resetModules();
-}
-resetWarmWorker();
 
 const assignment = claim();
 const chosen = new Set(assignment?.tests ?? []);
@@ -192,9 +174,6 @@ afterAll(async () => {
             });
     }
     report({ done: true, at: realNow() });
-    // A warm worker runs further copies: this one's handlers end with it.
-    process.off("uncaughtException", outsideTests);
-    process.off("unhandledRejection", outsideTests);
     if (assignment.mutant)
         runtime.clearActiveMutant();
 });

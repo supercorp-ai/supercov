@@ -30,15 +30,18 @@ const HIT_LIMIT_FLOOR = 1_000;
 // for sizing rounds by their work.
 const COPY_LOAD_ESTIMATE_MS = 1_000;
 const MAX_ROUND_FACTOR = 16;
+// How often a round's copies are looked at while it runs, and how long a
+// cancelled run gets to end: its workers are asked to stop, and after
+// CANCEL_FORCE_AFTER_MS stopped by force.
+const WATCH_INTERVAL_MS = 500;
+const CANCEL_FORCE_AFTER_MS = 3_000;
+const CANCEL_GRACE_MS = 15_000;
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
 }
 
 function isolated(vitest) {
-    // Warm workers (below) reset each copy's modules themselves.
-    if (vitest.__supercovWarm)
-        return true;
     for (const project of vitest.projects ?? [vitest.getCoreWorkspaceProject?.()]) {
         const config = project?.config;
         if (!config)
@@ -51,6 +54,50 @@ function isolated(vitest) {
             return false;
     }
     return true;
+}
+
+// The longest a hook may take, as the projects set it (Vitest's default 10 s).
+function hookTimeoutOf(vitest) {
+    const configs = [vitest.config, ...(vitest.projects ?? []).map((project) => project.config)];
+    return Math.max(10_000, ...configs.map((config) => Number(config?.hookTimeout) || 0));
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// What a copy reported (vitestStrong.mjs): its claim, its tests starting,
+// each test's outcome, errors outside any test, its end.
+function readOutcome(out) {
+    const outcome = { claimed: false, done: false, tests: [], outside: [], records: 0 };
+    if (!existsSync(out))
+        return outcome;
+    for (const line of readFileSync(out, "utf8").split("\n")) {
+        if (!line.trim())
+            continue;
+        let record;
+        try {
+            record = JSON.parse(line);
+        }
+        catch {
+            // A line the copy is still writing.
+            continue;
+        }
+        outcome.records += 1;
+        if (record.claimed) {
+            outcome.claimed = true;
+            outcome.claimedAt = record.at;
+        }
+        else if (record.started)
+            outcome.startedAt = record.at;
+        else if (record.done) {
+            outcome.done = true;
+            outcome.doneAt = record.at;
+        }
+        else if (record.test)
+            outcome.tests.push(record);
+        else if (record.outside)
+            outcome.outside.push(record);
+    }
+    return outcome;
 }
 
 function provide(vitest, value) {
@@ -67,28 +114,6 @@ function setTestTimeout(vitest, ms) {
     }
     if (vitest.config)
         vitest.config.testTimeout = ms;
-}
-
-// SUPERCOV_STRONG_WARM=1: copies run in worker processes Vitest keeps
-// between test files (the pool's own `isolate: false`), and each copy's setup
-// file resets the modules Vitest evaluated before its test file loads, as an
-// isolated worker would start: a copy no longer pays for a new process and
-// for the packages Node already loaded. Only the forks and threads pools keep
-// workers this way.
-function warmUp(vitest) {
-    if (process.env["SUPERCOV_STRONG_WARM"] !== "1" || !process.env["SUPERCOV_STRONG_PLAN"])
-        return;
-    const configs = [vitest.config, ...(vitest.projects ?? []).map((project) => project.config)].filter(Boolean);
-    const poolOf = (config) => config.pool ?? "forks";
-    if (!configs.every((config) => ["forks", "threads"].includes(poolOf(config)) && !config.browser?.enabled))
-        return;
-    for (const config of configs) {
-        const pool = poolOf(config);
-        config.poolOptions ??= {};
-        config.poolOptions[pool] = { ...config.poolOptions[pool], isolate: false };
-        config.isolate = false;
-    }
-    vitest.__supercovWarm = true;
 }
 
 // SUPERCOV_STRONG_CPU_PROFILE=<file>: a CPU profile of this process -- the
@@ -118,7 +143,6 @@ export default class SupercovStrongReporter {
     }
     onInit(vitest) {
         this.configureProjects?.(vitest.projects);
-        warmUp(vitest);
         const planPath = process.env["SUPERCOV_STRONG_PLAN"];
         const resultsPath = process.env["SUPERCOV_STRONG_RESULTS"];
         if (!planPath || !resultsPath)
@@ -220,7 +244,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let stalled = false;
     // Where the pass's time goes: each round's wall time against what its
     // copies spent loading (round start to claim), in tests, and after them.
-    const profile = { rounds: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, loadMs: 0, testMs: 0, copyMs: 0, tailMs: 0, testsRun: 0, timeline: [] };
+    const profile = { rounds: 0, wallMs: 0, cancelledRounds: 0, hungCopies: 0, copies: 0, mutantCopies: 0, checkCopies: 0, loadMs: 0, testMs: 0, copyMs: 0, tailMs: 0, testsRun: 0, timeline: [] };
     async function runRound(assignments, timeoutMs) {
         const directory = `${roundsDirectory}/${roundNumber++}`;
         const counts = new Map();
@@ -233,51 +257,83 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             writeFileSync(`${directory}/${key}/${index}.json`, JSON.stringify(assignment.claim));
             placedAt.push(`${directory}/${key}/${index}.out`);
         }
-        provide(vitest, { root, round: directory, warm: Boolean(vitest.__supercovWarm) });
+        provide(vitest, { root, round: directory });
         setTestTimeout(vitest, Math.ceil(timeoutMs));
-        // A round whose workers do not end (a fork that will not
-        // terminate) must not hold the pass: past its deadline, what it
-        // finished is read and the rest is a timeout.
-        let timer;
-        const deadline = new Promise((resolve) => {
-            timer = setTimeout(() => resolve("deadline"), timeoutMs * 2 + 30_000);
-        });
         const roundStarted = Date.now();
-        const ran = runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false);
-        const finished = await Promise.race([ran.then((result) => ({ result })), deadline]);
-        clearTimeout(timer);
-        if (finished === "deadline")
-            stalled = true;
-        else
-            last = finished.result;
+        let settled;
+        const ran = runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false)
+            .then((result) => {
+                settled = { result };
+            }, (error) => {
+                settled = { error };
+            });
+        // A copy reports as it goes: its claim, each test, its end. One that
+        // stops (a mutant that left a module's import waiting forever, a
+        // worker that will not end) must not hold the round. Once every copy
+        // still going has passed its limit (a mutant's copy: three times its
+        // file's baseline copy and 10 s more, twice StrykerJS's limit), or
+        // nothing has reported for
+        // longer than any one test or hook may take, the run is cancelled:
+        // what ended is read, the copies that did not end are timeouts, and
+        // the copies no worker took yet run in a later round.
+        const quietLimit = Math.max(timeoutMs, hookTimeoutOf(vitest)) * 2 + 30_000;
+        let reported = -1;
+        let lastReport = roundStarted;
+        let hung = false;
+        while (!settled) {
+            await Promise.race([ran, pause(WATCH_INTERVAL_MS)]);
+            if (settled)
+                break;
+            const now = Date.now();
+            const outcomes = placedAt.map(readOutcome);
+            const records = outcomes.reduce((sum, outcome) => sum + outcome.records, 0);
+            if (records !== reported) {
+                reported = records;
+                lastReport = now;
+                continue;
+            }
+            const going = outcomes.flatMap((outcome, at) => outcome.claimed && !outcome.done ? [{ outcome, at }] : []);
+            const overdue = going.length > 0 && going.every(({ outcome, at }) => assignments[at].limitMs !== undefined && now - outcome.claimedAt > assignments[at].limitMs);
+            if (overdue || now - lastReport > quietLimit) {
+                hung = true;
+                break;
+            }
+        }
+        if (hung) {
+            profile.cancelledRounds += 1;
+            const cancel = () => {
+                try {
+                    vitest.cancelCurrentRun?.("supercov: a test file stopped reporting")?.catch?.(() => { });
+                }
+                catch {
+                    // Nothing to cancel with: the grace below runs out.
+                }
+            };
+            cancel();
+            await Promise.race([ran, pause(CANCEL_FORCE_AFTER_MS)]);
+            // A second cancel stops the workers by force.
+            if (!settled)
+                cancel();
+            await Promise.race([ran, pause(CANCEL_GRACE_MS)]);
+            // Workers that will not stop even then: the pass ends here, and
+            // the mutants left run in the next pass `mutants test` starts.
+            if (!settled)
+                stalled = true;
+        }
+        if (settled?.result)
+            last = settled.result;
         const roundEnded = Date.now();
         profile.rounds += 1;
         profile.wallMs += roundEnded - roundStarted;
         let lastDone = roundStarted;
         // The outcome of each claim, whichever copy took it.
         const outcomesOf = placedAt.map((out) => {
-            const outcome = { claimed: false, done: false, tests: [], outside: [] };
-            if (!existsSync(out))
-                return outcome;
-            for (const line of readFileSync(out, "utf8").split("\n")) {
-                if (!line.trim())
-                    continue;
-                const record = JSON.parse(line);
-                if (record.claimed) {
-                    outcome.claimed = true;
-                    outcome.claimedAt = record.at;
-                }
-                else if (record.started)
-                    outcome.startedAt = record.at;
-                else if (record.done) {
-                    outcome.done = true;
-                    outcome.doneAt = record.at;
-                }
-                else if (record.test)
-                    outcome.tests.push(record);
-                else if (record.outside)
-                    outcome.outside.push(record);
-            }
+            const outcome = readOutcome(out);
+            // The run was cancelled: a copy that did not end stopped there.
+            outcome.cancelled = hung;
+            outcome.hung = hung && outcome.claimed && !outcome.done;
+            if (outcome.hung)
+                profile.hungCopies += 1;
             return outcome;
         }).map((outcome, at) => {
             if (outcome.claimedAt) {
@@ -331,16 +387,35 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // is certain; any other is confirmed without the mutant first.
     const baselineOrder = new Map();
     const wholeBaseline = new Set();
+    // How long each file's baseline copy took, from its claim to its end:
+    // a mutant's copy of the file that runs past three times that, and ten
+    // seconds more, has stopped.
+    const baselineCopyMs = new Map();
     const baseline = async (files) => {
-        const assignments = [...files].map(([file, entry]) => ({
+        let assignments = [...files].map(([file, entry]) => ({
             file,
             claim: { mutant: null, tests: [...entry.tests], wholeFile: entry.whole },
         }));
-        const outcomes = await runRound(assignments, 60_000);
-        return assignments.map((assignment, at) => ({ assignment, outcome: outcomes[at] }));
+        const results = [];
+        // A copy a cancelled round left to no worker runs in the next.
+        for (let tries = 0; assignments.length; tries++) {
+            const outcomes = await runRound(assignments, 60_000);
+            const left = [];
+            assignments.forEach((assignment, at) => {
+                const outcome = outcomes[at];
+                if (outcome.cancelled && !outcome.claimed && !stalled && tries < 2)
+                    left.push(assignment);
+                else
+                    results.push({ assignment, outcome });
+            });
+            assignments = left;
+        }
+        return results;
     };
     const recordBaseline = ({ assignment, outcome }) => {
         baselineOrder.set(assignment.file, outcome.tests.map((test) => test.test));
+        if (outcome.done)
+            baselineCopyMs.set(assignment.file, outcome.doneAt - outcome.claimedAt);
         if (assignment.claim.wholeFile)
             wholeBaseline.add(assignment.file);
         if (outcome.outside.length)
@@ -382,9 +457,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // SUPERCOV_STRONG_ROUND sets how many a round holds, as a multiple of
     // the workers (default 2: larger rounds load the machine, and timing-
     // sensitive tests slow down with it).
-    // Warm workers are recycled when a round ends: a larger round keeps
-    // them longer.
-    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || (vitest.__supercovWarm ? 6 : 2));
+    const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || 2);
     const perFile = oneAtATime ? 1 : workers * Math.min(roundFactor, 4);
     const perRound = oneAtATime ? 1 : workers * roundFactor;
     // A round ends when its slowest copy does: one file whose copy takes
@@ -487,9 +560,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             checks.push({ key, check });
             add(check.claim.tests.reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0));
         }
-        // A file whose baseline did not finish runs no mutant.
-        for (const job of pending)
+        // A file whose baseline did not finish runs no mutant: a mutant it
+        // was to test cannot be called a survivor.
+        for (const job of pending) {
+            for (const group of job.waiting.filter((group) => baselineFailed.has(`${group.file}#file`)))
+                job.unrun = group.file;
             job.waiting = job.waiting.filter((group) => !baselineFailed.has(`${group.file}#file`));
+        }
         // Retries wait for a round of their own, after every first attempt.
         const retrying = !checks.length && !pending.some((job) => job.waiting.some((group) => !group.retried));
         for (const job of pending) {
@@ -501,6 +578,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 if (Boolean(group.retried) !== retrying)
                     continue;
                 if (baselineFailed.has(`${group.file}#file`)) {
+                    job.unrun = group.file;
                     job.waiting.splice(job.waiting.indexOf(group), 1);
                     continue;
                 }
@@ -522,8 +600,15 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 : budget * TIMEOUT_FACTOR + FIRST_ATTEMPT_CONSTANT_MS);
             if (!job.started)
                 job.started = Date.now();
+            // The baseline ran no fewer tests, unless this copy runs its
+            // file whole and the baseline did not.
+            const baselineMs = baselineCopyMs.get(group.file);
+            const limitMs = baselineMs !== undefined && (!group.whole || wholeBaseline.has(group.file))
+                ? baselineMs * TIMEOUT_FACTOR * 2 + TIMEOUT_CONSTANT_MS * 2
+                : undefined;
             return {
                 file: group.file,
+                limitMs,
                 claim: {
                     mutant: { file: job.mutant.file, index: job.mutant.index },
                     tests: chosen,
@@ -542,6 +627,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         checks.forEach(({ check }, at) => {
             const outcome = outcomes[round.length + at];
             check.running = false;
+            if (!outcome.claimed && outcome.cancelled && !stalled)
+                return;
             check.tries += 1;
             if (!outcome.claimed && !stalled && check.tries < 3)
                 return;
@@ -561,6 +648,12 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (!outcome.claimed) {
                 if (stalled)
                     return;
+                // A cancelled round's copies no worker took are not this
+                // mutant's doing.
+                if (outcome.cancelled) {
+                    job.waiting.push(group);
+                    return;
+                }
                 group.unclaimed = (group.unclaimed ?? 0) + 1;
                 if (group.unclaimed > 2)
                     finish(job, { status: "error", reason: "no copy of its test file ran it" });
@@ -598,6 +691,12 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 }
                 kill({ test: failed.test }, { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test });
             }
+            else if (outcome.hung && !stalled) {
+                // The copy stopped reporting past its limit, as its file's
+                // baseline did not: a timeout, unless its tests left out
+                // hang the same way without the mutant.
+                kill({ unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
+            }
             else if (!outcome.done) {
                 // The copy started and its file did not finish: the mutant
                 // broke it while it loaded or ran, or held it past the
@@ -617,6 +716,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 job.waiting = job.later;
                 job.later = [];
             }
+            else if (job.unrun)
+                finish(job, { status: "error", reason: `${job.unrun} does not finish without a mutant, so it could not test this one` });
             else
                 finish(job, { status: "survived" });
         }
@@ -634,7 +735,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_ROUNDS"])
         rmSync(roundsDirectory, { recursive: true, force: true });
-    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, warm: Boolean(vitest.__supercovWarm), stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, perRound, profile });
+    write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, perRound, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants
         // left run in the next pass `mutants test` starts.

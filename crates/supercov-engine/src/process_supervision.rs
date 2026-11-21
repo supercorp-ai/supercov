@@ -979,7 +979,8 @@ pub fn descendant_process_tree(root_pid: u32) -> Vec<ProcessSnapshot> {
     result
 }
 
-fn format_duration(milliseconds: u128) -> String {
+/// A duration as diagnostics say it: `850ms`, `42s`, `3m07s`.
+pub fn format_duration(milliseconds: u128) -> String {
     if milliseconds < 1_000 {
         return format!("{milliseconds}ms");
     }

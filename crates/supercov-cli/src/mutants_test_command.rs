@@ -601,6 +601,77 @@ fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> 
     (total > 0).then(|| detected as f64 / total as f64)
 }
 
+/// How often a running pass says how far it got.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// While a pass runs: every `PROGRESS_INTERVAL` (or
+/// `SUPERCOV_PROGRESS_INTERVAL_MS`), a line on stderr with the verdicts so
+/// far, read from the pass's results as its driver writes them, and the time
+/// left at this pace. Whatever the driver, Vitest's or Playwright's.
+struct Progress {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Progress {
+    fn start(results: PathBuf, total: usize) -> Self {
+        let interval = std::env::var("SUPERCOV_PROGRESS_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map_or(PROGRESS_INTERVAL, std::time::Duration::from_millis);
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let thread = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(interval)
+            {
+                eprintln!("{}", progress_line(&results, total, started.elapsed()));
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
+    }
+}
+
+/// How far a pass got: its verdicts so far of the `total` it runs.
+fn progress_line(results: &Path, total: usize, elapsed: std::time::Duration) -> String {
+    let text = std::fs::read_to_string(results).unwrap_or_default();
+    let statuses = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["id"].is_string())
+        .map(|record| record["status"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    let count = |status: &str| statuses.iter().filter(|seen| *seen == status).count();
+    let done = statuses.len();
+    let left = if done > 0 {
+        let rest = elapsed.as_millis() * total.saturating_sub(done) as u128 / done as u128;
+        format!(
+            "; about {} left",
+            supercov_engine::process_supervision::format_duration(rest)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "[supercov] strong pass: {done} of {total} mutants ({} killed, {} timed out, {} survived, {} errors), {}{left}",
+        count("killed"),
+        count("timeout"),
+        count("survived"),
+        count("error"),
+        supercov_engine::process_supervision::format_duration(elapsed.as_millis()),
+    )
+}
+
 /// How many passes `mutants test` makes at most: a pass that stopped early
 /// leaves the rest to the next while each gets further.
 const PASSES: usize = 6;
@@ -714,9 +785,11 @@ fn execute(
                 }),
             };
             let mut diagnostics = std::io::stderr();
+            let progress = Progress::start(results.clone(), remaining.len());
             exit =
                 supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
                     .map_err(|error| error.to_string())?;
+            drop(progress);
             command_exit = Some(exit);
             let before = remaining.len();
             let text = std::fs::read_to_string(&results).unwrap_or_default();
