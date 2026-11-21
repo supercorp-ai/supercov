@@ -689,7 +689,8 @@ fn logical_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
             }
             let mut infected = false;
             let mut short_circuited = false;
-            for (values, _) in vectors {
+            // There are vectors here: `for_each` has no case of none.
+            vectors.iter().for_each(|(values, _)| {
                 match (
                     values.first().copied().flatten(),
                     values.get(1).copied().flatten(),
@@ -697,7 +698,7 @@ fn logical_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
                     (Some(left), Some(right)) => infected |= left != right,
                     _ => short_circuited = true,
                 }
-            }
+            });
             if infected {
                 return verdict_of(
                     INFECTED,
@@ -742,7 +743,9 @@ fn logical_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
     // where the right one ran.
     let mut infected = false;
     let mut undecided = false;
-    for &(right, truthy) in outcomes {
+    // `records.logicals` gives outcomes only where there are some:
+    // `for_each` has no case of none.
+    outcomes.iter().for_each(|&(right, truthy)| {
         match (operator, replacement) {
             ("&&", "||") if right && !truthy => infected = true,
             ("||", "&&") if right && truthy => infected = true,
@@ -751,7 +754,7 @@ fn logical_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
             ("??", "&&") if right && truthy => infected = true,
             _ => undecided = true,
         }
-    }
+    });
     if infected {
         return verdict_of(
             INFECTED,
@@ -1198,7 +1201,8 @@ pub(crate) fn abbreviated(mutant: &CandidateMutant) -> Option<CandidateMutant> {
             let end = operator.at + operator.text.len();
             let left = shown_start(mutant.original.get(..operator.at)?);
             let written = mutant.original.get(operator.at..end)?;
-            let right = shown_start(mutant.original.get(end..)?);
+            // `end` ends `written`, so it is a place in the original.
+            let right = shown_start(&mutant.original[end..]);
             let operator = crate::js_mutant_links::MutantOperator {
                 text: operator.text.clone(),
                 at: left.len(),
@@ -2463,5 +2467,187 @@ mod tests {
         let mut elsewhere = with_outcomes("c", &["lt"]);
         elsewhere.unvalued_hits.insert("t".into());
         expect(&boundary, &elsewhere, NOT_INFECTED, "operands-never-equal");
+    }
+
+    /// A mutant whose operator is unknown, or lies past the end of its
+    /// code, has no operands: its verdict says so, its replacement is its
+    /// descriptor and it is not shown shorter.
+    #[test]
+    fn a_mutant_without_an_operator_in_its_code_has_no_operands() {
+        expect(
+            &mutant("EqualityOperator", "<=", "a < b"),
+            &ran(),
+            UNKNOWN,
+            "no-operator",
+        );
+        expect(
+            &mutant("LogicalOperator", "||", "a && b"),
+            &ran(),
+            UNKNOWN,
+            "no-operator",
+        );
+        let at = |at: usize, text: &str| CandidateMutant {
+            operator: Some(MutantOperator {
+                text: text.into(),
+                at,
+            }),
+            ..mutant("EqualityOperator", "<=", "a < b")
+        };
+        // Past the end, and running past it.
+        for outside in [at(10, "<"), at(4, "<=")] {
+            expect(&outside, &ran(), UNKNOWN, "no-operator");
+            assert_eq!(replaced(&outside), "<=");
+            assert!(abbreviated(&outside).is_none());
+        }
+        // An operator that starts the code leaves no left operand to cut.
+        let negation = CandidateMutant {
+            operator: Some(MutantOperator {
+                text: "!".into(),
+                at: 0,
+            }),
+            ..mutant("BooleanLiteral", "removed", "!ok")
+        };
+        assert!(abbreviated(&negation).is_none());
+    }
+
+    /// `<` and `>` are false where their operands are equal, `>` true where
+    /// the left one is greater.
+    #[test]
+    fn a_forced_relational_comparison_reads_its_operands_relation_by_its_operator() {
+        let less = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("ConditionalExpression", "false", "a < b", "<")
+        };
+        expect(
+            &less,
+            &with_outcomes("c", &["eq"]),
+            NOT_INFECTED,
+            "comparison-always",
+        );
+        let greater = CandidateMutant {
+            compare: Some("c".into()),
+            ..operated("ConditionalExpression", "false", "a > b", ">")
+        };
+        expect(
+            &greater,
+            &with_outcomes("c", &["gt"]),
+            INFECTED,
+            "opposite-value",
+        );
+    }
+
+    /// A negated comparison of the first two of several conditions has no
+    /// rule: a comparison is one condition.
+    #[test]
+    fn a_negated_comparison_linked_to_a_prefix_of_conditions_is_unknown() {
+        let prefix = CandidateMutant {
+            decision: decided("d", None, Some(2)),
+            ..operated("EqualityOperator", "!==", "a === b", "===")
+        };
+        expect(
+            &prefix,
+            &with_vectors(&[(&[Some(true), Some(false)], false)]),
+            UNKNOWN,
+            "no-rule",
+        );
+    }
+
+    /// A left operand's truthiness where the right one never ran, read from
+    /// the value it gave: a `&&`'s left is truthy where that value is, and a
+    /// `??`'s present left is the value whatever its truthiness.
+    #[test]
+    fn a_forced_left_operand_s_truthiness_follows_from_a_value_the_left_gave() {
+        let left = |operator: &str| CandidateMutant {
+            branch: selection(BranchRole::Left, operator),
+            ..mutant("ConditionalExpression", "true", "a > 0")
+        };
+        expect(
+            &left("&&"),
+            &with_logicals(&[(false, true)]),
+            NOT_INFECTED,
+            "operand-always",
+        );
+        expect(
+            &left("??"),
+            &with_logicals(&[(false, false)]),
+            INFECTED,
+            "opposite-value",
+        );
+    }
+
+    /// An event that is neither a hit nor a decision with its vector says
+    /// nothing a verdict reads.
+    #[test]
+    fn an_event_that_is_no_hit_and_no_decision_vector_is_not_observed() {
+        use crate::coverage_report::{RuntimeEvent, RuntimeSnapshot};
+        let event = |kind: &str| RuntimeEvent {
+            event_type: kind.into(),
+            id: "d".into(),
+            vector: None,
+            timestamp_ms: 0,
+            phase_id: None,
+            environment: "server".into(),
+        };
+        let mut raw: RawTestResult = serde_json::from_value(serde_json::json!({
+            "test": "t", "provenance": {"runner": "r", "kind": "unit", "source": "s"}
+        }))
+        .unwrap();
+        raw.runtime = vec![RuntimeSnapshot {
+            events: vec![event("decision"), event("phase")],
+            ..RuntimeSnapshot::default()
+        }];
+        let observed = observations(&[raw]);
+        assert!(observed.hits.is_empty());
+        assert!(observed.decisions.is_empty());
+    }
+
+    /// The listed mutants with their verdicts: a hint of a rule this build
+    /// does not know is left out, tests listed without values that are not
+    /// among the results change nothing, a list of no files gives no
+    /// mutants, and one of no mutant set no results.
+    #[test]
+    fn results_list_each_mutant_with_only_the_hints_this_build_knows() {
+        let listed = |files: Vec<(&str, Vec<CandidateMutant>)>| MutantsFile {
+            schema_version: 1,
+            mutant_set: Some("stryker-js@10.1.1".into()),
+            files: files
+                .into_iter()
+                .map(|(file, mutants)| (file.to_owned(), mutants))
+                .collect(),
+            tests_without_values: vec!["elsewhere".into()],
+        };
+        let hinted = CandidateMutant {
+            untestable: Some(crate::js_mutant_links::StaticNote {
+                rule: "a-later-hint".into(),
+                reason: "r".into(),
+            }),
+            ..mutant("StringLiteral", "empty", "\"x\"")
+        };
+        let results = results(&[], Some(listed(vec![("a.ts", vec![hinted])]))).unwrap();
+        let [only] = results.mutants.as_slice() else {
+            panic!("{:?}", results.mutants);
+        };
+        assert_eq!(
+            (only.file.as_str(), &only.status, &only.untestable),
+            ("a.ts", &MutantStatus::NotReached, &None)
+        );
+        let none = super::results(&[], Some(listed(vec![]))).unwrap();
+        assert!(none.mutants.is_empty());
+        // A list that names no mutant set lists none.
+        let unnamed = MutantsFile {
+            mutant_set: None,
+            ..listed(vec![])
+        };
+        assert!(super::results(&[], Some(unnamed)).is_none());
+    }
+
+    /// `_` and `$` are word characters: a cut beside one would split a
+    /// name. A cut that splits a word in only the replacement still moves.
+    #[test]
+    fn a_change_is_not_cut_inside_a_name_or_a_word_of_either_text() {
+        assert_eq!(differing("x_a", "y_a"), None);
+        assert_eq!(differing("x$a", "y$a"), None);
+        assert_eq!(differing("x.a", "y.a"), Some(("x", "y", false, true)));
+        assert_eq!(differing("a+b", "a+cb"), Some(("b", "cb", true, false)));
     }
 }

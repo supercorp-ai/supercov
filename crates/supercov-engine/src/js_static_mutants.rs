@@ -44,11 +44,13 @@ fn within(inner: Span, outer: Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
 
-/// A relational comparison: its operator, and whether an operand is a
-/// clock or random reading (`CLOCK`, `RANDOM`).
+/// A relational comparison: its operator, the operator that differs from it
+/// only where its operands are equal, and whether an operand is a clock or
+/// random reading (`CLOCK`, `RANDOM`).
 #[derive(Debug)]
 struct Comparison {
     operator: &'static str,
+    twin: &'static str,
     untestable: Option<&'static str>,
 }
 
@@ -85,8 +87,9 @@ pub(crate) struct StaticFacts {
 /// What `untestable` reads of the program, kept while it is visited.
 #[derive(Default)]
 struct Values<'a> {
-    /// Relational comparisons and their innermost function.
-    comparisons: Vec<(&'a BinaryExpression<'a>, Option<Span>)>,
+    /// Relational comparisons, each with its boundary twin, and their
+    /// innermost function.
+    comparisons: Vec<(&'a BinaryExpression<'a>, &'static str, Option<Span>)>,
     /// `const`s with an identifier binding and an initializer, and their
     /// innermost function.
     constants: Vec<(String, &'a Expression<'a>, Option<Span>)>,
@@ -125,18 +128,23 @@ impl StaticFacts {
         let Collector {
             mut facts, values, ..
         } = collector;
-        for (binary, function) in &values.comparisons {
+        for (binary, twin, function) in &values.comparisons {
             let untestable = [Source::Clock, Source::Random].into_iter().find(|source| {
                 [&binary.left, &binary.right]
                     .into_iter()
                     .any(|operand| values.valued(operand, *source, *function, 2))
             });
-            if let Some(comparison) = facts.comparisons.get_mut(&key(binary.span)) {
-                comparison.untestable = untestable.map(|source| match source {
-                    Source::Clock => CLOCK,
-                    Source::Random => RANDOM,
-                });
-            }
+            facts.comparisons.insert(
+                key(binary.span),
+                Comparison {
+                    operator: binary.operator.as_str(),
+                    twin,
+                    untestable: untestable.map(|source| match source {
+                        Source::Clock => CLOCK,
+                        Source::Random => RANDOM,
+                    }),
+                },
+            );
         }
         facts
     }
@@ -147,7 +155,7 @@ impl StaticFacts {
             return None;
         }
         let comparison = self.comparisons.get(&key(mutant.span))?;
-        if boundary_twin(comparison.operator) != Some(mutant.replacement.as_str()) {
+        if comparison.twin != mutant.replacement {
             return None;
         }
         let guarded = self.guarded_zero.get(&key(mutant.span))?;
@@ -177,7 +185,7 @@ impl StaticFacts {
             return None;
         }
         let comparison = self.comparisons.get(&key(mutant.span))?;
-        if boundary_twin(comparison.operator) != Some(mutant.replacement.as_str()) {
+        if comparison.twin != mutant.replacement {
             return None;
         }
         match comparison.untestable? {
@@ -351,25 +359,15 @@ impl<'a> Values<'a> {
 }
 
 /// The relational operator that differs from `operator` only where its
-/// operands are equal.
-fn boundary_twin(operator: &str) -> Option<&'static str> {
+/// operands are equal; `None` for an operator that is not relational.
+fn boundary_twin(operator: BinaryOperator) -> Option<&'static str> {
     match operator {
-        "<" => Some("<="),
-        "<=" => Some("<"),
-        ">" => Some(">="),
-        ">=" => Some(">"),
+        BinaryOperator::LessThan => Some("<="),
+        BinaryOperator::LessEqualThan => Some("<"),
+        BinaryOperator::GreaterThan => Some(">="),
+        BinaryOperator::GreaterEqualThan => Some(">"),
         _ => None,
     }
-}
-
-fn relational(operator: BinaryOperator) -> bool {
-    matches!(
-        operator,
-        BinaryOperator::LessThan
-            | BinaryOperator::LessEqualThan
-            | BinaryOperator::GreaterThan
-            | BinaryOperator::GreaterEqualThan
-    )
 }
 
 /// The expression under parentheses and TypeScript's type-only wrappers,
@@ -485,20 +483,13 @@ fn static_call<'c>(call: &'c CallExpression<'_>) -> Option<(&'c str, &'c str)> {
 
 impl<'a> Collector<'a> {
     fn comparison(&mut self, binary: &BinaryExpression<'a>) {
-        if !relational(binary.operator) {
+        let Some(twin) = boundary_twin(binary.operator) else {
             return;
-        }
-        self.facts.comparisons.insert(
-            key(binary.span),
-            Comparison {
-                operator: binary.operator.as_str(),
-                untestable: None,
-            },
-        );
+        };
         let at = self.alloc(binary);
         self.values
             .comparisons
-            .push((at, self.functions.last().copied()));
+            .push((at, twin, self.functions.last().copied()));
         let operand = if zero(&binary.right) {
             &binary.left
         } else if zero(&binary.left) {
@@ -610,17 +601,20 @@ impl<'a> Visit<'a> for Collector<'a> {
 
     fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
         if declaration.kind == VariableDeclarationKind::Const {
-            for declarator in &declaration.declarations {
+            // A declaration has a declarator at least: no source reaches a
+            // loop's no-iteration case, which `for_each` does not have.
+            declaration.declarations.iter().for_each(|declarator| {
                 let (Some(identifier), Some(init)) =
                     (declarator.id.get_binding_identifier(), &declarator.init)
                 else {
-                    continue;
+                    return;
                 };
                 let name = identifier.name.to_string();
-                if numeric(init)
-                    && let Some(scope) = self.scopes.last()
-                {
-                    self.facts.numeric.insert(name.clone(), *scope);
+                // The program's scope is entered before any declaration in
+                // it, so there is always a scope.
+                if numeric(init) {
+                    let scope = self.scopes.last().copied().unwrap_or_default();
+                    self.facts.numeric.insert(name.clone(), scope);
                 }
                 if matches!(
                     bare(init),
@@ -634,7 +628,7 @@ impl<'a> Visit<'a> for Collector<'a> {
                 self.values
                     .constants
                     .push((name, init, self.functions.last().copied()));
-            }
+            });
         }
         walk::walk_variable_declaration(self, declaration);
     }
@@ -651,8 +645,10 @@ impl<'a> Visit<'a> for Collector<'a> {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        if arrow.expression
-            && let [Statement::ExpressionStatement(body)] = arrow.body.statements.as_slice()
+        // An expression body is always one expression statement; a block of
+        // one is no concise body.
+        if let [Statement::ExpressionStatement(body)] = arrow.body.statements.as_slice()
+            && arrow.expression
         {
             let body = self.alloc(&body.expression);
             self.values
@@ -837,6 +833,43 @@ mod tests {
         assert_eq!(
             ruled(source, StaticFacts::untestable),
             ["later > a → >=: clock"]
+        );
+    }
+
+    /// A number const is zero-guarded only where its initializer is always a
+    /// number: a negation, an assignment of a number or a compound
+    /// assignment other than `+=` and the logical ones. A negation before
+    /// `||` shows nothing truthy.
+    #[test]
+    fn a_zero_guard_reads_negations_and_assignments_as_numbers_only_where_they_are() {
+        let source = "export function f(a: number) {\n  let x = a;\n  const negative = -a;\n  const assigned = (x = 1);\n  const added = (x += 1);\n  const subtracted = (x -= 1);\n  const defaulted = (x ||= 1);\n  return [\n    negative && negative > 0,\n    assigned && assigned > 0,\n    added && added > 0,\n    subtracted && subtracted > 0,\n    defaulted && defaulted > 0,\n    -negative || negative > 0,\n  ];\n}\n";
+        assert_eq!(
+            ruled(source, StaticFacts::equivalent),
+            [
+                "negative > 0 → >=: zero-guarded",
+                "assigned > 0 → >=: zero-guarded",
+                "subtracted > 0 → >=: zero-guarded",
+            ]
+        );
+    }
+
+    /// What does not keep a clock reading one: a `now()` of something other
+    /// than a name, arithmetic with a call, a third `const` or local
+    /// function away, a `new` of anything but `Date` or a `Date` of two
+    /// arguments, `~`, a `&&`, a function whose block returns nothing, and a
+    /// `const` read inside its own initializer (which throws there). A
+    /// member path, a `||` fallback and a non-null assertion keep it.
+    #[test]
+    fn a_clock_hint_follows_only_what_keeps_a_reading_a_reading() {
+        let source = "function now(): number {\n  return Date.now();\n}\nexport function f(o: { clock: { now(): number }; offset: number }, a: number, flag: boolean) {\n  const read = now();\n  const copy = read;\n  const sleep = () => {\n    Date.now();\n  };\n  const stamp: number = Date.now() || (stamp > a ? 1 : 0);\n  return [\n    o.clock.now() > a,\n    Date.now() - o.offset > a,\n    Date.now() - Math.abs(a) > a,\n    read > a,\n    copy > a,\n    new Number(Date.now()) < a,\n    new Date(a, 1) < a,\n    ~Date.now() < a,\n    (Date.now() || 0) > a,\n    (flag && Date.now()) > a,\n    Date.now()! > a,\n    sleep() > a,\n  ];\n}\n";
+        assert_eq!(
+            ruled(source, StaticFacts::untestable),
+            [
+                "Date.now() - o.offset > a → >=: clock",
+                "read > a → >=: clock",
+                "(Date.now() || 0) > a → >=: clock",
+                "Date.now()! > a → >=: clock",
+            ]
         );
     }
 }
