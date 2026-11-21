@@ -6259,6 +6259,65 @@ fn a_strict_test_file_stays_strict_under_supercov() {
     assert!(said.contains("4 passed"), "{said}");
 }
 
+/// The sources Supercov measures keep their directives too: a strict
+/// CommonJS module (with or without the semicolon, behind a license comment
+/// or a shebang) and a TypeScript one, which also gets Supercov's lint and
+/// type banner, stay strict once instrumented, and their code is measured.
+#[cfg(unix)]
+#[test]
+fn strict_sources_stay_strict_once_instrumented() {
+    let body = "exports.sloppy = function () {\n  return this;\n};\nexports.one = (n) => (n > 0 ? 1 : 0);\n";
+    let sources = [
+        ("src/semicolon.cjs", format!("'use strict';\n{body}")),
+        ("src/no-semicolon.cjs", format!("\"use strict\"\n{body}")),
+        ("src/licensed.cjs", format!("/*! @license MIT */\n'use strict';\n{body}")),
+        ("src/script.cjs", format!("#!/usr/bin/env node\n'use strict';\n{body}")),
+        (
+            "src/typed.cts",
+            "'use strict';\nexports.sloppy = function (this: unknown): unknown {\n  return this;\n};\nexports.one = (n: number): number => (n > 0 ? 1 : 0);\n".to_owned(),
+        ),
+    ];
+    let mut checks = String::from(
+        "const test = require('node:test');\nconst assert = require('node:assert');\n",
+    );
+    for (path, _) in &sources {
+        checks.push_str(&format!(
+            "test('{path} is strict', () => {{\n  const {{ sloppy, one }} = require('../{path}');\n  assert.equal(sloppy(), undefined);\n  assert.equal(one(1), 1);\n}});\n"
+        ));
+    }
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "strict-sources", "scripts": { "test": "node --test" } }"#.to_owned(),
+        ),
+        ("test/sources.test.cjs".to_owned(), checks),
+    ];
+    files.extend(
+        sources
+            .iter()
+            .map(|(path, text)| ((*path).to_owned(), text.clone())),
+    );
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("strict-sources", &files);
+    passes_plainly(&project, &["node", "--test"]);
+    let ran = project.supercov(&["--", "node", "--test"]);
+    let said = ran.stdout() + &ran.stderr();
+    ran.succeeds();
+    assert!(said.contains(&format!("pass {}", sources.len())), "{said}");
+    for (path, _) in &sources {
+        let file = project
+            .supercov(&["runs", "latest", "file", path])
+            .succeeds();
+        assert!(
+            file.contains("Tests touching this file: 1"),
+            "{path} is measured\n{file}"
+        );
+    }
+}
+
 /// Vitest reads `@vitest-environment` (and `@jest-environment`) anywhere in
 /// a test file; a rewritten file keeps each where the file had it, and each
 /// test runs where it asks to, the project's default a browser-like
