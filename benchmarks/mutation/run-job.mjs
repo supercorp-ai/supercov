@@ -328,7 +328,10 @@ const firstWorkers = args.variant?.match(/^first-w(\d+)$/)?.[1] ?? null;
 // first-prof: the first variant with a CPU profile of the strong pass's main process; prof: the
 // plain job with one.
 const firstProfile = args.variant === 'first-prof';
-const mainProfile = firstProfile || args.variant === 'prof' || args.variant === 'prof-arena';
+const mainProfile = firstProfile || args.variant === 'prof' || args.variant === 'prof-arena' || args.variant === 'prof-direct';
+// prof-direct: prof with Vitest's workers forked by Vitest itself, not by Supercov's spawners.
+// direct: the plain job with Vitest's workers forked by Vitest itself.
+if (args.variant === 'prof-direct' || args.variant === 'direct') process.env.SUPERCOV_STRONG_DIRECT_FORK = '1';
 // prof-arena: prof with glibc's malloc held to two arenas in every process of the strong pass.
 if (args.variant === 'prof-arena') process.env.MALLOC_ARENA_MAX = '2';
 

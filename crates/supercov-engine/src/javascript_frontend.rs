@@ -77,6 +77,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "vitestReporter.mjs",
     "vitestStrong.mjs",
     "vitestStrongReporter.mjs",
+    "vitestStrongSpawner.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -2298,9 +2299,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:470",
-            "javascript-source-path#javascript_frontend.rs:1880",
-            "javascript-source-path#javascript_frontend.rs:1809",
+            "javascript-source-path#javascript_frontend.rs:471",
+            "javascript-source-path#javascript_frontend.rs:1881",
+            "javascript-source-path#javascript_frontend.rs:1810",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2411,8 +2412,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:514",
-            "javascript-source-path#javascript_frontend.rs:470",
+            "fs.read_to_string#javascript_frontend.rs:515",
+            "javascript-source-path#javascript_frontend.rs:471",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

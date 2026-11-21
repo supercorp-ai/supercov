@@ -86,6 +86,7 @@ const mappings = [
     "vitestReporter.mjs",
     "vitestStrong.mjs",
     "vitestStrongReporter.mjs",
+    "vitestStrongSpawner.mjs",
   ]),
   ...runtimeFiles("python", [
     "sitecustomize.py",

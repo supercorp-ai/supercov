@@ -13,8 +13,13 @@
 // runs its cheapest file first and, if that leaves it alive, its other files
 // in the next stage, and stops at its first kill. Where the project does not
 // isolate files, a stage holds one mutant.
+import childProcess from "node:child_process";
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { availableParallelism } from "node:os";
 import { relative, sep } from "node:path";
 
@@ -132,8 +137,153 @@ function alive(pid) {
     }
 }
 
+// Vitest 4 and later fork each worker from `dist/workers/forks.js` (or
+// `vmForks.js`); Vitest 1-3 fork through tinypool, and are left as they are.
+const VITEST_WORKER = /[\\/]vitest[\\/]dist[\\/]workers[\\/](?:forks|vmForks)\.js$/;
+// The spawner's process id while it runs (vitestStrongSpawner.mjs), and the
+// workers it forked.
+const spawnerPids = new Set();
+let spawnedWorkers = 0;
+
+// Vitest's workers forked by a small process of their own instead of
+// Vitest's: forking copies the parent's memory map, and Vitest's process
+// held about a gigabyte (on hono each fork held its event loop for 24 ms,
+// 72% of its time, while its workers waited on it). Each worker Vitest asks
+// for is a stand-in here, relaying to and from the real one through the
+// spawner. SUPERCOV_STRONG_DIRECT_FORK=1 forks them directly.
+function forkThroughSpawner() {
+    if (process.env["SUPERCOV_STRONG_DIRECT_FORK"] === "1")
+        return;
+    const original = childProcess.fork;
+    const standIns = new Map();
+    // One spawner: every message to and from a worker goes through it, and
+    // four of them sharing the workers were no faster on hono.
+    const spawner = { process: undefined, live: 0 };
+    let nextId = 0;
+    // A spawner's channel keeps this process alive only while one of its
+    // workers does, as the worker's own handle did.
+    const hold = (spawner) => {
+        if (!spawner.process)
+            return;
+        if (spawner.live > 0) {
+            spawner.process.ref();
+            spawner.process.channel?.ref?.();
+        }
+        else {
+            spawner.process.unref();
+            spawner.process.channel?.unref?.();
+        }
+    };
+    const start = (spawner) => {
+        const child = original(fileURLToPath(new URL("./vitestStrongSpawner.mjs", import.meta.url)), [], {
+            stdio: ["ignore", "inherit", "inherit", "ipc"],
+            serialization: "advanced",
+            execArgv: [],
+        });
+        spawner.process = child;
+        spawnerPids.add(child.pid);
+        child.on("message", (record) => standIns.get(record.id)?.receive(record));
+        child.on("error", () => { });
+        child.on("exit", () => {
+            spawnerPids.delete(child.pid);
+            spawner.process = undefined;
+            for (const standIn of [...standIns.values()])
+                if (standIn.spawner === spawner)
+                    standIn.receive({ exit: [null, "SIGKILL"] });
+        });
+    };
+    class Worker extends EventEmitter {
+        constructor(id, spawner) {
+            super();
+            this.id = id;
+            this.spawner = spawner;
+            this.pid = undefined;
+            this.exitCode = null;
+            this.signalCode = null;
+            this.killed = false;
+            this.connected = true;
+            this.stdin = null;
+            this.stdout = new PassThrough();
+            this.stderr = new PassThrough();
+            this.stdio = [null, this.stdout, this.stderr];
+            this.channel = { ref() { }, unref() { } };
+        }
+        receive(record) {
+            if (record.spawned !== undefined) {
+                this.pid = record.spawned;
+                this.emit("spawn");
+            }
+            else if (record.error) {
+                this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
+            }
+            else if (record.exit) {
+                [this.exitCode, this.signalCode] = record.exit;
+                this.connected = false;
+                standIns.delete(this.id);
+                this.spawner.live -= 1;
+                hold(this.spawner);
+                this.stdout.end();
+                this.stderr.end();
+                this.emit("disconnect");
+                this.emit("exit", this.exitCode, this.signalCode);
+                this.emit("close", this.exitCode, this.signalCode);
+            }
+            else if (record.stdout)
+                this.stdout.write(record.stdout);
+            else if (record.stderr)
+                this.stderr.write(record.stderr);
+            else if ("message" in record)
+                this.emit("message", record.message);
+        }
+        send(message, ...rest) {
+            const callback = rest.find((value) => typeof value === "function");
+            if (!this.connected || !this.spawner.process) {
+                const error = Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" });
+                process.nextTick(() => callback ? callback(error) : this.emit("error", error));
+                return false;
+            }
+            this.spawner.process.send({ id: this.id, send: true, message });
+            if (callback)
+                process.nextTick(callback, null);
+            return true;
+        }
+        kill(signal = "SIGTERM") {
+            if (this.exitCode !== null || this.signalCode !== null)
+                return false;
+            this.spawner.process?.send({ id: this.id, kill: signal });
+            this.killed = true;
+            return true;
+        }
+        disconnect() {
+            this.spawner.process?.send({ id: this.id, disconnect: true });
+        }
+        ref() { }
+        unref() { }
+    }
+    childProcess.fork = function fork(modulePath, args, options) {
+        const path = modulePath instanceof URL ? fileURLToPath(modulePath) : String(modulePath);
+        if (!VITEST_WORKER.test(path))
+            return original.apply(this, arguments);
+        if (!Array.isArray(args)) {
+            options = args;
+            args = [];
+        }
+        if (!spawner.process)
+            start(spawner);
+        const worker = new Worker(nextId++, spawner);
+        spawner.live += 1;
+        spawnedWorkers += 1;
+        hold(spawner);
+        standIns.set(worker.id, worker);
+        spawner.process.send({ id: worker.id, fork: true, modulePath: path, args, options: { ...options } });
+        return worker;
+    };
+    syncBuiltinESMExports();
+}
+
 // Whether a process is one of this process's own workers: running, and its
-// child where /proc tells (a worker that ended may leave its id to another).
+// child (or the spawner's) where /proc tells (a worker that ended may leave
+// its id to another).
 function ownWorker(pid) {
     if (!pid || pid === process.pid || !alive(pid))
         return false;
@@ -144,7 +294,8 @@ function ownWorker(pid) {
     catch {
         return true;
     }
-    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]) === process.pid;
+    const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return parent === process.pid || spawnerPids.has(parent);
 }
 
 // The whole lines appended to `path` since the cursor, which moves past them.
@@ -251,6 +402,7 @@ export default class SupercovStrongReporter {
         const resultsPath = process.env["SUPERCOV_STRONG_RESULTS"];
         if (!planPath || !resultsPath)
             return;
+        forkThroughSpawner();
         const original = vitest.runFiles.bind(vitest);
         vitest.runFiles = async (specs) => {
             const stopProfile = await profileMainProcess();
@@ -352,7 +504,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let running;
     // Where the pass's time goes: each stage's wall time against the copies'
     // own (claim to end) and when its last copy started.
-    const profile = { stages: [], wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
+    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
     // Runs one stage. `early(at, outcome)` is offered each copy's outcome as
     // soon as the copy ends, and says whether it took it; a stage's copies
     // are otherwise judged when its run has ended. `limitOf(assignment)` is
@@ -1078,6 +1230,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // every copy reported, to read where a verdict came from.
     if (!process.env["SUPERCOV_STRONG_KEEP_STAGES"])
         rmSync(stagesDirectory, { recursive: true, force: true });
+    profile.spawnedWorkers = spawnedWorkers;
     write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, stages: stageNumber, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants

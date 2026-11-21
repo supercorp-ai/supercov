@@ -158,6 +158,21 @@ CPUs.
 Where isolation is off (`isolate: false`, `--no-isolate`, a single-thread pool
 sharing modules) a stage holds one mutant.
 
+Each copy is a worker process, and Vitest 4 and later fork each from Vitest's
+own process. A fork copies its parent's memory map, and Vitest's process held
+about a gigabyte by the second stage on hono (its module graph, and the
+bundler's native heap, 276 MB). Each fork held its event loop for 24 ms, 72%
+of its time, and the workers waited on it to answer them. So the strong
+reporter has the workers forked by a spawner instead
+(`vitestStrongSpawner.mjs`, started while Vitest's process is still small):
+`child_process.fork` of Vitest's worker entry returns a stand-in that relays
+messages, output, signals and exits through the spawner. On hono's six
+shards the strong pass took 340 s against 370 s with the same machines and
+verdicts; the other corpus projects took the same time either way, and four
+spawners sharing the workers were no faster than one. Vitest 1-3 fork
+through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
+from Vitest's process. The pass summary counts `spawnedWorkers`.
+
 Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
 between test files (`isolate: false` for the pass), and the copy's setup file
 reset the modules and mocks Vitest had evaluated, so only the packages Node

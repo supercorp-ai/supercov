@@ -16012,7 +16012,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2623 => main.rs:2623",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2029 => javascript_frontend.rs:2029",
+            "fs.read_to_string#javascript_frontend.rs:2030 => javascript_frontend.rs:2030",
         ],
     );
 }
@@ -18085,12 +18085,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:358",
-            "javascript_frontend.rs:358",
+            "fs.read#javascript_frontend.rs:359",
+            "javascript_frontend.rs:359",
         ),
         (
-            "fs.read#javascript_frontend.rs:370",
-            "javascript_frontend.rs:370",
+            "fs.read#javascript_frontend.rs:371",
+            "javascript_frontend.rs:371",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -18120,12 +18120,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1811@2",
+            "fs.read_to_string#javascript_frontend.rs:1812@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1811"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1812"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -22602,6 +22602,59 @@ fn a_mutant_that_breaks_its_test_file_s_load_is_killed_once_its_worker_ends() {
         throws["strong"]["reason"], "the test file did not finish",
         "{throws}"
     );
+}
+
+/// Vitest 4 and later fork the strong pass's workers through Supercov's
+/// spawner, a small process of its own, not from Vitest's (which a fork
+/// copies, a gigabyte on a large suite); `SUPERCOV_STRONG_DIRECT_FORK=1`
+/// forks them from Vitest's. Either way each mutant gets the same verdict.
+#[cfg(unix)]
+#[test]
+fn a_strong_pass_forks_its_workers_through_a_spawner_with_the_same_verdicts() {
+    let project = vitest_mutants_project("strong-spawner");
+    let verdicts = |direct: bool| {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let env: &[(&str, &str)] = if direct {
+            &[("SUPERCOV_STRONG_DIRECT_FORK", "1")]
+        } else {
+            &[]
+        };
+        let reply = project
+            .supercov_with(&["runs", "latest", "mutants", "test", "--json"], env)
+            .json();
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let statuses = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"]["status"].to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (
+            reply["passes"][0]["profile"]["spawnedWorkers"].as_u64(),
+            statuses,
+        )
+    };
+    let (spawned, through) = verdicts(false);
+    assert!(spawned.unwrap_or(0) > 0, "{spawned:?}");
+    let (none, direct) = verdicts(true);
+    assert_eq!(none, Some(0));
+    assert!(!through.is_empty());
+    assert_eq!(through, direct);
 }
 
 /// A test file that does not finish without a mutant (here it throws while
