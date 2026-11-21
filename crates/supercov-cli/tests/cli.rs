@@ -22340,19 +22340,24 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         )
         .exits(1);
     assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
-    // A run whose evidence cannot be read, its size as recorded, has no
-    // plan.
+    // A run whose evidence is cut short after its header, its size as
+    // recorded, has no plan.
     let run = project.latest();
     let directory = project.root.join(format!(".supercov/runs/{run}"));
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.join("run.json")).unwrap()).unwrap();
     let evidence = directory.join(metadata["rawEvidence"]["file"].as_str().unwrap());
-    let size = std::fs::metadata(&evidence).unwrap().len() as usize;
-    std::fs::write(&evidence, vec![b'x'; size]).unwrap();
+    let mut bytes = std::fs::read(&evidence).unwrap();
+    let half = bytes.len() / 2;
+    bytes[half..].fill(b'x');
+    std::fs::write(&evidence, bytes).unwrap();
     let unread = project
         .supercov(&["runs", "latest", "mutants", "test", "--plan"])
         .exits(1);
-    assert!(unread.starts_with("[supercov] "), "{unread}");
+    assert!(
+        unread.starts_with("[supercov] InvalidArchive(\"invalid Supercov evidence archive"),
+        "{unread}"
+    );
 
     // No run, and no command to measure one with.
     let empty = Project::empty("mutants-no-run");
@@ -22980,6 +22985,12 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
     assert!(full.contains("\n  in:  order.items.length"), "{full}");
     assert!(view(&["src/cart.js", "--limit", "2"]).contains("next page: "));
     assert!(view(&["src/cart.js", "--status", "equivalent"]).contains("No mutants match."));
+    // Only infected mutants: none left alive to explain line by line.
+    let infected = view(&["src/cart.js", "--status", "infected"]);
+    assert!(
+        !infected.contains("one line's mutants and why"),
+        "{infected}"
+    );
     let beyond = view(&["src/cart.js", "--offset", "100"]);
     assert!(!beyond.contains("No mutants match."), "{beyond}");
     assert!(
@@ -23066,6 +23077,17 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
     ]);
     assert!(many.contains("StrykerJS (4 reports)"), "{many}");
     assert!(!many.contains("in these commands"), "{many}");
+    // A directory after a report is read with it.
+    let both = view(&[
+        "src/cart.js:13",
+        "--stryker",
+        "reports/clean.json",
+        "reports/many",
+    ]);
+    assert!(
+        both.contains("StrykerJS (5 reports in reports/clean.json, reports/many)"),
+        "{both}"
+    );
     let consts = view(&["src/consts.js", "--stryker", "reports/clean.json"]);
     contains_all(
         &consts,
