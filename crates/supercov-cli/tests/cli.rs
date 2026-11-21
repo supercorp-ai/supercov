@@ -22341,7 +22341,8 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         .exits(1);
     assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
     // A run whose evidence is cut short after its header, its size as
-    // recorded, has no plan.
+    // recorded, has no plan. Where the cut lands (a section's header or its
+    // compressed body) depends on the run's sizes, so the reason may be either.
     let run = project.latest();
     let directory = project.root.join(format!(".supercov/runs/{run}"));
     let metadata: serde_json::Value =
@@ -22355,7 +22356,7 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         .supercov(&["runs", "latest", "mutants", "test", "--plan"])
         .exits(1);
     assert!(
-        unread.starts_with("[supercov] InvalidArchive(\"invalid Supercov evidence archive"),
+        unread.starts_with("[supercov] InvalidArchive("),
         "{unread}"
     );
 
