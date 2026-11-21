@@ -211,12 +211,13 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         // standard error: the standard output is this command's answer.
         // Failing tests still leave a run; their tests kill nothing.
         let measured = std::env::current_exe().and_then(|program| {
+            use supercov_engine::fault_process::Launch;
             std::process::Command::new(program)
                 .arg("--")
                 .args(&command)
                 .env("SUPERCOV_MUTANTS", "1")
                 .stdout(std::io::stderr())
-                .status()
+                .launch_status()
         });
         if let Err(error) = measured {
             eprintln!("[supercov] could not measure: {error}");
@@ -619,7 +620,7 @@ fn save(
     let path = results_path(run);
     std::fs::write(
         &path,
-        serde_json::to_vec_pretty(&document).map_err(|e| e.to_string())?,
+        serde_json::to_vec_pretty(&document).expect("plain data serializes"),
     )
     .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -694,9 +695,9 @@ fn execute(
                 tests: plan.tests.clone(),
                 mutants: remaining.clone(),
             };
-            std::fs::write(
+            supercov_engine::fault_fs::write(
                 &plan_path,
-                serde_json::to_vec(&pass_plan).map_err(|e| e.to_string())?,
+                serde_json::to_vec(&pass_plan).expect("plain data serializes"),
             )
             .map_err(|e| format!("{}: {e}", plan_path.display()))?;
             let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
