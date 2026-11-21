@@ -22355,10 +22355,7 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let unread = project
         .supercov(&["runs", "latest", "mutants", "test", "--plan"])
         .exits(1);
-    assert!(
-        unread.starts_with("[supercov] InvalidArchive("),
-        "{unread}"
-    );
+    assert!(unread.starts_with("[supercov] InvalidArchive("), "{unread}");
 
     // No run, and no command to measure one with.
     let empty = Project::empty("mutants-no-run");
