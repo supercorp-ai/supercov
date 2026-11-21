@@ -226,6 +226,96 @@ struct ReportRun {
     lines: Vec<ReportLine>,
     scope: Option<serde_json::Value>,
     sources: BTreeMap<String, ReportSource>,
+    /// The run's mutants, for a JavaScript or TypeScript run that listed
+    /// them; absent otherwise, and the report then shows none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutants: Option<ReportMutants>,
+}
+
+/// What the report shows of a run's mutants: the scores and counts, each
+/// file's counts, and the mutants no test infects or reaches, each as
+/// `mutants` lists it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportMutants {
+    mutant_set: String,
+    summary: supercov_engine::mutants_query::MutantsSummary,
+    files: BTreeMap<String, supercov_engine::coverage_index::MutantCounts>,
+    mutants: Vec<ReportMutant>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportMutant {
+    file: String,
+    line: u32,
+    column: u32,
+    mutator: String,
+    /// `original → replacement`, or the part it changes, as the command
+    /// line shows it.
+    change: String,
+    status: supercov_engine::coverage_index::MutantStatus,
+    reason: String,
+    code: String,
+    /// `clock` or `random`: practically out of a test's reach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    untestable: Option<supercov_engine::coverage_index::Untestable>,
+}
+
+/// The run's mutants as the report shows them, or `None` for a run that
+/// listed none.
+fn build_mutants(index: &CoverageIndex<'_>, run: &str) -> Result<Option<ReportMutants>, String> {
+    use supercov_engine::coverage_index::MutantStatus;
+    use supercov_engine::mutants_query::{
+        CoverageMutantsQueryOptions, MutantsOptions, coverage_mutants_query,
+    };
+    let options = MutantsOptions {
+        statuses: vec![MutantStatus::NotInfected, MutantStatus::NotReached],
+        ..MutantsOptions::default()
+    };
+    let (data, _) = coverage_mutants_query(
+        index,
+        CoverageMutantsQueryOptions {
+            run,
+            file: None,
+            line: None,
+            options: &options,
+            offset: 0,
+            limit: usize::MAX,
+        },
+    )
+    .map_err(|error| format!("could not read mutants for run {run}: {error:?}"))?;
+    let Some(mutant_set) = data.mutant_set.clone() else {
+        return Ok(None);
+    };
+    if data.summary.mutants == 0 {
+        return Ok(None);
+    }
+    let mutants = data
+        .mutants
+        .iter()
+        .map(|mutant| ReportMutant {
+            file: mutant.file.clone(),
+            line: mutant.span.start[0],
+            column: mutant.span.start[1],
+            mutator: mutant.mutator.clone(),
+            change: crate::human_query::mutant_change(mutant),
+            status: mutant.status,
+            reason: mutant.weak.reason.clone(),
+            code: mutant.weak.code.clone(),
+            untestable: mutant.weak.untestable,
+        })
+        .collect();
+    Ok(Some(ReportMutants {
+        mutant_set,
+        summary: data.summary,
+        files: data
+            .files
+            .into_iter()
+            .map(|row| (row.file, row.status))
+            .collect(),
+        mutants,
+    }))
 }
 
 #[derive(Serialize)]
@@ -538,6 +628,7 @@ fn build_run(
         }
     };
     let (sources, omitted_sources) = collect_sources(root, &files, source_exact);
+    let mutants = build_mutants(&index, &run.id)?;
 
     Ok(Some(ReportRun {
         id: run.id.clone(),
@@ -562,6 +653,7 @@ fn build_run(
         lines,
         scope,
         sources,
+        mutants,
     }))
 }
 

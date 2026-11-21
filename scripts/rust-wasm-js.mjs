@@ -191,7 +191,7 @@ try {
         ['fs.open#integrity.rs:427@3', 'integrity.rs:427'],
         ['fs.read_to_string#rust_wasm.rs:291', 'rust_wasm.rs:291'],
         // The wasm run's own publication: its work directory.
-        ['fs.create_dir_all#rust_wasm_evidence.rs:375', 'rust_wasm_evidence.rs:375'],
+        ['fs.create_dir_all#rust_wasm_evidence.rs:377', 'rust_wasm_evidence.rs:377'],
       ]) {
         const failed = run(cwd, binary, ['--', ...entry.command], { SUPERCOV_TEST_FAULT: fault });
         assert.notEqual(failed.status, 0, `${fault}\n${failed.stderr}`);

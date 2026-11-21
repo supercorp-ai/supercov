@@ -1,0 +1,13 @@
+diff --git a/packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts b/packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts
+index 6c087d5..67cf5d6 100644
+--- a/packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts
++++ b/packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts
+@@ -77,7 +77,7 @@ export function getHTTPStatusCode(
+   json: TRPCResponse | TRPCResponse[],
+   errors?: readonly (TRPCError | undefined)[],
+ ) {
+-  const arr = Array.isArray(json) ? json : [json];
++  const arr = ([] as TRPCResponse[]).concat(json);
+   const httpStatuses = new Set<number>(
+     arr.map((res, index) => {
+       if ('error' in res) {

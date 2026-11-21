@@ -61,6 +61,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "playwright.mjs",
     "playwrightCacheThread.mjs",
     "playwrightReporter.mjs",
+    "playwrightStrong.mjs",
+    "playwrightStrongReporter.mjs",
     "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
@@ -73,6 +75,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "vitest.mjs",
     "vitestBrowser.mjs",
     "vitestReporter.mjs",
+    "vitestStrong.mjs",
+    "vitestStrongReporter.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -388,7 +392,8 @@ fn frontend_artifact_paths(
         ".supercov/vitest.config.mjs".to_owned(),
         ".supercov/vitestCommands.mjs".to_owned(),
         ".supercov/manifest.json".to_owned(),
-        ".supercov/statement-exclusions.json".to_owned(),
+        ".supercov/frontend-evidence/statement-exclusions.json".to_owned(),
+        ".supercov/frontend-evidence/mutants.json".to_owned(),
         ".supercov/instrumentation-complete".to_owned(),
     ];
     artifacts.extend(
@@ -396,10 +401,9 @@ fn frontend_artifact_paths(
             .iter()
             .map(|(name, _)| format!(".supercov/node_modules/{name}")),
     );
-    // Scope entries outside the instrumented set may still be rewritten
-    // (assertion attribution, capability imports), so they are cached like
-    // instrumented sources. Both populations feed the cache key through the
-    // source digest -- nothing cached here escapes the fingerprint.
+    // Scope entries outside the instrumented set may still be rewritten (assertion attribution,
+    // capability imports), so they are cached like instrumented sources. Both populations feed
+    // the cache key through the source digest -- nothing cached here escapes the fingerprint.
     artifacts.extend(project.source_files.iter().cloned());
     artifacts.extend(
         project
@@ -1002,7 +1006,7 @@ fn runtime_declarations() -> String {
     // Next.js runs the project's eslint over the build graph, and
     // @typescript-eslint/no-explicit-any turned every `any` below into a
     // hard "Failed to compile" for a real monorepo.
-    let mut text = String::from("/* eslint-disable */\n");
+    let mut text = String::from(RUNTIME_DECLARATIONS_HEAD);
     for (name, before) in VALUES {
         let leading = (0..*before)
             .map(|index| format!("a{index}: any, "))
@@ -1432,11 +1436,21 @@ fn write_vitest_config(
              // them by falling back to another installed version.\n\
              return await import(pathToFileURL(entry).href);\n\
            }}\n\
-           return await import('vite');\n\
+           // A specifier the config's bundler cannot read: a literal one is\n\
+           // reported as unresolved on every run where only Vitest's own\n\
+           // copy of Vite is installed, though this line never runs there.\n\
+           const supercovVite = 'vite';\n\
+           return await import(supercovVite);\n\
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
+         import SupercovStrongReporter from './node_modules/vitestStrongReporter.mjs';\n\
+         // Strong mutation (`supercov runs <id> mutants test`): the strong\n\
+         // setup file switches each test file's mutant on, and the strong\n\
+         // reporter runs the plan in stages instead of one run.\n\
+         const supercovStrong = Boolean(process.env.SUPERCOV_STRONG_PLAN);\n\
+         const supercovNodeSetup = supercovStrong ? 'vitestStrong.mjs' : 'vitest.mjs';\n\
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
@@ -1447,7 +1461,7 @@ fn write_vitest_config(
          const supercovSetupFile = (config) =>\n\
            supercovBrowserMode(config)\n\
              ? '.supercov/node_modules/vitestBrowser.mjs'\n\
-             : '.supercov/node_modules/vitest.mjs';\n\
+             : `.supercov/node_modules/${{supercovNodeSetup}}`;\n\
          // Evidence leaves the browser over Vitest's own command channel, so\n\
          // the command is registered only for the mode that uses it.\n\
          const supercovBrowserTest = (config) =>\n\
@@ -1458,7 +1472,7 @@ fn write_vitest_config(
          // environment after Vitest has loaded file/glob/inline configs and\n\
          // applied --project, preserving the runner's own config semantics.\n\
          const configureProjects = (projects) => {{\n\
-           const nodeSetup = resolve(process.cwd(), '.supercov/node_modules/vitest.mjs');\n\
+           const nodeSetup = resolve(process.cwd(), `.supercov/node_modules/${{supercovNodeSetup}}`);\n\
            const browserSetup = resolve(process.cwd(), '.supercov/node_modules/vitestBrowser.mjs');\n\
            for (const project of projects ?? []) {{\n\
              const test = project.config;\n\
@@ -1498,7 +1512,9 @@ fn write_vitest_config(
            supercovSkipCoverageThresholds(config.test?.coverage);\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
-           config.test.reporters = configuredReporters\n\
+           config.test.reporters = supercovStrong\n\
+             ? [new SupercovStrongReporter(configureProjects)]\n\
+             : configuredReporters\n\
              ? [...(Array.isArray(configuredReporters) ? configuredReporters : [configuredReporters]), new SupercovVitestReporter(configureProjects)]\n\
              : ['default', new SupercovVitestReporter(configureProjects)];\n\
            return config;\n\
@@ -1721,7 +1737,13 @@ fn write_playwright_config(
            ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))\n\
            : [['list']];\n\
          const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.mjs');\n\
-         export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
+         // Strong mutation (`supercov runs <id> mutants test`): the plan runs as\n\
+         // repetitions of each test, each with its own mutant, and the strong\n\
+         // reporter turns their outcomes into verdicts.\n\
+         const supercovStrong = Boolean(process.env.SUPERCOV_STRONG_PLAN);\n\
+         export default supercovStrong\n\
+           ? (await import('./node_modules/playwrightStrong.mjs')).strongConfig(normalized, runtimeProjectRoot, resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightStrongReporter.mjs'))\n\
+           : {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
         // Relative to the copy, as it is seen from where the config runs: a
         // test runner `docker exec` starts in a container the copy is mounted
         // into sees it elsewhere, and found no tests in the host's path.
@@ -1919,6 +1941,12 @@ fn instrument_source(
             });
         }
     };
+    // A strong pass's file with no switch runs as written: the instrumenter
+    // gives it back as it read it, with no runtime.
+    if crate::js_instrumenter::strong_enabled() && output.runtime.is_none() {
+        write_authored(workspace, file, &source)?;
+        return Ok(InstrumentedSource::Measured(Box::new(output)));
+    }
     // A directly run TypeScript file names its helpers' types from the
     // runtime's declarations, which sit beside the runtime in the
     // workspace.
@@ -2049,6 +2077,8 @@ pub fn prepare_javascript_frontend(
     let instrumented = crate::threads::parallel_map(&project.source_files, |file| {
         instrument_source(&options, file)
     });
+    // Each file's mutants with their links, kept beside the manifest.
+    let mut mutants = BTreeMap::new();
     for (file, instrumented) in project.source_files.iter().zip(instrumented) {
         let output = match instrumented? {
             InstrumentedSource::Measured(output) => *output,
@@ -2059,6 +2089,9 @@ pub fn prepare_javascript_frontend(
         };
         authored.insert(file.clone());
         exclusions.extend(output.excluded_statements);
+        if !output.mutants.is_empty() {
+            mutants.insert(file.clone(), output.mutants);
+        }
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
         }
@@ -2149,9 +2182,22 @@ pub fn prepare_javascript_frontend(
         &workspace.join(AUTHORED_LIST),
         &serde_json::to_vec(&authored).expect("plain data serializes"),
     )?;
+    // The run archives this directory whole, each file by its name.
+    let evidence = generated.join("frontend-evidence");
     atomic_write(
-        &generated.join("statement-exclusions.json"),
+        &evidence.join("statement-exclusions.json"),
         &serde_json::to_vec(&exclusions).expect("plain data serializes"),
+    )?;
+    let mutants = crate::js_mutant_links::MutantsFile {
+        schema_version: crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
+        mutant_set: crate::js_instrumenter::mutants_enabled()
+            .then(|| crate::js_mutants::MUTANT_SET.to_owned()),
+        files: mutants,
+        tests_without_values: Vec::new(),
+    };
+    atomic_write(
+        &evidence.join("mutants.json"),
+        &serde_json::to_vec(&mutants).expect("plain data serializes"),
     )?;
     let manifest_path = generated.join("manifest.json");
     let mut encoded = serde_json::to_vec_pretty(&manifest).expect("plain data serializes");
@@ -2173,6 +2219,20 @@ pub fn prepare_javascript_frontend(
         assertion_calls,
     })
 }
+
+/// The first lines of the runtime's declarations: the lint exemption, then the
+/// mutants' probe helpers, whose types are not a plain value pass-through.
+const RUNTIME_DECLARATIONS_HEAD: &str = concat!(
+    "/* eslint-disable */\n",
+    "export declare function compareV2(site: string, left: any, right: any, op: number): boolean;\n",
+    // `+` is a string when either side is, `any` when either side is; the
+    // other operators give a number, or a bigint for bigints.
+    "export declare function arithV2<L, R>(site: string, left: L, right: R, op: number): 0 extends 1 & L ? any : 0 extends 1 & R ? any : L extends string ? string : R extends string ? string : L extends bigint ? bigint : number;\n",
+    "export declare function assignV2<T>(site: string, current: any, value: T, op: number): T;\n",
+    "export declare function methodV2<T>(site: string, receiver: T, method: string, arrow?: string, copy?: (...args: any[]) => unknown): T;\n",
+    "export declare function valueV2<T>(site: string, value: T): T;\n",
+    "export declare function strongSlot(file: string): { a: number; h(): void };\n",
+);
 
 #[cfg(test)]
 mod tests {
@@ -2249,9 +2309,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:466",
-            "javascript-source-path#javascript_frontend.rs:1869",
-            "javascript-source-path#javascript_frontend.rs:1799",
+            "javascript-source-path#javascript_frontend.rs:470",
+            "javascript-source-path#javascript_frontend.rs:1891",
+            "javascript-source-path#javascript_frontend.rs:1821",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2362,8 +2422,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:510",
-            "javascript-source-path#javascript_frontend.rs:466",
+            "fs.read_to_string#javascript_frontend.rs:514",
+            "javascript-source-path#javascript_frontend.rs:470",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
@@ -2785,7 +2845,7 @@ mod tests {
         let config = fs::read_to_string(path).unwrap();
         assert!(config.contains("config?.test?.browser?.enabled"));
         assert!(config.contains("'.supercov/node_modules/vitestBrowser.mjs'"));
-        assert!(config.contains("'.supercov/node_modules/vitest.mjs'"));
+        assert!(config.contains("`.supercov/node_modules/${supercovNodeSetup}`"));
         // The command exists only for the mode that uses it.
         assert!(config.contains("browser: { commands: supercovBrowserCommands(process.cwd()) }"));
         assert!(config.contains("...supercovBrowserTest(loaded?.config)"));
@@ -3230,6 +3290,40 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A strong pass keeps the authored copy of a source it gives no switch,
+    /// which runs as written; a copy that cannot be kept stops the
+    /// preparation.
+    #[test]
+    fn a_strong_pass_keeps_a_source_it_gives_no_switch_as_written() {
+        use crate::js_instrumenter::{STRONG_FILES_FOR_TEST, STRONG_FOR_TEST};
+        STRONG_FOR_TEST.with(|flag| flag.set(Some(true)));
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = Some(Default::default()));
+        let authored =
+            |workspace: &Path| workspace.join(AUTHORED_DIRECTORY).join("src/example.mjs");
+        let (source_root, workspace, project) = frontend_fixture();
+        let kept = prepare_javascript_frontend(&workspace, &project, "collector", "cache");
+        let written = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
+        let ran = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
+        let copy = fs::read_to_string(authored(&workspace)).unwrap();
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+
+        let (source_root, workspace, project) = frontend_fixture();
+        // A directory, not empty, where the copy goes.
+        fs::create_dir_all(authored(&workspace)).unwrap();
+        fs::write(authored(&workspace).join("in-the-way"), "").unwrap();
+        let blocked = prepare_javascript_frontend(&workspace, &project, "collector", "cache");
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = None);
+        STRONG_FOR_TEST.with(|flag| flag.set(None));
+
+        kept.unwrap();
+        assert_eq!(ran, written);
+        assert_eq!(copy, written);
+        assert!(blocked.is_err());
+    }
+
     #[test]
     fn a_file_that_cannot_be_restored_or_written_leaves_no_temporary_behind() {
         let root = temporary("unwritable");
@@ -3244,6 +3338,9 @@ mod tests {
         // A directory that is not there yet is made.
         atomic_write(&root.join("new/a.js"), b"x").unwrap();
         assert_eq!(fs::read_to_string(root.join("new/a.js")).unwrap(), "x");
+        // One under a file cannot be.
+        fs::write(root.join("file"), "a file").unwrap();
+        assert!(restore_cached_file(&root.join("file/dir/a.js"), b"cached\n").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

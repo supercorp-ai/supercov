@@ -146,6 +146,17 @@ pub struct LogicalSnapshot {
     pub vectors: Vec<LogicalVector>,
 }
 
+/// One relational comparison site's operand relations (`lt`, `eq`, `gt`,
+/// `unordered`, `other`), keyed `file:line:column`, and the infection probes'
+/// outcomes: carried through the evidence for weak-mutation verdicts, never
+/// counted in coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComparisonSnapshot {
+    pub id: String,
+    pub outcomes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(
     rename_all = "camelCase",
@@ -161,6 +172,10 @@ pub struct RuntimeSnapshot {
     pub events: Vec<RuntimeEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logicals: Vec<LogicalSnapshot>,
+    /// What each comparison and mutation probe saw: the values that decide
+    /// whether a mutant there is infected (`docs/design/mutants.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comparisons: Vec<ComparisonSnapshot>,
     /// Every hit and decision vector of this snapshot is an explicit event of
     /// this phase. A frontend that observes a whole phase at once -- Python
     /// reads a phase's slot -- names the phase here instead of writing an
@@ -187,6 +202,8 @@ struct RuntimeSnapshotWire {
     event_columns: Option<EventColumns>,
     #[serde(default)]
     logicals: Vec<LogicalSnapshot>,
+    #[serde(default)]
+    comparisons: Vec<ComparisonSnapshot>,
     #[serde(default)]
     phase_id: Option<String>,
 }
@@ -318,6 +335,7 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
             hits: wire.hits,
             events,
             logicals: wire.logicals,
+            comparisons: wire.comparisons,
             phase_id: wire.phase_id,
         })
     }
@@ -356,7 +374,18 @@ pub struct ServerRecord {
     /// module loading are not a request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<u64>,
+    /// What a `comparison` record's site saw (`lt`, `same`, ...), or which
+    /// way a `logical` record's selection went (`SF`, `ST`, `RF`, `RT`: the
+    /// short or right side, falsy or truthy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
+
+/// A server record's note, first in what each writer wrote, that the writer
+/// records values: every outcome its comparisons, selections and probes saw,
+/// as `comparison` and `logical` records. Its silence about a value is then
+/// what a snapshot's is; a runtime older than these records writes no note.
+pub const SERVER_VALUES_RECORD: &str = "values";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -457,6 +486,11 @@ pub struct RawTestResult {
     /// its own has no need of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<[i64; 2]>,
+    /// How long the test took, in milliseconds, as its runner measured it:
+    /// the strong pass orders a mutant's tests by it and sets their time
+    /// limits from it. Nothing else reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 fn default_test_role() -> String {
@@ -540,6 +574,13 @@ fn credit_by_time(
                 served.is_empty() || attempt.as_ref().is_some_and(|id| served.contains(id))
             })
             .collect::<Vec<_>>();
+        // The process's note that it records values goes with its work to
+        // each test given some, and stays with what is no test's.
+        let values = records
+            .iter()
+            .find(|record| record.record_type == SERVER_VALUES_RECORD)
+            .cloned();
+        let mut owners = BTreeSet::new();
         for record in records
             .into_iter()
             .filter(|record| record.record_type != "served")
@@ -551,7 +592,15 @@ fn credit_by_time(
                 let only = running.next()?;
                 running.next().is_none().then_some(only.0)
             });
+            owners.extend(owner);
             work.push((owner, record));
+        }
+        if let Some(values) = values {
+            work.extend(
+                owners
+                    .into_iter()
+                    .map(|owner| (Some(owner), values.clone())),
+            );
         }
     }
     let mut unattributed = Vec::new();
@@ -566,8 +615,12 @@ fn credit_by_time(
                 raw.server.push(record);
             }
             None => {
+                // Which request it was is left out, so a request's work is
+                // counted once; that it was a request's is kept (`Some(0)`):
+                // strong mutation switches a request's mutant per request,
+                // and start-up work only by starting the server with it.
                 let mut record = record;
-                record.request = None;
+                record.request = record.request.map(|_| 0);
                 if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
                     unattributed.push(record);
                 }
@@ -956,6 +1009,11 @@ pub struct CoverageReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionResult>,
     pub filters: CoverageFilters,
+    /// Each mutant the run listed, with its weak-mutation verdict from every
+    /// test of the report; `None` when the run listed none. Beside coverage,
+    /// never part of it.
+    #[serde(skip)]
+    pub mutation: Option<crate::coverage_index::MutationResults>,
     /// Every result passed, so the passed view is the whole view
     /// ([`passing_is_every_result`]): its query index records are the whole
     /// view's, copied.
@@ -2406,6 +2464,10 @@ fn create_coverage_view_with_model(
         // of their own: a run's millions of server records each made four
         // or five strings here.
         for record in &raw.server {
+            // A writer's note that it records values covers nothing.
+            if record.record_type == SERVER_VALUES_RECORD {
+                continue;
+            }
             let (record_id, decision): (&str, Option<&McdcVector>) =
                 if record.record_type == "decision" {
                     let decision = record.id.as_deref().ok_or_else(|| {
@@ -3311,6 +3373,7 @@ pub fn analyze_coverage_results(
         view,
         execution,
         filters: CoverageFilters { passed, failed },
+        mutation: None,
         passed_is_whole: passing_is_all,
     })
 }
@@ -3469,6 +3532,7 @@ fn record_hash(record: &ServerRecord) -> u64 {
     record.timestamp_ms.hash(&mut hasher);
     record.phase_id.hash(&mut hasher);
     record.request.hash(&mut hasher);
+    record.outcome.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -3520,6 +3584,77 @@ fn parse_scoped_server_records<'a>(
     parsed
 }
 
+/// The values each test's server records hold, as the snapshot of its
+/// values a test process writes: the `comparison` and `logical` records of a
+/// process that records values become one snapshot of `comparisons` and
+/// `logicals`, read as a test process's are. Its hits and decisions stay
+/// records, and so does the writer's note that it records values.
+fn fold_server_values(raw_results: &mut [RawTestResult]) -> Result<(), ReportError> {
+    const SELECTIONS: [(&str, bool, bool); 4] = [
+        ("SF", false, false),
+        ("ST", false, true),
+        ("RF", true, false),
+        ("RT", true, true),
+    ];
+    for raw in raw_results.iter_mut() {
+        let mut comparisons = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut logicals = BTreeMap::<String, BTreeSet<(bool, bool)>>::new();
+        let mut kept = Vec::with_capacity(raw.server.len());
+        let mut folded = false;
+        for record in std::mem::take(&mut raw.server) {
+            let kind = record.record_type.as_str();
+            if kind != "comparison" && kind != "logical" {
+                kept.push(record);
+                continue;
+            }
+            folded = true;
+            let (Some(id), Some(outcome)) = (record.id, record.outcome) else {
+                return Err(ReportError::InvalidServerRecord(format!(
+                    "{kind} without its id or outcome"
+                )));
+            };
+            if kind == "comparison" {
+                comparisons.entry(id).or_default().insert(outcome);
+                continue;
+            }
+            let Some(&(_, right, truthy)) = SELECTIONS.iter().find(|(name, _, _)| *name == outcome)
+            else {
+                return Err(ReportError::InvalidServerRecord(format!(
+                    "logical outcome {outcome}"
+                )));
+            };
+            logicals.entry(id).or_default().insert((right, truthy));
+        }
+        raw.server = kept;
+        // A test whose server recorded no value keeps its snapshots as they
+        // were.
+        if !folded {
+            continue;
+        }
+        raw.runtime.push(RuntimeSnapshot {
+            logicals: logicals
+                .into_iter()
+                .map(|(id, vectors)| LogicalSnapshot {
+                    id,
+                    vectors: vectors
+                        .into_iter()
+                        .map(|(right, truthy)| LogicalVector { right, truthy })
+                        .collect(),
+                })
+                .collect(),
+            comparisons: comparisons
+                .into_iter()
+                .map(|(id, outcomes)| ComparisonSnapshot {
+                    id,
+                    outcomes: outcomes.into_iter().collect(),
+                })
+                .collect(),
+            ..RuntimeSnapshot::default()
+        });
+    }
+    Ok(())
+}
+
 fn is_mcdc_result(path: &str) -> bool {
     path == "mcdc.json" || path.ends_with("/mcdc.json")
 }
@@ -3531,15 +3666,17 @@ fn is_mcdc_journal(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, _) = archive_request(request)?;
-    finish_archive_analysis(normalized, transport)
+    let (_, normalized, transport, _, mutation) = archive_request(request)?;
+    finish_archive_analysis(normalized, transport, mutation)
 }
 
 fn finish_archive_analysis(
     normalized: CoverageReportRequest,
     transport: TransportStats,
+    mutation: Option<crate::coverage_index::MutationResults>,
 ) -> Result<CoverageReport, ReportError> {
     let report = analyze_coverage_results(&normalized).map(|mut report| {
+        report.mutation = mutation;
         report.view.transport = Some(transport.clone());
         report.filters.passed.transport = Some(transport.clone());
         report.filters.failed.transport = Some(transport);
@@ -3553,8 +3690,8 @@ fn finish_archive_analysis(
 }
 
 /// A stored run's evidence as the request its views are built from, with the
-/// frontend that declared it, what its processes reported, and the digest of
-/// the archive bytes it was read from.
+/// frontend that declared it, what its processes reported, the digest of the
+/// archive bytes it was read from, and its mutants' verdicts.
 pub fn archive_request(
     request: &ArchiveReportRequest,
 ) -> Result<
@@ -3563,16 +3700,65 @@ pub fn archive_request(
         CoverageReportRequest,
         TransportStats,
         crate::evidence_archive::ArchiveDigest,
+        Option<crate::coverage_index::MutationResults>,
     ),
     ReportError,
 > {
-    archive_request_from(request, None, |visit| {
+    archive_request_from(request, None, false, |visit| {
         crate::evidence_archive::read_archive_each(
             Path::new(&request.archive_path),
             |_| true,
             visit,
         )
     })
+    .map(|(frontend, normalized, transport, digest, mutation, _)| {
+        (frontend, normalized, transport, digest, mutation)
+    })
+}
+
+/// A stored run's tests and the mutants it listed, for the strong pass to
+/// plan from: each test's records as the views read them (server work
+/// credited, places resolved), and every listed mutant with its links.
+/// `None` for the mutants when the run listed none.
+pub(crate) fn archive_tests_and_mutants(
+    request: &ArchiveReportRequest,
+) -> Result<ArchiveTestsAndMutants, ReportError> {
+    let (_, normalized, _, _, _, listed) = archive_request_from(request, None, true, |visit| {
+        crate::evidence_archive::read_archive_each(
+            Path::new(&request.archive_path),
+            |_| true,
+            visit,
+        )
+    })?;
+    // Each measured file's point ids: what its sources must give again for
+    // mutants listed from them to be the run's.
+    let mut points = BTreeMap::<String, BTreeSet<String>>::new();
+    for point in &normalized.manifest.points {
+        points
+            .entry(point.file.clone())
+            .or_default()
+            .insert(point.id.clone());
+    }
+    Ok((normalized.raw_results, listed, points))
+}
+
+/// A run's tests, its mutants where it listed them, and each measured file's
+/// point ids.
+pub(crate) type ArchiveTestsAndMutants = (
+    Vec<RawTestResult>,
+    Option<crate::js_mutant_links::MutantsFile>,
+    BTreeMap<String, BTreeSet<String>>,
+);
+
+/// The file beside a run's evidence archive that holds the mutants
+/// `supercov mutants` listed from its sources, when the run itself listed
+/// none.
+pub const LISTED_MUTANTS_FILE: &str = "mutants-listed.json";
+
+/// The mutants listed beside the archive at `archive_path`, if any.
+fn listed_beside(archive_path: impl AsRef<Path>) -> Option<crate::js_mutant_links::MutantsFile> {
+    let bytes = std::fs::read(archive_path.as_ref().with_file_name(LISTED_MUTANTS_FILE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// A run's evidence, still in memory as the archive is written from it, as
@@ -3584,10 +3770,14 @@ pub fn analyze_coverage_entries(
     entries: &[EvidenceArchiveEntry],
     parsed: Option<ParsedResults>,
 ) -> Result<CoverageReport, ReportError> {
-    let (_, normalized, transport, ()) = archive_request_from(request, parsed, |mut visit| {
-        entries.iter().cloned().try_for_each(&mut visit)
-    })?;
-    finish_archive_analysis(normalized, transport)
+    let (_, normalized, transport, (), mutation) =
+        archive_request_from(request, parsed, false, |mut visit| {
+            entries.iter().cloned().try_for_each(&mut visit)
+        })
+        .map(|(frontend, normalized, transport, digest, mutation, _)| {
+            (frontend, normalized, transport, digest, mutation)
+        })?;
+    finish_archive_analysis(normalized, transport, mutation)
 }
 
 /// The results of a run's `mcdc.json` and `.mcdc.jsonl` entries, by path, as
@@ -3597,9 +3787,11 @@ pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 
 /// `archive_request`, from entries `read` hands to the visitor in the
 /// archive's order.
+#[allow(clippy::type_complexity)]
 fn archive_request_from<D>(
     request: &ArchiveReportRequest,
     mut parsed: Option<ParsedResults>,
+    keep_listed: bool,
     read: impl FnOnce(
         &mut dyn FnMut(
             EvidenceArchiveEntry,
@@ -3611,6 +3803,8 @@ fn archive_request_from<D>(
         CoverageReportRequest,
         TransportStats,
         D,
+        Option<crate::coverage_index::MutationResults>,
+        Option<crate::js_mutant_links::MutantsFile>,
     ),
     ReportError,
 > {
@@ -3714,7 +3908,14 @@ fn archive_request_from<D>(
     // A record is compared as itself, by its hash and then in full, not as
     // the JSON it would write, and is moved into its result: serializing
     // each was most of the join on a large run.
-    let scoped_server_records = scoped_records.len();
+    // A writer's note that it records values is no record of work.
+    let work = |records: &[ServerRecord]| {
+        records
+            .iter()
+            .filter(|record| record.record_type != SERVER_VALUES_RECORD)
+            .count()
+    };
+    let scoped_server_records = work(&scoped_records);
     // A file's records are together and share its scope: the result they
     // join is looked up when the scope changes.
     let mut last: Option<(ExecutionScope, usize)> = None;
@@ -3784,6 +3985,7 @@ fn archive_request_from<D>(
     background.records.clone_from(&background_records);
     if had_background {
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(format!("background:{}", request.run_id)),
             scope: None,
@@ -3809,6 +4011,7 @@ fn archive_request_from<D>(
             server: background_records.clone(),
         });
     }
+    fold_server_values(&mut raw_results)?;
 
     // Execution traces are appended by the launch observer inside application
     // processes, so they share the clone hazard of server evidence.
@@ -3830,7 +4033,7 @@ fn archive_request_from<D>(
         workspace_capabilities: count_event("workspace-capability"),
         guest_processes: count_event("guest-process"),
         scoped_server_records,
-        background_server_records: background_records.len(),
+        background_server_records: work(&background_records),
         corrupt_records: scoped.corrupt_records
             + background.corrupt_records
             + execution.corrupt_records,
@@ -3870,6 +4073,22 @@ fn archive_request_from<D>(
                 .any(|raw| raw.provenance.runner == declared.runner)
         });
     }
+    // Each mutant's verdict, from the tests the view keeps. A run measured
+    // without its mutants has them listed beside its archive once
+    // `supercov mutants` asked for them.
+    let listed = entries
+        .iter()
+        .find(|entry| entry.path == "mutants.json")
+        .map(parse_entry::<crate::js_mutant_links::MutantsFile>)
+        .transpose()?;
+    let listed = match listed {
+        Some(listed) if listed.mutant_set.is_some() => Some(listed),
+        archived => listed_beside(&request.archive_path)
+            .filter(|beside| beside.mutant_set.is_some())
+            .or(archived),
+    };
+    let kept = if keep_listed { listed.clone() } else { None };
+    let mutation = crate::js_weak_mutation::results(&raw_results, listed);
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
@@ -3885,7 +4104,7 @@ fn archive_request_from<D>(
     drop(entries);
     crate::frontend_protocol::validate_frontend_report_request(&frontend, &normalized)
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    Ok((frontend, normalized, transport, digest))
+    Ok((frontend, normalized, transport, digest, mutation, kept))
 }
 
 /// Evidence that names a probe by its module's table and place -- a module
@@ -4240,6 +4459,20 @@ mod tests {
     /// this one) reads as exactly the events it was made of, in their order:
     /// a phase or none, two environments, decisions with their vectors, and a
     /// timestamp earlier than the one before it.
+    /// A snapshot's probe outcomes are kept, with columnar events or without,
+    /// and a snapshot without any writes none.
+    #[test]
+    fn comparison_outcomes_survive_reading_and_writing() {
+        let read: RuntimeSnapshot = serde_json::from_str(r#"{"hits":["a"],"eventColumns":{"types":["hit"],"phases":[],"environments":["browser"],"id":["a"],"type":[0],"phase":[-1],"environment":[0],"t":[1]},"comparisons":[{"id":"src/a.ts:3:9","outcomes":["lt","eq"]},{"id":"src/a.ts:4:1-4:6#arith","outcomes":["differs"]}]}"#).unwrap();
+        assert_eq!(read.comparisons.len(), 2);
+        assert_eq!(read.comparisons[0].outcomes, ["lt", "eq"]);
+        let written = serde_json::to_string(&read).unwrap();
+        let again: RuntimeSnapshot = serde_json::from_str(&written).unwrap();
+        assert_eq!(again.comparisons, read.comparisons);
+        let plain = serde_json::to_string(&RuntimeSnapshot::default()).unwrap();
+        assert!(!plain.contains("comparisons"), "{plain}");
+    }
+
     #[test]
     fn columnar_events_read_as_the_events_they_were_made_of() {
         let written: RuntimeSnapshot = serde_json::from_str(r#"{"decisions":[],"hits":["a","b"],"logicals":[],"events":[{"type":"hit","id":"a","timestampMs":1793741378313,"phaseId":"p:1","environment":"browser"},{"type":"hit","id":"b","timestampMs":1793741378310,"environment":"browser"},{"type":"decision","id":"d","vector":{"values":[true,null,false],"outcome":true},"timestampMs":1793741378400,"phaseId":"p:2","environment":"browser"},{"type":"hit","id":"c","timestampMs":1793741378400,"phaseId":"p:1","environment":"server"},{"type":"decision","id":"d","vector":{"values":[false,null,false],"outcome":false},"timestampMs":1793741378401,"phaseId":null,"environment":"browser"}]}"#).unwrap();
@@ -4499,6 +4732,7 @@ mod tests {
 
     fn raw(id: &str, retry: usize, status: &str, hits: &[&str]) -> RawTestResult {
         RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(id.into()),
             scope: None,
@@ -4524,11 +4758,68 @@ mod tests {
                 hits: hits.iter().map(|hit| (*hit).into()).collect(),
                 events: vec![],
                 logicals: vec![],
-                phase_id: None,
+                ..Default::default()
             }],
             browser: vec![],
             server: vec![],
         }
+    }
+
+    /// A server process names a selection's outcome by the place of the
+    /// point it hit, as a snapshot does: once its records are a snapshot,
+    /// the outcome is its branch's.
+    #[test]
+    fn a_server_s_logical_record_by_place_is_its_branch_s() {
+        let tables = BTreeMap::from([(
+            "k".to_owned(),
+            ProbeTableIds {
+                points: vec![
+                    "pick:short".into(),
+                    "pick:short".into(),
+                    "pick:right".into(),
+                    "pick:right".into(),
+                ],
+                decisions: Vec::new(),
+                follows: Vec::new(),
+            },
+        )]);
+        let record = |kind: &str, id: Option<&str>, outcome: Option<&str>| ServerRecord {
+            record_type: kind.into(),
+            vector: None,
+            id: id.map(str::to_owned),
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+            outcome: outcome.map(str::to_owned),
+        };
+        let mut result = raw("a", 0, "passed", &[]);
+        result.server = vec![
+            record(SERVER_VALUES_RECORD, None, None),
+            record("hit", Some("~pk.2"), None),
+            record("logical", Some("~pk.2"), Some("RF")),
+            record("logical", Some("~pk.1"), Some("ST")),
+        ];
+        let mut results = vec![result];
+        fold_server_values(&mut results).unwrap();
+        resolve_probe_places(&mut results, &tables);
+        let values = results[0].runtime.last().unwrap();
+        assert_eq!(
+            values.logicals,
+            [LogicalSnapshot {
+                id: "pick".into(),
+                vectors: vec![
+                    LogicalVector {
+                        right: false,
+                        truthy: true
+                    },
+                    LogicalVector {
+                        right: true,
+                        truthy: false
+                    },
+                ],
+            }]
+        );
     }
 
     /// Evidence names a probe by its module's table and place; the report
@@ -4606,6 +4897,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: None,
+            outcome: None,
         };
         result.server = vec![
             record("hit", "~pk.0"),
@@ -4711,6 +5003,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: None,
+            outcome: None,
         }];
         let mut results = vec![result];
         resolve_probe_places(&mut results, &tables);
@@ -4766,6 +5059,7 @@ mod tests {
             phase_id: Some("p".into()),
             scope: None,
             request: Some(4),
+            outcome: None,
         }];
         let mut results = vec![result];
         resolve_probe_places(&mut results, &tables);
@@ -4804,6 +5098,7 @@ mod tests {
     #[test]
     fn a_filter_keeps_the_setup_of_the_files_it_picks_and_nothing_else() {
         let in_file = |id: &str, role: &str, file: &str| RawTestResult {
+            duration_ms: None,
             span: None,
             role: role.into(),
             test_file: Some(file.into()),
@@ -4858,6 +5153,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: Some(timestamp as u64),
+            outcome: None,
         };
         // Module loading in a test process: no request, never credited.
         let mut loading = at(170);
@@ -4942,6 +5238,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request,
+            outcome: None,
         };
         // Two workers' tests overlap from 150 to 200; each has its own server.
         let mut results = vec![scoped("first", 100, 200), scoped("second", 150, 300)];
@@ -5256,6 +5553,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: None,
+            outcome: None,
         };
         let read = |record: ServerRecord| {
             let mut attempt = raw("test", 0, "passed", &[]);
@@ -5520,6 +5818,7 @@ mod tests {
             hits: vec!["hit".into()],
             events: vec![],
             logicals: vec![],
+            comparisons: Vec::new(),
             phase_id: Some("b".into()),
         });
         attempt.runtime.push(RuntimeSnapshot {
@@ -5527,6 +5826,7 @@ mod tests {
             hits: vec!["hit".into()],
             events: vec![],
             logicals: vec![],
+            comparisons: Vec::new(),
             phase_id: Some("ghost".into()),
         });
         let view = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();
@@ -6699,6 +6999,7 @@ mod tests {
             phase_id: None,
             scope: None,
             request: None,
+            outcome: None,
         }];
         assert!(matches!(
             create_coverage_view(&manifest, &[test], "time"),
@@ -6797,5 +7098,309 @@ mod tests {
             result.err()
         );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// A process that records values notes it first; that note goes with
+    /// its work to each test it is credited to, and stays with what is no
+    /// test's.
+    #[test]
+    fn a_process_s_note_that_it_records_values_goes_with_its_work() {
+        let record = |kind: &str, id: Option<&str>, at: Option<i64>| ServerRecord {
+            record_type: kind.into(),
+            vector: None,
+            id: id.map(str::to_owned),
+            timestamp_ms: at,
+            phase_id: None,
+            scope: None,
+            request: at.map(|at| at as u64),
+            outcome: (kind == "comparison").then(|| "lt".into()),
+        };
+        let mut first = raw("first", 0, "passed", &[]);
+        first.phases = vec![CoveragePhase {
+            id: "first-phase".into(),
+            kind: "action".into(),
+            operation: "get".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 100,
+            ended_at_ms: Some(200),
+            status: None,
+            error: None,
+        }];
+        let mut second = raw("second", 0, "passed", &[]);
+        second.phases = vec![CoveragePhase {
+            id: "second-phase".into(),
+            started_at_ms: 300,
+            ended_at_ms: Some(400),
+            ..first.phases[0].clone()
+        }];
+        let mut results = vec![first, second];
+        let left = credit_by_time(
+            &mut results,
+            vec![
+                vec![
+                    record(SERVER_VALUES_RECORD, None, None),
+                    record("hit", Some("webhook"), Some(150)),
+                    record("comparison", Some("src/a.js:1:1"), Some(150)),
+                    record("hit", Some("later"), Some(500)),
+                ],
+                // An older runtime's process: no note.
+                vec![record("hit", Some("old"), Some(350))],
+            ],
+        );
+        let kinds = |records: &[ServerRecord]| {
+            records
+                .iter()
+                .map(|record| record.record_type.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&results[0].server),
+            ["hit", "comparison", SERVER_VALUES_RECORD]
+        );
+        assert_eq!(kinds(&results[1].server), ["hit"]);
+        assert_eq!(kinds(&left), [SERVER_VALUES_RECORD, "hit"]);
+    }
+
+    /// A test's value records become one snapshot of its values, read as a
+    /// test process's are; its hits, decisions and the note stay records,
+    /// and the note covers nothing.
+    #[test]
+    fn a_test_s_value_records_become_a_snapshot_of_its_values() {
+        let record = |kind: &str, id: Option<&str>, outcome: Option<&str>| ServerRecord {
+            record_type: kind.into(),
+            vector: None,
+            id: id.map(str::to_owned),
+            timestamp_ms: Some(1),
+            phase_id: None,
+            scope: None,
+            request: None,
+            outcome: outcome.map(str::to_owned),
+        };
+        let mut valued = raw("valued", 0, "passed", &[]);
+        valued.server = vec![
+            record(SERVER_VALUES_RECORD, None, None),
+            record("hit", Some("s"), None),
+            record("comparison", Some("c"), Some("lt")),
+            record("comparison", Some("c"), Some("eq")),
+            record("comparison", Some("c"), Some("lt")),
+            record("logical", Some("b"), Some("RT")),
+            record("logical", Some("b"), Some("SF")),
+        ];
+        let plain = raw("plain", 0, "passed", &["s"]);
+        let mut results = vec![valued, plain.clone()];
+        fold_server_values(&mut results).unwrap();
+        assert_eq!(
+            results[0]
+                .server
+                .iter()
+                .map(|record| record.record_type.as_str())
+                .collect::<Vec<_>>(),
+            [SERVER_VALUES_RECORD, "hit"]
+        );
+        let values = results[0].runtime.last().unwrap();
+        assert_eq!(
+            values.comparisons,
+            [ComparisonSnapshot {
+                id: "c".into(),
+                outcomes: vec!["eq".into(), "lt".into()],
+            }]
+        );
+        assert_eq!(
+            values.logicals,
+            [LogicalSnapshot {
+                id: "b".into(),
+                vectors: vec![
+                    LogicalVector {
+                        right: false,
+                        truthy: false
+                    },
+                    LogicalVector {
+                        right: true,
+                        truthy: true
+                    },
+                ],
+            }]
+        );
+        assert!(values.hits.is_empty() && values.phase_id.is_none());
+        assert_eq!(results[1], plain);
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("s", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest,
+            raw_results: results,
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        })
+        .expect("the note is no coverage, and no error");
+        assert_eq!(report.view.summary.statements.covered, 1);
+        for (kind, outcome) in [("comparison", None), ("logical", Some("XX"))] {
+            let mut broken = raw("broken", 0, "passed", &[]);
+            broken.server = vec![record(kind, Some("c"), outcome)];
+            assert!(matches!(
+                fold_server_values(&mut [broken]),
+                Err(ReportError::InvalidServerRecord(_))
+            ));
+        }
+    }
+
+    /// A mutant whose statement ran in a server process is decided from the
+    /// values that process recorded, and stays unknown where its records do
+    /// not say they carry values: an older runtime's.
+    #[test]
+    fn a_server_process_s_values_decide_its_mutants_and_an_older_runtime_s_silence_does_not() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("s", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let scope = ExecutionScope {
+            version: 1,
+            run_id: "run".into(),
+            worker_id: "worker".into(),
+            test_id: "t".into(),
+            test_key: "t".into(),
+            retry: 0,
+            attempt_id: "attempt".into(),
+        };
+        let mut result = raw("t", 0, "passed", &[]);
+        result.scope = Some(scope.clone());
+        // Stored without its id, worked out from its place.
+        let mutants = serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": crate::js_mutants::MUTANT_SET,
+            "files": {"src/app.js": [{
+                "mutator": "EqualityOperator", "replacement": "<=",
+                "start": [1, 1], "end": [1, 6], "original": "a < b",
+                "operator": {"text": "<", "at": 2},
+                "statement": "s", "compare": "src/app.js:1:1"
+            }]},
+        });
+        let verdict = |records: &str| {
+            let first = format!(
+                "{{\"type\":\"hit\",\"id\":\"s\",\"scope\":{}}}\n",
+                serde_json::to_string(&scope).unwrap()
+            );
+            let path = archive(vec![
+                EvidenceArchiveEntry {
+                    path: "manifest.json".into(),
+                    contents: serde_json::to_vec(&manifest).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: "worker/mcdc.json".into(),
+                    contents: serde_json::to_vec(&result).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: "mutants.json".into(),
+                    contents: serde_json::to_vec(&mutants).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: "server/run/attempt.jsonl".into(),
+                    contents: format!("{first}{records}").into_bytes(),
+                },
+            ]);
+            let report = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
+            })
+            .unwrap();
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+            let mutation = report.mutation.expect("listed mutants");
+            assert_eq!(report.view.summary.statements.covered, 1);
+            let mutant = &mutation.mutants[0];
+            assert_eq!(mutant.descriptor, "<=");
+            (mutant.status, mutant.code.clone())
+        };
+        let values = "{\"type\":\"values\"}\n{\"type\":\"comparison\",\"id\":\"src/app.js:1:1\",\"outcome\":\"lt\"}\n";
+        assert_eq!(
+            verdict(values),
+            (
+                crate::coverage_index::MutantStatus::NotInfected,
+                "operands-never-equal".into()
+            )
+        );
+        // The same silence from a process that does not say it records values.
+        assert_eq!(
+            verdict(""),
+            (
+                crate::coverage_index::MutantStatus::Unknown,
+                "server-process".into()
+            )
+        );
+    }
+
+    /// A server's value record without its outcome, or a `mutants.json`
+    /// that does not read, fails the archive's analysis, by what it is.
+    #[test]
+    fn an_archive_whose_server_values_or_mutants_do_not_read_is_refused() {
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![point("s", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let analyze = |path: &str, contents: &[u8]| {
+            let archive_path = archive(vec![
+                EvidenceArchiveEntry {
+                    path: "manifest.json".into(),
+                    contents: serde_json::to_vec(&manifest).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: "worker/mcdc.json".into(),
+                    contents: serde_json::to_vec(&raw("t", 0, "passed", &["s"])).unwrap(),
+                },
+                EvidenceArchiveEntry {
+                    path: path.into(),
+                    contents: contents.to_vec(),
+                },
+            ]);
+            let report = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: archive_path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+                test_filter: None,
+            });
+            fs::remove_dir_all(archive_path.parent().unwrap()).unwrap();
+            report.err()
+        };
+        let unvalued = analyze(
+            "server/background/process-1-a1b2c3d4-0.jsonl",
+            b"{\"type\":\"comparison\",\"id\":\"c\"}\n",
+        );
+        assert!(
+            matches!(unvalued, Some(ReportError::InvalidServerRecord(_))),
+            "{unvalued:?}"
+        );
+        let unread = analyze("mutants.json", b"not json");
+        assert!(
+            matches!(&unread, Some(ReportError::InvalidJson { path, .. }) if path == "mutants.json"),
+            "{unread:?}"
+        );
     }
 }

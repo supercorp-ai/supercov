@@ -536,7 +536,7 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
-        phase_id: None,
+        ..Default::default()
     }
 }
 
@@ -684,6 +684,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 tags: test.tags.clone(),
             };
             RawTestResult {
+                duration_ms: None,
                 span: None,
                 scope: Some(ExecutionScope {
                     version: 1,
@@ -790,6 +791,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
             vectors: Vec::new(),
         };
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             scope: Some(ExecutionScope {
                 version: 1,

@@ -1,0 +1,13 @@
+diff --git a/src/index.ts b/src/index.ts
+index f1983fd..fe6f3eb 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -81,7 +81,7 @@ export function splitByCase<
+ }
+ 
+ export function upperFirst<S extends string>(str: S): Capitalize<S> {
+-  return (str ? str[0].toUpperCase() + str.slice(1) : "") as Capitalize<S>;
++  return (str ? str.charAt(0).toUpperCase() + str.slice(1) : "") as Capitalize<S>;
+ }
+ 
+ export function lowerFirst<S extends string>(str: S): Uncapitalize<S> {

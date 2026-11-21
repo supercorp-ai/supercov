@@ -373,6 +373,7 @@ pub(crate) fn run_doctests(
             let attempt_id = format!("{run_id}:doctest:{index:08}");
             let recorded = snapshot(&project.manifest, &project.probes, &evidence, &attempt_id)?;
             results.push(RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some(name.clone()),
                 scope: Some(ExecutionScope {

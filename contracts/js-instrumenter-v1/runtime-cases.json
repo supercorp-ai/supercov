@@ -48,5 +48,10 @@
     "file": "runtime/module-private-static.mjs",
     "kind": "module",
     "source": "const effects = []; class Counter { static #seed = 2; static { if (this.#seed) effects.push('static'); } #value = Counter.#seed; increment(step = 1) { this.#value += step; return this.#value; } } export function run() { const counter = new Counter(); return [counter.increment(), counter.increment(2)]; } export function observe() { return effects; }"
+  },
+  {
+    "file": "runtime/module-top-level-probes.mjs",
+    "kind": "module",
+    "source": "const effects = [];\nfunction count(n) { return n > 0 ? 1 + count(n - 1) : 0; }\nconst depth = count(3);\nlet total = 2;\ntotal += depth * 2;\nconst items = [{ on: false }, { on: true }];\nconst any = items.some((item) => item.on);\nconst all = items.every((item) => (effects.push(\"every\"), item.on));\nconst first = items.every((item) => item.on === depth > 5);\nconst maybe = depth > 9 ? [] : null;\nconst none = maybe?.some((x) => x);\nconst flags = items.map((item) => item.on);\nconst matched = /^a+$/.test(\"aa\") && \"  a \".trim().length < 2;\nfunction later(limit) { return total >= limit; }\nconst early = later(8);\nexport function run() { return [depth, total, any, all, first, none, flags, matched, early, Math.min(depth, total)]; }\nfunction observe() { return effects; }\n"
   }
 ]

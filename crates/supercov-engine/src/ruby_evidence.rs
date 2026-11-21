@@ -958,7 +958,7 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
-        phase_id: None,
+        ..Default::default()
     })
 }
 
@@ -1390,6 +1390,7 @@ fn build_from_evidence(
                 .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned));
             raw_results.push(RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some(test.clone()),
                 scope: Some(scope(run_id, &worker, &test, retry)),
@@ -1477,6 +1478,7 @@ fn build_from_evidence(
         // Only an outcome names a test's file, and this test reported none.
         let test_file = test.split("::").next().map(str::to_owned);
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
@@ -1532,6 +1534,7 @@ fn build_from_evidence(
         };
         let phase = phase_id(run_id, &identity);
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, worker, &test, 0)),

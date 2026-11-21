@@ -1,0 +1,136 @@
+{
+  "project": "hono",
+  "scenario": "truth",
+  "shard": "s1",
+  "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+  "startedAt": "2026-11-19T23:59:47.954Z",
+  "machine": {
+    "instanceType": "m8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 61.6
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.6.0",
+    "vitest": "5.0.1",
+    "vitestProject": "5.0.1"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/honojs/hono 75ff8e3ea18485589816881c6278bc9783e56602 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.46,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.05,
+        "sysS": 0.01,
+        "cpuS": 0.06,
+        "cpuPercent": "16%",
+        "maxRssKiB": 18936,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.6.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.47,
+      "wallS": 1.734,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.73,
+        "sysS": 0.18,
+        "cpuS": 0.91,
+        "cpuPercent": "53%",
+        "maxRssKiB": 190812,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.21,
+      "wallS": 0.674,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.76,
+        "sysS": 0.88,
+        "cpuS": 3.64,
+        "cpuPercent": "541%",
+        "maxRssKiB": 241284,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 2.88,
+      "wallS": 0.939,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.99,
+        "sysS": 0.53,
+        "cpuS": 1.52,
+        "cpuPercent": "162%",
+        "maxRssKiB": 341652,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "truth",
+      "command": "node_modules/.bin/stryker run stryker.truth.json",
+      "startOffsetS": 3.85,
+      "wallS": 159.7,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1383.57,
+        "sysS": 70.66,
+        "cpuS": 1454.23,
+        "cpuPercent": "910%",
+        "maxRssKiB": 6874196,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": true,
+        "mutate": [
+          "src/hono-base.ts",
+          "src/router/reg-exp-router/matcher.ts",
+          "src/utils/body.ts",
+          "src/utils/mime.ts",
+          "!src/**/*.test.ts",
+          "!src/**/types.ts",
+          "!src/utils/http-status.ts",
+          "!src/**/*.d.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/truth.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "truth.json"
+    }
+  ],
+  "totalS": 163.55
+}

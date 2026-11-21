@@ -77,3 +77,15 @@ test("a compact snapshot expands to what JSON.parse of the whole gave", async ()
   const odd = { hits: [1], events: [] };
   assert.equal(JSON.stringify(expandSnapshot(JSON.parse(compact(odd)))), JSON.stringify(odd));
 });
+
+test("comparison outcomes are kept, each once per probe, and left out when there are none", () => {
+  const merged = mergeSnapshots([
+    { hits: ["a"], comparisons: [{ id: "f.ts:1:2", outcomes: ["lt"] }, { id: "f.ts:3:4-3:9#arith", outcomes: ["differs"] }] },
+    { hits: ["a"], comparisons: [{ id: "f.ts:1:2", outcomes: ["lt", "eq"] }] },
+  ]);
+  assert.deepEqual(merged.comparisons, [
+    { id: "f.ts:1:2", outcomes: ["lt", "eq"] },
+    { id: "f.ts:3:4-3:9#arith", outcomes: ["differs"] },
+  ]);
+  assert.equal("comparisons" in mergeSnapshots([{ hits: ["a"] }]), false);
+});

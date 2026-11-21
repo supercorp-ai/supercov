@@ -406,6 +406,7 @@
     .source-key-symbol.missed { color: var(--bad); }
     .source-key-symbol.asserted { color: var(--accent); }
     .source-key-symbol.declared { color: var(--faint); }
+    .source-key-symbol.mutant { color: var(--open-ink); }
     .code { overflow-x: auto; border: 1px solid var(--rule-soft); border-radius: 14px; color: var(--code-ink); background: var(--code-bg); box-shadow: var(--shadow); font: 12.5px/1.7 var(--mono); }
     .code-row, .code-line { display: grid; grid-template-columns: 56px 14px 18px minmax(max-content, 1fr); min-height: 21px; }
     .code-line { grid-template-columns: 56px 14px minmax(max-content, 1fr); }
@@ -413,6 +414,7 @@
     .code-row.open-gap .code-state { color: #ff8f2b; }
     .code-row.covered .code-state { color: #4cd07d; }
     .code-row.uncovered .code-state { color: #ff6b5c; }
+    .code-row.has-mutants .code-no::before { content: "\2731"; float: left; padding-left: 2px; color: #ff8f2b; font-weight: 800; }
     .code-row.continuation .code-state, .code-row.continuation .code-assert { opacity: .42; }
     .code-row.asserted-open { background: var(--code-assert); }
     .code-no, .code-gutter { color: var(--code-muted); text-align: right; padding: 0 10px; border-right: 1px solid var(--code-rule); user-select: none; font-size: 11.5px; }
@@ -706,6 +708,10 @@
     .overview-card .instrument-head, .file-quality-summary { align-items: flex-start; }
     .overview-card .instrument-head > .jmark { margin-top: 3px; }
     .overview-metrics { grid-template-columns: repeat(2, minmax(0, 350px)); gap: 40px; }
+    .overview-metrics.with-mutants { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .mutant-counts { display: grid; gap: 4px; margin: 16px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 12.5px; }
+    .mutant-counts strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mutant-counts .open strong { color: var(--open-ink); }
     .quality-rating { text-transform: capitalize; font: 600 12px/1.25 var(--sans); padding: 5px 9px; letter-spacing: 0; }
     .figure .quality-rating { align-self: center; margin-left: 6px; }
     .quality-score-line { display: flex; gap: 12px; align-items: center; }
@@ -1069,6 +1075,12 @@
       return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-left" d="M8 3.1v5.6" fill="none" stroke-width="2.1" stroke-linecap="round"/><circle class="ic-core" cx="8" cy="12.2" r="1.15"/></svg>`, `${integer(open)} left to reach`);
     }
 
+    function markMutants(left, size) {
+      const dimension = size || 15;
+      if (!left) return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-reached" d="M3.2 8.6 6.4 11.8 12.8 4.6" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`, "no mutant left alive");
+      return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-left" d="M8 3.1v5.6" fill="none" stroke-width="2.1" stroke-linecap="round"/><circle class="ic-core" cx="8" cy="12.2" r="1.15"/></svg>`, `${integer(left)} ${left === 1 ? "mutant" : "mutants"} no test infects or reaches`);
+    }
+
     // ---------- the obligation pool ----------
     // Coverage is counted, never averaged. The engine's own definition of a missing
     // obligation is uncoveredLines + uncoveredStatements + uncoveredFunctions +
@@ -1407,6 +1419,31 @@
       return metric;
     }
 
+    // The run's mutants beside its coverage: the weak mutation score, and the
+    // mutants by status, the ones the tests leave alive first.
+    function renderMutants(run) {
+      const data = mutantData(run); if (!data) return null;
+      const summary = data.summary, status = summary.status || {};
+      const notInfected = status["not-infected"] || 0, notReached = status["not-reached"] || 0;
+      const metric = node("div", "overview-metric mutants-metric");
+      const heading = node("div", "metric-heading"); heading.append(node("h2", "overview-label", "Mutants")); metric.append(heading);
+      const head = node("div", "instrument-head");
+      const score = summary.weakScore == null ? null : summary.weakScore * 100;
+      head.append(markCoverage(score, 62, notInfected + notReached));
+      const stack = node("div", "figure-stack");
+      const figure = node("div", "figure"); figure.append(node("span", "figure-number", score == null ? "\u2014" : pct(score)));
+      stack.append(figure, node("div", "figure-unit", "weak mutation score")); head.append(stack); metric.append(head);
+      const counts = node("ul", "mutant-counts"); counts.setAttribute("aria-label", "Mutants by status");
+      const count = (value, label, open) => { const item = node("li", open && value ? "open" : ""); item.append(node("strong", "", integer(value)), document.createTextNode(` ${label}`)); counts.append(item); };
+      count(notInfected, summary.untestable ? `not infected (${integer(summary.untestable)} at a clock or random boundary)` : "not infected", true);
+      count(notReached, "not reached", true);
+      count(status.infected || 0, "infected");
+      count(status.unknown || 0, "unknown");
+      count(status.equivalent || 0, "equivalent");
+      metric.append(counts);
+      return metric;
+    }
+
     function openOverviewFile(file, assessed = false) {
       state.tab = "explore"; state.file = file; state.line = null; state.assertLine = null; state.sourceRadius = 32; state.qualityFiles = assessed; render();
     }
@@ -1425,7 +1462,9 @@
 
     function renderTestEvidence(run) {
       const card = node("section", "instrument overview-card"); card.setAttribute("aria-label", "Coverage and assertions");
-      const metrics = node("div", "overview-metrics"); metrics.append(renderCoverageInstrument(run), renderAssertions(run)); card.append(metrics);
+      const metrics = node("div", "overview-metrics"); metrics.append(renderCoverageInstrument(run), renderAssertions(run));
+      const mutants = renderMutants(run); if (mutants) { metrics.classList.add("with-mutants"); metrics.append(mutants); }
+      card.append(metrics);
       const tests = (run.tests || []).filter(test => test.role === "test");
       const passed = tests.filter(test => testTone(test) === "good").length;
       const skipped = tests.filter(test => /skip|ignored|todo|pending/i.test(test.outcome || "")).length;
@@ -1707,6 +1746,19 @@
     // Assertion credit is per statement and only exists once a map explains a
     // flow, so every reader below returns nothing rather than a zero until then.
     function assertionData(run) { return run.assertions && run.assertions.available ? run.assertions : null; }
+    // A run's mutants: absent for a run that listed none, and then nothing of
+    // them is shown.
+    function mutantData(run) { return run.mutants || null; }
+    function mutantFileCount(run, file) { const data = mutantData(run); return data ? data.files[file] || null : null; }
+    function mutantsLeft(counts) { return counts ? (counts["not-infected"] || 0) + (counts["not-reached"] || 0) : null; }
+    function mutantsIn(run, file) { const data = mutantData(run); return data ? data.mutants.filter(item => item.file === file) : []; }
+    function mutantStatusLabel(status) { return status === "not-infected" ? "Not infected" : status === "not-reached" ? "Not reached" : status; }
+    function mutantFileSummary(counts) {
+      const total = Object.values(counts).reduce((sum, value) => sum + (Number(value) || 0), 0);
+      return `${integer(counts["not-infected"] || 0)} not infected, ${integer(counts["not-reached"] || 0)} not reached, of ${integer(total)} ${total === 1 ? "mutant" : "mutants"}`;
+    }
+    function mutantHint(mutant) { return mutant.untestable ? `At a ${mutant.untestable} boundary: only one exact ${mutant.untestable === "clock" ? "millisecond" : "random value"} tells it apart` : ""; }
+    function mutantLine(mutant) { return `${mutantStatusLabel(mutant.status)}: ${mutant.change} \u2014 ${mutant.reason}`; }
     function assertionFileCount(run, file) { const data = assertionData(run); return data && data.files ? data.files[file] || null : null; }
     function assertionStatementsIn(run, file) { const data = assertionData(run); return ((data && data.statements) || []).filter(item => item.file === file); }
     // A flow selects tests by file and displayed name, which is how the run's
@@ -1759,6 +1811,17 @@
         const more = button("View decision evidence", "subtle-button evidence-more", () => openReportModal("evidence", run, more, { title: `Decision evidence · line ${line}`, content: decisions })); coverage.append(more);
       }
       panel.append(coverage);
+      const lineMutants = mutantsIn(run, file).filter(item => item.line === line);
+      if (lineMutants.length) {
+        const mutants = node("section", "line-evidence-section"); mutants.append(node("h4", "", "Mutants"));
+        lineMutants.forEach(item => {
+          const entry = node("div", "line-gap");
+          entry.append(node("strong", "", `${mutantStatusLabel(item.status)} \u00b7 ${item.mutator}`), node("p", "annotation-assertion", item.change), node("p", "", item.reason));
+          const hint = mutantHint(item); if (hint) entry.append(node("p", "annotation-meta", hint));
+          mutants.append(entry);
+        });
+        panel.append(mutants);
+      }
       const assertions = node("section", "line-evidence-section"); assertions.append(node("h4", "", "Assertions"));
       if (!assertionData(run)) assertions.append(node("p", "", run.assertions?.error || "Assertions were not assessed for this run."));
       else if (!claims.length) assertions.append(node("p", "", "Not assessed: no statement a passing test ran starts on this line, or it is an import or declaration."));
@@ -1816,8 +1879,10 @@
       if (!source) headCopy.append(node("div", "small muted", "Only the recorded evidence lines were bundled for this file."));
       const legend = node("div", "source-legend");
       const assertedStatements = assertionStatementsIn(run, file);
+      const mutantsByLine = new Map(); mutantsIn(run, file).forEach(item => { if (!mutantsByLine.has(item.line)) mutantsByLine.set(item.line, []); mutantsByLine.get(item.line).push(item); });
       const legendKeys = [["!", "gap", "Open gap"], ["✓", "covered", "Covered executable line"], ["×", "missed", "Missed executable line"], ["·", "", "Non-executable source"]];
       if (assertedStatements.length) legendKeys.push(["◆", "asserted", "Asserted"], ["◇", "declared", "Not asserted"]);
+      if (mutantsByLine.size) legendKeys.push(["✱", "mutant", "Mutant no test infects or reaches"]);
       legendKeys.forEach(([symbol, tone, label]) => {
         const key = node("span", "source-key"); key.append(node("span", `source-key-symbol ${tone}`, symbol), node("span", "", label)); legend.append(key);
       });
@@ -1891,8 +1956,11 @@
         const assertMark = node("span", `code-assert${credited ? "" : effectiveClaims.length ? " declared" : " absent"}`, credited ? "◆" : effectiveClaims.length ? "◇" : "·");
         stateMark.setAttribute("aria-hidden", "true"); assertMark.setAttribute("aria-hidden", "true");
         const assertionLabel = effectiveClaims.length ? assertionCreditLabel(run, effectiveClaims) : "Assertions not assessed on this line";
-        gutter.title = `${stateLabel} · ${assertionLabel}`;
-        gutter.setAttribute("aria-label", `Line ${item.line}: ${stateLabel}. ${assertionLabel}. Show coverage and assertions`);
+        const lineMutants = mutantsByLine.get(item.line) || [];
+        const mutantLabel = lineMutants.length ? `${integer(lineMutants.length)} ${lineMutants.length === 1 ? "mutant" : "mutants"} no test infects or reaches` : "";
+        if (lineMutants.length) row.classList.add("has-mutants");
+        gutter.title = `${stateLabel} · ${assertionLabel}${lineMutants.length ? `\n${lineMutants.map(mutantLine).join("\n")}` : ""}`;
+        gutter.setAttribute("aria-label", `Line ${item.line}: ${stateLabel}. ${assertionLabel}.${mutantLabel ? ` ${mutantLabel}.` : ""} Show coverage${mutantLabel ? ", mutants" : ""} and assertions`);
         gutter.setAttribute("aria-expanded", String(open)); gutter.setAttribute("aria-controls", panelId);
         gutter.append(stateMark, assertMark);
         if (open) row.classList.add("evidence-open");
@@ -2244,6 +2312,8 @@
         quality: { label: "Quality", compare: (a, b, d) => missingLast(healthOf(a), d) - missingLast(healthOf(b), d), descending: false },
         security: { label: "Security", compare: (a, b, d) => missingLast(securityCount(a.file), d) - missingLast(securityCount(b.file), d), descending: true }
       };
+      // The mutants no test infects or reaches, for a run that listed mutants.
+      if (mutantData(run)) columns.mutants = { label: "Mutants", compare: (a, b, d) => missingLast(mutantsLeft(mutantFileCount(run, a.file)), d) - missingLast(mutantsLeft(mutantFileCount(run, b.file)), d), descending: true };
       if (!columns[state.fileSort]) state.fileSort = "coverage";
       if (typeof state.fileSortDescending !== "boolean") state.fileSortDescending = columns[state.fileSort].descending;
       const activeColumn = columns[state.fileSort];
@@ -2298,6 +2368,7 @@
       columnMarks.append(headCell("asserted", ""));
       columnMarks.append(headCell("quality", ""));
       columnMarks.append(headCell("security", ""));
+      if (columns.mutants) columnMarks.append(headCell("mutants", ""));
       columnRow.append(columnMarks, node("span", "file-head-end"));
       const table = node("div", "file-table"); table.append(columnRow);
       const list = node("div", "file-list");
@@ -2330,8 +2401,14 @@
         if (assessed) { const mark = node("span", "file-row-mark"); mark.append(markQuality(assessed.health, 22), node("span", "", health(assessed.health))); mark.title = `Quality ${health(assessed.health)}, the ${band(assessed.health)} band`; trail.append(mark); }
         else { const mark = node("span", "file-row-mark quiet"); mark.append(markQuality(null, 22), node("span", "", "\u2014")); mark.title = "Not assessed"; trail.append(mark); }
         trail.append(securityFileMark(file.file));
+        if (columns.mutants) {
+          const counts = mutantFileCount(run, file.file), left = mutantsLeft(counts);
+          const mark = node("span", `file-row-mark${left ? " open" : counts ? "" : " quiet"}`);
+          mark.append(markMutants(left || 0, 22), node("span", "", counts ? integer(left) : "\u2014"));
+          mark.title = counts ? mutantFileSummary(counts) : "No mutants in this file"; trail.append(mark);
+        }
         if (limited) trail.append(node("span", "file-row-metric limited", "Limited"));
-        labelFileMetrics(trail); row.append(trail);
+        labelFileMetrics(trail, columns.mutants ? ["Coverage", "Assertions", "Quality", "Security", "Mutants"] : undefined); row.append(trail);
         const chevron = node("span", "file-chevron", "\u203a"); chevron.setAttribute("aria-hidden", "true"); row.append(chevron); list.append(row);
       });
       if (!values.length) list.append(node("div", "empty", "No files match this search.")); table.append(list); panel.append(table); appendCrossFileFindings(panel); content.append(panel);

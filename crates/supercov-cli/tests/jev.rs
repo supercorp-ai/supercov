@@ -371,7 +371,7 @@ fn security_reads_a_coverage_run_beside_its_findings() {
             "fs.read_from#evidence_archive.rs:676@3",
             "evidence_archive.rs:676",
         ),
-        ("fs.read_dir#run_store.rs:672", "run_store.rs:672"),
+        ("fs.read_dir#run_store.rs:673", "run_store.rs:673"),
     ] {
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault));
@@ -4582,12 +4582,12 @@ fn a_security_assessment_alone_is_reported() {
     // A source whose size cannot be read is left out.
     let unsized_source = project.supercov_with(
         &["report", "--no-open", "--output", "unsized.html"],
-        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:654")],
+        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:746")],
     );
     assert!(
         unsized_source
             .stderr()
-            .contains("test fault at fs (html_report.rs:654 metadata)"),
+            .contains("test fault at fs (html_report.rs:746 metadata)"),
         "{}",
         unsized_source.stderr()
     );
@@ -5876,7 +5876,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1332,fs.read_from#evidence_archive.rs:676";
+    let unread = "fs.open#run_store.rs:1347,fs.read_from#evidence_archive.rs:676";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);

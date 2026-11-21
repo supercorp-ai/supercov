@@ -1543,6 +1543,7 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events: Vec::new(),
         logicals: Vec::new(),
+        comparisons: Vec::new(),
         phase_id: Some(phase.into()),
     })
 }
@@ -1996,6 +1997,7 @@ fn build_from_evidence(
                 .and_then(|path| relative(root, path))
                 .or_else(|| test.split("::").next().map(str::to_owned));
             raw_results.push(RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some(test.clone()),
                 scope: Some(scope(run_id, &worker, &test, retry)),
@@ -2084,6 +2086,7 @@ fn build_from_evidence(
         // a pytest node id begins with it.
         let test_file = test.split("::").next().map(str::to_owned);
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, &worker, &test, retry)),
@@ -2130,6 +2133,7 @@ fn build_from_evidence(
         };
         let phase = phase_id(run_id, &identity);
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test.clone()),
             scope: Some(scope(run_id, worker, &test, 0)),

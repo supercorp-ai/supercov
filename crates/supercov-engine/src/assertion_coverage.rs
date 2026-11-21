@@ -4054,6 +4054,7 @@ mod tests {
                 probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some("test".into()),
                 scope: None,
@@ -4085,7 +4086,7 @@ mod tests {
                     hits: vec!["function".into(), "work".into(), "declined".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),
