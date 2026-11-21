@@ -1937,9 +1937,9 @@ fn instrument_source(
             });
         }
     };
-    // A strong pass's file with no switch runs as written.
-    if crate::js_instrumenter::strong_enabled() && output.runtime.is_none() && output.code == source
-    {
+    // A strong pass's file with no switch runs as written: the instrumenter
+    // gives it back as it read it, with no runtime.
+    if crate::js_instrumenter::strong_enabled() && output.runtime.is_none() {
         write_authored(workspace, file, &source)?;
         return Ok(InstrumentedSource::Measured(Box::new(output)));
     }
@@ -3286,6 +3286,40 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A strong pass keeps the authored copy of a source it gives no switch,
+    /// which runs as written; a copy that cannot be kept stops the
+    /// preparation.
+    #[test]
+    fn a_strong_pass_keeps_a_source_it_gives_no_switch_as_written() {
+        use crate::js_instrumenter::{STRONG_FILES_FOR_TEST, STRONG_FOR_TEST};
+        STRONG_FOR_TEST.with(|flag| flag.set(Some(true)));
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = Some(Default::default()));
+        let authored =
+            |workspace: &Path| workspace.join(AUTHORED_DIRECTORY).join("src/example.mjs");
+        let (source_root, workspace, project) = frontend_fixture();
+        let kept = prepare_javascript_frontend(&workspace, &project, "collector", "cache");
+        let written = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
+        let ran = fs::read_to_string(workspace.join("src/example.mjs")).unwrap();
+        let copy = fs::read_to_string(authored(&workspace)).unwrap();
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+
+        let (source_root, workspace, project) = frontend_fixture();
+        // A directory, not empty, where the copy goes.
+        fs::create_dir_all(authored(&workspace)).unwrap();
+        fs::write(authored(&workspace).join("in-the-way"), "").unwrap();
+        let blocked = prepare_javascript_frontend(&workspace, &project, "collector", "cache");
+        let _ = fs::remove_dir_all(source_root);
+        let _ = fs::remove_dir_all(workspace);
+        STRONG_FILES_FOR_TEST.with(|files| *files.borrow_mut() = None);
+        STRONG_FOR_TEST.with(|flag| flag.set(None));
+
+        kept.unwrap();
+        assert_eq!(ran, written);
+        assert_eq!(copy, written);
+        assert!(blocked.is_err());
+    }
+
     #[test]
     fn a_file_that_cannot_be_restored_or_written_leaves_no_temporary_behind() {
         let root = temporary("unwritable");
@@ -3300,6 +3334,9 @@ mod tests {
         // A directory that is not there yet is made.
         atomic_write(&root.join("new/a.js"), b"x").unwrap();
         assert_eq!(fs::read_to_string(root.join("new/a.js")).unwrap(), "x");
+        // One under a file cannot be.
+        fs::write(root.join("file"), "a file").unwrap();
+        assert!(restore_cached_file(&root.join("file/dir/a.js"), b"cached\n").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

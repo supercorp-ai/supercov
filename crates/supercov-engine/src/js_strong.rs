@@ -602,26 +602,26 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     for at in records {
                         let Seen { record, seen: own } = &seen[at];
                         let raw = &raw_results[*record];
+                        // Every test record was indexed by this id above.
                         if role_of(raw) == "test"
                             && (may_reach(mutant, own)
                                 || mutant
                                     .function
                                     .as_ref()
                                     .is_some_and(|function| own.hits.contains(function)))
-                            && let Some(&test) = test_index
-                                .get(&raw.test_id.clone().unwrap_or_else(|| raw.test.clone()))
                         {
-                            covering.insert(test);
+                            covering.insert(
+                                test_index
+                                    [&raw.test_id.clone().unwrap_or_else(|| raw.test.clone())],
+                            );
                         }
                         let why = if role_of(raw) == "test" && !exact(raw) {
                             Some(CandidateReason::NotExact)
                         } else if reach_only {
-                            (may_reach(mutant, own)
-                                || mutant
-                                    .function
-                                    .as_ref()
-                                    .is_some_and(|function| own.hits.contains(function)))
-                            .then_some(CandidateReason::Unknown)
+                            // Every record read here ran the mutant's
+                            // point, or the mutant has none, but an inexact
+                            // test's, which was taken above.
+                            Some(CandidateReason::Unknown)
                         } else {
                             could_infect(mutant, own, &whole)
                         };
@@ -632,9 +632,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         match role_of(raw) {
                             "test" => {
                                 let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
-                                if let Some(&test) = test_index.get(&id) {
-                                    take(test, why);
-                                }
+                                take(test_index[&id], why);
                                 // Module-level code a test ran (a module it
                                 // loaded first): the module keeps what it
                                 // made for every later test of the file, which
@@ -698,4 +696,578 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         tests,
         mutants,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coverage_analysis::McdcVector;
+    use crate::coverage_report::{
+        ATTRIBUTION_RUN_WIDE, ComparisonSnapshot, DecisionSnapshot, ExitCodeInput, LogicalSnapshot,
+        LogicalVector, RuntimeSnapshot, ServerRecord,
+    };
+    use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+
+    /// A passed record of `role` that hit `hits`, under the id `id`.
+    fn record(id: &str, role: &str, file: Option<&str>, hits: &[&str]) -> RawTestResult {
+        let mut raw: RawTestResult = serde_json::from_value(serde_json::json!({
+            "testId": id, "test": id, "status": "passed", "role": role,
+            "provenance": {"runner": "vitest", "kind": "unit", "source": "s"}
+        }))
+        .unwrap();
+        raw.test_file = file.map(str::to_owned);
+        raw.runtime = vec![RuntimeSnapshot {
+            hits: hits.iter().map(|hit| (*hit).to_owned()).collect(),
+            ..RuntimeSnapshot::default()
+        }];
+        raw
+    }
+
+    fn decision(id: &str, vectors: &[(bool, bool)]) -> DecisionSnapshot {
+        DecisionSnapshot {
+            id: id.into(),
+            vectors: vectors
+                .iter()
+                .map(|&(value, outcome)| McdcVector {
+                    values: vec![Some(value)],
+                    outcome,
+                })
+                .collect(),
+        }
+    }
+
+    fn server_hit(id: &str, request: Option<u64>) -> ServerRecord {
+        ServerRecord {
+            record_type: "hit".into(),
+            vector: None,
+            id: Some(id.into()),
+            timestamp_ms: None,
+            phase_id: None,
+            scope: None,
+            request,
+            outcome: None,
+        }
+    }
+
+    /// A `BooleanLiteral` mutant of `true` at 1:1-1:5, with `fields` over it.
+    fn mutant(fields: serde_json::Value) -> CandidateMutant {
+        let mut all = serde_json::json!({
+            "mutator": "BooleanLiteral", "replacement": "false",
+            "start": [1, 1], "end": [1, 5], "original": "true"
+        });
+        all.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(all).unwrap()
+    }
+
+    fn listed(mutants: Vec<CandidateMutant>, without_values: &[&str]) -> MutantsFile {
+        MutantsFile {
+            schema_version: 1,
+            mutant_set: Some("set".into()),
+            files: if mutants.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([("src/app.js".to_owned(), mutants)])
+            },
+            tests_without_values: without_values.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    /// Each mutant's candidates as the names of their tests and why.
+    fn candidates(plan: &StrongPlan, id: &str) -> Vec<(String, CandidateReason)> {
+        plan.mutants
+            .iter()
+            .find(|mutant| mutant.id == id)
+            .unwrap()
+            .candidates
+            .iter()
+            .map(|candidate| (plan.tests[candidate.test].name.clone(), candidate.reason))
+            .collect()
+    }
+
+    fn planned<'p>(plan: &'p StrongPlan, id: &str) -> &'p PlannedMutant {
+        plan.mutants.iter().find(|mutant| mutant.id == id).unwrap()
+    }
+
+    #[test]
+    fn a_run_that_listed_no_mutant_set_has_no_plan() {
+        let mut none = listed(Vec::new(), &[]);
+        none.mutant_set = None;
+        assert_eq!(plan(&[record("a", "test", None, &[])], none), None);
+    }
+
+    /// A run with no records and a file of no mutants plans nothing, though
+    /// it names tests measured without values that none of its records is.
+    #[test]
+    fn a_run_without_records_or_mutants_plans_nothing_to_run() {
+        let mut empty = listed(Vec::new(), &["gone"]);
+        empty.files.insert("src/empty.js".into(), Vec::new());
+        let plan = plan(&[], empty).unwrap();
+        assert_eq!(plan.mutant_set, "set");
+        assert!(plan.tests.is_empty());
+        assert!(plan.mutants.is_empty());
+    }
+
+    /// A test's attempts are one test: it is runnable only where every
+    /// attempt passed and none was flaky, its span is its earliest
+    /// attempt's, and its duration its longest attempt's, read from the
+    /// span where the runner said none.
+    #[test]
+    fn a_test_s_attempts_are_one_test_runnable_only_where_every_attempt_passed() {
+        let spanned = |span: [i64; 2]| RawTestResult {
+            span: Some(span),
+            ..record("a", "test", Some("t/a.test.js"), &[])
+        };
+        let mut failed = record("b", "test", Some("t/b.test.js"), &[]);
+        failed.status = Some("failed".into());
+        let mut flaky = record("c", "test", Some("t/c.test.js"), &[]);
+        flaky.flaky = true;
+        let raw_results = [
+            spanned([10, 20]),
+            spanned([15, 40]),
+            spanned([5, 8]),
+            failed,
+            flaky,
+            record("d", "test", None, &[]),
+        ];
+        let plan = plan(&raw_results, listed(Vec::new(), &[])).unwrap();
+        let tests = plan
+            .tests
+            .iter()
+            .map(|test| {
+                (
+                    test.id.as_str(),
+                    test.file.as_deref(),
+                    test.runnable,
+                    test.span,
+                    test.duration_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tests,
+            [
+                ("a", Some("t/a.test.js"), true, Some([5, 8]), Some(25)),
+                ("b", Some("t/b.test.js"), false, None, None),
+                ("c", Some("t/c.test.js"), false, None, None),
+                ("d", None, true, None, None),
+            ]
+        );
+        assert!(plan.mutants.is_empty());
+    }
+
+    /// Each mutant's candidates are the tests whose own evidence, with what
+    /// their file's modules did as they loaded, may infect it: module-level
+    /// code takes every test of the file it ran in, a setup no file owns
+    /// takes none, and a mutant no passing test may infect survives.
+    #[test]
+    fn a_mutant_s_candidates_are_the_tests_whose_own_evidence_may_infect_it() {
+        let mut load = record("load", "setup", Some("t/a.test.js"), &["s-load"]);
+        load.runtime[0].decisions = vec![decision("d-load", &[(true, true), (false, false)])];
+        load.runtime[0].logicals = vec![LogicalSnapshot {
+            id: "b".into(),
+            vectors: vec![LogicalVector {
+                right: true,
+                truthy: false,
+            }],
+        }];
+        load.runtime[0].comparisons = vec![ComparisonSnapshot {
+            id: "c".into(),
+            outcomes: vec!["lt".into()],
+        }];
+        let mut a = record("a", "test", Some("t/a.test.js"), &["s", "f"]);
+        a.runtime[0].decisions = vec![
+            decision("d-load", &[(true, true)]),
+            decision("d", &[(true, true)]),
+        ];
+        // Its server's work for a request that named no test, credited to
+        // it by time.
+        a.server = vec![server_hit("f", Some(1))];
+        let mut by_time = record("t", "test", Some("t/t.test.js"), &["s-time"]);
+        by_time.attribution = ATTRIBUTION_BY_TIME.into();
+        let mut named = record("named only", "test", Some("t/n.test.js"), &["s", "f"]);
+        named.test_id = None;
+        named.runtime[0].decisions = vec![decision("d", &[(true, true)])];
+        let raw_results = [
+            load,
+            record("loose", "setup", None, &["s-setup"]),
+            a,
+            by_time,
+            named,
+            record("u", "test", Some("t/u.test.js"), &["s-unvalued"]),
+            record("nf", "test", None, &["s-nf"]),
+            // The same test again, from a file no test was first seen in.
+            record("a", "test", Some("t/other.test.js"), &["s-other"]),
+            record("nobody", "setup", Some("t/nobody.test.js"), &["s-nobody"]),
+        ];
+        let mutants = vec![
+            mutant(serde_json::json!({"id": "fn", "statement": "s", "function": "f"})),
+            mutant(serde_json::json!({
+                "statement": "s",
+                "equivalent": {"rule": "some-rule", "reason": "no input differs"}
+            })),
+            mutant(serde_json::json!({
+                "id": "clock", "mutator": "ConditionalExpression", "replacement": "true",
+                "original": "a > b", "statement": "s", "function": "f",
+                "decision": {"id": "d"},
+                "untestable": {"rule": "clock", "reason": "reads the clock"}
+            })),
+            mutant(serde_json::json!({"id": "module", "statement": "s-load"})),
+            mutant(serde_json::json!({"id": "loose", "statement": "s-setup"})),
+            mutant(serde_json::json!({
+                "id": "unvalued", "mutator": "EqualityOperator", "replacement": "<=",
+                "original": "a < b", "operator": {"text": "<", "at": 2},
+                "statement": "s-unvalued", "compare": "cmp-u"
+            })),
+            mutant(serde_json::json!({"id": "nofile", "statement": "s-nf"})),
+            mutant(serde_json::json!({"id": "other", "statement": "s-other"})),
+            mutant(serde_json::json!({"id": "nobody", "statement": "s-nobody"})),
+        ];
+        let plan = plan(&raw_results, listed(mutants, &["u"])).unwrap();
+        let names = plan
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["a", "t", "named only", "u", "nf"]);
+        let both = |reason| vec![("a".to_owned(), reason), ("named only".to_owned(), reason)];
+
+        let infected = planned(&plan, "fn");
+        assert_eq!(candidates(&plan, "fn"), both(CandidateReason::Infected));
+        assert_eq!(infected.covering, 2);
+        assert_eq!(infected.server_wide, Some(ServerWide::ByTime));
+        assert_eq!(
+            infected.function_hit_by,
+            BTreeMap::from([("test".to_owned(), 2)])
+        );
+
+        // An equivalent mutant stored without its id has the one its place
+        // makes.
+        let equivalent = planned(&plan, "src/app.js:1:1-1:5:BooleanLiteral:false");
+        assert_eq!(
+            (
+                equivalent.weak,
+                equivalent.decided,
+                equivalent.reason.as_deref()
+            ),
+            ("equivalent", Some(Decided::Equivalent), Some("static"))
+        );
+        assert!(equivalent.candidates.is_empty());
+
+        // Not infected only where the clock's readings never met: every
+        // test that reached it runs it.
+        let clock = planned(&plan, "clock");
+        assert_eq!((clock.weak, clock.decided), ("not-infected", None));
+        assert_eq!(candidates(&plan, "clock"), both(CandidateReason::Unknown));
+        assert_eq!(clock.server_wide, Some(ServerWide::ByTime));
+
+        let module = planned(&plan, "module");
+        assert_eq!(
+            candidates(&plan, "module"),
+            [("a".to_owned(), CandidateReason::ModuleLoad)]
+        );
+        assert_eq!(module.whole_files, ["t/a.test.js"]);
+        assert_eq!(module.covering, 1);
+
+        for survivor in ["loose", "nobody"] {
+            let survived = planned(&plan, survivor);
+            assert_eq!(
+                (survived.decided, survived.reason.as_deref()),
+                (Some(Decided::Survived), Some("no-passing-candidate")),
+                "{survivor}"
+            );
+            assert!(survived.candidates.is_empty(), "{survivor}");
+        }
+        assert!(planned(&plan, "loose").whole_files.is_empty());
+        assert_eq!(planned(&plan, "nobody").whole_files, ["t/nobody.test.js"]);
+
+        // A test measured without the probes ran the comparison and
+        // recorded no value of it: it cannot tell, so it runs.
+        assert_eq!(planned(&plan, "unvalued").weak, "unknown");
+        assert_eq!(
+            candidates(&plan, "unvalued"),
+            [("u".to_owned(), CandidateReason::Unknown)]
+        );
+        assert_eq!(planned(&plan, "unvalued").whole_files, ["t/u.test.js"]);
+
+        assert_eq!(
+            candidates(&plan, "nofile"),
+            [("nf".to_owned(), CandidateReason::Infected)]
+        );
+        assert!(planned(&plan, "nofile").whole_files.is_empty());
+        assert_eq!(
+            candidates(&plan, "other"),
+            [("a".to_owned(), CandidateReason::Infected)]
+        );
+        assert_eq!(planned(&plan, "other").whole_files, ["t/other.test.js"]);
+    }
+
+    /// A test whose evidence is not its own is a candidate of every mutant
+    /// that runs, though it did not run the mutant's function, and does not
+    /// count as covering it.
+    #[test]
+    fn a_test_whose_evidence_is_not_its_own_is_a_candidate_it_did_not_cover() {
+        let mut wide = record("e", "test", Some("t/e.test.js"), &["s"]);
+        wide.attribution = ATTRIBUTION_RUN_WIDE.into();
+        let raw_results = [record("a", "test", Some("t/a.test.js"), &["s", "f"]), wide];
+        let mutants = vec![mutant(
+            serde_json::json!({"id": "fn", "statement": "s", "function": "f"}),
+        )];
+        let plan = plan(&raw_results, listed(mutants, &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "fn"),
+            [
+                ("a".to_owned(), CandidateReason::Infected),
+                ("e".to_owned(), CandidateReason::NotExact),
+            ]
+        );
+        assert_eq!(planned(&plan, "fn").covering, 1);
+    }
+
+    /// Work no test was credited with makes every test of the run a
+    /// candidate: a run of none has no candidate, and each such mutant
+    /// survives, as does one whose function no record ran.
+    #[test]
+    fn a_mutant_only_uncredited_work_ran_survives_a_run_without_tests() {
+        let raw_results = [record("bg", "background", None, &["s"])];
+        let mutants = vec![
+            mutant(serde_json::json!({"id": "bg", "statement": "s"})),
+            mutant(serde_json::json!({"id": "nopoint"})),
+            mutant(serde_json::json!({"id": "unhit", "function": "never"})),
+        ];
+        let plan = plan(&raw_results, listed(mutants, &[])).unwrap();
+        assert!(plan.tests.is_empty());
+        let outcomes = plan
+            .mutants
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant.id.as_str(),
+                    mutant.weak,
+                    mutant.decided,
+                    mutant.reason.as_deref(),
+                    mutant.candidates.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let survived = Some(Decided::Survived);
+        let reason = Some("no-passing-candidate");
+        assert_eq!(
+            outcomes,
+            [
+                ("bg", "infected", survived, reason, 0),
+                ("nopoint", "unknown", survived, reason, 0),
+                ("unhit", "unknown", survived, reason, 0),
+            ]
+        );
+    }
+
+    /// Merging observations keeps each decision's evaluations once, a
+    /// decision evaluated nowhere among them, and every logical and
+    /// comparison outcome.
+    #[test]
+    fn merged_observations_keep_each_evaluation_once() {
+        let mut into = Observations::default();
+        into.decisions
+            .insert("d".into(), vec![(vec![Some(true)], true)]);
+        let mut from = Observations::default();
+        from.decisions.insert(
+            "d".into(),
+            vec![(vec![Some(true)], true), (vec![Some(false)], false)],
+        );
+        from.decisions.insert("none".into(), Vec::new());
+        from.logicals
+            .insert("b".into(), HashSet::from([(true, false)]));
+        from.comparisons
+            .insert("c".into(), HashSet::from(["lt".to_owned()]));
+        merge(&mut into, &from);
+        assert_eq!(
+            into.decisions["d"],
+            [(vec![Some(true)], true), (vec![Some(false)], false)]
+        );
+        assert!(into.decisions["none"].is_empty());
+        assert_eq!(into.logicals["b"], HashSet::from([(true, false)]));
+        assert_eq!(into.comparisons["c"], HashSet::from(["lt".to_owned()]));
+    }
+
+    /// A record that did not run the mutant's function cannot infect it,
+    /// and neither can one that ran only its function where the run never
+    /// ran its statement: the statement counts as run only where the run
+    /// ran it.
+    #[test]
+    fn a_record_infects_a_method_only_where_it_ran_the_function_and_the_run_the_statement() {
+        let method = mutant(serde_json::json!({"statement": "s", "function": "f"}));
+        let hits = |hits: &[&str]| Observations {
+            hits: hits.iter().map(|hit| (*hit).to_owned()).collect(),
+            ..Observations::default()
+        };
+        assert!(!may_reach(&method, &hits(&["s"])));
+        assert_eq!(
+            could_infect(&method, &hits(&["s"]), &hits(&["s", "f"])),
+            None
+        );
+        assert_eq!(could_infect(&method, &hits(&["f"]), &hits(&["f"])), None);
+        assert_eq!(
+            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"])),
+            Some(CandidateReason::Infected)
+        );
+    }
+
+    /// Module-level code a server ran for a test is the server module's top
+    /// level, which runs once for every later request.
+    #[test]
+    fn module_level_code_a_server_ran_for_a_test_needs_the_server_started_with_it() {
+        let mut raw = record("a", "test", None, &[]);
+        raw.server = vec![server_hit("s", Some(1))];
+        let module_level = mutant(serde_json::json!({"statement": "s"}));
+        assert_eq!(
+            server_wide(&raw, &module_level),
+            Some(ServerWide::ModuleLevel)
+        );
+    }
+
+    /// An archive under a directory of its own, removed first, holding a
+    /// manifest of no points, the model and declaration every archive
+    /// holds, and `extra`.
+    fn archive(label: &str, extra: Vec<EvidenceArchiveEntry>) -> ArchiveReportRequest {
+        let root =
+            std::env::temp_dir().join(format!("supercov-strong-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let json = |path: &str, value: serde_json::Value| EvidenceArchiveEntry {
+            path: path.into(),
+            contents: serde_json::to_vec(&value).unwrap(),
+        };
+        let model = crate::coverage_report::PersistedCoverageModel::from_declaration(
+            &crate::coverage_report::javascript_coverage_model(),
+        )
+        .unwrap();
+        let mut entries = vec![
+            json(
+                "manifest.json",
+                serde_json::json!({"decisions": [], "points": [], "branches": []}),
+            ),
+            json("coverage-model.json", serde_json::to_value(model).unwrap()),
+            json(
+                "frontend.json",
+                serde_json::json!({
+                    "protocolVersion": 2,
+                    "frontendId": "javascript",
+                    "frontendVersion": "fixture-v1",
+                    "language": "javascript",
+                    "structuralSource": "owned-probes",
+                    "runners": [{
+                        "runner": "vitest",
+                        "executionModel": "serial-in-process",
+                        "attribution": {
+                            "run": "exact", "worker": "unavailable", "test": "exact",
+                            "retry": "exact", "phase": "exact", "action": "exact",
+                            "assertion": "exact"
+                        },
+                        "limitations": [{
+                            "id": "fixture-worker-unavailable",
+                            "scopes": ["worker"],
+                            "reason": "The fixture does not require worker identity"
+                        }]
+                    }],
+                    "structuralLimitations": []
+                }),
+            ),
+            json(
+                "worker/mcdc.json",
+                serde_json::to_value(RawTestResult {
+                    retry: Some(0),
+                    ..record("a", "test", Some("t/a.test.js"), &[])
+                })
+                .unwrap(),
+            ),
+        ];
+        entries.extend(extra);
+        let archive_path = root.join("evidence.raw.gz");
+        write_archive(entries, &archive_path).unwrap();
+        ArchiveReportRequest {
+            archive_path,
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+            test_filter: None,
+        }
+    }
+
+    fn own_mutants() -> EvidenceArchiveEntry {
+        EvidenceArchiveEntry {
+            path: "mutants.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "mutantSet": crate::js_mutants::MUTANT_SET,
+                "files": {}
+            }))
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_run_whose_archive_does_not_read_has_no_plan_and_lists_nothing() {
+        let request = archive("unread", Vec::new());
+        let missing = ArchiveReportRequest {
+            archive_path: request.archive_path.with_file_name("missing.raw.gz"),
+            ..request
+        };
+        let root = missing.archive_path.parent().unwrap().to_owned();
+        assert!(matches!(
+            plan_for_archive(&missing, &root),
+            Err(ReportError::InvalidArchive(_))
+        ));
+        assert!(matches!(
+            list_run_mutants(&missing, &root),
+            Err(ReportError::InvalidArchive(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that measured no file and listed no mutants has nothing to
+    /// list, and leaves nothing beside its archive.
+    #[test]
+    fn a_run_that_measured_no_file_has_no_plan_and_nothing_listed_beside_it() {
+        let request = archive("no-points", Vec::new());
+        let root = request.archive_path.parent().unwrap().to_owned();
+        let planned = plan_for_archive(&request, &root).unwrap();
+        assert!(planned.plan.is_none());
+        assert!(planned.changed.is_empty());
+        assert!(!beside(&request).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where the note beside the archive cannot be written, the plan and the
+    /// listing fail, and say where.
+    #[test]
+    fn a_note_beside_the_archive_that_cannot_be_written_fails_the_plan_and_the_listing() {
+        let request = archive("unwritable", vec![own_mutants()]);
+        let root = request.archive_path.parent().unwrap().to_owned();
+        std::fs::create_dir(beside(&request).with_extension("json.partial")).unwrap();
+        for error in [
+            plan_for_archive(&request, &root).err(),
+            list_run_mutants(&request, &root).err(),
+        ] {
+            assert!(
+                matches!(&error, Some(ReportError::InvalidArchive(message))
+                    if message.contains(crate::coverage_report::LISTED_MUTANTS_FILE)),
+                "{error:?}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A note beside the archive that does not read says nothing: the run's
+    /// own list does.
+    #[test]
+    fn a_note_beside_the_archive_that_does_not_read_leaves_the_run_s_own_list() {
+        let request = archive("unreadable-note", vec![own_mutants()]);
+        let root = request.archive_path.parent().unwrap().to_owned();
+        std::fs::write(beside(&request), b"not json").unwrap();
+        assert!(run_recorded_mutant_values(&request.archive_path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

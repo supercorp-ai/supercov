@@ -83,7 +83,9 @@ pub fn changed_lines(diff: &str) -> ChangedLines {
                 .split_whitespace()
                 .find(|part| part.starts_with(sign))?;
             let mut numbers = part[1..].split(',');
-            let start = numbers.next()?.parse::<usize>().ok()?;
+            let start = numbers
+                .next()
+                .and_then(|start| start.parse::<usize>().ok())?;
             let count = match numbers.next() {
                 Some(count) => count.parse::<usize>().ok()?,
                 None => 1,
@@ -429,6 +431,42 @@ diff --git a/src/tail.ts b/src/tail.ts
                 ("src/fresh.ts".to_owned(), BTreeSet::from([1, 2])),
                 ("src/new.ts".to_owned(), BTreeSet::from([3, 4])),
                 ("src/tail.ts".to_owned(), BTreeSet::from([4])),
+            ])
+        );
+    }
+
+    /// A hunk's context lines are counted on both sides; a hunk cut short by
+    /// the next file's header ends there; a header whose new side does not
+    /// read names no line.
+    #[test]
+    fn a_hunk_ends_where_its_lines_do_and_an_unreadable_header_names_none() {
+        let diff = "\
+diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,3 +1,4 @@
+ before
++added
+ after
+ last
+@@ -9,2 +10,3 @@
++cut short
+diff --git a/src/b.ts b/src/b.ts
+--- a/src/b.ts
++++ b/src/b.ts
+@@ -1 +x @@
+@@ -2 +3,y @@
+@@ -5 +5 @@
++read
+";
+        assert_eq!(
+            changed_lines(diff),
+            ChangedLines::from([
+                (
+                    "src/a.ts".to_owned(),
+                    BTreeSet::from([1, 2, 3, 4, 10, 11, 12])
+                ),
+                ("src/b.ts".to_owned(), BTreeSet::from([5])),
             ])
         );
     }

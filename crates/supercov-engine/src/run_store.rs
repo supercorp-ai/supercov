@@ -1187,7 +1187,7 @@ fn index_sections(
             .map(|view| view.map_err(RunIndexError::Report)),
         passed_is_whole,
     )?;
-    sections.extend(crate::coverage_index::mutation_sections(mutation.as_ref())?);
+    sections.extend(mutation_index_sections(mutation.as_ref()));
     std::thread::spawn(move || drop(normalized)); // every test's records, freed by nobody's wait
     Ok((sections, read))
 }
@@ -1384,6 +1384,15 @@ pub(crate) fn write_query_index_with(
 /// new inode (`open_or_build_query_index`).
 pub fn open_or_rebuild_query_index(run: &StoredRun) -> Result<QueryIndex, RunIndexError> {
     open_or_build_query_index(run, &run.query_index_path, analysis_digest(), None)
+}
+
+/// A run's mutation sections. Its verdicts are listed file by file, so each
+/// file's mutants are together, which is all the sections refuse.
+fn mutation_index_sections(
+    mutation: Option<&crate::coverage_index::MutationResults>,
+) -> Vec<crate::query_index::QueryIndexSection> {
+    crate::coverage_index::mutation_sections(mutation)
+        .expect("a run's verdicts list each file's mutants together")
 }
 
 #[cfg(test)]
