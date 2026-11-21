@@ -22937,6 +22937,25 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["(1 at a clock or random boundary)"],
     );
 
+    // Read against the working tree while git sees no new file: only the
+    // changed lines count.
+    assert!(
+        view(&["src/clock.js", "--diff", "base"])
+            .contains("No mutant is on a line this change added or changed.")
+    );
+    // A report whose run's mutants cannot be read from its index says so.
+    let unread = project.supercov_with(
+        &["report", "--no-open", "--output", "report.html"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            "coverage-index-read#mutants_query.rs:672",
+        )],
+    );
+    let said = format!("{}{}", unread.stdout(), unread.stderr());
+    assert_ne!(unread.code(), 0, "{said}");
+    assert!(said.contains("could not read mutants for run "), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+
     // The table of files.
     contains_all(
         &view(&[]),
