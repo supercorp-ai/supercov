@@ -6075,6 +6075,7 @@ fn passes_plainly(project: &Project, command: &[&str]) {
 }
 
 /// What the test files below share: where it runs.
+#[cfg(unix)]
 const RUNTIME_PROBE: &str =
     "exports.runtime = () => (typeof window === 'undefined' ? 'node' : 'browser');\n";
 
