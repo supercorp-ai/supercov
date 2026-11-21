@@ -357,6 +357,16 @@ impl<'a> Visit<'a> for Slots {
         self.statements.insert(statement.address());
         walk::walk_statement(self, statement);
     }
+
+    /// A method's or an accessor's function in an object literal is no
+    /// expression to Babel (it is the `ObjectMethod` itself), and printing a
+    /// switch in its place would write a plain property instead.
+    fn visit_object_property(&mut self, property: &oxc_ast::ast::ObjectProperty<'a>) {
+        walk::walk_object_property(self, property);
+        if property.method || property.kind != PropertyKind::Init {
+            self.expressions.remove(&property.value.address());
+        }
+    }
 }
 
 struct Planner<'p, 'a> {
@@ -563,13 +573,9 @@ impl<'a> Planner<'_, 'a> {
                     _ => None,
                 }
             }
-            AstKind::ObjectProperty(property)
-                if !property.computed
-                    && !property.method
-                    && property.kind == PropertyKind::Init =>
-            {
-                key_name(&property.key)
-            }
+            // A method's or an accessor's function is never placed (see
+            // `Slots`).
+            AstKind::ObjectProperty(property) if !property.computed => key_name(&property.key),
             AstKind::PropertyDefinition(property) if !property.computed => key_name(&property.key),
             AstKind::AssignmentPattern(pattern) => match &pattern.left {
                 BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
@@ -1294,26 +1300,40 @@ fn is_switch_if(statement: &Statement<'_>, record: &str) -> bool {
     matches!(statement, Statement::IfStatement(statement) if is_switch_test(&statement.test, record))
 }
 
-/// The original statements at the end of a switch's `else` chain. Every
-/// `if` of the chain is the switch's own, with an `else` (`switch_if`).
+/// The original statements at the end of a switch's `else` chain, taken
+/// out of it. Every `if` of the chain is the switch's own, with an `else`,
+/// and the last `else` is the block of the original statements
+/// (`switch_if`).
 fn final_else<'a>(
     statement: &mut Statement<'a>,
     ast: AstBuilder<'a>,
 ) -> oxc_allocator::Vec<'a, Statement<'a>> {
-    let mut current = statement.take_in(ast.allocator);
-    loop {
-        match current {
-            Statement::IfStatement(mut statement) => {
-                current = statement
-                    .alternate
-                    .take()
-                    .expect("a switch's `if` has an `else`");
-            }
-            Statement::BlockStatement(mut block) => {
-                return block.body.take_in(ast.allocator);
-            }
-            other => return ast.vec1(other),
-        }
+    let mut last = FinalElse {
+        ast,
+        original: None,
+    };
+    last.visit_statement(statement);
+    last.original.expect("a switch's chain ends in a block")
+}
+
+/// Follows a switch's chain of `else`s to its last, and takes the block's
+/// statements.
+struct FinalElse<'a> {
+    ast: AstBuilder<'a>,
+    original: Option<oxc_allocator::Vec<'a, Statement<'a>>>,
+}
+
+impl<'a> VisitMut<'a> for FinalElse<'a> {
+    fn visit_if_statement(&mut self, statement: &mut oxc_ast::ast::IfStatement<'a>) {
+        let alternate = statement
+            .alternate
+            .as_mut()
+            .expect("a switch's `if` has an `else`");
+        self.visit_statement(alternate);
+    }
+
+    fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
+        self.original = Some(block.body.take_in(self.ast.allocator));
     }
 }
 
@@ -2504,29 +2524,74 @@ mod tests {
         assert!(code.contains("(r.h(), true)"), "{code}");
     }
 
-    /// An object literal's method or accessor is named by its key, as
-    /// written: a switch on its function gives the function no name.
+    /// An object literal's method, accessor, async method or generator is
+    /// no expression to Babel: a mutant in its parameters, or in a body
+    /// that cannot be wrapped, goes on the object literal, which keeps every
+    /// member's form. Switched off, the program runs as written; switched
+    /// on, each member is still what it was.
     #[test]
-    fn an_object_method_s_function_is_not_named_by_its_key() {
-        let source = "const o = { m({ [k + 3]: v }) { return v; }, set s({ [k + 4]: v }) {} };\n";
-        let mutants = [
-            on(source, "k + 3", "ArithmeticOperator", "-"),
-            on(source, "k + 4", "ArithmeticOperator", "-"),
-        ];
+    fn an_object_method_s_mutant_goes_on_its_object_literal() {
+        let source = concat!(
+            "const k = 1;\n",
+            "const store = [];\n",
+            "const o = {\n",
+            "  m({ [k + 3]: v }) { return v; },\n",
+            "  get g() { const { [k + 5]: w } = { 6: \"got\" }; function h() {} return h && w; },\n",
+            "  set s({ [k + 4]: v }) { store.push(v); },\n",
+            "  async a({ [k + 6]: v }) { return v; },\n",
+            "  *gen({ [k + 7]: v }) { yield v; },\n",
+            "};\n",
+        );
+        let mutants = [3, 5, 4, 6, 7]
+            .map(|offset| on(source, &format!("k + {offset}"), "ArithmeticOperator", "-"));
         let (code, placed) = switched(source, "src/o.js", &mutants, &HashSet::default());
         parses(&code, "src/o.js");
         assert!(
             placed.iter().all(|mutant| mutant.unplaceable.is_none()),
             "{placed:?}"
         );
-        assert!(
-            code.contains("[k - 3]: v") && code.contains("[k - 4]: v"),
-            "{code}"
+        assert!(code.contains("const o = r.a === 0 ? (r.h(), {"), "{code}");
+        for form in ["m({", "get g()", "set s({", "async a({", "*gen({"] {
+            assert_eq!(code.matches(form).count(), 6, "{form}: {code}");
+        }
+        assert!(!code.contains("m: ") && !code.contains("s: "), "{code}");
+
+        let driver = concat!(
+            "const kinds = Object.entries(Object.getOwnPropertyDescriptors(o)).map(([name, d]) =>",
+            " name + \":\" + (d.get ? \"get\" : \"\") + (d.set ? \"set\" : \"\") + (d.value ? typeof d.value : \"\"));\n",
+            "o.s = { 5: \"set\" };\n",
+            "console.log(JSON.stringify({ kinds, m: o.m({ 4: \"m\" }), g: o.g, store,",
+            " gen: [...o.gen({ 8: \"gen\" })], a: o.a({ 7: \"a\" }) instanceof Promise }));\n",
         );
-        assert!(
-            !code.contains("}[\"m\"]") && !code.contains("}[\"s\"]"),
-            "{code}"
+        let run = |program: &str| {
+            let output = std::process::Command::new("node")
+                .arg("-e")
+                .arg(format!("{program}{driver}"))
+                .output()
+                .expect("Node.js");
+            assert!(
+                output.status.success(),
+                "{}\n{program}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Value>(&output.stdout).expect("JSON")
+        };
+        let original = run(source);
+        assert_eq!(
+            original["kinds"],
+            serde_json::json!(["m:function", "g:get", "s:set", "a:function", "gen:function"])
         );
+        assert_eq!(original["store"], serde_json::json!(["set"]));
+        let active = |index: i32| run(&format!("const r = {{ a: {index}, h() {{}} }};\n{code}"));
+        assert_eq!(active(-1), original);
+        for index in 0..5 {
+            let switched_on = active(index);
+            assert_eq!(switched_on["kinds"], original["kinds"], "#{index}");
+            // The async method's value is a promise either way.
+            if index != 3 {
+                assert_ne!(switched_on, original, "#{index}");
+            }
+        }
     }
 
     /// A class member's key written without brackets takes no switch, and
