@@ -4383,10 +4383,9 @@ impl<'a> VisitMut<'a> for ComparisonTransformer<'a, '_> {
             }
             _ => return,
         };
-        // Generated comparisons (loop counters a pass added) have no source.
-        if binary.span.is_unspanned() {
-            return;
-        }
+        // Every relational comparison here is the source's: no pass
+        // generates one (they generate `+`, `*`, `===`, `&`, `|` and `^`),
+        // and a generated equality's empty span is no equality site.
         let (line, column) = line_and_utf16_column(self.source, binary.span.start as usize);
         let site = format!("{}:{}:{}", self.file, line, column);
         let span = binary.span;
@@ -4828,8 +4827,9 @@ struct InfectionSites<'a> {
     methods: HashMap<SpanKey, (String, Option<Span>)>,
     /// Calls that end an optional chain on a name or `this`
     /// (`items?.some(f)`, `state?.list.every(f)`): probed as a conditional
-    /// that short-circuits as the chain did.
-    optional_methods: HashSet<SpanKey>,
+    /// that short-circuits as the chain did. Each with its base as the
+    /// source writes it: the name, or `None` for `this`.
+    optional_methods: HashMap<SpanKey, Option<String>>,
     /// The calls an optional chain ends with, the whole chain.
     chain_tops: HashSet<SpanKey>,
     /// `some` and `every` calls whose callback is `pure_callback`: a copy
@@ -4917,7 +4917,14 @@ impl<'a> Visit<'a> for InfectionSites<'a> {
                 && self.returned.contains(&span_key(call.span))
                 && call.arguments.first().is_some_and(may_be_type_predicate);
             if optional && !predicate_risk {
-                self.optional_methods.insert(span_key(call.span));
+                // An optional callee passed the test above only with a base.
+                let base = match optional_receiver_base(&call.callee)
+                    .expect("an optional method site has a name or `this` for its base")
+                {
+                    Expression::Identifier(name) => Some(name.name.to_string()),
+                    _ => None,
+                };
+                self.optional_methods.insert(span_key(call.span), base);
             }
             if !predicate_risk {
                 let arrow = call
@@ -5072,19 +5079,17 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
             return;
         }
         let site = self.site(arrow.span, "arrow");
-        // The statement pass gives a concise arrow a block, `{ hit; return
-        // value; }`: the value is then the last statement's.
+        // A site is a concise arrow of the source. The statement pass either
+        // leaves it concise or gives it a block, `{ hit; return value; }`:
+        // the value is then the returned one.
         let value = match arrow.body.statements.last_mut() {
-            Some(Statement::ExpressionStatement(statement)) if arrow.expression => {
-                &mut statement.expression
-            }
-            Some(Statement::ReturnStatement(statement)) if !arrow.expression => {
-                let Some(argument) = statement.argument.as_mut() else {
-                    return;
-                };
-                argument
-            }
-            _ => return,
+            Some(Statement::ReturnStatement(statement)) => statement
+                .argument
+                .as_mut()
+                .expect("the statement pass returns the concise body's value"),
+            _ => arrow
+                .get_expression_mut()
+                .expect("a site arrow the statement pass left is concise"),
         };
         self.placed.push(site.clone());
         let body = value.take_in(self.ast.allocator);
@@ -5171,63 +5176,41 @@ impl<'a> VisitMut<'a> for InfectionProbeTransformer<'a, '_> {
                     ],
                 );
             }
+            // A site is a call of the source (a generated one's empty span is
+            // none) whose callee is a member read. An optional method site
+            // is a chain's call, which the walk never visits as an
+            // expression of its own: the chain's arm probes it.
             Expression::CallExpression(call) => {
-                if call.span.is_unspanned()
-                    || !self.sites.methods.contains_key(&span_key(call.span))
-                    || self.sites.optional_methods.contains(&span_key(call.span))
-                {
-                    return;
-                }
                 let span = call.span;
-                let Expression::StaticMemberExpression(member) = &mut call.callee else {
-                    return;
-                };
-                let receiver = member.object.take_in(self.ast.allocator);
-                member.object = self.method_probe(span, receiver);
+                if let Some(member) = static_member_mut(&mut call.callee)
+                    && self.sites.methods.contains_key(&span_key(span))
+                {
+                    let receiver = member.object.take_in(self.ast.allocator);
+                    member.object = self.method_probe(span, receiver);
+                }
             }
             Expression::ChainExpression(chain) => {
-                let ChainElement::CallExpression(call) = &chain.expression else {
-                    return;
-                };
-                if call.span.is_unspanned()
-                    || !self.sites.optional_methods.contains(&span_key(call.span))
-                    || !rereadable_optional_base(&call.callee)
+                if let ChainElement::CallExpression(call) = &mut chain.expression
+                    && let Some(base) = self.sites.optional_methods.get(&span_key(call.span))
                 {
-                    return;
+                    let base = base.clone();
+                    let call = call.take_in(self.ast.allocator);
+                    let span = chain.span;
+                    *expression = self.optional_method_probe(span, call, base.as_deref());
                 }
-                *expression = self.optional_method_probe(expression.take_in(self.ast.allocator));
             }
             _ => {}
         }
     }
 }
 
-/// Whether the base of a method call's optional link is, as the coverage
-/// passes left it, a name or `this`, or a sequence ending in one: what
-/// `InfectionProbeTransformer::again` reads again.
-fn rereadable_optional_base(callee: &Expression<'_>) -> bool {
-    fn rereadable(base: &Expression<'_>) -> bool {
-        match base {
-            Expression::Identifier(_) | Expression::ThisExpression(_) => true,
-            Expression::ParenthesizedExpression(inner) => rereadable(&inner.expression),
-            Expression::SequenceExpression(sequence) => {
-                sequence.expressions.last().is_some_and(rereadable)
-            }
-            _ => false,
-        }
-    }
-    let Expression::StaticMemberExpression(first) = callee else {
-        return false;
-    };
-    let mut link: &StaticMemberExpression<'_> = first;
-    loop {
-        if link.optional {
-            return rereadable(&link.object);
-        }
-        let Expression::StaticMemberExpression(next) = &link.object else {
-            return false;
-        };
-        link = next;
+/// `expression` as a static member read, where it is one.
+fn static_member_mut<'r, 'a>(
+    expression: &'r mut Expression<'a>,
+) -> Option<&'r mut StaticMemberExpression<'a>> {
+    match expression {
+        Expression::StaticMemberExpression(member) => Some(&mut **member),
+        _ => None,
     }
 }
 
@@ -5262,46 +5245,44 @@ impl<'a> InfectionProbeTransformer<'a, '_> {
     /// base is a name or `this` (`optional_receiver_base`), read again; its
     /// first read keeps what the chain's coverage probe made of it, and
     /// TypeScript narrows the name through it as it did through `?.`.
-    fn optional_method_probe(&mut self, chain: Expression<'a>) -> Expression<'a> {
-        let Expression::ChainExpression(chain) = chain else {
-            return chain;
-        };
-        let chain = chain.unbox();
-        let ChainElement::CallExpression(call) = chain.expression else {
-            unreachable!("an optional method site is a chain's call");
-        };
-        let mut call = call.unbox();
+    /// `call` is the chain's, `chain` the chain's span and `base` the
+    /// link's base as the site recorded it.
+    ///
+    /// The site was found on the source (`optional_receiver_base`): a call
+    /// of a static member whose receiver is static member reads down to the
+    /// optional link. The coverage passes change none of those links (only
+    /// an optional call's callee, and this call is not one).
+    fn optional_method_probe(
+        &mut self,
+        chain: Span,
+        mut call: CallExpression<'a>,
+        base: Option<&str>,
+    ) -> Expression<'a> {
         let span = call.span;
-        let Expression::StaticMemberExpression(method) = &mut call.callee else {
-            unreachable!("an optional method site calls a member");
-        };
+        let method =
+            static_member_mut(&mut call.callee).expect("an optional method site calls a member");
         let mut receiver = method.object.take_in(self.ast.allocator);
         // The optional link: the method's own (`base?.method`) or one of the
         // members of its receiver.
         let first_read = if method.optional {
             method.optional = false;
-            let again = self.again(&receiver);
+            let again = self.again(base);
             std::mem::replace(&mut receiver, again)
         } else {
             let mut link = &mut receiver;
             loop {
-                let Expression::StaticMemberExpression(member) = link else {
-                    unreachable!("an optional method's receiver is member reads");
-                };
+                let member = static_member_mut(link)
+                    .expect("an optional method's receiver is member reads down to its link");
                 if member.optional {
                     member.optional = false;
-                    let again = self.again(&member.object);
+                    let again = self.again(base);
                     break std::mem::replace(&mut member.object, again);
                 }
                 link = &mut member.object;
             }
         };
-        let second_read = self.again(&first_read);
-        let probed = self.method_probe(span, receiver);
-        let Expression::StaticMemberExpression(method) = &mut call.callee else {
-            unreachable!("an optional method site calls a member");
-        };
-        method.object = probed;
+        let second_read = self.again(base);
+        method.object = self.method_probe(span, receiver);
         let undefined = || {
             self.ast
                 .expression_unary(Span::default(), UnaryOperator::Void, numeric(self.ast, 0))
@@ -5323,29 +5304,22 @@ impl<'a> InfectionProbeTransformer<'a, '_> {
             ),
         );
         self.ast.expression_conditional(
-            chain.span,
+            chain,
             test,
             undefined(),
             Expression::CallExpression(self.ast.alloc(call)),
         )
     }
 
-    /// The name or `this` an optional link's base reads, read again: the
-    /// last operand of what the chain's coverage probe made of it.
-    fn again(&self, base: &Expression<'a>) -> Expression<'a> {
+    /// The base of an optional method site's link, read again: the name
+    /// the source reads there, or `this` (`None`). The first read keeps what
+    /// the chain's coverage probe made of it.
+    fn again(&self, base: Option<&str>) -> Expression<'a> {
         match base {
-            Expression::Identifier(identifier) => self
+            Some(name) => self
                 .ast
-                .expression_identifier(Span::default(), identifier.name),
-            Expression::ThisExpression(_) => self.ast.expression_this(Span::default()),
-            Expression::ParenthesizedExpression(inner) => self.again(&inner.expression),
-            Expression::SequenceExpression(sequence) => self.again(
-                sequence
-                    .expressions
-                    .last()
-                    .expect("a sequence has an operand"),
-            ),
-            _ => unreachable!("an optional method's base is a name or this"),
+                .expression_identifier(Span::default(), self.ast.ident(name)),
+            None => self.ast.expression_this(Span::default()),
         }
     }
 }
@@ -15763,6 +15737,7 @@ export function shapes(n: number): unknown {
             "(c) => (f() ? 1 : 2)",
             "(c) => (c.a ? f() : 2)",
             "(c) => (c.a ? 1 : f())",
+            "(c) => !f()",
         ] {
             assert!(!pure(text), "{text} is not pure");
         }
@@ -17448,7 +17423,7 @@ export function shapes(n: number): unknown {
                 walk::walk_static_member_expression(self, member);
             }
         }
-        let source = "class C {\n  #p = [1];\n  m(o) {\n    return [o?.#p.some, o?.a.#p.some, o.#p.some, o?.a[0].some, o.a[0].some, (o?.a).some, o?.f().some];\n  }\n}\n";
+        let source = "class C {\n  #p = [1];\n  m(o) {\n    return [o?.#p.some, o?.a.#p.some, o.#p.some, o?.a[0].some, o.a[0].some, (o?.a).some, o?.f().some, o?.[0].some, o.f?.().some];\n  }\n}\n";
         let allocator = Allocator::default();
         // Without parentheses kept, a chain can be a member's object.
         let parsed = Parser::new(&allocator, source, SourceType::mjs())
@@ -17460,19 +17435,22 @@ export function shapes(n: number): unknown {
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let mut receivers = Receivers(Vec::new());
         receivers.visit_program(&parsed.program);
-        assert_eq!(receivers.0, [true, true, false, true, false, true, true]);
+        assert_eq!(
+            receivers.0,
+            [true, true, false, true, false, true, true, true, true]
+        );
     }
 
-    /// The base an optional method's probe reads again: a name or `this`,
-    /// in parentheses or last in a sequence, and nothing else.
+    /// An optional method site's base, which its probe reads again: a name
+    /// or `this` as the source writes it, at the end of member reads.
     #[test]
-    fn an_optional_method_s_base_is_read_again_only_where_it_is_a_name() {
-        let callee = |text: &str| {
+    fn an_optional_method_site_s_base_is_a_name_or_this_as_written() {
+        let site = |text: &str| {
             let allocator = Allocator::default();
             let expression = Parser::new(&allocator, text, SourceType::mjs())
                 .parse_expression()
                 .unwrap_or_else(|errors| panic!("{text}: {errors:?}"));
-            // A chain's member, as the probe finds it in the call.
+            // A chain's member, as the site is found in the call.
             let member = match &expression {
                 Expression::ChainExpression(chain) => match &chain.expression {
                     ChainElement::StaticMemberExpression(member) => {
@@ -17482,17 +17460,14 @@ export function shapes(n: number): unknown {
                 },
                 other => other.clone_in(&allocator),
             };
-            (
-                rereadable_optional_base(&member),
-                optional_receiver_base(&member).is_some(),
-            )
+            optional_receiver_base(&member).is_some()
         };
-        assert_eq!(callee("(x)?.some"), (true, false));
-        assert_eq!(callee("(a, x)?.some"), (true, false));
-        assert_eq!(callee("f()?.some"), (false, false));
-        assert_eq!(callee("x.some"), (false, false));
-        assert_eq!(callee("some"), (false, false));
-        assert_eq!(callee("x?.list.some"), (true, true));
+        for text in ["x?.some", "this?.some", "x?.list.some"] {
+            assert!(site(text), "{text} is a site");
+        }
+        for text in ["(x)?.some", "f()?.some", "x.some", "some"] {
+            assert!(!site(text), "{text} is no site");
+        }
     }
 
     /// What runs code when it is evaluated: a generator's `yield`, a tagged
