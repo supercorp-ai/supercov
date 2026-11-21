@@ -9,8 +9,6 @@
 
 use std::{io::Write, path::PathBuf, process::ExitCode};
 
-use supercov_engine::indexed_query::IndexedQueryData;
-
 /// Everything one page holds: the export asks for all of it at once.
 const ALL: &str = "1000000000";
 
@@ -75,9 +73,10 @@ pub fn command(arguments: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let IndexedQueryData::Mutants(data) = &output_data.data else {
-        unreachable!("a mutants request is answered with mutants");
-    };
+    let data = output_data
+        .data
+        .mutants()
+        .expect("a mutants request is answered with mutants");
     if let Some(note) = &data.note {
         eprintln!("[supercov] {note}");
     }

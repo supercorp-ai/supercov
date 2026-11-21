@@ -4936,6 +4936,8 @@ mod tests {
         // A text whose length runs past the text the index holds.
         let past = |at: usize| mutant(at + 4, u32::MAX.to_le_bytes().to_vec());
         let cases: Vec<(&str, Edit)> = vec![
+            // Text that is not UTF-8.
+            ("InvalidUtf8", set(SECTION_MUTANT_TEXT, 1, 0, vec![0xff])),
             (
                 "mutation record count",
                 Box::new(|s: &mut Vec<QueryIndexSection>| {
@@ -6710,6 +6712,16 @@ mod tests {
                 crate::coverage_query::QueryError::InvalidPagination
             ))
         ));
+        // A reply holds a mutants answer only where it answered a mutants
+        // query.
+        let mutants: IndexedQueryRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run", "filter": "all", "command": "mutants",
+        }))
+        .unwrap();
+        let answered = query_indexed(&index, None, &mutants, None).unwrap();
+        assert!(answered.data.mutants().is_some());
+        let summary = query_indexed(&index, None, &request("summary", "all", None), None).unwrap();
+        assert!(summary.data.mutants().is_none());
         assert!(matches!(
             crate::indexed_query::execute_indexed_query(
                 &index,

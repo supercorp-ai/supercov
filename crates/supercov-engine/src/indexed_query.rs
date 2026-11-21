@@ -516,6 +516,16 @@ pub enum IndexedQueryData {
     Mutants(Box<crate::mutants_query::CoverageMutantsData>),
 }
 
+impl IndexedQueryData {
+    /// A mutants query's answer, or `None` for any other query's.
+    pub fn mutants(&self) -> Option<&crate::mutants_query::CoverageMutantsData> {
+        match self {
+            Self::Mutants(data) => Some(data),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedQueryOutput {
     pub command: &'static str,

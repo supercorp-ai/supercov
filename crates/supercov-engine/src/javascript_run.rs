@@ -2816,9 +2816,9 @@ fn run_strong_restarts(
 ) -> Result<(), DirectJavascriptRunError> {
     let mut read = 0usize;
     let mut number = 0usize;
-    let mut asked = true;
+    let mut asked;
     // Every pass that can ask for more asks for fewer: a bound, all the same.
-    while asked && number < 1_000 {
+    loop {
         let text = std::fs::read_to_string(&strong.results).unwrap_or_default();
         let lines = text.lines().collect::<Vec<_>>();
         let jobs = lines[read.min(lines.len())..]
@@ -2889,8 +2889,10 @@ fn run_strong_restarts(
                 return Ok(());
             }
         }
+        if !asked || number >= 1_000 {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 /// Strong mode for the run's own instrumentation, set back when it ends.
