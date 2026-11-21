@@ -175,14 +175,15 @@ node benchmarks/mutation/build-workflow.mjs --runs-on <64-vCPU label> > .github/
 # 1. the workflow (one job per project x scenario x shard)
 node benchmarks/mutation/workflow.mjs --runs-on <16-vCPU label> --truth-runs-on <16-vCPU, 64 GiB+ label> \
   > .github/workflows/mutation-bench.yml
-#    --projects defu,ufo, --scenarios stryker-cold,truth and --shards s2,s6 narrow it; --variants round-2,round-6 runs Supercov jobs
-#    at those SUPERCOV_STRONG_ROUND settings. The full matrix (about 140 jobs) goes in several runs
+#    --projects defu,ufo, --scenarios stryker-cold,truth and --shards s2,s6 narrow it; --variants own-vitest,first
+#    runs those Supercov variants only ('' is the plain job). The full matrix (about 140 jobs) goes in several runs
 #    by --projects and --shards, 32 or so jobs each. The CI service used here lists only its three
 #    latest runs: an older one drops off the list but still runs, and its artifacts are still
 #    retrieved by its id, so keep every run's id
 #    Other Supercov variants: first (`supercov mutants -- <test command>` with no run before it, as a
 #    first use), first-wN (first with Vitest's --maxWorkers=N),
-#    first-prof (first with a CPU profile of the strong pass's main process, main.cpuprofile)
+#    first-prof (first with a CPU profile of the strong pass's main process, main.cpuprofile), prof (the
+#    plain job with that profile)
 
 # 2. run it on a workflow_dispatch-capable CI service, then download every artifact
 #    (mutation-bench-<project>-<scenario>[-<shard>]) into one directory
@@ -197,6 +198,30 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
+
+## Results of 2026-11-21: the strong pass in stages
+
+Supercov's cold rows again (`results/2026-11-21/summary.md`), on the binary of the strong pass in
+stages (key `0f34df1d56509c31`, CI runs 4767710917481845 and 6327964608487668); every other row is
+2026-11-20's. Against the binary of the previous rows (`e8f192cd`, rounds), on the same 16-vCPU
+machines:
+
+| project | strong pass s, rounds | strong pass s, stages | ms per mutant run (StrykerJS's mutant phase) | soundness violations | extra kills |
+|---|---:|---:|---|---:|---:|
+| defu | 2.4 | 2.1 | 22 (17) | 0 | 0 |
+| scule | 2.1 | 1.9 | 25 (17) | 0 | 0 |
+| cookie-es | 11.9 | 10.2 | 15 (12) | 0 | 0 |
+| pathe | 12.8 | 11.7 | 24 (17) | 0 | 0 |
+| ufo | 26.9 | 18.7 | 21 (14) | 0 | 0 |
+| hono (6 shards) | 1,181 | 366 | 89 (51) | 10, the diagnosed ground-truth artifacts above | 0 |
+| tRPC (32 shards) | 6,343 | 3,737 | 1,528 (755) | 2, the diagnosed ones above | 0 |
+
+Verdicts are those of the rounds, but for Killed against Timeout (both detected) and one hono mutant
+that a flaky timing test (`Logger by Middleware > Time in seconds`) had killed under the rounds and
+that every stages run calls survived, as the ground truth does. Where the time went, and what each
+step of the change did, is in `docs/design/strong-mutation.md`: workers waited at each round's end
+(22-32% busy); a mutant's later files listed at once cost a worker's start each, and on hono a fork
+of Vitest's 1 GB main process (24 ms, 72% of its time); retries and long copies held stages' ends.
 
 ## Results of 2026-11-20
 

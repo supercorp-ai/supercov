@@ -46,7 +46,7 @@ for (const project of projects) {
     const runsOn = scenario === 'truth' && args['truth-runs-on'] ? args['truth-runs-on'] : args['runs-on'];
     for (const shard of shards) {
       if (args.shards && !args.shards.split(',').includes(shard)) continue;
-      // --variants replaces the variant list of Supercov jobs ('' = the plain job), e.g. round-2,round-6.
+      // --variants replaces the variant list of Supercov jobs ('' = the plain job), e.g. ,own-vitest.
       const variants = args.variants !== undefined && scenario.includes('supercov') ? args.variants.split(',') : ['', ...(scenario.includes('supercov') ? project.supercovVariants ?? [] : [])];
       for (const variant of variants) include.push({ project: project.name, scenario, shard, runsOn, variant });
     }

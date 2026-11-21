@@ -1111,7 +1111,7 @@ fn run_javascript(
                 arguments: request.command[1..].iter().map(OsString::from).collect(),
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
-                // A strong pass's command prints its rounds: they go to a
+                // A strong pass's command prints its stages: they go to a
                 // log beside its results, and the answer alone to stdout.
                 captured_output: request
                     .strong

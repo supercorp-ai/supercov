@@ -22006,10 +22006,10 @@ fn a_mutant_that_loops_forever_after_its_test_passed_is_a_timeout() {
 }
 
 /// A mutant that leaves a module's top-level `await` waiting forever: its
-/// test file never loads, so no test's limit can end it. Once the copies
-/// still going are past their limit (three times their file's baseline, and
-/// ten seconds), the round is cancelled and those mutants are timeouts, in
-/// the same pass: no deadline to wait out, no second pass.
+/// test file never loads, so no test's limit can end it. Once its copy is
+/// past its limit (three times its file's baseline, and ten seconds), the
+/// copy's worker is stopped and the mutant is a timeout, in the same pass:
+/// the stage goes on, no deadline to wait out, no second pass.
 #[cfg(unix)]
 #[test]
 fn a_mutant_that_leaves_an_import_waiting_forever_is_a_timeout_in_the_same_pass() {
@@ -22031,10 +22031,7 @@ fn a_mutant_that_leaves_an_import_waiting_forever_is_a_timeout_in_the_same_pass(
     assert_eq!(passes.len(), 1, "{reply}");
     assert_eq!(passes[0]["stalled"], false, "{reply}");
     assert!(
-        passes[0]["profile"]["cancelledRounds"]
-            .as_u64()
-            .unwrap_or(0)
-            >= 1,
+        passes[0]["profile"]["hungCopies"].as_u64().unwrap_or(0) >= 1,
         "{reply}"
     );
     let listed = project
@@ -22057,8 +22054,8 @@ fn a_mutant_that_leaves_an_import_waiting_forever_is_a_timeout_in_the_same_pass(
         })
         .unwrap_or_else(|| panic!("{listed}"));
     assert_eq!(never["strong"]["status"], "timeout", "{never}");
-    // The copies the cancel left to no worker ran later: every mutant of
-    // the file has a verdict of its own.
+    // The stage went on past the stopped copy: every mutant of the file
+    // has a verdict of its own.
     let doubled = mutants
         .iter()
         .find(|mutant| {
@@ -22073,7 +22070,7 @@ fn a_mutant_that_leaves_an_import_waiting_forever_is_a_timeout_in_the_same_pass(
 /// verdict, how many mutants it has to run; once there are verdicts, how
 /// they stand and the time left at this pace. `inc`'s mutants survive the
 /// quick file, which runs first, and run again in the slow one in a later
-/// round, after `dbl`'s verdicts.
+/// stage, after `dbl`'s verdicts.
 #[cfg(unix)]
 #[test]
 fn a_running_pass_says_how_far_it_got() {
@@ -22114,6 +22111,128 @@ fn a_running_pass_says_how_far_it_got() {
             && line.contains("; about ")
             && line.ends_with(" left")),
         "{said}"
+    );
+}
+
+/// A pass runs in stages, each one run of all it holds: every mutant's
+/// cheapest file beside that file's baseline, then the next batch of the
+/// mutants' other files, beside theirs, the likeliest killer first (nothing
+/// learned yet: the cheapest). `inc`'s mutants survive `a`, which only calls
+/// it; the next batch is one file, the quick `c`, which kills each of them,
+/// so the slow `b` never runs: two copies each, in two stages (the fixture's
+/// `cart.js` mutants have one test file, and one copy each).
+#[cfg(unix)]
+#[test]
+fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
+    let project = vitest_mutants_project("strong-skip");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { maxWorkers: 1 } };\n",
+    );
+    project.write(
+        "src/steps.js",
+        "export function inc(n) {\n  return n + 1;\n}\n",
+    );
+    project.write(
+        "test/a.test.js",
+        "import { it } from \"vitest\";\nimport { inc } from \"../src/steps.js\";\nit(\"runs inc\", () => {\n  inc(1);\n});\n",
+    );
+    project.write(
+        "test/b.test.js",
+        "import { expect, it } from \"vitest\";\nimport { inc } from \"../src/steps.js\";\nit(\"increments slowly\", async () => {\n  await new Promise((resolve) => setTimeout(resolve, 600));\n  expect(inc(1)).toBe(2);\n});\n",
+    );
+    project.write(
+        "test/c.test.js",
+        "import { expect, it } from \"vitest\";\nimport { inc } from \"../src/steps.js\";\nit(\"increments\", async () => {\n  await new Promise((resolve) => setTimeout(resolve, 50));\n  expect(inc(1)).toBe(2);\n});\n",
+    );
+    project.commit("steps");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let passes = reply["passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 1, "{reply}");
+    assert_eq!(passes[0]["stages"], 2, "{reply}");
+    let ran = reply["summary"]["ran"].as_u64().unwrap();
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/steps.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let killed = mutants
+        .iter()
+        .filter(|mutant| mutant["strong"]["status"] == "killed")
+        .count() as u64;
+    assert!(killed >= 2, "{listed}");
+    assert!(
+        mutants
+            .iter()
+            .all(|mutant| mutant["strong"]["status"] != "survived"),
+        "{listed}"
+    );
+    assert_eq!(
+        passes[0]["profile"]["mutantCopies"],
+        ran + killed,
+        "{reply}"
+    );
+    assert_eq!(passes[0]["profile"]["skippedCopies"], 0, "{reply}");
+}
+
+/// A mutant that makes a module throw while it loads: its copy's test file
+/// never loads, and its worker ends without the copy's end. That is a kill
+/// as soon as the worker is gone (the test file did not finish), not a copy
+/// that stopped reporting: no worker is stopped and none counts as hung.
+#[cfg(unix)]
+#[test]
+fn a_mutant_that_breaks_its_test_file_s_load_is_killed_once_its_worker_ends() {
+    let project = vitest_mutants_project("strong-load-throws");
+    project.write(
+        "src/config.js",
+        "const settings = { strict: true };\nif (!settings.strict) throw new Error(\"not strict\");\nexport const strict = settings.strict;\n",
+    );
+    project.write(
+        "test/config.test.js",
+        "import { expect, it } from \"vitest\";\nimport { strict } from \"../src/config.js\";\nit(\"is strict\", () => expect(strict).toBe(true));\n",
+    );
+    project.commit("config");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    let passes = reply["passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 1, "{reply}");
+    assert_eq!(passes[0]["profile"]["killedCopies"], 0, "{reply}");
+    assert_eq!(passes[0]["profile"]["hungCopies"], 0, "{reply}");
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/config.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let throws = mutants
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/config.js:2:") && id.ends_with(":ConditionalExpression:true")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(throws["strong"]["status"], "killed", "{throws}");
+    assert_eq!(
+        throws["strong"]["reason"], "the test file did not finish",
+        "{throws}"
     );
 }
 

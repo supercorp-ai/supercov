@@ -325,8 +325,12 @@ function mutateFiles() {
 let supercov = null;
 // first-wN: the first variant with Vitest's --maxWorkers=N.
 const firstWorkers = args.variant?.match(/^first-w(\d+)$/)?.[1] ?? null;
-// first-prof: the first variant with a CPU profile of the strong pass's main process.
+// first-prof: the first variant with a CPU profile of the strong pass's main process; prof: the
+// plain job with one.
 const firstProfile = args.variant === 'first-prof';
+const mainProfile = firstProfile || args.variant === 'prof' || args.variant === 'prof-arena';
+// prof-arena: prof with glibc's malloc held to two arenas in every process of the strong pass.
+if (args.variant === 'prof-arena') process.env.MALLOC_ARENA_MAX = '2';
 
 async function installSupercov() {
   const binary = process.env.SUPERCOV_BENCH_BINARY;
@@ -336,11 +340,6 @@ async function installSupercov() {
   await phase('tool-install', `npm i --prefix ${prefix} --no-audit --no-fund supercov@${corpus.tools.supercovWrapper} >/dev/null && ls ${prefix}/node_modules/.bin`, { cwd: workRoot });
   if (project.supercovVitest && args.variant !== 'own-vitest') await upgradeVitest(project.supercovVitest, project.supercovVitestReason);
   if (args.variant === 'own-vitest') note(`variant own-vitest: Supercov on the project's own Vitest ${project.vitest}`);
-  const round = args.variant?.match(/^round-(\d+)$/);
-  if (round) {
-    process.env.SUPERCOV_STRONG_ROUND = round[1];
-    note(`variant round-N: SUPERCOV_STRONG_ROUND set per job (assignments per Vitest worker in a strong round)`);
-  }
   if (firstWorkers) note(`variant first-w${firstWorkers}: the first variant with Vitest's --maxWorkers=${firstWorkers}`);
   if (args.variant === 'first') note('variant first: no measured run; `supercov mutants -- <test command>` measures what it needs, then tests the mutants');
   process.env.SUPERCOV_RUST_BINARY = binary;
@@ -493,7 +492,7 @@ async function main() {
     // A shard is K (of the project's supercovShards) or K-N (K of N, for a re-split shard).
     const split = args.shard?.match(/^(\d+)-(\d+)$/);
     const shard = args.shard ? ['--shard', split ? `${split[1]}/${split[2]}` : `${args.shard}/${project.supercovShards}`] : [];
-    if (firstProfile) process.env.SUPERCOV_STRONG_CPU_PROFILE = join(out_, 'main.cpuprofile');
+    if (mainProfile) process.env.SUPERCOV_STRONG_CPU_PROFILE = join(out_, 'main.cpuprofile');
     if (args.variant === 'first' || firstWorkers || firstProfile) {
       // What a user's first `supercov mutants` does: nothing measured before it.
       await supercovStrong('supercov-strong', shard, { first: true });
@@ -512,9 +511,9 @@ async function main() {
   } else if (scenario === 'supercov-diag') {
     // Diagnosis of strong-pass verdicts: SUPERCOV_DIAG_FILES (comma-separated source files) and
     // SUPERCOV_DIAG_POINTS (comma-separated file:line) name what to look at. Keeps the workspace
-    // and each strong round's assignments and outcomes, and archives them with the plans.
+    // and each strong stage's assignments and outcomes, and archives them with the plans.
     process.env.SUPERCOV_KEEP_WORKSPACE = '1';
-    process.env.SUPERCOV_STRONG_KEEP_ROUNDS = '1';
+    process.env.SUPERCOV_STRONG_KEEP_STAGES = '1';
     const files = (process.env.SUPERCOV_DIAG_FILES ?? '').split(',').filter(Boolean);
     const points = (process.env.SUPERCOV_DIAG_POINTS ?? '').split(',').filter(Boolean);
     const measure = await supercovMeasure();
@@ -531,10 +530,10 @@ async function main() {
     }
     for (const [i, file] of files.entries()) {
       await phase(`strong-${i + 1}`, `${supercov} runs latest mutants test --json --file ${file} > ${join(out_, `strong-${i + 1}.json`)}`, { allowFail: true });
-      // Each command numbers its rounds from 0 in the same directory: keep this command's, then clear them.
-      await phase(`rounds-${i + 1}`, `d=$(find .supercov -path '*node_modules*' -prune -o -type d -name strong-rounds -print | head -1); [ -n "$d" ] && tar czf ${join(out_, `rounds-${i + 1}.tgz`)} -C "$d" . && rm -rf "$d"`, { allowFail: true });
+      // Each command numbers its stages from 0 in the same directory: keep this command's, then clear them.
+      await phase(`stages-${i + 1}`, `d=$(find .supercov -path '*node_modules*' -prune -o -type d -name strong-stages -print | head -1); [ -n "$d" ] && tar czf ${join(out_, `stages-${i + 1}.tgz`)} -C "$d" . && rm -rf "$d"`, { allowFail: true });
     }
-    await phase('archive', `find .supercov \\( -path '*node_modules*' -prune \\) -o \\( -path '*strong-rounds*' -o -path '.supercov/strong/*' -o -path '*frontend-evidence/mutants.json' -o -path '.supercov/runs/*/strong-mutation.json' \\) -type f -print | tar czf ${join(out_, 'diag.tgz')} -T -`, { allowFail: true });
+    await phase('archive', `find .supercov \\( -path '*node_modules*' -prune \\) -o \\( -path '*strong-stages*' -o -path '.supercov/strong/*' -o -path '*frontend-evidence/mutants.json' -o -path '.supercov/runs/*/strong-mutation.json' \\) -type f -print | tar czf ${join(out_, 'diag.tgz')} -T -`, { allowFail: true });
   } else if (scenario === 'pr-supercov') {
     applyEdit();
     const measure = await supercovMeasure();

@@ -1,22 +1,20 @@
 // Strong mutation's setup file for Vitest (docs/design/strong-mutation.md).
 //
-// The strong reporter (vitestStrongReporter.mjs) runs the suite in rounds. A
-// round can run one test file several times, each copy with its own mutant;
-// the copies cannot be told apart by Vitest's own results (they share the
-// file's path), so each copy claims its assignment from the round's
-// directory, and reports its tests' outcomes there itself.
+// The strong reporter (vitestStrongReporter.mjs) runs the suite in stages. A
+// stage can run one test file many times, each copy with its own mutant; the
+// copies cannot be told apart by Vitest's own results (they share the file's
+// path), so each copy claims its assignment from the stage's directory as it
+// starts, and reports its tests' outcomes there itself.
 //
 // This file runs in the test file's isolated module graph before the test
 // file's imports: it switches the copy's mutant on, so a mutant evaluated
 // while a module loads is in place too, and skips every test the assignment
 // did not choose. After the copy's first chosen test fails, the rest are
 // skipped: the mutant is killed.
-import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { afterAll, afterEach, beforeAll, beforeEach, inject } from "vitest";
-import * as localRuntime from "./runtime.mjs";
-
-const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? localRuntime;
+import { appendFileSync, readFileSync, existsSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { isMainThread } from "node:worker_threads";
+import { afterAll, afterEach, beforeAll, beforeEach, inject, vi } from "vitest";
 
 /** The test file's path from the project root, as the plan names it. */
 function thisFile(root) {
@@ -29,7 +27,11 @@ function thisFile(root) {
         : filepath;
 }
 
-/** This copy's assignment: the first of the file's that no other copy took. */
+/**
+ * This copy's assignment: the next of its file's. Each copy appends a token
+ * of its own to the file's claims (an append is one atomic write), and the
+ * line it landed on is the assignment it takes.
+ */
 function claim() {
     let provided;
     try {
@@ -38,25 +40,53 @@ function claim() {
     catch {
         return undefined;
     }
-    if (!provided?.round)
+    if (!provided?.stage)
         return undefined;
     const file = thisFile(provided.root);
     if (!file)
         return undefined;
-    const directory = `${provided.round}/${createHash("sha256").update(file).digest("hex").slice(0, 24)}`;
-    for (let index = 0; existsSync(`${directory}/${index}.json`); index += 1) {
-        try {
-            closeSync(openSync(`${directory}/${index}.claim`, "wx"));
-        }
-        catch {
-            continue;
-        }
-        return { ...JSON.parse(readFileSync(`${directory}/${index}.json`, "utf8")), out: `${directory}/${index}.out` };
+    const key = createHash("sha256").update(file).digest("hex").slice(0, 24);
+    const directory = `${provided.stage}/${key}`;
+    const token = randomBytes(12).toString("hex");
+    let index;
+    try {
+        appendFileSync(`${directory}/claims`, `${token}\n`);
+        index = readFileSync(`${directory}/claims`, "utf8").split("\n").indexOf(token);
     }
-    return undefined;
+    catch {
+        return undefined;
+    }
+    // A copy beyond its file's assignments has nothing to run.
+    if (index < 0 || !existsSync(`${directory}/${index}.json`))
+        return { surplus: true };
+    return {
+        ...JSON.parse(readFileSync(`${directory}/${index}.json`, "utf8")),
+        // The mutant got its verdict from another copy meanwhile.
+        skip: existsSync(`${directory}/${index}.skip`),
+        out: `${directory}/${index}.out`,
+        claimed: { log: `${provided.stage}/claimed`, line: `${key}/${index}` },
+    };
 }
 
-const assignment = claim();
+const claimed = claim();
+// A copy with nothing to run -- beyond its file's assignments, or one whose
+// mutant another copy has decided -- ends here, before its test file loads.
+if (claimed?.surplus || claimed?.skip) {
+    if (claimed.skip) {
+        const at = Date.now();
+        appendFileSync(claimed.out, `${JSON.stringify({ claimed: true, at, up: Math.round(performance.now()), skipped: true })}\n${JSON.stringify({ done: true, at })}\n`);
+        try {
+            appendFileSync(claimed.claimed.log, `${claimed.claimed.line}\n`);
+        }
+        catch {
+            // The stage is over.
+        }
+    }
+    throw new Error("supercov: this copy has nothing to run");
+}
+// Loaded only by a copy that runs.
+const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? (await import("./runtime.mjs"));
+const assignment = claimed;
 const chosen = new Set(assignment?.tests ?? []);
 let killed = false;
 // Set once the active mutant was evaluated past the hit limit.
@@ -83,7 +113,20 @@ function outsideTests(error) {
 if (assignment) {
     process.on("uncaughtException", outsideTests);
     process.on("unhandledRejection", outsideTests);
-    report({ claimed: true, at: realNow() });
+    // A worker process of its own (not a thread of Vitest's) can be
+    // stopped alone, should it stop reporting.
+    // `up`: how long the worker had been starting (its process, Vitest, the
+    // environment) before this copy claimed.
+    report({ claimed: true, at: realNow(), up: Math.round(performance.now()), pid: isMainThread ? process.pid : undefined });
+    try {
+        appendFileSync(assignment.claimed.log, `${assignment.claimed.line}\n`);
+    }
+    catch {
+        // The stage is over.
+    }
+    // The copy's own test limit, read as the test file's tests are collected.
+    if (assignment.testTimeout)
+        vi.setConfig({ testTimeout: assignment.testTimeout });
     if (assignment.mutant) {
         runtime.setMutantHitLimit?.(assignment.hitLimit ?? 1_000_000);
         runtime.setActiveMutant(assignment.mutant.file, assignment.mutant.index);
@@ -106,7 +149,7 @@ beforeAll(() => {
 
 beforeEach((context) => {
     if (!assignment) {
-        // A copy with nothing to do (more copies than assignments).
+        // Outside a strong pass's stage.
         context.skip();
         return;
     }

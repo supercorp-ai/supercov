@@ -93,10 +93,22 @@ mutated value for the file's later tests, which never run that code again.
 ## Order and early exit
 
 A mutant's candidates are grouped by test file, cheapest file first. It runs
-its cheapest file first; if that leaves it alive, all its other files run in
-the next round at once: the first file kills most killed mutants, and a
-survivor takes two rounds rather than one per file. Within a file a copy stops
-at its first failing test: that settles `killed`.
+its cheapest file first: the first file kills most killed mutants. If that
+leaves it alive, its other files run in the next stages in batches of 1, 4, 16,
+... files, the files most likely to kill it first: a file's kills over the
+mutants it ran so far in the pass, over its cost (its tests' time and a copy's
+start). A copy listed in a stage costs a worker's start, and on hono a fork of
+Vitest's own process, even where it ends at once; most of a mutant's later
+files belong to survivors, which need them all, but listing them all at once
+listed 30% more copies on the public benchmark's kill matrix than batches do,
+and made hono's strong pass 2.3 times slower. A stage whose work would not keep
+every worker busy for twice its longest copy takes each mutant's next batch
+beside it, so that a small stage does not end waiting on one long copy. Within a file a copy stops
+at its first failing test: that settles `killed` (or, where the kill waits on a
+confirmation, below, holds the mutant until it has run), and the mutant's
+copies of its other files that no worker has started yet end before their test
+file loads. Should the confirmation overturn the kill, those files run in the
+next stage.
 
 ## Running many mutants at once without restarting anything (Vitest)
 
@@ -106,32 +118,45 @@ test file's imports. So different files of **one** Vitest run can each have a
 different mutant switched on, and nothing one file does with its mutant can
 reach another file's modules.
 
-The pass therefore schedules rounds. A round can run one test file several
-times, each copy with its own mutant: Vitest's pool runs a file listed twice
-twice, each in its own worker (with the worker's own database, where a suite
-gives each worker one). The copies cannot be told apart in Vitest's results,
-which are kept by file path, so each copy claims its assignment from the
-round's directory and reports its tests' outcomes there itself. Supercov's
-setup file switches the copy's mutant on before the file's imports run, and
-skips every test the assignment did not choose. A round holds at least
-`SUPERCOV_STRONG_ROUND` (default 2) × the workers assignments: a round ends
-when its slowest copy does. Larger rounds of every kind measured slower on
-hono and tRPC (4×: +17% and +6%), but one slow file is what holds a round: on
-tRPC a `websockets.test.ts` copy took 15-21 s while the median copy took
-1.2 s, and every other worker waited. So a round takes more assignments while
-their estimated work (1 s to load a copy, plus its tests' baseline durations)
-is less than every worker kept busy as long as its longest copy, up to 16 ×
-the workers: tRPC's pass took 24% less time (3.86 to 2.95 s per mutant run),
-hono's 7% less, the small corpus projects the same, with the same verdicts.
-More workers than Vitest's default did not help: 32 and 48 on 16 CPUs were
-3-6% slower on tRPC, slower on hono, and changed verdicts (runtime errors under
-load). One round is one call into the resident Vitest
-instance (`runTestSpecifications`): no new process, no new workers, the
+The pass therefore runs in stages. A stage is one run of the resident Vitest
+instance (`runTestSpecifications`) holding every copy the pass can run yet:
+first every mutant's cheapest file, then the other files of the mutants that
+left alive, with the confirmations and the retries (see below), each beside
+the baselines of the files it needs. A
+stage can run one test file many times, each copy with its own mutant:
+Vitest's pool runs a file listed twice twice, each in its own worker (with the
+worker's own database, where a suite gives each worker one). The copies cannot
+be told apart in Vitest's results, which are kept by file path, so each copy
+claims its assignment as it starts: it appends a token of its own to its
+file's claims in the stage's directory, and the line it landed on is its
+assignment. It reports its tests' outcomes there itself. Supercov's setup file
+switches the copy's mutant on before the file's imports run, and skips every
+test the assignment did not choose. No new process, no new workers: the
 project's own pool, so a suite that gives each worker its own database keeps
 doing so.
 
+Vitest's pool starts the next listed copy as soon as a worker is free, and
+keeps the pass's order (the pass replaces its sequencer's sort, which would run
+the files its cache says were slowest first). A stage lists the baselines
+first, then each copy by its estimate (its file's time beyond its tests, from
+its baseline, and its tests' durations as the baseline ran them, or as
+measured; or its file's baseline copy where it runs the file whole) over its
+rank among the mutant's files waiting: a mutant's next file comes before its later ones, so
+most mutants are decided before their later copies start, and long copies come
+early, so the stage does not end waiting on a long copy that started last. A
+mutant's kill is recorded as soon as its copy ends, while the stage runs. A
+copy with nothing left to run (its mutant decided meanwhile) ends in the setup
+file, before its test file or Supercov's runtime loads.
+
+An earlier design ran small rounds of two to sixteen copies per worker. Each
+round ended when its slowest copy did, and the other workers waited: most of a
+round's copies were done within a second, and one copy that waited on its
+tests' own timers held the round for 4-20 s. The workers were busy 22-32% of
+the pass on hono, tRPC and ufo alike, and the machine used about 4 of its 16
+CPUs.
+
 Where isolation is off (`isolate: false`, `--no-isolate`, a single-thread pool
-sharing modules) a round holds one mutant.
+sharing modules) a stage holds one mutant.
 
 Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
 between test files (`isolate: false` for the pass), and the copy's setup file
@@ -154,11 +179,11 @@ was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
 the measured run the same everywhere. What warm workers saved is starting a
 process and Vitest for each copy, not compiling.
 
-The time a copy spends is mostly not its tests: on tRPC a copy waits about
-0.5 s for its worker before its setup file runs and its tests take 0.1-0.4 s,
-and Vitest's own process is idle 93-95% of the pass (a CPU profile of it,
-`SUPERCOV_STRONG_CPU_PROFILE=<file>`). The pass summary's `profile` records
-rounds, copies, time loading and in copies, and the first rounds' timeline.
+The pass summary's `profile` records its copies (of mutants, confirmations,
+and those that skipped), the copies stopped and hung, and for each stage its
+copies, its wall time, the copies' own time (claim to end), and when its last
+copy started. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
+Vitest's own process for the whole pass.
 
 ## Baselines
 
@@ -167,6 +192,14 @@ an earlier one's state). Each file is first run with the union of its
 candidates and no mutant; a file where that fails runs whole from then on, and
 only a test that fails with the whole file and no mutant is no kill. A file
 that does not finish without a mutant is reported, its mutants `error`.
+
+A file's baseline runs in the stage that first needs the file, listed before
+the mutants' copies of it, and is recorded as soon as its copy ends. A copy
+beside it is judged by it: where the baseline had to run the file whole, the
+copy runs again whole; where the copy stopped at a test that fails without the
+mutant too, it runs again without that test. On tRPC a baseline stage of its
+own ended 17 s after its last copy started, in every shard, waiting on one
+long file.
 
 A mutant's copy runs only its own candidates, a subset of that union, and a
 test can still lean on one the subset left out. A kill counts at once where
@@ -187,13 +220,22 @@ StrykerJS, which also runs only a mutant's covering tests, counts that kill
 
 ## Timeouts and runaway loops
 
-A mutant's test gets `factor × its measured duration + constant` (defaults
-1.5× and 5 s, as StrykerJS), applied in two steps. A round ends when its
-slowest copy does, so one mutant that hangs a test would hold every worker for
-its whole limit (on tRPC most rounds waited 6.5-13.5 s on one or two hanging
-copies). A mutant's first attempt therefore gets 1.5× and 1 s; a copy past that
-runs again with twice the full limit, in a round of such retries only, and is a
-`timeout` only if it passes that too. The short limit costs a retry, never a
+A mutant's test gets twice StrykerJS's limit (`factor × its measured duration
++ constant`, 1.5× and 5 s): its slowest test's duration (as measured or as its
+baseline ran it, whichever is longer; for a copy that runs its file whole, the
+file's slowest test) × 3 and 10 s. Each copy sets its own limit (`vi.setConfig`
+in the setup file, before its test file's tests are collected). Rounds used to
+give a first attempt 1.5× and 1 s and retry past that with the full limit, as a
+round ended when its slowest copy did; in a stage a hanging copy holds only its
+own worker, and a real timeout costs the full limit either way, so one attempt
+at the full limit gives the same verdicts without the retries, which ended
+every tRPC pass with a stage of retries alone, 13-18 s long. What a short first
+limit was for, a stage's end, has a rule of its own: once every copy of a stage
+has started, a mutant's copy still going well past what it should take (1.5×
+its estimate or its file's baseline copy, and 1 s) holds the stage alone, so
+its worker is stopped and it runs again in the next stage, with its whole
+limit, beside that stage's work (a copy whose test had already failed keeps
+its kill). On hono a first stage otherwise waited 11.6 s on one such copy. The short limit costs a retry, never a
 verdict (0 differences on hono and tRPC; hono 294 to 227 ms a mutant, tRPC
 3.4 to 2.8 s). A mutant switch counts its evaluations; past a
 fixed limit (1,000,000 per copy) it throws a timeout error, so a loop the
@@ -209,26 +251,32 @@ detected, so the suite gets credit no assertion earned (tRPC's
 Supercov calls such a mutant `survived`: no test tells it apart. An error no test catches (work a
 test left running, a rejected promise nobody awaited) is the mutant's where
 the file raised none without it: a kill, or a `timeout` where it is the
-switch's own limit. A copy can also stop where no test's limit reaches: a mutant that leaves a
-module's top-level `await` waiting forever never lets its test file load. A
-round's copies report as they go (their claim, each test, their end), and
-the driver looks at them every 0.5 s. Once every copy still going has run
-past its own limit, the round's run is cancelled: its workers are asked to
-stop, and 3 s later stopped by force. A copy's limit is three times its
-file's baseline copy and 10 s more (twice StrykerJS's), plus the longest test
-or hook limit, so a test that hangs is still Vitest's to end. The round is also
-cancelled once nothing has reported for twice the longest test or hook
-limit and 30 s more. A cancelled copy ends gracefully with its remaining tests
-skipped, so only what each copy reported before the cancel counts. The copies
-still going then are timeouts, unless a test had already failed, or their
-tests left out hang the same way without the mutant (the confirmation
-above). A first version judged cancelled copies by how they ended, and turned
-19 of hono's timeouts into survivors. Copies no worker had taken run in a later round, and the pass goes
-on. On tRPC, such a hang used to hold the round for its whole deadline and
-then end the pass: the next pass started Vitest and ran every baseline
-again (3 of 32 shards, about a minute each). Only workers that do not stop
-even when forced still end the pass, and `mutants test` starts another for
-the mutants left.
+switch's own limit. A copy can also stop where no test's limit reaches: a
+mutant that leaves a module's top-level `await` waiting forever never lets its
+test file load. A stage's copies report as they go (their claim, each test,
+their end), and the driver looks at the copies going every 0.5 s. A copy's
+limit is its file's baseline copy × 3 and 10 s (twice StrykerJS's), plus the
+longest of its test limit and the hook limit, so a test that hangs is still
+Vitest's to end. Past that, the copy's worker process
+(Vitest's `forks` pool, its default) is stopped: Vitest's pool counts the
+worker as failed and starts the next copy, and the stage goes on. A copy whose
+worker is a thread of Vitest's own process (`threads`) cannot be stopped
+alone: once every copy still going is such a one past its limit, or nothing
+has reported for twice the longest test or hook limit and 30 s more, the
+stage's run is cancelled, its workers asked to stop and 3 s later stopped by
+force. A cancelled copy ends gracefully with its remaining tests skipped, so
+only what each copy reported before the cancel counts (a first version judged
+cancelled copies by how they ended, and turned 19 of hono's timeouts into
+survivors), and copies no worker had taken run in the next stage. A copy
+stopped either way is a timeout, unless a test had already failed, or its tests
+left out hang the same way without the mutant (the confirmation above). A copy
+whose worker process ends without the copy's end (its test file failed to
+load, its worker crashed) is over at once, and a kill: the test file did not
+finish. A first version of stages waited for such a copy's limit and then
+stopped a process that no longer existed, which turned 18 of tRPC's kills into
+timeouts.
+Only workers that do not stop even when forced end the pass, and
+`mutants test` starts another for the mutants left.
 
 ## Instrumentation
 

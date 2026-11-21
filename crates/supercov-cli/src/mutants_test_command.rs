@@ -744,8 +744,8 @@ fn execute(
             .filter(|m| m.decided.is_none())
             .cloned()
             .collect::<Vec<_>>();
-        // A pass that stops before its end (a test worker that never ended
-        // past a round's deadline) leaves its verdicts; the next pass runs
+        // A pass that stops before its end (a test worker that would not
+        // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
         let mut exit = 0;
         for _ in 0..PASSES {

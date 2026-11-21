@@ -1448,7 +1448,7 @@ fn write_vitest_config(
          import SupercovStrongReporter from './node_modules/vitestStrongReporter.mjs';\n\
          // Strong mutation (`supercov runs <id> mutants test`): the strong\n\
          // setup file switches each test file's mutant on, and the strong\n\
-         // reporter runs the plan in rounds instead of one run.\n\
+         // reporter runs the plan in stages instead of one run.\n\
          const supercovStrong = Boolean(process.env.SUPERCOV_STRONG_PLAN);\n\
          const supercovNodeSetup = supercovStrong ? 'vitestStrong.mjs' : 'vitest.mjs';\n\
          import {{ supercovBrowserCommands }} from './vitestCommands.mjs';\n\
