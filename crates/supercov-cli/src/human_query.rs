@@ -1263,7 +1263,9 @@ fn diff_mutants_text(
     let shown = &request.mutants.statuses;
     let rest = MutantStatus::ALL
         .into_iter()
-        .filter(|status| !shown.is_empty() && !shown.contains(status))
+        // A change's mutants are shown by status, the alive ones unless
+        // `--status` named others: `shown` is never empty here.
+        .filter(|status| !shown.contains(status))
         .filter(|status| data.summary.status.of(*status) > 0)
         .collect::<Vec<_>>();
     if !rest.is_empty() {
@@ -1322,9 +1324,9 @@ fn mutants_text(
             format!(" — {label}")
         }
     )];
-    if let Some(note) = &data.note
-        && data.summary.mutants == 0
-    {
+    // A note says why no mutant is listed: the run listed none, or none is
+    // in the files asked about.
+    if let Some(note) = &data.note {
         lines.extend([String::new(), note.clone()]);
         if data.stryker.is_none() {
             return lines.join("\n");
@@ -1378,7 +1380,8 @@ fn mutants_text(
                     .mutants
                     .stryker
                     .as_ref()
-                    .map_or_else(|| stryker.reports.join(", "), stryker_named)
+                    // StrykerJS is joined only where --stryker named reports.
+                    .map_or_else(String::new, stryker_named)
             ),
             format!("  Matched              {}", count(stryker.matched)),
             format!("  Only in Supercov     {}", by_mutator(&stryker.only_supercov)),
@@ -1397,15 +1400,15 @@ fn mutants_text(
                 "  SOUNDNESS VIOLATIONS {}: not infected or not reached here, killed by StrykerJS (exit 1)",
                 count(violations.total)
             ));
-            for violation in &violations.mutants {
-                lines.push(format!(
+            lines.extend(violations.mutants.iter().map(|violation| {
+                format!(
                     "    {}  {} here, {} by StrykerJS: {}",
                     violation.id,
                     violation.status.name(),
                     violation.stryker,
                     violation.reason
-                ));
-            }
+                )
+            }));
             if violations.total > violations.mutants.len() {
                 lines.push(format!(
                     "    … and {} more (--json lists them by mutant: --status not-infected,not-reached)",
@@ -1512,8 +1515,9 @@ fn mutants_text(
             .map_or_else(String::new, |status| format!("  stryker: {status}"))
     };
     if data.line.is_some() {
-        // One line's mutants, each with its whole reason.
-        for mutant in &data.mutants {
+        // One line's mutants, each with its whole reason (there are some:
+        // an empty page returned above).
+        data.mutants.iter().for_each(|mutant| {
             lines.extend([
                 format!(
                     "{}:{}  {}  {}{}{}",
@@ -1537,7 +1541,7 @@ fn mutants_text(
                 lines.push(format!("  untestable in practice: {reason}"));
             }
             lines.push(format!("  id:  {}", mutant.id));
-        }
+        });
     } else {
         let position = |mutant: &supercov_engine::mutants_query::MutantEntry| {
             let at = format!("{}:{}", mutant.span.start[0], mutant.span.start[1]);
@@ -1562,8 +1566,8 @@ fn mutants_text(
             ]
         });
         let [at, mutator, code, status] = widths;
-        for mutant in &data.mutants {
-            lines.push(format!(
+        lines.extend(data.mutants.iter().map(|mutant| {
+            format!(
                 "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {}{}{}",
                 position(mutant),
                 mutant.mutator,
@@ -1572,8 +1576,8 @@ fn mutants_text(
                 mutant.weak.reason,
                 untestable_suffix(mutant),
                 stryker(&mutant.stryker)
-            ));
-        }
+            )
+        }));
     }
     lines.push(page_label(page));
     let location = match (&data.file, data.line) {

@@ -854,18 +854,18 @@ fn read_stryker_reports(
     let project = std::env::current_dir()
         .map_err(|error| format!("Could not resolve the current directory: {error}"))?;
     let base = project.join(root.unwrap_or("."));
+    // Both paths are absolute, so no `.` is left among their components.
     let normal = |path: &Path| {
-        let mut normal = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    normal.pop();
+        path.components()
+            .fold(PathBuf::new(), |mut normal, component| {
+                match component {
+                    Component::ParentDir => {
+                        normal.pop();
+                    }
+                    other => normal.push(other),
                 }
-                other => normal.push(other),
-            }
-        }
-        normal
+                normal
+            })
     };
     let project = normal(&project);
     let path_of = |file: &str| {
@@ -882,8 +882,10 @@ fn read_stryker_reports(
         root: root.map(str::to_owned),
         ..Default::default()
     };
+    // `--stryker` names one report at least, and a directory with none is
+    // refused: there is always a file to read.
     let mut files = Vec::new();
-    for path in paths {
+    paths.iter().try_for_each(|path| {
         if Path::new(path).is_dir() {
             let found = json_files(Path::new(path))
                 .map_err(|error| format!("Could not read {path}: {error}"))?;
@@ -894,11 +896,12 @@ fn read_stryker_reports(
         } else {
             files.push(path.clone());
         }
-    }
-    for path in files {
+        Ok(())
+    })?;
+    files.into_iter().try_for_each(|path| {
         // A report named twice, or found in two directories given, once.
         if reports.reports.contains(&path) {
-            continue;
+            return Ok(());
         }
         let text = supercov_engine::fault_fs::read_to_string(&path)
             .map_err(|error| format!("Could not read {path}: {error}"))?;
@@ -906,7 +909,8 @@ fn read_stryker_reports(
             .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
         reports.reports.push(path);
         reports.mutants.extend(mutants);
-    }
+        Ok::<(), String>(())
+    })?;
     Ok(reports)
 }
 
@@ -914,8 +918,10 @@ fn read_stryker_reports(
 /// `directory` was given with the rest joined by `/`.
 fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
     let mut found = Vec::new();
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
+    let mut pending = Vec::new();
+    // The directory given first, then each found below it.
+    let mut directory = directory.to_path_buf();
+    loop {
         for entry in supercov_engine::fault_fs::read_dir(&directory)? {
             let path = entry?.path();
             if path.is_dir() {
@@ -926,6 +932,10 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
             {
                 found.push(path.to_string_lossy().replace('\\', "/"));
             }
+        }
+        match pending.pop() {
+            Some(next) => directory = next,
+            None => break,
         }
     }
     found.sort();

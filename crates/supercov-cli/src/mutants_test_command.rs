@@ -788,6 +788,11 @@ mod tests {
         assert!(critical("lib/money.ts", &globs));
         assert!(!critical("lib/deep/money.ts", &globs));
         assert!(!critical("src/other.ts", &globs));
+        // `?` is one character of a name, never a `/`.
+        assert!(critical("src/cart.js", &["src/cart.j?".to_owned()]));
+        assert!(!critical("src/cart.js", &["src?cart.js".to_owned()]));
+        // A `*` that reached the end of the name with the glob left over.
+        assert!(!critical("src/cart.js", &["src/*z".to_owned()]));
     }
 
     #[test]
@@ -797,6 +802,10 @@ mod tests {
             span_lines("c:/x/a.ts:12:1-12:7:BlockStatement:{}"),
             (12, 12)
         );
+        // An id with no span is read as spanning every line.
+        assert_eq!(span_lines("src/a.ts"), (0, u32::MAX));
+        assert_eq!(span_lines("src/a.ts:3:Mutator"), (0, u32::MAX));
+        assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
     }
 
     #[test]

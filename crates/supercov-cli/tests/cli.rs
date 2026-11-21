@@ -22315,7 +22315,7 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         "--critical",
         "src/**",
         "--fail-on",
-        "survived",
+        ",",
         "--",
         "npx",
         "vitest",
@@ -22340,6 +22340,19 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
         )
         .exits(1);
     assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
+    // A run whose evidence cannot be read, its size as recorded, has no
+    // plan.
+    let run = project.latest();
+    let directory = project.root.join(format!(".supercov/runs/{run}"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("run.json")).unwrap()).unwrap();
+    let evidence = directory.join(metadata["rawEvidence"]["file"].as_str().unwrap());
+    let size = std::fs::metadata(&evidence).unwrap().len() as usize;
+    std::fs::write(&evidence, vec![b'x'; size]).unwrap();
+    let unread = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan"])
+        .exits(1);
+    assert!(unread.starts_with("[supercov] "), "{unread}");
 
     // No run, and no command to measure one with.
     let empty = Project::empty("mutants-no-run");
@@ -22519,6 +22532,10 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         .exits(1);
     assert!(unsaved.contains("strong-mutation.json"), "{unsaved}");
     std::fs::remove_dir(&saved).unwrap();
+    // Nothing asked: nothing runs, and nothing fails.
+    project
+        .supercov(&["runs", "latest", "mutants", "test", "--file", "src/none.js"])
+        .succeeds();
     // A run that recorded no command, and none given.
     let metadata_path = project.root.join(format!(".supercov/runs/{run}/run.json"));
     let metadata = std::fs::read_to_string(&metadata_path).unwrap();
@@ -22531,6 +22548,16 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         "{commandless}"
     );
     std::fs::write(&metadata_path, metadata).unwrap();
+    // A command that writes no verdict: each mutant it ran is an error.
+    let mut silent = tax_pass.to_vec();
+    silent.extend(["--json", "--", "node", "-e", "0"]);
+    let silent = project.supercov(&silent).json();
+    assert!(silent["summary"]["ran"].as_u64() > Some(0), "{silent}");
+    assert_eq!(
+        silent["summary"]["error"], silent["summary"]["ran"],
+        "{silent}"
+    );
+    let errors = silent["summary"]["error"].as_u64().unwrap();
 
     // The command's own verdicts: a record no verdict is read from leaves
     // its mutant to the next pass, and a pass that decides nothing more
@@ -22559,7 +22586,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
             "fake-strong.mjs",
         ])
         .json();
-    assert_eq!(reply["summary"]["error"], 1, "{reply}");
+    assert_eq!(reply["summary"]["error"], errors + 1, "{reply}");
     assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
     assert!(reply["summary"]["equivalent"].as_u64() > Some(0), "{reply}");
     assert_eq!(reply["passes"][0]["driver"], "fake", "{reply}");
@@ -22687,6 +22714,9 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
             "{contents}"
         );
     }
+    // An empty list accepts nothing.
+    project.write("supercov.accepted.json", "[]");
+    gated(&[]).succeeds();
     std::fs::remove_file(project.root.join("supercov.accepted.json")).unwrap();
 
     // A source changed since a run whose mutants were never listed: its
@@ -22766,6 +22796,16 @@ fn a_run_whose_source_holds_no_code_has_no_mutants_to_test() {
         &measured.succeeds(),
         &["mutation score -\n", "  ran 0 mutant(s) in "],
     );
+    let plan = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    assert_eq!(plan["summary"]["mutants"], 0, "{plan}");
+    // The report shows no mutants for it.
+    project
+        .supercov(&["report", "--no-open", "--output", "report.html"])
+        .succeeds();
+    let report = report_data(&project.read("report.html"));
+    assert!(report["runs"][0]["mutants"].is_null(), "{report}");
 }
 
 /// The mutants commands started in a directory deleted under the shell
@@ -22782,6 +22822,11 @@ fn the_mutants_commands_in_a_removed_directory_say_so() {
             &["runs", "latest", "mutants", "--format", "jsonl"],
             2,
             "could not resolve the current directory",
+        ),
+        (
+            &["runs", "latest", "mutants", "--stryker", "mutation.json"],
+            2,
+            "Could not resolve the current directory",
         ),
     ] {
         let gone = parent.join("gone");
@@ -22804,4 +22849,537 @@ fn the_mutants_commands_in_a_removed_directory_say_so() {
         );
     }
     std::fs::remove_dir_all(parent).unwrap();
+}
+
+/// A mocha project kept below the top of its repository, its tests run
+/// with uncommitted changes on top of a `base` branch: mutants at a clock
+/// boundary, a change too long to show whole, a source with no mutants, a
+/// source no test loads, and a file of thirty guards nothing calls.
+#[cfg(unix)]
+fn mutant_views_project(label: &str) -> (Project, Project) {
+    let repository = Project::empty(label);
+    let project = Project {
+        root: repository.root.join("app"),
+    };
+    project.write(
+        "package.json",
+        r#"{ "name": "views", "type": "module", "scripts": { "test": "mocha" } }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    repository.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/cart.js",
+        "export function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function refund(sum) {\n  return sum > 100 ? sum * 0.9 : sum;\n}\n",
+    );
+    project.write(
+        "src/clock.js",
+        "export function expired(deadline) {\n  return Date.now() > deadline;\n}\n\nexport function fresh(at) {\n  return Date.now() - at < 1000;\n}\n\nexport function shout(name) {\n  return `HEY ${name}`;\n}\n",
+    );
+    project.write(
+        "src/greet.js",
+        "export function greet(name) {\n  return \"Hello there, \" + name + \", and welcome back to the little store we have built for all of you\";\n}\n\nexport function full(order) {\n  return order.items.length + order.extras.length >= order.limit;\n}\n",
+    );
+    project.write("src/consts.js", "export const FREE_FROM = 50;\n");
+    let mut guards = String::from("export function band(n) {\n");
+    for bound in 0..30 {
+        guards.push_str(&format!("  if (n > {bound}) return {bound};\n"));
+    }
+    guards.push_str("  return -1;\n}\n");
+    project.write("src/unused.js", &guards);
+    project.write(
+        "test/cart.test.js",
+        "import assert from \"node:assert/strict\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => assert.equal(shipping(80), 0));\n  it(\"charges small orders\", () => assert.equal(shipping(10), 5));\n  it(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n});\n",
+    );
+    project.write(
+        "test/more.test.js",
+        "import assert from \"node:assert/strict\";\nimport { expired } from \"../src/clock.js\";\nimport { greet } from \"../src/greet.js\";\nimport { FREE_FROM } from \"../src/consts.js\";\ndescribe(\"more\", () => {\n  it(\"expires\", () => assert.equal(expired(0), true));\n  it(\"greets\", () => assert.ok(greet(\"Ann\").startsWith(\"Hello\")));\n  it(\"frees from fifty\", () => assert.equal(FREE_FROM, 50));\n});\n",
+    );
+    repository.git(&["init", "-q"]);
+    repository.commit("views");
+    repository.git(&["branch", "base"]);
+    // Uncommitted: dearer small orders, and a smaller refund.
+    project.edit("src/cart.js", "return 5;", "return 6;");
+    project.edit("src/cart.js", "sum * 0.9", "sum * 0.8");
+    project.edit("test/cart.test.js", "shipping(10), 5", "shipping(10), 6");
+    (repository, project)
+}
+
+/// Every view of a run's mutants as a reader sees it: the summary's count
+/// of mutants at a clock boundary; the table of files, with the one no
+/// test ran, a filter's label and its pages; a file's and a line's
+/// mutants, cut where too long, with their boundary, StrykerJS's status
+/// and the gate; a change's (the run's working tree) with its pages; and
+/// a source with no mutants, which notes so.
+#[cfg(unix)]
+#[test]
+fn every_mutants_view_shows_what_the_run_says_of_them() {
+    let (_repository, project) = mutant_views_project("mutant-views");
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let view = |arguments: &[&str]| {
+        let mut command = vec!["runs", "latest", "mutants"];
+        command.extend(arguments);
+        project.supercov(&command).succeeds()
+    };
+    contains_all(
+        &project.supercov(&["runs", "latest"]).succeeds(),
+        &["(1 at a clock or random boundary)"],
+    );
+
+    // The table of files.
+    contains_all(
+        &view(&[]),
+        &[
+            "1 file no test ran, with ",
+            " is listed last",
+            "list the mutants no test infects: ",
+        ],
+    );
+    assert!(view(&["--limit", "1"]).contains("next page: "));
+    let past = view(&["--offset", "100"]);
+    assert!(!past.contains("inspect a file: "), "{past}");
+    // One test's view: what it does not infect, none; what it never ran.
+    let labels = view(&["--title", "labels"]);
+    contains_all(
+        &labels,
+        &[
+            "title containing \"labels\"",
+            " files no test ran, with ",
+            " are listed last",
+        ],
+    );
+    assert!(
+        !labels.contains("list the mutants no test infects"),
+        "{labels}"
+    );
+
+    // A file's mutants: the clock boundary named where no test infected
+    // the mutant, not where none reached it.
+    let clock = view(&["src/clock.js"]);
+    assert!(clock.contains("(clock boundary)"), "{clock}");
+    assert!(
+        clock
+            .lines()
+            .filter(|line| line.starts_with("6:"))
+            .all(|line| !line.contains("boundary")),
+        "{clock}"
+    );
+    assert!(
+        view(&["src/clock.js:2"]).contains("  untestable in practice: "),
+        "clock line"
+    );
+    let greet = view(&["src/greet.js"]);
+    assert!(greet.contains('…'), "{greet}");
+    let full = view(&["src/greet.js:6"]);
+    assert!(full.contains("\n  in:  order.items.length"), "{full}");
+    assert!(view(&["src/cart.js", "--limit", "2"]).contains("next page: "));
+    assert!(view(&["src/cart.js", "--status", "equivalent"]).contains("No mutants match."));
+    let beyond = view(&["src/cart.js", "--offset", "100"]);
+    assert!(!beyond.contains("No mutants match."), "{beyond}");
+    assert!(
+        view(&["src/cart.js", "--mutator", "EqualityOperator"])
+            .contains("--mutator 'EqualityOperator'"),
+        "mutator"
+    );
+    let gate = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/cart.js",
+            "--fail-on",
+            "not-infected",
+        ])
+        .exits(1);
+    assert!(
+        gate.contains("FAILED --fail-on not-infected: 1 mutant (exit 1)"),
+        "{gate}"
+    );
+    // A source with no mutants says so, with StrykerJS's block or alone.
+    let consts = view(&["src/consts.js"]);
+    assert!(
+        consts.contains("src/consts.js has no mutants in this run."),
+        "{consts}"
+    );
+    assert!(!consts.contains("StrykerJS"), "{consts}");
+
+    // StrykerJS's report: a survivor it agrees on, no violation.
+    let source = project.read("src/cart.js");
+    let report = |file: &str| {
+        serde_json::json!({
+            "schemaVersion": "1",
+            "thresholds": {"high": 80, "low": 60},
+            "files": {file: {"language": "javascript", "source": source, "mutants": [{
+                "id": "1",
+                "mutatorName": "ConditionalExpression",
+                "replacement": "true",
+                "location": {"start": {"line": 13, "column": 10}, "end": {"line": 13, "column": 19}},
+                "status": "Survived",
+            }]}},
+        })
+        .to_string()
+    };
+    project.write("reports/clean.json", &report("src/cart.js"));
+    project.write("reports/nested/clean.json", &report("../../src/cart.js"));
+    for number in 0..4 {
+        project.write(
+            &format!("reports/many/r{number}.json"),
+            &report("src/cart.js"),
+        );
+    }
+    let joined = view(&["src/cart.js", "--stryker", "reports/clean.json"]);
+    contains_all(
+        &joined,
+        &[
+            "  stryker: Survived",
+            "  Soundness violations 0",
+            "  Only in StrykerJS    0\n",
+        ],
+    );
+    let rooted = view(&[
+        "src/cart.js",
+        "--stryker",
+        "reports/nested/clean.json",
+        "--stryker-root",
+        "reports/nested",
+        "--limit",
+        "1",
+    ]);
+    assert!(
+        rooted.contains("--stryker-root 'reports/nested'"),
+        "{rooted}"
+    );
+    // Four reports on a line's view: no command shown stands for them.
+    let many = view(&[
+        "src/cart.js:13",
+        "--stryker",
+        "reports/many/r0.json",
+        "reports/many/r1.json",
+        "reports/many/r2.json",
+        "reports/many/r3.json",
+    ]);
+    assert!(many.contains("StrykerJS (4 reports)"), "{many}");
+    assert!(!many.contains("in these commands"), "{many}");
+    let consts = view(&["src/consts.js", "--stryker", "reports/clean.json"]);
+    contains_all(
+        &consts,
+        &[
+            "src/consts.js has no mutants in this run.",
+            "StrykerJS (reports/clean.json)",
+        ],
+    );
+    // More violations than are listed one by one.
+    let unused = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/unused.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let killed = unused["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["mutator"] == "ConditionalExpression")
+        .map(|mutant| {
+            let id = mutant["id"].as_str().unwrap();
+            let parts = id.split(':').collect::<Vec<_>>();
+            let (start_column, end_line) = parts[2].split_once('-').unwrap();
+            serde_json::json!({
+                "id": id,
+                "mutatorName": "ConditionalExpression",
+                "replacement": parts[5],
+                "location": {
+                    "start": {"line": parts[1].parse::<u32>().unwrap(), "column": start_column.parse::<u32>().unwrap()},
+                    "end": {"line": end_line.parse::<u32>().unwrap(), "column": parts[3].parse::<u32>().unwrap()},
+                },
+                "status": "Killed",
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(killed.len(), 60, "{unused}");
+    project.write(
+        "reports/violations.json",
+        &serde_json::json!({
+            "schemaVersion": "1",
+            "thresholds": {"high": 80, "low": 60},
+            "files": {"src/unused.js": {"language": "javascript", "source": project.read("src/unused.js"), "mutants": killed}},
+        })
+        .to_string(),
+    );
+    let violated = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/unused.js",
+            "--stryker",
+            "reports/violations.json",
+        ])
+        .exits(1);
+    contains_all(
+        &violated,
+        &[
+            "SOUNDNESS VIOLATIONS 60",
+            "    … and 10 more (--json lists them by mutant",
+        ],
+    );
+
+    // A change's mutants, read against the working tree the run measured.
+    let change = view(&["--diff", "base"]);
+    contains_all(
+        &change,
+        &[
+            "to the working tree: the run was measured with uncommitted changes, or records no commit",
+            "Not reached",
+            "src/cart.js:13:",
+        ],
+    );
+    assert!(
+        view(&["--diff", "base", "--stryker", "reports/clean.json"])
+            .contains("  stryker: Survived")
+    );
+    assert!(view(&["--diff", "base", "--limit", "1"]).contains("next page: "));
+    assert!(view(&["--diff", "base", "--limit", "1", "--offset", "1"]).contains("showing 2-2 of "));
+    // The last page, from the second mutant on.
+    let rest = view(&["--diff", "base", "--offset", "1"]);
+    assert!(rest.contains("showing 2-"), "{rest}");
+    assert!(!rest.contains("next page: "), "{rest}");
+    assert!(
+        view(&["--diff", "base", "--status", "not-infected"])
+            .contains("No mutant on this change is left that way.")
+    );
+    assert!(
+        view(&["src/clock.js", "--diff", "base"])
+            .contains("No mutant is on a line this change added or changed.")
+    );
+    let every = view(&[
+        "--diff",
+        "base",
+        "--status",
+        "not-infected,not-reached,infected,unknown,equivalent",
+    ]);
+    assert!(!every.contains("Not listed: "), "{every}");
+    // Each of git's asks failing in turn.
+    let mut said = std::collections::BTreeSet::new();
+    for nth in 1..=10 {
+        let ran = project.supercov_with(
+            &["runs", "latest", "mutants", "--diff", "base"],
+            &[("SUPERCOV_TEST_FAULT", &format!("git@{nth}"))],
+        );
+        if ran.code() == 0 {
+            continue;
+        }
+        let stderr = ran.stderr();
+        for message in [
+            "--diff needs git: could not run git",
+            "Could not find where this change left base",
+            "could not run git: injected fault at git",
+        ] {
+            if stderr.contains(message) {
+                said.insert(message);
+            }
+        }
+    }
+    assert_eq!(said.len(), 3, "{said:?}");
+}
+
+/// A run's mutants written out: one JSON object per line, or a markdown
+/// table for a pull request, to standard output or a file; mistakes and a
+/// file or output that cannot be written are said, with exit 2.
+#[cfg(unix)]
+#[test]
+fn mutants_export_as_lines_or_a_table_and_says_what_it_cannot_write() {
+    let (_repository, project) = mutant_views_project("mutants-export");
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let export = |arguments: &[&str]| {
+        let mut command = vec!["runs", "latest", "mutants"];
+        command.extend(arguments);
+        project.supercov(&command)
+    };
+    let bogus = export(&["--format", "jsonl", "--status", "bogus"]).exits(2);
+    assert!(bogus.contains("--status bogus is not a status"), "{bogus}");
+    let missing = export(&["src/nothing.js", "--format", "jsonl"]).exits(2);
+    assert!(missing.contains("src/nothing.js"), "{missing}");
+    // No mutants: no lines, and the note why.
+    let none = export(&[
+        "src/consts.js",
+        "--format",
+        "jsonl",
+        "--json",
+        "--limit",
+        "5",
+        "--offset",
+        "0",
+    ]);
+    assert_eq!(none.succeeds(), "");
+    assert!(
+        none.stderr()
+            .contains("src/consts.js has no mutants in this run."),
+        "{}",
+        none.stderr()
+    );
+    let unwritten = export(&["--format", "jsonl", "--output", "missing/mutants.jsonl"]).exits(2);
+    assert!(unwritten.contains("missing/mutants.jsonl: "), "{unwritten}");
+    let written = export(&["--format", "markdown", "--output", "mutants.md"]);
+    assert!(
+        written
+            .stderr()
+            .contains("wrote the mutants' table to mutants.md"),
+        "{}",
+        written.stderr()
+    );
+    assert!(project.read("mutants.md").starts_with("### Mutants\n\n**"));
+    let reached = export(&[
+        "src/cart.js",
+        "--format",
+        "markdown",
+        "--status",
+        "not-reached",
+    ])
+    .succeeds();
+    assert!(reached.contains(" | not reached | "), "{reached}");
+    assert!(!reached.contains(" | not infected | "), "{reached}");
+    let empty = export(&["src/consts.js", "--format", "markdown"]).succeeds();
+    contains_all(
+        &empty,
+        &[
+            "**0 mutants**: weak score **—**\n",
+            "No mutant is not infected or not reached.",
+        ],
+    );
+    let clock = export(&["src/clock.js", "--format", "markdown"]).succeeds();
+    contains_all(&clock, &["not infected (clock boundary)", "HEY"]);
+    // A change with no mutant on its lines in the file asked about.
+    let unchanged = export(&["src/clock.js", "--diff", "base", "--format", "markdown"]).succeeds();
+    contains_all(
+        &unchanged,
+        &[
+            "### Mutants on this change",
+            "**0 mutants** on 0 of ",
+            "weak score **—**\n",
+        ],
+    );
+    // StrykerJS joined with no violation: the export passes.
+    project.write(
+        "reports/empty.json",
+        r#"{"schemaVersion": "1", "thresholds": {"high": 80, "low": 60}, "files": {}}"#,
+    );
+    export(&[
+        "src/cart.js",
+        "--format",
+        "jsonl",
+        "--stryker",
+        "reports/empty.json",
+    ])
+    .succeeds();
+    let one = export(&["src/greet.js:1", "--format", "markdown"]).succeeds();
+    assert!(one.contains("**1 mutant**"), "{one}");
+    // A standard output with no room left.
+    #[cfg(target_os = "linux")]
+    {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = project
+            .supercov_command(&["runs", "latest", "mutants", "--format", "jsonl"])
+            .stdout(full)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(
+            stderr.contains("could not write the mutants to standard output"),
+            "{stderr}"
+        );
+    }
+}
+
+/// `--stryker` and the other mutants options each name what they need, and
+/// a report or directory of reports that cannot be read is said to be so.
+#[cfg(unix)]
+#[test]
+fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
+    let (_repository, project) = mutant_views_project("mutants-stryker-refusals");
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    // A source changed since a run whose mutants were never listed: its
+    // mutants are not listed, and that is said.
+    project.edit("src/greet.js", "Hello there", "Hi there");
+    let changed = project.supercov(&["runs", "latest", "mutants"]);
+    let said = format!("{}{}", changed.succeeds(), changed.stderr());
+    assert!(said.contains("1 file(s) changed since run"), "{said}");
+    for (flag, said) in [
+        ("--status", "--status requires statuses"),
+        ("--mutator", "--mutator requires a StrykerJS mutator"),
+        (
+            "--stryker",
+            "--stryker requires a StrykerJS mutation.json report",
+        ),
+        ("--diff", "--diff requires a git ref"),
+        ("--fail-on", "--fail-on requires statuses"),
+        ("--stryker-root", "--stryker-root requires a directory"),
+    ] {
+        let refused = project
+            .supercov(&["runs", "latest", "mutants", flag])
+            .exits(2);
+        assert!(refused.contains(said), "{flag}: {refused}");
+    }
+    // No status named: every mutant, as with no --status.
+    project
+        .supercov(&["runs", "latest", "mutants", "--status", ","])
+        .succeeds();
+    std::fs::create_dir_all(project.root.join("reports/void/deeper")).unwrap();
+    let void = project
+        .supercov(&["runs", "latest", "mutants", "--stryker", "reports/void"])
+        .exits(2);
+    assert!(
+        void.contains("reports/void holds no .json report"),
+        "{void}"
+    );
+    project.write("reports/broken.json", "not json");
+    let broken = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--stryker",
+            "reports/broken.json",
+        ])
+        .exits(2);
+    assert!(
+        broken.contains("Could not read reports/broken.json as a StrykerJS report"),
+        "{broken}"
+    );
+    for fault in [
+        "fs.read_dir#public_query.rs:925",
+        "fs.read_dir entry#public_query.rs:925",
+    ] {
+        let unlisted = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "--stryker", "reports"],
+                &[("SUPERCOV_TEST_FAULT", fault)],
+            )
+            .exits(2);
+        assert!(
+            unlisted.contains("Could not read reports: "),
+            "{fault}: {unlisted}"
+        );
+        assert!(
+            fired_at(&unlisted, "public_query.rs:925"),
+            "{fault}: {unlisted}"
+        );
+    }
 }
