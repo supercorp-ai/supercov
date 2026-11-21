@@ -270,16 +270,23 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // A copy reports as it goes: its claim, each test, its end. One that
         // stops (a mutant that left a module's import waiting forever, a
         // worker that will not end) must not hold the round. Once every copy
-        // still going has passed its limit (a mutant's copy: three times its
-        // file's baseline copy and 10 s more, twice StrykerJS's limit), or
-        // nothing has reported for
-        // longer than any one test or hook may take, the run is cancelled:
-        // what ended is read, the copies that did not end are timeouts, and
-        // the copies no worker took yet run in a later round.
-        const quietLimit = Math.max(timeoutMs, hookTimeoutOf(vitest)) * 2 + 30_000;
+        // still going has passed its limit, or nothing has reported for
+        // twice the longest test or hook limit and 30 s more, the run is
+        // cancelled. A mutant's copy may take three times its file's
+        // baseline copy and 10 s more (twice StrykerJS's limit), plus the
+        // longest test or hook limit: a test that hangs is Vitest's to end,
+        // as a timeout.
+        const slowest = Math.max(timeoutMs, hookTimeoutOf(vitest));
+        const quietLimit = slowest * 2 + 30_000;
         let reported = -1;
         let lastReport = roundStarted;
         let hung = false;
+        // What every copy had reported when the run was cancelled. A
+        // cancelled copy ends gracefully, its tests left skipped: only what
+        // it reported before counts. A copy still going then is a timeout
+        // unless a test had already failed; one no worker had taken runs in
+        // a later round.
+        let atCancel;
         while (!settled) {
             await Promise.race([ran, pause(WATCH_INTERVAL_MS)]);
             if (settled)
@@ -293,9 +300,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 continue;
             }
             const going = outcomes.flatMap((outcome, at) => outcome.claimed && !outcome.done ? [{ outcome, at }] : []);
-            const overdue = going.length > 0 && going.every(({ outcome, at }) => assignments[at].limitMs !== undefined && now - outcome.claimedAt > assignments[at].limitMs);
+            const overdue = going.length > 0 && going.every(({ outcome, at }) => assignments[at].limitMs !== undefined && now - outcome.claimedAt > assignments[at].limitMs + slowest);
             if (overdue || now - lastReport > quietLimit) {
                 hung = true;
+                atCancel = outcomes;
                 break;
             }
         }
@@ -327,9 +335,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         profile.wallMs += roundEnded - roundStarted;
         let lastDone = roundStarted;
         // The outcome of each claim, whichever copy took it.
-        const outcomesOf = placedAt.map((out) => {
-            const outcome = readOutcome(out);
-            // The run was cancelled: a copy that did not end stopped there.
+        const outcomesOf = placedAt.map((out, at) => {
+            const outcome = hung ? atCancel[at] : readOutcome(out);
             outcome.cancelled = hung;
             outcome.hung = hung && outcome.claimed && !outcome.done;
             if (outcome.hung)

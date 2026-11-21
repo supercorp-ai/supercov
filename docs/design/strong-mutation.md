@@ -215,11 +215,15 @@ round's copies report as they go (their claim, each test, their end), and
 the driver looks at them every 0.5 s. Once every copy still going has run
 past its own limit, the round's run is cancelled: its workers are asked to
 stop, and 3 s later stopped by force. A copy's limit is three times its
-file's baseline copy and 10 s more, twice StrykerJS's. The round is also
+file's baseline copy and 10 s more (twice StrykerJS's), plus the longest test
+or hook limit, so a test that hangs is still Vitest's to end. The round is also
 cancelled once nothing has reported for twice the longest test or hook
-limit and 30 s more. The copies that did not end are timeouts, unless their
+limit and 30 s more. A cancelled copy ends gracefully with its remaining tests
+skipped, so only what each copy reported before the cancel counts. The copies
+still going then are timeouts, unless a test had already failed, or their
 tests left out hang the same way without the mutant (the confirmation
-above). Copies no worker had taken run in a later round, and the pass goes
+above). A first version judged cancelled copies by how they ended, and turned
+19 of hono's timeouts into survivors. Copies no worker had taken run in a later round, and the pass goes
 on. On tRPC, such a hang used to hold the round for its whole deadline and
 then end the pass: the next pass started Vitest and ran every baseline
 again (3 of 32 shards, about a minute each). Only workers that do not stop
