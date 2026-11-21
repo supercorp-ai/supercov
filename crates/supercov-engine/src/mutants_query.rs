@@ -1180,4 +1180,645 @@ mod tests {
         );
         assert_eq!((none.weak_score, none.weak_score_reached), (None, None));
     }
+
+    #[test]
+    fn statuses_are_read_by_name_and_an_unknown_one_is_refused() {
+        let options = serde_json::from_value::<MutantsOptions>(serde_json::json!({
+            "statuses": ["not-infected", "not-reached"],
+        }))
+        .unwrap();
+        assert_eq!(
+            options.statuses,
+            [MutantStatus::NotInfected, MutantStatus::NotReached]
+        );
+        let unknown = serde_json::from_value::<MutantsOptions>(serde_json::json!({
+            "statuses": ["survived"],
+        }))
+        .unwrap_err();
+        assert!(
+            unknown
+                .to_string()
+                .contains("unknown mutant status survived"),
+            "{unknown}"
+        );
+        // A status is a name, not a number.
+        assert!(
+            serde_json::from_value::<MutantsOptions>(serde_json::json!({ "statuses": [1] }))
+                .is_err()
+        );
+    }
+
+    /// A report is refused with the part it lacks named; one of no files,
+    /// or of a file with no mutants, holds none.
+    #[test]
+    fn a_stryker_report_missing_a_part_is_refused_with_what_it_lacks() {
+        let parse = |report: serde_json::Value| {
+            parse_stryker_report(&report.to_string(), |path| format!("web/{path}"))
+        };
+        let location = serde_json::json!({
+            "start": { "line": 1, "column": 1 },
+            "end": { "line": 1, "column": 6 },
+        });
+        let mutant = |without: &str| {
+            let mut mutant = serde_json::json!({
+                "location": location,
+                "mutatorName": "EqualityOperator",
+                "replacement": "a <= b",
+                "status": "Killed",
+            });
+            match without {
+                "start" | "end" => {
+                    mutant["location"].as_object_mut().unwrap().remove(without);
+                }
+                _ => {
+                    mutant.as_object_mut().unwrap().remove(without);
+                }
+            }
+            serde_json::json!({ "files": { "src/a.js": { "mutants": [mutant] } } })
+        };
+        assert!(parse_stryker_report("not json", str::to_owned).is_err());
+        assert_eq!(
+            parse(serde_json::json!({ "schemaVersion": "2" })).unwrap_err(),
+            "it has no `files` object; is it StrykerJS's mutation.json?"
+        );
+        assert_eq!(
+            parse(serde_json::json!({ "files": { "src/a.js": { "source": "" } } })).unwrap_err(),
+            "src/a.js has no `mutants` list"
+        );
+        assert_eq!(
+            parse(mutant("start")).unwrap_err(),
+            "a mutant of src/a.js has no start location"
+        );
+        assert_eq!(
+            parse(mutant("end")).unwrap_err(),
+            "a mutant of src/a.js has no end location"
+        );
+        assert_eq!(
+            parse(mutant("mutatorName")).unwrap_err(),
+            "a mutant of src/a.js has no mutatorName"
+        );
+        assert_eq!(
+            parse(mutant("status")).unwrap_err(),
+            "a mutant of src/a.js has no status"
+        );
+        assert_eq!(parse(serde_json::json!({ "files": {} })).unwrap(), []);
+        assert_eq!(
+            parse(serde_json::json!({ "files": { "src/a.js": { "mutants": [] } } })).unwrap(),
+            []
+        );
+        // Without the file's source, the mutated code is not known.
+        assert_eq!(
+            parse(mutant("none")).unwrap(),
+            [StrykerReportMutant {
+                file: "web/src/a.js".into(),
+                start: (1, 1),
+                end: (1, 6),
+                mutator: "EqualityOperator".into(),
+                replacement: Some("a <= b".into()),
+                original: None,
+                status: "Killed".into(),
+            }]
+        );
+    }
+
+    /// A lone carriage return ends a line; the column just past a source's
+    /// last character is its end; a place outside the source has no text.
+    #[test]
+    fn a_slice_reaches_a_source_s_end_and_not_past_it() {
+        assert_eq!(utf16_slice("a\rbc", (2, 1), (2, 3)).as_deref(), Some("bc"));
+        assert_eq!(utf16_slice("ab\n", (2, 1), (2, 1)).as_deref(), Some(""));
+        assert_eq!(utf16_slice("", (1, 1), (1, 1)).as_deref(), Some(""));
+        assert_eq!(utf16_slice("ab", (0, 1), (1, 2)), None);
+        assert_eq!(utf16_slice("ab", (1, 1), (3, 1)), None);
+        assert_eq!(utf16_slice("ab", (1, 5), (1, 6)), None);
+    }
+
+    /// A report without the mutated code takes it from the run's mutant at
+    /// the same place, or names the mutant by its replacement alone.
+    #[test]
+    fn a_stryker_mutant_without_its_code_takes_the_run_s_or_its_replacement() {
+        assert!(stryker_by_id(&[], &HashMap::new()).is_empty());
+        let mutant = |line: u32| StrykerReportMutant {
+            file: "src/a.js".into(),
+            start: (line, 5),
+            end: (line, 10),
+            mutator: "EqualityOperator".into(),
+            replacement: Some("a <= b".into()),
+            original: None,
+            status: "Survived".into(),
+        };
+        let originals =
+            HashMap::from([(("src/a.js", (1, 5), (1, 10), "EqualityOperator"), "a < b")]);
+        let merged = stryker_by_id(&[mutant(1), mutant(2)], &originals);
+        assert_eq!(
+            merged.keys().collect::<Vec<_>>(),
+            [
+                "src/a.js:1:5-1:10:EqualityOperator:<=",
+                "src/a.js:2:5-2:10:EqualityOperator:?a <= b",
+            ]
+        );
+    }
+
+    fn stryker(line: u32, mutator: &str, status: &str) -> StrykerReportMutant {
+        StrykerReportMutant {
+            file: "app/route.ts".into(),
+            start: (line, 1),
+            end: (line, 6),
+            mutator: mutator.into(),
+            replacement: Some("a <= b".into()),
+            original: Some("a < b".into()),
+            status: status.into(),
+        }
+    }
+
+    fn compared(line: u32, status: MutantStatus) -> IndexedMutant {
+        IndexedMutant {
+            mutator: "EqualityOperator".into(),
+            descriptor: "<=".into(),
+            status,
+            ..indexed((line, 1), (line, 6), "a < b", "a <= b", None)
+        }
+    }
+
+    /// Past fifty, violations are counted and not listed; a survivor this
+    /// run infects is not explained.
+    #[test]
+    fn the_join_lists_fifty_violations_and_counts_every_one() {
+        let mut asked = (1..=51)
+            .map(|line| compared(line, MutantStatus::NotInfected))
+            .collect::<Vec<_>>();
+        asked.push(compared(60, MutantStatus::Infected));
+        let mut mutants = (1..=51)
+            .map(|line| stryker(line, "EqualityOperator", "Killed"))
+            .collect::<Vec<_>>();
+        mutants.push(stryker(60, "EqualityOperator", "Survived"));
+        let reports = StrykerReports {
+            reports: vec!["reports/mutation.json".into()],
+            mutants,
+            ..StrykerReports::default()
+        };
+        let (joined, statuses) = join(&asked, &reports, |_| true);
+        assert_eq!(joined.matched, 52);
+        assert_eq!(joined.soundness_violations.total, 51);
+        assert_eq!(joined.soundness_violations.mutants.len(), LISTED_VIOLATIONS);
+        assert_eq!(
+            joined.survivors_explained,
+            SurvivorsExplained {
+                survivors: 1,
+                explained: 0
+            }
+        );
+        assert_eq!(statuses.len(), 52);
+
+        // Nothing asked: every StrykerJS mutant is its own.
+        let (joined, _) = join(&[], &reports, |_| true);
+        assert_eq!(joined.matched, 0);
+        assert_eq!(joined.only_stryker.total, 52);
+        // Nothing on either side.
+        let (joined, statuses) = join(&[], &StrykerReports::default(), |_| true);
+        assert_eq!(joined, StrykerJoin::default());
+        assert!(statuses.is_empty());
+    }
+
+    /// Where no point contains a mutant whose status is unknown, the run
+    /// cannot say whether it was reached.
+    #[test]
+    fn an_unplaced_mutant_is_of_unknown_reach() {
+        let unplaced = MutantEntry::of(
+            &IndexedMutant {
+                status: MutantStatus::Unknown,
+                code: "no-point".into(),
+                ..indexed((1, 1), (1, 6), "a < b", "a <= b", None)
+            },
+            None,
+        );
+        assert_eq!(unplaced.weak.reach, "unknown");
+        assert_eq!(unplaced.weak.infection, Some("unknown"));
+        let placed = MutantEntry::of(
+            &IndexedMutant {
+                status: MutantStatus::Unknown,
+                ..indexed((1, 1), (1, 6), "a < b", "a <= b", None)
+            },
+            None,
+        );
+        assert_eq!(placed.weak.reach, "reached");
+    }
+
+    fn report(mutation: Option<Vec<IndexedMutant>>) -> crate::coverage_report::CoverageReport {
+        use crate::coverage_report::{
+            CoverageManifest, CoverageReportRequest, ExitCodeInput, PointMeta, RawTestResult,
+            RuntimeSnapshot, TestProvenance, analyze_coverage_results,
+        };
+        let mut report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: Vec::new(),
+                points: vec![PointMeta {
+                    id: "point".into(),
+                    kind: crate::coverage_analysis::PointKind::Statement,
+                    file: "app/route.ts".into(),
+                    line: 1,
+                    column: 1,
+                    source: "work();".into(),
+                    label: None,
+                }],
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
+            },
+            raw_results: vec![RawTestResult {
+                duration_ms: None,
+                span: None,
+                test_id: Some("test".into()),
+                scope: None,
+                test: "test".into(),
+                test_file: Some("tests/route.test.ts".into()),
+                title: None,
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: None,
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "node:test".into(),
+                    kind: "unit".into(),
+                    project: None,
+                    source: "runner-default".into(),
+                    tags: Vec::new(),
+                },
+                role: "test".into(),
+                attribution: crate::coverage_report::ATTRIBUTION_EXACT.into(),
+                phases: Vec::new(),
+                runtime: vec![RuntimeSnapshot {
+                    hits: vec!["point".into()],
+                    ..Default::default()
+                }],
+                browser: Vec::new(),
+                server: Vec::new(),
+            }],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        })
+        .unwrap();
+        // The scope includes a file with no mutants and leaves one out.
+        let scope = serde_json::json!({
+            "version": 1,
+            "mode": "automatic",
+            "roots": ["."],
+            "entries": [
+                { "file": "app/route.ts", "status": "included", "reason": "source" },
+                { "file": "app/plain.ts", "status": "included", "reason": "source" },
+                { "file": "app/skipped.ts", "status": "excluded", "reason": "generated" },
+            ]
+        });
+        for view in [
+            &mut report.view,
+            &mut report.filters.passed,
+            &mut report.filters.failed,
+        ] {
+            view.scope = Some(scope.clone());
+        }
+        report.mutation = mutation.map(|mutants| crate::coverage_index::MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants,
+        });
+        report
+    }
+
+    /// The index of `sections`, given to `body`.
+    fn with_sections<R>(
+        sections: &[crate::query_index::QueryIndexSection],
+        body: impl FnOnce(&CoverageIndex<'_>) -> R,
+    ) -> R {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-mutants-query-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_directory::TestDirectory::adopt(root);
+        let identity = crate::query_index::QueryIndexIdentity {
+            evidence_sha256: [1; 32],
+            evidence_bytes: 100,
+            analysis_sha256: [2; 32],
+            producer_sha256: [3; 32],
+            archive_schema_version: 2,
+        };
+        let path = root.join("query-index.v1.bin");
+        crate::query_index::write_query_index(sections, &identity, &path).unwrap();
+        let container = crate::query_index::QueryIndex::open(&path, &identity).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        body(&index)
+    }
+
+    /// The index of a run that listed `mutation`, given to `body`.
+    fn with_index<R>(
+        mutation: Option<Vec<IndexedMutant>>,
+        body: impl FnOnce(&CoverageIndex<'_>) -> R,
+    ) -> R {
+        let sections = crate::coverage_index::coverage_index_sections(&report(mutation)).unwrap();
+        with_sections(&sections, body)
+    }
+
+    /// Two files' mutants: one not infected at a clock boundary, one not
+    /// reached and one infected in `app/route.ts`, and one of unknown status
+    /// in `app/router.ts`.
+    fn listed() -> Vec<IndexedMutant> {
+        vec![
+            IndexedMutant {
+                untestable: Some((Untestable::Clock, "reads Date.now()".into())),
+                ..compared(1, MutantStatus::NotInfected)
+            },
+            IndexedMutant {
+                start: (10, 3),
+                end: (10, 20),
+                status: MutantStatus::NotReached,
+                ..indexed((10, 3), (10, 20), "items.filter(ok)", "items", None)
+            },
+            compared(20, MutantStatus::Infected),
+            IndexedMutant {
+                file: "app/router.ts".into(),
+                status: MutantStatus::Unknown,
+                code: "no-point".into(),
+                ..compared(3, MutantStatus::Unknown)
+            },
+        ]
+    }
+
+    fn query(
+        index: &CoverageIndex<'_>,
+        file: Option<&str>,
+        options: &MutantsOptions,
+    ) -> Result<(CoverageMutantsData, AgentPagination), QueryError> {
+        coverage_mutants_query(
+            index,
+            CoverageMutantsQueryOptions {
+                run: "run",
+                file,
+                line: None,
+                options,
+                offset: 0,
+                limit: 50,
+            },
+        )
+    }
+
+    #[test]
+    fn a_page_of_no_mutants_is_refused() {
+        with_index(Some(listed()), |index| {
+            let refused = coverage_mutants_query(
+                index,
+                CoverageMutantsQueryOptions {
+                    run: "run",
+                    file: None,
+                    line: None,
+                    options: &MutantsOptions::default(),
+                    offset: 0,
+                    limit: 0,
+                },
+            );
+            assert!(matches!(refused, Err(QueryError::InvalidPagination)));
+        });
+    }
+
+    /// Each read of the index the query makes fails it when the index
+    /// cannot be read.
+    #[test]
+    fn a_mutants_query_fails_where_the_index_cannot_be_read() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions::default();
+            for (fault, file) in [
+                ("coverage-index-read.mutation", None),
+                ("coverage-index-read.mutants_of", None),
+                ("coverage-index-read.scope_entries", Some("app/plain.ts")),
+            ] {
+                let failed = crate::fault::during(fault, || query(index, file, &options));
+                assert!(matches!(failed, Err(QueryError::Index(_))), "{fault}");
+            }
+        });
+    }
+
+    /// A file is named whole or by a part only its name has; a part two
+    /// names share is ambiguous.
+    #[test]
+    fn a_file_is_found_by_a_part_of_its_name_only_it_has() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions::default();
+            let (data, _) = query(index, Some("router"), &options).unwrap();
+            assert_eq!(data.file.as_deref(), Some("app/router.ts"));
+            assert_eq!(data.mutants.len(), 1);
+            assert_eq!(data.mutants[0].weak.reach, "unknown");
+            let (data, _) = query(index, Some("app/route.ts"), &options).unwrap();
+            assert_eq!(data.file.as_deref(), Some("app/route.ts"));
+            assert_eq!(data.mutants.len(), 3);
+            // A clock boundary's not-infected mutant is counted untestable.
+            assert_eq!(data.summary.untestable, 1);
+            let Err(QueryError::AmbiguousSelector { selector, matches }) =
+                query(index, Some("app/rout"), &options)
+            else {
+                panic!("a part two files share is ambiguous");
+            };
+            assert_eq!(selector, "app/rout");
+            assert_eq!(matches, ["app/route.ts", "app/router.ts"]);
+        });
+    }
+
+    /// A file the run's scope includes and no mutant is in has a note; one
+    /// it leaves out, or does not name, is not found, as is any file of a
+    /// run that listed no mutants.
+    #[test]
+    fn a_file_the_scope_includes_with_no_mutants_has_a_note() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions::default();
+            let (data, _) = query(index, Some("app/plain.ts"), &options).unwrap();
+            assert_eq!(
+                data.note.as_deref(),
+                Some("app/plain.ts has no mutants in this run.")
+            );
+            assert_eq!(data.file.as_deref(), Some("app/plain.ts"));
+            assert!(data.mutants.is_empty());
+            for selector in ["app/skipped.ts", "app/nowhere.ts"] {
+                assert!(
+                    matches!(
+                        query(index, Some(selector), &options),
+                        Err(QueryError::SourceNotFound(file)) if file == selector
+                    ),
+                    "{selector}"
+                );
+            }
+        });
+        with_index(None, |index| {
+            assert!(matches!(
+                query(index, Some("app/plain.ts"), &MutantsOptions::default()),
+                Err(QueryError::SourceNotFound(_))
+            ));
+            let (data, _) = query(index, None, &MutantsOptions::default()).unwrap();
+            assert_eq!(data.note.as_deref(), Some(NO_LIST));
+        });
+    }
+
+    #[test]
+    fn a_run_that_listed_mutants_in_no_file_says_so() {
+        with_index(Some(Vec::new()), |index| {
+            let (data, _) = query(index, None, &MutantsOptions::default()).unwrap();
+            assert_eq!(
+                data.note.as_deref(),
+                Some("The run listed its mutants, and the files it measured have none.")
+            );
+            assert_eq!(data.mutant_set.as_deref(), Some("stryker-js@10.1.1"));
+            assert!(data.mutants.is_empty());
+        });
+    }
+
+    /// A mutator asked for leaves out the file's other mutants, and the
+    /// StrykerJS mutants of other mutators and other files.
+    #[test]
+    fn a_mutator_asked_for_leaves_out_the_other_mutators_mutants() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions {
+                mutator: Some("equalityoperator".into()),
+                stryker: Some(StrykerReports {
+                    mutants: vec![
+                        stryker(1, "EqualityOperator", "Killed"),
+                        stryker(10, "MethodExpression", "Survived"),
+                        StrykerReportMutant {
+                            file: "app/router.ts".into(),
+                            ..stryker(3, "EqualityOperator", "Killed")
+                        },
+                    ],
+                    ..StrykerReports::default()
+                }),
+                ..MutantsOptions::default()
+            };
+            let (data, _) = query(index, Some("app/route.ts"), &options).unwrap();
+            assert_eq!(
+                data.mutants
+                    .iter()
+                    .map(|mutant| mutant.span.start[0])
+                    .collect::<Vec<_>>(),
+                [1, 20]
+            );
+            let joined = data.stryker.unwrap();
+            assert_eq!(joined.matched, 1);
+            assert_eq!(joined.only_stryker.total, 0);
+            assert_eq!(joined.only_supercov.total, 1);
+            assert_eq!(joined.soundness_violations.total, 1);
+            assert_eq!(data.mutants[0].stryker.as_deref(), Some("Killed"));
+        });
+    }
+
+    /// With `--diff`, the mutants on changed lines are listed what the
+    /// change's tests leave alive first, and the summary counts the changed
+    /// lines a mutant is on: a file git does not track yet by its mutants'
+    /// lines.
+    #[test]
+    fn a_change_s_mutants_are_counted_by_the_lines_they_are_on() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions {
+                diff: Some(MutantDiff {
+                    base: "origin/main".into(),
+                    merge_base: "abc".into(),
+                    commit: None,
+                    changed: BTreeMap::from([(
+                        "app/route.ts".to_owned(),
+                        std::collections::BTreeSet::from([1, 2, 10]),
+                    )]),
+                    untracked: std::collections::BTreeSet::from([
+                        "app/router.ts".to_owned(),
+                        "app/new.ts".to_owned(),
+                    ]),
+                }),
+                // StrykerJS's mutant on line 20 is off the change.
+                stryker: Some(StrykerReports {
+                    mutants: vec![
+                        stryker(1, "EqualityOperator", "Survived"),
+                        stryker(20, "EqualityOperator", "Killed"),
+                    ],
+                    ..StrykerReports::default()
+                }),
+                ..MutantsOptions::default()
+            };
+            let (data, pagination) = query(index, None, &options).unwrap();
+            assert_eq!(
+                data.mutants
+                    .iter()
+                    .map(|mutant| (mutant.file.as_str(), mutant.status))
+                    .collect::<Vec<_>>(),
+                [
+                    ("app/route.ts", MutantStatus::NotInfected),
+                    ("app/route.ts", MutantStatus::NotReached),
+                    ("app/router.ts", MutantStatus::Unknown),
+                ]
+            );
+            assert_eq!(pagination.total, 3);
+            let diff = data.diff.unwrap();
+            assert_eq!(diff.changed_lines, 4);
+            assert_eq!(diff.lines_with_mutants, 3);
+            let joined = data.stryker.unwrap();
+            assert_eq!(joined.matched, 1);
+            assert_eq!(joined.only_stryker.total, 0);
+            assert_eq!(
+                data.files
+                    .iter()
+                    .map(|row| row.file.as_str())
+                    .collect::<Vec<_>>(),
+                ["app/route.ts", "app/router.ts"]
+            );
+        });
+    }
+
+    /// A change no mutant is on lists none, and strong verdicts of none
+    /// give no score.
+    #[test]
+    fn a_change_no_mutant_is_on_lists_none() {
+        with_index(Some(listed()), |index| {
+            let options = MutantsOptions {
+                diff: Some(MutantDiff::default()),
+                strong: Some(BTreeMap::new()),
+                ..MutantsOptions::default()
+            };
+            let (data, _) = query(index, None, &options).unwrap();
+            assert!(data.mutants.is_empty());
+            assert!(data.files.is_empty());
+            assert_eq!(data.summary.mutation_score, None);
+            assert!(!data.levels.strong);
+            let diff = data.diff.unwrap();
+            assert_eq!((diff.changed_lines, diff.lines_with_mutants), (0, 0));
+        });
+    }
+
+    /// An index that lists a file and none of its mutants is read as a file
+    /// with none to ask about.
+    #[test]
+    fn a_file_listed_with_no_mutants_has_none_to_ask_about() {
+        use crate::coverage_index::{SECTION_MUTANTS, SECTION_MUTATION_FILES};
+        let mut sections =
+            crate::coverage_index::coverage_index_sections(&report(Some(vec![compared(
+                1,
+                MutantStatus::NotInfected,
+            )])))
+            .unwrap();
+        for section in &mut sections {
+            if section.kind == SECTION_MUTATION_FILES {
+                // Its counts and its mutants' count, from the not-infected
+                // one at offset 12 to the total at 28.
+                section.bytes[12..16].fill(0);
+                section.bytes[28..32].fill(0);
+            } else if section.kind == SECTION_MUTANTS {
+                section.bytes.clear();
+                section.count = 0;
+            }
+        }
+        with_sections(&sections, |index| {
+            let (data, _) = query(index, Some("app/route.ts"), &MutantsOptions::default()).unwrap();
+            assert_eq!(data.file.as_deref(), Some("app/route.ts"));
+            assert!(data.mutants.is_empty());
+            assert_eq!(data.summary.mutants, 0);
+        });
+    }
 }
