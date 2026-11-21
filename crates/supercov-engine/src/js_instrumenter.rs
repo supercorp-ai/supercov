@@ -3989,7 +3989,11 @@ fn runtime_helper_type<'a>(
     }
 }
 
-#[cfg(test)]
+// Not `#[cfg(test)]`, nor the statements that read them: a statement under
+// it is compiled only into the crate's own tests, so a run measuring
+// Supercov from its unit tests and one measuring it from its command's
+// tests would count different statements, and could not be merged. Outside
+// the tests nothing sets them.
 thread_local! {
     /// In this crate's tests, on the thread that sets it: the mutants on or
     /// off whatever `SUPERCOV_MUTANTS` says.
@@ -4034,7 +4038,6 @@ pub fn set_strong_files(files: Option<std::collections::HashSet<String>>) {
 }
 
 fn strong_files() -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
-    #[cfg(test)]
     if let Some(files) = STRONG_FILES_FOR_TEST.with(|files| files.borrow().clone()) {
         return Some(std::sync::Arc::new(files));
     }
@@ -4079,7 +4082,6 @@ pub(crate) fn listing_mutants<T>(f: impl FnOnce() -> T) -> T {
 /// and `SUPERCOV_MUTANTS=1` makes a run list them with their probes, which
 /// record the values the weak verdicts read.
 pub(crate) fn mutants_enabled() -> bool {
-    #[cfg(test)]
     if let Some(on) = MUTANTS_FOR_TEST.with(std::cell::Cell::get) {
         return on;
     }
@@ -4110,7 +4112,6 @@ pub fn set_strong_mode(on: Option<bool>) {
 /// mutation, `js_schemata`) instead of placing coverage and weak-mutation
 /// probes: `set_strong_mode`, or else `SUPERCOV_STRONG=1`.
 pub(crate) fn strong_enabled() -> bool {
-    #[cfg(test)]
     if let Some(on) = STRONG_FOR_TEST.with(std::cell::Cell::get) {
         return on;
     }
@@ -4126,7 +4127,6 @@ pub(crate) fn strong_enabled() -> bool {
 /// Whether the mutants' probes are placed: the comparison probe and those
 /// of arithmetic, compound assignment, method calls and concise arrows.
 fn probes_enabled() -> bool {
-    #[cfg(test)]
     if !PROBES_FOR_TEST.with(std::cell::Cell::get) {
         return false;
     }
