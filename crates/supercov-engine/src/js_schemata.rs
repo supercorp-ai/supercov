@@ -386,7 +386,8 @@ impl<'a> Planner<'_, 'a> {
             | AstKind::ChainExpression(_)
             | AstKind::FormalParameters(_) => true,
             AstKind::FunctionBody(_) => self.concise_body(index),
-            AstKind::ExpressionStatement(_) => index > 0 && self.concise_body(index - 1),
+            // A statement has the program, at least, around it.
+            AstKind::ExpressionStatement(_) => self.concise_body(index - 1),
             _ => false,
         }
     }
@@ -460,8 +461,7 @@ impl<'a> Planner<'_, 'a> {
                 | AstKind::TSImportEqualsDeclaration(_) => true,
                 _ => false,
             };
-            let labeled =
-                index > 0 && matches!(self.stack[index - 1], AstKind::LabeledStatement(_));
+            let labeled = matches!(self.stack[index - 1], AstKind::LabeledStatement(_));
             return (!declaration && !labeled).then_some(PlaceKind::Statement);
         }
         if !self.slots.expressions.contains(&self.slot_address(index)) {
@@ -478,10 +478,10 @@ impl<'a> Planner<'_, 'a> {
     fn valid_expression(&self, index: usize) -> bool {
         let kind = self.stack[index];
         let span = kind.span();
-        let Some(parent) = self.babel_parent(index) else {
-            return true;
-        };
-        let within = |outer: Span| outer.start <= span.start && span.end <= outer.end;
+        let parent = self
+            .babel_parent(index)
+            .expect("the program is around every expression");
+        let within = |outer: Span| outer.contains_inclusive(span);
         let is_key = |key: &PropertyKey<'_>| within(key.span());
         let link = matches!(
             kind,
@@ -495,7 +495,9 @@ impl<'a> Planner<'_, 'a> {
             AstKind::ObjectProperty(property) => !is_key(&property.key),
             AstKind::BindingProperty(property) => !is_key(&property.key),
             AstKind::AssignmentTargetPropertyProperty(property) => !is_key(&property.name),
-            AstKind::MethodDefinition(method) => method.computed || !is_key(&method.key),
+            // A method's only child in an expression slot is its key: its
+            // value is a function, and a decorator has a node of its own.
+            AstKind::MethodDefinition(method) => method.computed,
             AstKind::PropertyDefinition(property) => property.computed || !is_key(&property.key),
             AstKind::AccessorProperty(property) => property.computed || !is_key(&property.key),
             AstKind::TaggedTemplateExpression(_) => false,
@@ -521,25 +523,22 @@ impl<'a> Planner<'_, 'a> {
         if !anonymous {
             return None;
         }
-        let span = self.stack[index].span();
-        let within = |outer: Span| outer.start <= span.start && span.end <= outer.end;
         let key_name = |key: &PropertyKey<'_>| match key {
             PropertyKey::StaticIdentifier(name) => Some(name.name.to_string()),
             PropertyKey::PrivateIdentifier(name) => Some(format!("#{}", name.name)),
             PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
             _ => None,
         };
-        let parent = self.babel_parent(index)?;
+        let parent = self
+            .babel_parent(index)
+            .expect("the program is around every expression");
+        // A function or class is never a key where it is placed (see
+        // `valid_expression`), and none is a binding or an assignment's
+        // target: under each parent below it is the value, the initializer
+        // or the default.
         match self.stack[parent] {
             AstKind::VariableDeclarator(declarator) => match &declarator.id {
-                BindingPattern::BindingIdentifier(id)
-                    if declarator
-                        .init
-                        .as_ref()
-                        .is_some_and(|init| within(init.span())) =>
-                {
-                    Some(id.name.to_string())
-                }
+                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
                 _ => None,
             },
             AstKind::AssignmentExpression(assignment)
@@ -549,7 +548,7 @@ impl<'a> Planner<'_, 'a> {
                         | AssignmentOperator::LogicalAnd
                         | AssignmentOperator::LogicalOr
                         | AssignmentOperator::LogicalNullish
-                ) && within(assignment.right.span()) =>
+                ) =>
             {
                 // `(f) = function () {}` names nothing: a parenthesized
                 // target is not an identifier reference to the grammar.
@@ -567,43 +566,23 @@ impl<'a> Planner<'_, 'a> {
             AstKind::ObjectProperty(property)
                 if !property.computed
                     && !property.method
-                    && property.kind == PropertyKind::Init
-                    && within(property.value.span()) =>
+                    && property.kind == PropertyKind::Init =>
             {
                 key_name(&property.key)
             }
-            AstKind::PropertyDefinition(property)
-                if !property.computed
-                    && property
-                        .value
-                        .as_ref()
-                        .is_some_and(|value| within(value.span())) =>
-            {
-                key_name(&property.key)
-            }
-            AstKind::AssignmentPattern(pattern) if within(pattern.right.span()) => {
-                match &pattern.left {
-                    BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
-                    _ => None,
-                }
-            }
-            AstKind::FormalParameter(parameter)
-                if parameter
-                    .initializer
-                    .as_ref()
-                    .is_some_and(|initializer| within(initializer.span())) =>
-            {
-                match &parameter.pattern {
-                    BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
-                    _ => None,
-                }
-            }
-            AstKind::AssignmentTargetWithDefault(target) if within(target.init.span()) => {
-                match &target.binding {
-                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
-                    _ => None,
-                }
-            }
+            AstKind::PropertyDefinition(property) if !property.computed => key_name(&property.key),
+            AstKind::AssignmentPattern(pattern) => match &pattern.left {
+                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+                _ => None,
+            },
+            AstKind::FormalParameter(parameter) => match &parameter.pattern {
+                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+                _ => None,
+            },
+            AstKind::AssignmentTargetWithDefault(target) => match &target.binding {
+                AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+                _ => None,
+            },
             AstKind::ExportDefaultDeclaration(_) => Some("default".to_owned()),
             _ => None,
         }
@@ -613,7 +592,7 @@ impl<'a> Planner<'_, 'a> {
     /// function or an instance field's initializer is around it.
     fn in_function(&self, index: usize) -> bool {
         let span = self.stack[index].span();
-        let within = |outer: Span| outer.start <= span.start && span.end <= outer.end;
+        let within = |outer: Span| outer.contains_inclusive(span);
         self.stack[..index].iter().any(|ancestor| match ancestor {
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => true,
             AstKind::PropertyDefinition(property) => {
@@ -645,8 +624,8 @@ impl<'a> Planner<'_, 'a> {
                 .id
                 .get_binding_identifier()
                 .is_some_and(|id| self.static_exports.contains(&id.name.as_str()));
+            // A declarator has its declaration and the program around it.
             named
-                && at >= 2
                 && matches!(self.stack[at - 2], AstKind::ExportNamedDeclaration(_))
                 && !self.stack[at + 1..index].iter().any(|inner| {
                     matches!(
@@ -1078,22 +1057,22 @@ fn statement_matches(statement: &Statement<'_>, mutant: &LedgerMutant) -> bool {
     statement.span() == mutant.span && accepts(mutant, statement_kind(statement))
 }
 
-fn statement_replacement<'a>(
-    ast: AstBuilder<'a>,
-    statement: &Statement<'a>,
-    mutant: &LedgerMutant,
-) -> Option<Statement<'a>> {
+/// `mutant`'s replacement for `statement`, a statement it is on
+/// (`statement_matches`). Each kind of statement has one mutator that
+/// mutates it: a `for` without a test is ConditionalExpression's, a block
+/// BlockStatement's, and an expression statement or a `throw`
+/// CallExpression's.
+fn statement_replacement<'a>(ast: AstBuilder<'a>, statement: &Statement<'a>) -> Statement<'a> {
     let span = statement.span();
-    Some(match (mutant.mutator, statement) {
-        ("CallExpression", _) => ast.statement_empty(span),
-        ("BlockStatement", Statement::BlockStatement(_)) => ast.statement_block(span, ast.vec()),
-        ("ConditionalExpression", Statement::ForStatement(for_statement)) => {
+    match statement {
+        Statement::ForStatement(for_statement) => {
             let mut clone = for_statement.clone_in(ast.allocator);
             clone.test = Some(ast.expression_boolean_literal(span, false));
             Statement::ForStatement(clone)
         }
-        _ => return None,
-    })
+        Statement::BlockStatement(_) => ast.statement_block(span, ast.vec()),
+        _ => ast.statement_empty(span),
+    }
 }
 
 // ---- finding a mutant's node ----------------------------------------------
@@ -1141,8 +1120,9 @@ impl<'a> Visit<'a> for Builder<'_, 'a> {
         for index in self.waiting(statement.span()) {
             let mutant = &self.mutants[index];
             if statement_matches(statement, mutant) {
-                self.built[index] =
-                    statement_replacement(self.ast, statement, mutant).map(Replacement::Statement);
+                self.built[index] = Some(Replacement::Statement(statement_replacement(
+                    self.ast, statement,
+                )));
                 self.done(statement.span(), index);
             }
         }
@@ -1314,20 +1294,20 @@ fn is_switch_if(statement: &Statement<'_>, record: &str) -> bool {
     matches!(statement, Statement::IfStatement(statement) if is_switch_test(&statement.test, record))
 }
 
-/// The original statements at the end of a switch's `else` chain.
+/// The original statements at the end of a switch's `else` chain. Every
+/// `if` of the chain is the switch's own, with an `else` (`switch_if`).
 fn final_else<'a>(
     statement: &mut Statement<'a>,
     ast: AstBuilder<'a>,
-    record: &str,
 ) -> oxc_allocator::Vec<'a, Statement<'a>> {
     let mut current = statement.take_in(ast.allocator);
     loop {
         match current {
-            Statement::IfStatement(mut statement) if is_switch_test(&statement.test, record) => {
-                match statement.alternate.take() {
-                    Some(alternate) => current = alternate,
-                    None => return ast.vec(),
-                }
+            Statement::IfStatement(mut statement) => {
+                current = statement
+                    .alternate
+                    .take()
+                    .expect("a switch's `if` has an `else`");
             }
             Statement::BlockStatement(mut block) => {
                 return block.body.take_in(ast.allocator);
@@ -1371,21 +1351,17 @@ impl<'a> VisitMut<'a> for Unplace<'a, '_> {
                         && is_switch_if(&block.body[0], self.record)
                         && block.body[0].span() == block.span =>
                 {
+                    // A statement's switch keeps the one statement it was
+                    // placed on (`place_statement`).
                     let mut inner = block.body.pop().expect("one statement");
-                    let mut original = final_else(&mut inner, self.ast, self.record);
-                    if original.len() == 1 {
-                        *statement = original.pop().expect("one statement");
-                    } else {
-                        *statement = self.ast.statement_block(span, original);
-                    }
+                    *statement = final_else(&mut inner, self.ast)
+                        .pop()
+                        .expect("one statement");
                 }
                 Statement::IfStatement(_) if is_switch_if(statement, self.record) => {
-                    let mut original = final_else(statement, self.ast, self.record);
-                    *statement = if original.len() == 1 {
-                        original.pop().expect("one statement")
-                    } else {
-                        self.ast.statement_block(span, original)
-                    };
+                    *statement = final_else(statement, self.ast)
+                        .pop()
+                        .expect("one statement");
                 }
                 _ => break,
             }
@@ -1400,7 +1376,7 @@ impl<'a> VisitMut<'a> for Unplace<'a, '_> {
             && body.statements[0].span() == body.span
         {
             let mut inner = body.statements.pop().expect("one statement");
-            body.statements = final_else(&mut inner, self.ast, self.record);
+            body.statements = final_else(&mut inner, self.ast);
         }
         walk_mut::walk_function_body(self, body);
     }
@@ -1412,7 +1388,7 @@ impl<'a> VisitMut<'a> for Unplace<'a, '_> {
             && case.consequent[0].span() == case.span
         {
             let mut inner = case.consequent.pop().expect("one statement");
-            case.consequent = final_else(&mut inner, self.ast, self.record);
+            case.consequent = final_else(&mut inner, self.ast);
         }
         walk_mut::walk_switch_case(self, case);
     }
@@ -1445,10 +1421,8 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         if self.applied {
             return;
         }
-        if statement_matches(statement, self.mutant)
-            && let Some(replacement) = statement_replacement(self.ast, statement, self.mutant)
-        {
-            *statement = replacement;
+        if statement_matches(statement, self.mutant) {
+            *statement = statement_replacement(self.ast, statement);
             self.applied = true;
             return;
         }
@@ -1459,7 +1433,8 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         if self.applied {
             return;
         }
-        if block.span == self.mutant.span && accepts(self.mutant, NodeKind::Block) {
+        // Only the block has its span: a mutant with it is on the block.
+        if block.span == self.mutant.span {
             block.body.clear();
             self.applied = true;
             return;
@@ -1484,7 +1459,8 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         if self.applied {
             return;
         }
-        if case.span == self.mutant.span && accepts(self.mutant, NodeKind::SwitchCase) {
+        // Only the `case` has its span: a mutant with it is on the `case`.
+        if case.span == self.mutant.span {
             case.consequent.clear();
             self.applied = true;
             return;
@@ -1496,9 +1472,7 @@ impl<'a> VisitMut<'a> for Apply<'_, 'a> {
         &mut self,
         tagged: &mut oxc_ast::ast::TaggedTemplateExpression<'a>,
     ) {
-        if self.applied {
-            return;
-        }
+        // Reached from `visit_expression`, which stops once applied.
         if tagged.quasi.span == self.mutant.span && self.mutant.mutator == "StringLiteral" {
             let raw = if self.mutant.replacement == "empty" {
                 ""
@@ -1624,10 +1598,10 @@ impl<'a> Switches<'_, 'a> {
                     .map(|applied| (*index, applied))
             })
             .collect::<Vec<_>>();
+        // A name is the place's only where the node is an anonymous
+        // function or class (`inferred_name`).
         let mut result = expression.take_in(self.ast.allocator);
-        if let Some(name) = &name
-            && anonymous(&result)
-        {
+        if let Some(name) = &name {
             result = named(self.ast, result, name);
         }
         for (index, mut applied) in branches.into_iter().rev() {
@@ -2130,6 +2104,537 @@ mod tests {
         let switched = strong(source, "src/c.js");
         assert!(switched.code.contains("__supercovStrong"));
         assert!(!switched.code.contains("registerProbeV2"));
+    }
+
+    /// A mutant of `mutator` and `descriptor` on the first `text` of
+    /// `source`, as the enumeration would list one there.
+    fn on(source: &str, text: &str, mutator: &'static str, descriptor: &str) -> LedgerMutant {
+        let start = source
+            .find(text)
+            .unwrap_or_else(|| panic!("{text:?} in {source:?}")) as u32;
+        LedgerMutant {
+            span: Span::new(start, start + text.len() as u32),
+            start: (1, 1),
+            end: (1, 1),
+            mutator,
+            replacement: descriptor.to_owned(),
+        }
+    }
+
+    /// `source` with `mutants` written in behind switches that read `r`,
+    /// printed, and what strong mode says of each mutant.
+    fn switched(
+        source: &str,
+        file: &str,
+        mutants: &[LedgerMutant],
+        kept: &HashSet<(u32, u32)>,
+    ) -> (String, Vec<StrongMutant>) {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new(file)).unwrap();
+        let mut program = Parser::new(&allocator, source, source_type).parse().program;
+        let placed = place(&allocator, &mut program, file, mutants, "r", kept);
+        let code = oxc_codegen::Codegen::new().build(&program).code;
+        (code, placed)
+    }
+
+    fn parses(code: &str, file: &str) {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new(file)).unwrap();
+        let parsed = Parser::new(&allocator, code, source_type).parse();
+        assert!(parsed.errors.is_empty(), "{:?}\n{code}", parsed.errors);
+    }
+
+    /// Each mutant's replacement code, on `source` as written.
+    fn texts(source: &str, file: &str, mutants: &[LedgerMutant]) -> Vec<Option<String>> {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new(file)).unwrap();
+        let parsed = Parser::new(&allocator, source, source_type).parse();
+        replacement_texts(&allocator, &parsed.program, source, mutants)
+    }
+
+    /// A mutator mutates only its own kinds of node: a node with the
+    /// mutant's span but of another kind is not the mutant's.
+    #[test]
+    fn a_mutator_is_on_only_the_kinds_of_node_it_mutates() {
+        let mutant = |mutator: &'static str, descriptor: &str| LedgerMutant {
+            span: Span::default(),
+            start: (1, 1),
+            end: (1, 1),
+            mutator,
+            replacement: descriptor.to_owned(),
+        };
+        assert!(!accepts(
+            &mutant("BooleanLiteral", "removed"),
+            NodeKind::Binary
+        ));
+        assert!(!accepts(&mutant("StringLiteral", "empty"), NodeKind::Call));
+        assert!(!accepts(
+            &mutant("BlockStatement", "empty"),
+            NodeKind::ExpressionStatement
+        ));
+        assert!(!accepts(
+            &mutant("CallExpression", "empty"),
+            NodeKind::Block
+        ));
+        // A private field's optional link is told from a property's by the
+        // `#` its descriptor starts with.
+        assert!(accepts(
+            &mutant("OptionalChaining", ".#p"),
+            NodeKind::PrivateField
+        ));
+        assert!(!accepts(
+            &mutant("OptionalChaining", ".#p"),
+            NodeKind::StaticMember
+        ));
+        // Regex mutants are never written into the program.
+        assert!(!accepts(
+            &mutant("Regex", "removed"),
+            NodeKind::StringLiteral
+        ));
+    }
+
+    /// Next.js reads `config` from every file under a `pages` directory,
+    /// at the root of the project or below it, and from no other route.
+    #[test]
+    fn next_reads_config_from_every_file_under_pages() {
+        assert!(next_static_exports("pages/api/a.ts").contains(&"config"));
+        assert!(next_static_exports("src/pages/b.tsx").contains(&"config"));
+        assert!(next_static_exports("src/middleware.ts").contains(&"config"));
+        assert!(!next_static_exports("app/page.ts").contains(&"config"));
+        assert!(next_static_exports("app/page.ts").contains(&"dynamic"));
+    }
+
+    /// A chain's last link is replaced inside its chain: a private field's
+    /// link loses its `?`, a test is replaced whole, and a removed method
+    /// leaves the chain that was its object, non-null assertion and all.
+    #[test]
+    fn a_chain_s_last_link_is_replaced_within_its_chain() {
+        let source = "class A { #p = 1; read(o) { return o?.#p; } }\nif (a?.b!) f();\nconst t = a?.b!.trim();\ng?.();\n";
+        let mutants = [
+            on(source, "o?.#p", "OptionalChaining", ".#p"),
+            on(source, "a?.b!", "ConditionalExpression", "true"),
+            on(source, "a?.b!.trim()", "MethodExpression", "removed"),
+            // A call of no method has no method to remove.
+            on(source, "g?.()", "MethodExpression", "removed"),
+        ];
+        assert_eq!(
+            texts(source, "src/c.ts", &mutants),
+            [
+                Some("o.#p".to_owned()),
+                Some("true".to_owned()),
+                Some("a?.b!".to_owned()),
+                None
+            ]
+        );
+    }
+
+    /// Supercov writes the replacement of every mutant StrykerJS lists, and
+    /// none for a descriptor no StrykerJS mutant has or a node that is not
+    /// the mutant's kind: a parenthesized test is Babel's test without its
+    /// parentheses, and a `for` with a test is not ConditionalExpression's.
+    #[test]
+    fn a_replacement_is_written_only_for_a_mutant_strykerjs_could_list() {
+        let source = "x = a + b;\ny += 1;\nz = trim();\nw = s[\"toLowerCase\"]();\nv = s[\"trim\"]();\nif (e[0]) f();\nif ((h)) f();\nfor (; i;) {}\nclass K { #q; m() { if (this.#q) f(); } }\n";
+        let mutants = [
+            on(source, "a + b", "ArithmeticOperator", "%"),
+            on(source, "y += 1", "AssignmentOperator", "**="),
+            on(source, "trim()", "MethodExpression", "removed"),
+            on(
+                source,
+                "s[\"toLowerCase\"]()",
+                "MethodExpression",
+                "toUpperCase",
+            ),
+            on(source, "s[\"trim\"]()", "MethodExpression", "removed"),
+            on(source, "e[0]", "ConditionalExpression", "true"),
+            on(source, "(h)", "ConditionalExpression", "true"),
+            on(source, "for (; i;) {}", "ConditionalExpression", "false"),
+            on(source, "this.#q", "ConditionalExpression", "false"),
+        ];
+        let text = |value: &str| Some(value.to_owned());
+        assert_eq!(
+            texts(source, "src/d.js", &mutants),
+            [
+                None,
+                None,
+                None,
+                text("s.toUpperCase()"),
+                text("s"),
+                text("true"),
+                None,
+                None,
+                text("false"),
+            ]
+        );
+    }
+
+    /// A mutator's replacement of a node of a kind it does not mutate is
+    /// nothing, whatever the node.
+    #[test]
+    fn a_mutator_replaces_no_node_of_another_kind() {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new("src/x.js")).unwrap();
+        let program = Parser::new(&allocator, "x;\n", source_type).parse().program;
+        let Statement::ExpressionStatement(statement) = &program.body[0] else {
+            panic!("an expression statement");
+        };
+        let ast = AstBuilder::new(&allocator);
+        for (mutator, descriptor) in [("CallExpression", "empty"), ("OptionalChaining", ".x")] {
+            let mutant = LedgerMutant {
+                span: statement.expression.span(),
+                start: (1, 1),
+                end: (1, 1),
+                mutator,
+                replacement: descriptor.to_owned(),
+            };
+            assert!(
+                expression_replacement(ast, &statement.expression, &mutant).is_none(),
+                "{mutator}"
+            );
+        }
+    }
+
+    /// A parenthesized expression statement at the top of the program has
+    /// nothing Babel sees between its expression and the program, and the
+    /// expression takes the switch.
+    #[test]
+    fn a_top_level_parenthesized_expression_takes_its_own_switch() {
+        let source = "(a + b);\n";
+        let (code, placed) = switched(
+            source,
+            "src/p.js",
+            &[on(source, "a + b", "ArithmeticOperator", "-")],
+            &HashSet::default(),
+        );
+        assert_eq!(placed[0].unplaceable, None);
+        assert!(placed[0].is_static);
+        assert!(
+            code.contains("r.a === 0 ? (r.h(), a - b) : a + b"),
+            "{code}"
+        );
+    }
+
+    /// A `case` that declares a lexical binding or a class is not wrapped,
+    /// and its mutant goes on the `switch`. The `switch`'s copy holds only
+    /// the switches that end before the mutated `case` starts: a later
+    /// `case`'s switch, and a later statement's, become their originals.
+    #[test]
+    fn a_lexical_case_s_mutant_goes_on_its_switch() {
+        let source = "switch (x) {\n  case 0: f(); break;\n  case 1: let y = 1; g(y); break;\n  case 2: class C {} h(C);\n  case 3: var z = 1;\n  case 4: i();\n}\n";
+        let mutants = [
+            on(
+                source,
+                "case 1: let y = 1; g(y); break;",
+                "ConditionalExpression",
+                "empty",
+            ),
+            on(
+                source,
+                "case 2: class C {} h(C);",
+                "ConditionalExpression",
+                "empty",
+            ),
+            on(
+                source,
+                "case 3: var z = 1;",
+                "ConditionalExpression",
+                "empty",
+            ),
+            on(source, "i();", "CallExpression", "empty"),
+        ];
+        let (code, placed) = switched(source, "src/s.js", &mutants, &HashSet::default());
+        parses(&code, "src/s.js");
+        assert!(
+            placed.iter().all(|mutant| mutant.unplaceable.is_none()),
+            "{placed:?}"
+        );
+        // The `switch` is written three times: in the two copies and as
+        // written. Only the original holds the later switches.
+        assert_eq!(code.matches("switch (x)").count(), 3, "{code}");
+        for index in 0..4 {
+            let test = format!("r.a === {index}");
+            assert_eq!(code.matches(&test).count(), 1, "{test}: {code}");
+        }
+    }
+
+    /// A `var` is wrapped where a lexical declaration is not, and a `declare
+    /// var` is not: it declares what is defined elsewhere. A copy of a
+    /// statement keeps the conditionals that are no switch, and a mutant
+    /// with no replacement leaves its switch without a branch.
+    #[test]
+    fn a_var_takes_the_switch_its_binding_key_cannot() {
+        let source = "var { [k + 1]: v } = [c !== 1 ? 1 : 2, c === d ? 3 : 4, c === 5 ? 5 : 6, c.a === 7 ? 7 : 8];\nvar { [k * 2]: u } = o;\nq = a + b;\n({ [k + 6]: t } = o);\nx = e[s.trim()];\nf(s.toLowerCase());\n";
+        let mutants = [
+            on(source, "k + 1", "ArithmeticOperator", "-"),
+            on(source, "k * 2", "ArithmeticOperator", "%"),
+            on(source, "a + b", "ArithmeticOperator", "%"),
+            on(source, "k + 6", "ArithmeticOperator", "-"),
+            on(source, "s.trim()", "MethodExpression", "removed"),
+            on(source, "s.toLowerCase()", "MethodExpression", "toUpperCase"),
+        ];
+        let (code, placed) = switched(source, "src/v.js", &mutants, &HashSet::default());
+        parses(&code, "src/v.js");
+        assert!(
+            placed.iter().all(|mutant| mutant.unplaceable.is_none()),
+            "{placed:?}"
+        );
+        assert!(code.contains("[k - 1]: v"), "{code}");
+        for conditional in [
+            "c !== 1 ? 1 : 2",
+            "c === d ? 3 : 4",
+            "c === 5 ? 5 : 6",
+            "c.a === 7 ? 7 : 8",
+        ] {
+            assert_eq!(
+                code.matches(conditional).count(),
+                2,
+                "{conditional}: {code}"
+            );
+        }
+        assert!(!code.contains('%'), "{code}");
+        assert!(
+            !code.contains("r.a === 1") && !code.contains("r.a === 2"),
+            "{code}"
+        );
+        assert!(code.contains("[k - 6]: t"), "{code}");
+        // A link inside a computed member's property, or in an argument, is
+        // no link of the chain it is in, and takes its own switch.
+        assert!(
+            code.contains("e[r.a === 4 ? (r.h(), s) : s.trim()]"),
+            "{code}"
+        );
+        assert!(
+            code.contains("f(r.a === 5 ? (r.h(), s.toUpperCase()) : s.toLowerCase())"),
+            "{code}"
+        );
+
+        let ambient = "declare var { [k - 1]: w }: any;\n";
+        let (_, placed) = switched(
+            ambient,
+            "src/w.ts",
+            &[on(ambient, "k - 1", "ArithmeticOperator", "+")],
+            &HashSet::default(),
+        );
+        assert_eq!(placed[0].unplaceable, Some(NO_PLACEABLE_ANCESTOR));
+    }
+
+    /// `new.target` cannot be swapped for a switch, and its statement takes
+    /// the switch instead.
+    #[test]
+    fn a_meta_property_s_mutant_goes_on_its_statement() {
+        let source = "function f() {\n  if (new.target) g();\n}\n";
+        let (code, placed) = switched(
+            source,
+            "src/m.js",
+            &[on(source, "new.target", "ConditionalExpression", "true")],
+            &HashSet::default(),
+        );
+        parses(&code, "src/m.js");
+        assert_eq!(placed[0].unplaceable, None);
+        assert!(!placed[0].is_static);
+        assert!(code.contains("if (true) g()"), "{code}");
+    }
+
+    /// An arrow's concise body is no statement and no body to Babel: a
+    /// mutant on it goes on the arrow, which keeps its name.
+    #[test]
+    fn a_concise_body_s_mutant_goes_on_its_arrow() {
+        let source = "const f = () => g();\n";
+        let (code, placed) = switched(
+            source,
+            "src/f.js",
+            &[on(source, "g()", "CallExpression", "empty")],
+            &HashSet::default(),
+        );
+        assert_eq!(placed[0].unplaceable, None);
+        assert!(placed[0].is_static);
+        assert!(code.contains("r.a === 0"), "{code}");
+        assert!(code.contains("}[\"f\"]"), "{code}");
+    }
+
+    /// Every place that names an anonymous function or class names it in
+    /// its switch, and the places that name nothing leave it unnamed. A
+    /// replacement that is no function is not named.
+    #[test]
+    fn a_wrapped_function_keeps_every_name_its_place_gives_it() {
+        let source = concat!(
+            "const a = function ({ [k + 1]: v }) { return v; };\n",
+            "const B = class extends Base { m({ [k + 2]: w }) { return w; } };\n",
+            "const o = { p: () => \"p\", \"q\": () => \"q\", 3: () => \"3\", [\"s\"]: () => \"s\" };\n",
+            "class D { e = () => \"e\"; #g = () => \"g\"; static [\"h\"] = () => \"h\"; }\n",
+            "const { i } = () => \"i\";\n",
+            "let j; j += () => \"j\";\n",
+            "const { l = () => \"l\" } = {};\n",
+            "const [{ y2 } = () => \"y2\"] = [];\n",
+            "function m(n = () => \"n\", { x } = () => \"x\") {}\n",
+            "let p2; [p2 = () => \"p2\"] = [];\n",
+            "[o.t = () => \"t\"] = [];\n",
+            "const u = () => \"u\";\n",
+            "export default () => \"default\";\n",
+        );
+        let mut mutants = vec![
+            on(source, "k + 1", "ArithmeticOperator", "-"),
+            on(source, "k + 2", "ArithmeticOperator", "-"),
+            on(source, "() => \"u\"", "ConditionalExpression", "true"),
+        ];
+        for name in [
+            "p", "q", "3", "s", "e", "g", "h", "i", "j", "l", "y2", "n", "x", "p2", "t", "default",
+        ] {
+            mutants.push(on(
+                source,
+                &format!("() => \"{name}\""),
+                "ArrowFunction",
+                "undefined",
+            ));
+        }
+        let (code, placed) = switched(source, "src/n.js", &mutants, &HashSet::default());
+        parses(&code, "src/n.js");
+        assert!(
+            placed.iter().all(|mutant| mutant.unplaceable.is_none()),
+            "{placed:?}"
+        );
+        for name in [
+            "a", "B", "p", "q", "e", "#g", "l", "n", "p2", "u", "default",
+        ] {
+            assert!(code.contains(&format!("}}[\"{name}\"]")), "{name}: {code}");
+        }
+        for name in ["3", "s", "h", "i", "j", "y2", "x", "t"] {
+            assert!(!code.contains(&format!("}}[\"{name}\"]")), "{name}: {code}");
+        }
+        assert!(code.contains("(r.h(), true)"), "{code}");
+    }
+
+    /// An object literal's method or accessor is named by its key, as
+    /// written: a switch on its function gives the function no name.
+    #[test]
+    fn an_object_method_s_function_is_not_named_by_its_key() {
+        let source = "const o = { m({ [k + 3]: v }) { return v; }, set s({ [k + 4]: v }) {} };\n";
+        let mutants = [
+            on(source, "k + 3", "ArithmeticOperator", "-"),
+            on(source, "k + 4", "ArithmeticOperator", "-"),
+        ];
+        let (code, placed) = switched(source, "src/o.js", &mutants, &HashSet::default());
+        parses(&code, "src/o.js");
+        assert!(
+            placed.iter().all(|mutant| mutant.unplaceable.is_none()),
+            "{placed:?}"
+        );
+        assert!(
+            code.contains("[k - 3]: v") && code.contains("[k - 4]: v"),
+            "{code}"
+        );
+        assert!(
+            !code.contains("}[\"m\"]") && !code.contains("}[\"s\"]"),
+            "{code}"
+        );
+    }
+
+    /// A class member's key written without brackets takes no switch, and
+    /// one in brackets does. A mutant in an instance accessor's value runs
+    /// when an instance is made; in a static accessor's, or in a key, when
+    /// the class is. A template's tag is no place for a switch.
+    #[test]
+    fn a_class_member_s_key_takes_a_switch_only_in_brackets() {
+        let source = "class E {\n  \"x\"() {}\n  [k + 1]() {}\n  \"y\" = 1;\n  [k + 2] = 2;\n  accessor \"z\" = 3;\n  accessor [k + 3] = 4;\n  accessor w = k + 4;\n  static accessor v = k + 5;\n}\n(a || b)`t`;\n";
+        let mut mutants = vec![
+            on(source, "\"x\"", "StringLiteral", "empty"),
+            on(source, "\"y\"", "StringLiteral", "empty"),
+            on(source, "\"z\"", "StringLiteral", "empty"),
+        ];
+        for index in 1..=5 {
+            mutants.push(on(
+                source,
+                &format!("k + {index}"),
+                "ArithmeticOperator",
+                "-",
+            ));
+        }
+        mutants.push(on(source, "a || b", "LogicalOperator", "&&"));
+        let (code, placed) = switched(source, "src/e.ts", &mutants, &HashSet::default());
+        parses(&code, "src/e.ts");
+        let reasons = placed
+            .iter()
+            .map(|mutant| mutant.unplaceable)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [
+                Some(NO_PLACEABLE_ANCESTOR),
+                Some(NO_PLACEABLE_ANCESTOR),
+                Some(NO_PLACEABLE_ANCESTOR),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]
+        );
+        let statics = placed[3..8]
+            .iter()
+            .map(|mutant| mutant.is_static)
+            .collect::<Vec<_>>();
+        assert_eq!(statics, [true, true, true, false, true]);
+        assert!(code.contains("(r.h(), (a && b)`t`)"), "{code}");
+    }
+
+    /// A function whose source the program reads keeps its code, and its
+    /// mutants are listed as such; a file with no mutants is left as it is;
+    /// and a function in a Next.js static export is code Next.js runs.
+    #[test]
+    fn kept_functions_and_static_exports_keep_their_code() {
+        let source = "export function f(a) {\n  return a + 1;\n}\n";
+        let start = source.find("function").unwrap() as u32;
+        let end = source.rfind('}').unwrap() as u32 + 1;
+        let kept = [(start, end)].into_iter().collect::<HashSet<_>>();
+        let (code, placed) = switched(
+            source,
+            "src/k.js",
+            &[on(source, "a + 1", "ArithmeticOperator", "-")],
+            &kept,
+        );
+        assert_eq!(placed[0].unplaceable, Some(FUNCTION_SOURCE));
+        assert!(!placed[0].is_static);
+        assert!(!code.contains("r.a"), "{code}");
+
+        let (code, placed) = switched(source, "src/k.js", &[], &HashSet::default());
+        assert!(placed.is_empty());
+        assert!(code.contains("return a + 1;"), "{code}");
+
+        let page = "export const revalidate = (() => 1 + 2)();\nexport const dynamic = \"auto\";\n";
+        let (_, placed) = switched(
+            page,
+            "app/page.ts",
+            &[
+                on(page, "1 + 2", "ArithmeticOperator", "-"),
+                on(page, "\"auto\"", "StringLiteral", "empty"),
+            ],
+            &HashSet::default(),
+        );
+        let reasons = placed
+            .iter()
+            .map(|mutant| mutant.unplaceable)
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, [None, Some(NEXT_SEGMENT_CONFIG)]);
+    }
+
+    /// A tagged template's template is no expression slot: its mutants go
+    /// on the tagged template, and only StringLiteral's replace it.
+    #[test]
+    fn a_tagged_template_s_template_is_replaced_on_its_tagged_template() {
+        let source = "f(tag``, tag`x`);\n";
+        let mutants = [
+            on(source, "``", "StringLiteral", "Stryker was here!"),
+            on(source, "`x`", "ConditionalExpression", "true"),
+        ];
+        let (code, placed) = switched(source, "src/t.js", &mutants, &HashSet::default());
+        parses(&code, "src/t.js");
+        assert!(
+            placed.iter().all(|mutant| mutant.unplaceable.is_none()),
+            "{placed:?}"
+        );
+        assert!(code.contains("(r.h(), tag`Stryker was here!`)"), "{code}");
+        assert!(!code.contains("r.a === 1"), "{code}");
     }
 
     /// The behaviour check: on the parity fixtures Node runs as they are,
