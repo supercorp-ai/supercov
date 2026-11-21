@@ -323,6 +323,10 @@ function mutateFiles() {
 }
 
 let supercov = null;
+// first-wN: the first variant with Vitest's --maxWorkers=N.
+const firstWorkers = args.variant?.match(/^first-w(\d+)$/)?.[1] ?? null;
+// first-prof: the first variant with a CPU profile of the strong pass's main process.
+const firstProfile = args.variant === 'first-prof';
 
 async function installSupercov() {
   const binary = process.env.SUPERCOV_BENCH_BINARY;
@@ -337,6 +341,12 @@ async function installSupercov() {
     process.env.SUPERCOV_STRONG_ROUND = round[1];
     note(`variant round-N: SUPERCOV_STRONG_ROUND set per job (assignments per Vitest worker in a strong round)`);
   }
+  if (args.variant === 'warm') {
+    process.env.SUPERCOV_STRONG_WARM = '1';
+    note('variant warm: SUPERCOV_STRONG_WARM=1 (one Vitest instance per copy, modules reset between assignments)');
+  }
+  if (firstWorkers) note(`variant first-w${firstWorkers}: the first variant with Vitest's --maxWorkers=${firstWorkers}`);
+  if (args.variant === 'first') note('variant first: no measured run; `supercov mutants -- <test command>` measures what it needs, then tests the mutants');
   process.env.SUPERCOV_RUST_BINARY = binary;
   process.env.SUPERCOV_SOURCE_ROOTS = mutateFiles().join(',');
   supercov = `${prefix}/node_modules/.bin/supercov`;
@@ -386,9 +396,12 @@ async function supercovMeasure() {
   return record;
 }
 
-async function supercovStrong(name, flags) {
+async function supercovStrong(name, flags, { first = false } = {}) {
   const out = join(out_, `${name}.result.json`);
-  const record = await phase(name, `${supercov} runs latest mutants test --json ${flags.join(' ')} > ${out}`, { allowFail: true });
+  const command = first
+    ? `${supercov} mutants --json ${flags.join(' ')} -- node_modules/.bin/${project.test}${firstWorkers ? ` --maxWorkers=${firstWorkers}` : ''}`
+    : `${supercov} runs latest mutants test --json ${flags.join(' ')}`;
+  const record = await phase(name, `${command} > ${out}`, { allowFail: true });
   record.result = existsSync(out) ? `${name}.result.json` : null;
   const run = latestRunDir();
   if (run && existsSync(join(run, 'strong-mutation.json'))) {
@@ -481,15 +494,21 @@ async function main() {
     await stryker('stryker-incremental', { mutate: strykerMutate(prMutate), incremental: true });
   } else if (scenario === 'supercov-cold') {
     if (!args.shard || args.shard === '1') await plainTests();
-    const measure = await supercovMeasure();
-    if (measure.exitCode !== 0) throw new Error(`supercov measure failed (exit ${measure.exitCode})`);
     // A shard is K (of the project's supercovShards) or K-N (K of N, for a re-split shard).
     const split = args.shard?.match(/^(\d+)-(\d+)$/);
     const shard = args.shard ? ['--shard', split ? `${split[1]}/${split[2]}` : `${args.shard}/${project.supercovShards}`] : [];
-    // The plan of this job's part (what would run, against which tests), for where time goes.
-    await phase('supercov-plan', `${supercov} runs latest mutants test --plan --json ${shard.join(' ')} > ${join(out_, 'supercov-plan.json')}`, { allowFail: true });
-    if (args.shard && !project.supercovShards) throw new Error(`${project.name} has no supercovShards`);
-    await supercovStrong('supercov-strong', shard);
+    if (firstProfile) process.env.SUPERCOV_STRONG_CPU_PROFILE = join(out_, 'main.cpuprofile');
+    if (args.variant === 'first' || firstWorkers || firstProfile) {
+      // What a user's first `supercov mutants` does: nothing measured before it.
+      await supercovStrong('supercov-strong', shard, { first: true });
+    } else {
+      const measure = await supercovMeasure();
+      if (measure.exitCode !== 0) throw new Error(`supercov measure failed (exit ${measure.exitCode})`);
+      // The plan of this job's part (what would run, against which tests), for where time goes.
+      await phase('supercov-plan', `${supercov} runs latest mutants test --plan --json ${shard.join(' ')} > ${join(out_, 'supercov-plan.json')}`, { allowFail: true });
+      if (args.shard && !project.supercovShards) throw new Error(`${project.name} has no supercovShards`);
+      await supercovStrong('supercov-strong', shard);
+    }
   } else if (scenario === 'shell-diag') {
     // Diagnosis only: DIAG_SCRIPT holds commands separated by ';;', each run in the clone as a phase.
     const commands = (process.env.DIAG_SCRIPT ?? '').split(';;').map((c) => c.trim()).filter(Boolean);

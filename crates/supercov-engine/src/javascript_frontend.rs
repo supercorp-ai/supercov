@@ -1436,7 +1436,11 @@ fn write_vitest_config(
              // them by falling back to another installed version.\n\
              return await import(pathToFileURL(entry).href);\n\
            }}\n\
-           return await import('vite');\n\
+           // A specifier the config's bundler cannot read: a literal one is\n\
+           // reported as unresolved on every run where only Vitest's own\n\
+           // copy of Vite is installed, though this line never runs there.\n\
+           const supercovVite = 'vite';\n\
+           return await import(supercovVite);\n\
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\

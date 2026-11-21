@@ -26,6 +26,10 @@ const TIMEOUT_CONSTANT_MS = 5_000;
 // only if it passes that too: the short limit costs a retry, never a verdict.
 const FIRST_ATTEMPT_CONSTANT_MS = 1_000;
 const HIT_LIMIT_FLOOR = 1_000;
+// What a copy costs before its tests run (a worker, Vitest, the modules),
+// for sizing rounds by their work.
+const COPY_LOAD_ESTIMATE_MS = 1_000;
+const MAX_ROUND_FACTOR = 16;
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
@@ -383,6 +387,12 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const roundFactor = Math.max(1, Number(process.env["SUPERCOV_STRONG_ROUND"]) || (vitest.__supercovWarm ? 6 : 2));
     const perFile = oneAtATime ? 1 : workers * Math.min(roundFactor, 4);
     const perRound = oneAtATime ? 1 : workers * roundFactor;
+    // A round ends when its slowest copy does: one file whose copy takes
+    // twenty seconds next to copies of a second holds every other worker
+    // idle for the rest. Past perRound, a round takes more copies while
+    // their estimated work is less than every worker kept busy as long as
+    // its longest copy, up to MAX_ROUND_FACTOR times the workers.
+    const maxPerRound = oneAtATime ? 1 : workers * Math.max(roundFactor, MAX_ROUND_FACTOR);
     const durationOf = new Map(tests.map((test) => [test.id, test.durationMs ?? 1_000]));
     // A mutant runs its cheapest file first; if that does not kill it, all
     // its other files at once: the first file kills most killed mutants,
@@ -456,14 +466,26 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const used = new Map();
         const round = [];
         const checks = [];
+        let work = 0;
+        let longest = 0;
+        const add = (cost) => {
+            const estimate = COPY_LOAD_ESTIMATE_MS + cost;
+            work += estimate;
+            longest = Math.max(longest, estimate);
+        };
+        const full = () => {
+            const copies = round.length + checks.length;
+            return copies >= perRound && (copies >= maxPerRound || work >= workers * longest);
+        };
         for (const [key, check] of confirmations) {
-            if (check.result || check.running || round.length + checks.length >= perRound)
+            if (check.result || check.running || full())
                 continue;
             if ((used.get(check.file) ?? 0) >= perFile)
                 continue;
             used.set(check.file, (used.get(check.file) ?? 0) + 1);
             check.running = true;
             checks.push({ key, check });
+            add(check.claim.tests.reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0));
         }
         // A file whose baseline did not finish runs no mutant.
         for (const job of pending)
@@ -471,10 +493,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // Retries wait for a round of their own, after every first attempt.
         const retrying = !checks.length && !pending.some((job) => job.waiting.some((group) => !group.retried));
         for (const job of pending) {
-            if (round.length + checks.length >= perRound)
+            if (full())
                 break;
             for (const group of [...job.waiting]) {
-                if (round.length + checks.length >= perRound || (oneAtATime && round.length + checks.length))
+                if (full() || (oneAtATime && round.length + checks.length))
                     break;
                 if (Boolean(group.retried) !== retrying)
                     continue;
@@ -488,6 +510,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 job.waiting.splice(job.waiting.indexOf(group), 1);
                 job.open += 1;
                 round.push({ job, group });
+                add(group.cost);
             }
         }
         let limit = 0;

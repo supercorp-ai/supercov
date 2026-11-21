@@ -113,10 +113,19 @@ gives each worker one). The copies cannot be told apart in Vitest's results,
 which are kept by file path, so each copy claims its assignment from the
 round's directory and reports its tests' outcomes there itself. Supercov's
 setup file switches the copy's mutant on before the file's imports run, and
-skips every test the assignment did not choose. A round holds
+skips every test the assignment did not choose. A round holds at least
 `SUPERCOV_STRONG_ROUND` (default 2) × the workers assignments: a round ends
-when its slowest copy does. Larger rounds measured slower on hono and tRPC
-(4×: +17% and +6%). One round is one call into the resident Vitest
+when its slowest copy does. Larger rounds of every kind measured slower on
+hono and tRPC (4×: +17% and +6%), but one slow file is what holds a round: on
+tRPC a `websockets.test.ts` copy took 15-21 s while the median copy took
+1.2 s, and every other worker waited. So a round takes more assignments while
+their estimated work (1 s to load a copy, plus its tests' baseline durations)
+is less than every worker kept busy as long as its longest copy, up to 16 ×
+the workers: tRPC's pass took 24% less time (3.86 to 2.95 s per mutant run),
+hono's 7% less, the small corpus projects the same, with the same verdicts.
+More workers than Vitest's default did not help: 32 and 48 on 16 CPUs were
+3-6% slower on tRPC, slower on hono, and changed verdicts (runtime errors under
+load). One round is one call into the resident Vitest
 instance (`runTestSpecifications`): no new process, no new workers, the
 project's own pool, so a suite that gives each worker its own database keeps
 doing so.
@@ -133,11 +142,17 @@ isolated pass on every corpus measured (hono, tRPC, and a private
 application's unit and integration suites: 0 differences, 0 soundness
 violations), but its speed depends on the suite: the application's suites ran
 2.9× (unit) and 1.9× (integration) faster, hono the same, tRPC 30% slower. It
-is off by default.
+is off by default. A later comparison against StrykerJS's ground truth found
+kills it should not make, from state a module reset does not undo: a
+process-wide value one test file changed (pathe's `process.cwd`), a fake clock
+left on (hono's JWT tests), and a copy that did not finish (hono, tRPC: 37
+extra kills there). It halved the strong pass on the small corpus projects
+(ufo 26 to 12 s) and used 2.3-2.6× less CPU on hono and tRPC, but their wall
+time did not drop.
 
 The time a copy spends is mostly not its tests: on tRPC a copy waits about
 0.5 s for its worker before its setup file runs and its tests take 0.1-0.4 s,
-and Vitest's own process is idle 95% of the pass (a CPU profile of it,
+and Vitest's own process is idle 93-95% of the pass (a CPU profile of it,
 `SUPERCOV_STRONG_CPU_PROFILE=<file>`). The pass summary's `profile` records
 rounds, copies, time loading and in copies, and the first rounds' timeline.
 

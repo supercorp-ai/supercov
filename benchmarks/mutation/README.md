@@ -177,7 +177,11 @@ node benchmarks/mutation/workflow.mjs --runs-on <16-vCPU label> --truth-runs-on 
   > .github/workflows/mutation-bench.yml
 #    --projects defu,ufo, --scenarios stryker-cold,truth and --shards s2,s6 narrow it; --variants round-2,round-6 runs Supercov jobs
 #    at those SUPERCOV_STRONG_ROUND settings. The CI service used here takes at most 64 jobs per
-#    run from a computer, so the full matrix (about 140 jobs) goes in several runs by --projects
+#    run from a computer (two runs of exactly 64 were dropped; 32 or so per run is safe), so the
+#    full matrix (about 140 jobs) goes in several runs by --projects
+#    Other Supercov variants: first (`supercov mutants -- <test command>` with no run before it, as a
+#    first use), warm (SUPERCOV_STRONG_WARM=1), first-wN (first with Vitest's --maxWorkers=N),
+#    first-prof (first with a CPU profile of the strong pass's main process, main.cpuprofile)
 
 # 2. run it on a workflow_dispatch-capable CI service, then download every artifact
 #    (mutation-bench-<project>-<scenario>[-<shard>]) into one directory
