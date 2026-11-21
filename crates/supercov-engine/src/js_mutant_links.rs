@@ -629,13 +629,14 @@ impl FactCollector<'_> {
                     .unwrap_or(rest.len());
             } else if rest.starts_with("/*") {
                 offset += rest.find("*/").map_or(rest.len(), |end| end + 2);
-            } else if let Some(character) = rest.chars().next() {
+            } else if rest.starts_with(|character: char| {
                 // A byte order mark is JavaScript whitespace, not Unicode's.
-                if !(character.is_whitespace() || character == '\u{feff}' || character == ')') {
-                    break None;
-                }
-                offset += character.len_utf8();
+                character.is_whitespace() || character == '\u{feff}' || character == ')'
+            }) {
+                offset += rest.chars().next().map_or(0, char::len_utf8);
             } else {
+                // A script's HTML-like comment (`<!--`), which the scan does
+                // not read: the operator is not shown.
                 break None;
             }
         };
@@ -1801,6 +1802,18 @@ mod tests {
                 text: "-".into(),
                 at: 11
             })
+        );
+        // A script's HTML-like comment is not read: no operator is shown.
+        MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
+        let script = instrument_candidate(
+            "exports.m = function (a, b) {\n  return a <!-- plus\n    + b;\n};\n",
+            "src/legacy.cjs",
+        )
+        .unwrap();
+        MUTANTS_FOR_TEST.with(|flag| flag.set(None));
+        assert_eq!(
+            mutant(&script, "a <!-- plus\n    + b", "ArithmeticOperator", "-").operator,
+            None
         );
     }
 
