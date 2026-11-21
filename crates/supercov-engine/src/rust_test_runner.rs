@@ -1726,8 +1726,25 @@ fn running_line(
             "unittests "
         },
         source.display(),
-        executable.display()
+        cargo_path(&executable.display().to_string(), std::path::MAIN_SEPARATOR)
     )
+}
+
+/// A path as Cargo prints it. Cargo's per-unit build directory
+/// (`target/debug/build/<package>/<hash>/out/...`) names the package and its
+/// hash as one component, so on Windows Cargo prints them with a `/` between
+/// them and `\` everywhere else: Supercov's line printed `\` there too, and
+/// differed from Cargo's.
+fn cargo_path(text: &str, separator: char) -> String {
+    let hash = |part: &str| part.len() == 16 && part.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let parts = text.split(separator).collect::<Vec<_>>();
+    let mut printed = parts[0].to_owned();
+    for (index, part) in parts.iter().enumerate().skip(1) {
+        let unit = index >= 2 && parts[index - 2] == "build" && hash(part);
+        printed.push(if unit { '/' } else { separator });
+        printed.push_str(part);
+    }
+    printed
 }
 
 /// Whether Cargo colours its own lines: as `--color` or `CARGO_TERM_COLOR`
@@ -3741,6 +3758,44 @@ mod tests {
             )),
             "     Running tests/outside.rs (target/debug/deps/shop-0123456789abcdef)"
         );
+        // Cargo's per-unit build directory: the package and its hash are one
+        // component, printed with `/` between them whatever the separator.
+        for (text, separator, printed) in [
+            (
+                "target\\debug\\build\\shop\\f036352577a492b6\\out\\outside-0123456789abcdef",
+                '\\',
+                "target\\debug\\build\\shop/f036352577a492b6\\out\\outside-0123456789abcdef",
+            ),
+            (
+                "C:\\work\\target\\debug\\build\\shop\\f036352577a492b6\\out\\x.exe",
+                '\\',
+                "C:\\work\\target\\debug\\build\\shop/f036352577a492b6\\out\\x.exe",
+            ),
+            (
+                "/work/target/debug/build/shop/f036352577a492b6/out/x",
+                '/',
+                "/work/target/debug/build/shop/f036352577a492b6/out/x",
+            ),
+            // The old layout, and names that are no unit's hash.
+            (
+                "target\\debug\\deps\\shop-0123456789abcdef",
+                '\\',
+                "target\\debug\\deps\\shop-0123456789abcdef",
+            ),
+            (
+                "target\\debug\\build\\shop\\notahash\\out",
+                '\\',
+                "target\\debug\\build\\shop\\notahash\\out",
+            ),
+            (
+                "target\\debug\\build\\shop\\sixteen-letters!\\out",
+                '\\',
+                "target\\debug\\build\\shop\\sixteen-letters!\\out",
+            ),
+            ("shop", '\\', "shop"),
+        ] {
+            assert_eq!(cargo_path(text, separator), printed);
+        }
         // As Windows gives them: the package resolved, the workspace not.
         let windows = running_line(
             Path::new("C:\\work\\copy"),

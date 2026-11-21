@@ -6011,6 +6011,374 @@ fn jest_tests_are_named_by_their_describe_blocks_and_selected_by_jest() {
     assert!(output.contains("1 failed, 1 skipped, 2 total"), "{output}");
 }
 
+/// A project with the repository's `node_modules` linked in, committed.
+#[cfg(unix)]
+fn linked_project(label: &str, files: &[(&str, &str)]) -> Project {
+    let project = Project::empty(label);
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    for (path, text) in files {
+        project.write(path, text);
+    }
+    project.git(&["init", "-q"]);
+    project.commit(label);
+    project
+}
+
+/// The rewritten copy of `file` a kept workspace holds.
+#[cfg(unix)]
+fn rewritten_test_file(project: &Project, file: &str) -> String {
+    let workspaces = project.root.join(".supercov/workspaces");
+    let mut found = Vec::new();
+    let mut stack = vec![workspaces];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            if path.file_name().is_some_and(|name| name == "node_modules") {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.to_string_lossy().ends_with(file) {
+                found.push(path);
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "{file}: {found:?}");
+    std::fs::read_to_string(&found[0]).unwrap()
+}
+
+/// The command's own run, without Supercov: the fixture is right before
+/// Supercov is asked to keep it so.
+#[cfg(unix)]
+fn passes_plainly(project: &Project, command: &[&str]) {
+    let ran = std::process::Command::new(command[0])
+        .args(&command[1..])
+        .current_dir(&project.root)
+        .output()
+        .unwrap();
+    assert!(
+        ran.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+/// What the test files below share: where it runs.
+#[cfg(unix)]
+const RUNTIME_PROBE: &str =
+    "exports.runtime = () => (typeof window === 'undefined' ? 'node' : 'browser');\n";
+
+/// Jest reads a test's pragmas from the comment the file opens with, and
+/// Supercov keeps that comment first in the files it rewrites (#235: since
+/// 4.25.0 a lint banner went in front of it, and a test marked
+/// `@jest-environment node` ran in the project's default environment). The
+/// project's default is a browser-like environment; each file below picks
+/// `node` its own way, or does not and stays in the default, and asserts
+/// where it runs. Jest reads no docblock behind a shebang or a line comment,
+/// with or without Supercov.
+#[cfg(unix)]
+#[test]
+fn jest_reads_each_rewritten_test_s_docblock_as_it_reads_the_original() {
+    let tests: &[(&str, &str, &str)] = &[
+        (
+            "multi-line",
+            "/**\n * @jest-environment node\n */\n",
+            "node",
+        ),
+        ("one-line", "/** @jest-environment node */\n", "node"),
+        ("same-line", "/** @jest-environment node */ ", "node"),
+        ("single-star", "/* @jest-environment node */\n", "node"),
+        (
+            "options",
+            "/**\n * @jest-environment node\n * @jest-environment-options {\"customExportConditions\": [\"node\"]}\n */\n",
+            "node",
+        ),
+        (
+            "strict",
+            "/** @jest-environment node */\n'use strict';\n",
+            "node",
+        ),
+        ("blank-lines", "\n\n/** @jest-environment node */\n", "node"),
+        (
+            "crlf",
+            "/**\r\n * @jest-environment node\r\n */\r\n",
+            "node",
+        ),
+        ("default", "", "browser"),
+        ("plain-comment", "/* nothing to read here */\n", "browser"),
+        (
+            "line-comment-first",
+            "// a note\n/** @jest-environment node */\n",
+            "browser",
+        ),
+    ];
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "jest-docblocks", "scripts": { "test": "jest" }, "jest": { "testEnvironment": "<rootDir>/browser-env.js" } }"#.to_owned(),
+        ),
+        (
+            "browser-env.js".to_owned(),
+            "const { TestEnvironment } = require('jest-environment-node');\nmodule.exports = class BrowserLike extends TestEnvironment {\n  constructor(config, context) {\n    super(config, context);\n    this.global.window = this.global;\n  }\n};\n".to_owned(),
+        ),
+        ("src/runtime.js".to_owned(), RUNTIME_PROBE.to_owned()),
+    ];
+    for (name, opening, expected) in tests {
+        files.push((
+            format!("test/{name}.test.js"),
+            format!(
+                "{opening}const {{ runtime }} = require('../src/runtime');\ntest('runs in {expected}', () => {{\n  expect(runtime()).toBe('{expected}');\n}});\n"
+            ),
+        ));
+    }
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("jest-docblocks", &files);
+    passes_plainly(&project, &["node_modules/.bin/jest"]);
+    let ran = project.supercov_with(&["--", "npx", "jest"], &[("SUPERCOV_KEEP_WORKSPACE", "1")]);
+    let said = ran.stderr();
+    ran.succeeds();
+    assert!(said.contains(&format!("{} passed", tests.len())), "{said}");
+    for (name, opening, _) in tests {
+        let rewritten = rewritten_test_file(&project, &format!("test/{name}.test.js"));
+        // What comes before the file's code (a directive is code).
+        let comments = opening.split("'use strict'").next().unwrap();
+        assert!(
+            rewritten.starts_with(comments),
+            "{name}: the file opens as it did\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("/* eslint-disable */"),
+            "{name}: still exempt from lint\n{rewritten}"
+        );
+    }
+}
+
+/// `'use strict'` is a directive only at the start of a file's code: a
+/// statement Supercov put in front of it (the runtime's loader) made the
+/// test file sloppy, and `this` in a plain function call the global object.
+/// node:test and Jest, CommonJS files with and without the semicolon, behind
+/// a shebang and a docblock.
+#[cfg(unix)]
+#[test]
+fn a_strict_test_file_stays_strict_under_supercov() {
+    let strict = |opening: &str, runner: &str| {
+        let (import, check) = if runner == "node" {
+            (
+                "const test = require('node:test');\nconst assert = require('node:assert');\n",
+                "assert.equal(sloppy(), undefined);\n  assert.equal(one(), 1);",
+            )
+        } else {
+            (
+                "",
+                "expect(sloppy()).toBeUndefined();\n  expect(one()).toBe(1);",
+            )
+        };
+        format!(
+            "{opening}{import}const {{ one }} = require('../src/one');\nfunction sloppy() {{\n  return this;\n}}\ntest('is strict', () => {{\n  {check}\n}});\n"
+        )
+    };
+    let openings = [
+        ("semicolon", "'use strict';\n"),
+        ("no-semicolon", "\"use strict\"\n"),
+        ("with-comment", "'use strict' // the whole file\n"),
+        ("docblock", "/** strict below */\n'use strict';\n"),
+    ];
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "strict-tests", "scripts": { "test": "node --test" } }"#.to_owned(),
+        ),
+        (
+            "src/one.js".to_owned(),
+            "exports.one = () => 1;\n".to_owned(),
+        ),
+    ];
+    for (name, opening) in openings {
+        files.push((format!("test/{name}.test.cjs"), strict(opening, "node")));
+    }
+    files.push((
+        "test/shebang.test.cjs".to_owned(),
+        strict("#!/usr/bin/env node\n'use strict';\n", "node"),
+    ));
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("strict-node-tests", &files);
+    passes_plainly(&project, &["node", "--test"]);
+    let ran = project.supercov_with(
+        &["--", "node", "--test"],
+        &[("SUPERCOV_KEEP_WORKSPACE", "1")],
+    );
+    let said = ran.stdout() + &ran.stderr();
+    ran.succeeds();
+    assert!(said.contains("pass 5"), "{said}");
+    for (name, _) in openings {
+        let rewritten = rewritten_test_file(&project, &format!("test/{name}.test.cjs"));
+        assert!(
+            rewritten.contains("__SUPERCOV_DIRECT_RUNTIME__"),
+            "{name}: rewritten\n{rewritten}"
+        );
+    }
+
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "strict-jest", "scripts": { "test": "jest" } }"#.to_owned(),
+        ),
+        (
+            "src/one.js".to_owned(),
+            "exports.one = () => 1;\n".to_owned(),
+        ),
+    ];
+    for (name, opening) in openings {
+        files.push((format!("test/{name}.test.js"), strict(opening, "jest")));
+    }
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("strict-jest-tests", &files);
+    passes_plainly(&project, &["node_modules/.bin/jest"]);
+    let ran = project.supercov(&["--", "npx", "jest"]);
+    let said = ran.stderr();
+    ran.succeeds();
+    assert!(said.contains("4 passed"), "{said}");
+}
+
+/// The sources Supercov measures keep their directives too: a strict
+/// CommonJS module (with or without the semicolon, behind a license comment
+/// or a shebang) and a TypeScript one, which also gets Supercov's lint and
+/// type banner, stay strict once instrumented, and their code is measured.
+#[cfg(unix)]
+#[test]
+fn strict_sources_stay_strict_once_instrumented() {
+    let body = "exports.sloppy = function () {\n  return this;\n};\nexports.one = (n) => (n > 0 ? 1 : 0);\n";
+    let sources = [
+        ("src/semicolon.cjs", format!("'use strict';\n{body}")),
+        ("src/no-semicolon.cjs", format!("\"use strict\"\n{body}")),
+        ("src/licensed.cjs", format!("/*! @license MIT */\n'use strict';\n{body}")),
+        ("src/script.cjs", format!("#!/usr/bin/env node\n'use strict';\n{body}")),
+        (
+            "src/typed.cts",
+            "'use strict';\nexports.sloppy = function (this: unknown): unknown {\n  return this;\n};\nexports.one = (n: number): number => (n > 0 ? 1 : 0);\n".to_owned(),
+        ),
+    ];
+    let mut checks = String::from(
+        "const test = require('node:test');\nconst assert = require('node:assert');\n",
+    );
+    for (path, _) in &sources {
+        checks.push_str(&format!(
+            "test('{path} is strict', () => {{\n  const {{ sloppy, one }} = require('../{path}');\n  assert.equal(sloppy(), undefined);\n  assert.equal(one(1), 1);\n}});\n"
+        ));
+    }
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "strict-sources", "scripts": { "test": "node --test" } }"#.to_owned(),
+        ),
+        ("test/sources.test.cjs".to_owned(), checks),
+    ];
+    files.extend(
+        sources
+            .iter()
+            .map(|(path, text)| ((*path).to_owned(), text.clone())),
+    );
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("strict-sources", &files);
+    passes_plainly(&project, &["node", "--test"]);
+    let ran = project.supercov(&["--", "node", "--test"]);
+    let said = ran.stdout() + &ran.stderr();
+    ran.succeeds();
+    assert!(said.contains(&format!("pass {}", sources.len())), "{said}");
+    for (path, _) in &sources {
+        let file = project
+            .supercov(&["runs", "latest", "file", path])
+            .succeeds();
+        assert!(
+            file.contains("Tests touching this file: 1"),
+            "{path} is measured\n{file}"
+        );
+    }
+}
+
+/// Vitest reads `@vitest-environment` (and `@jest-environment`) anywhere in
+/// a test file; a rewritten file keeps each where the file had it, and each
+/// test runs where it asks to, the project's default a browser-like
+/// environment of its own.
+#[cfg(unix)]
+#[test]
+fn vitest_reads_each_rewritten_test_s_environment_as_it_reads_the_original() {
+    let tests: &[(&str, &str, &str)] = &[
+        ("line", "// @vitest-environment node\n", "node"),
+        (
+            "docblock",
+            "/**\n * @vitest-environment node\n */\n",
+            "node",
+        ),
+        ("jest-docblock", "/** @jest-environment node */\n", "node"),
+        (
+            "after-comment",
+            "// a note\n// @vitest-environment node\n",
+            "node",
+        ),
+        ("default", "", "browser"),
+    ];
+    let mut files = vec![
+        (
+            "package.json".to_owned(),
+            r#"{ "name": "vitest-environments", "type": "module", "scripts": { "test": "vitest run" } }"#.to_owned(),
+        ),
+        (
+            "vitest.config.js".to_owned(),
+            "export default { test: { environment: './browser-env.js' } };\n".to_owned(),
+        ),
+        (
+            "browser-env.js".to_owned(),
+            "export default {\n  name: 'browser-like',\n  viteEnvironment: 'ssr',\n  setup() {\n    globalThis.window = globalThis;\n    return { teardown() { delete globalThis.window; } };\n  },\n};\n".to_owned(),
+        ),
+        (
+            "src/runtime.js".to_owned(),
+            "export const runtime = () => (typeof window === 'undefined' ? 'node' : 'browser');\n".to_owned(),
+        ),
+    ];
+    for (name, opening, expected) in tests {
+        files.push((
+            format!("test/{name}.test.js"),
+            format!(
+                "{opening}import {{ expect, test }} from 'vitest';\nimport {{ runtime }} from '../src/runtime.js';\ntest('runs in {expected}', () => {{\n  expect(runtime()).toBe('{expected}');\n}});\n"
+            ),
+        ));
+    }
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let project = linked_project("vitest-environments", &files);
+    passes_plainly(&project, &["node_modules/.bin/vitest", "run"]);
+    let ran = project.supercov(&["--", "npx", "vitest", "run"]);
+    let said = ran.stdout() + &ran.stderr();
+    ran.succeeds();
+    assert!(said.contains(&format!("{} passed", tests.len())), "{said}");
+}
+
 #[cfg(unix)]
 #[test]
 fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
@@ -15621,7 +15989,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2522 => main.rs:2522",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2012 => javascript_frontend.rs:2012",
+            "fs.read_to_string#javascript_frontend.rs:2001 => javascript_frontend.rs:2001",
         ],
     );
 }
@@ -17728,12 +18096,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1801@2",
+            "fs.read_to_string#javascript_frontend.rs:1789@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1801"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1789"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
