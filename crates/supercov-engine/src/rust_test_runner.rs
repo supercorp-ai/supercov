@@ -1726,8 +1726,47 @@ fn running_line(
             "unittests "
         },
         source.display(),
-        executable.display()
+        cargo_path(&executable, std::path::MAIN_SEPARATOR)
     )
+}
+
+/// A path as Cargo prints it. Cargo's per-unit build directory
+/// (`target/debug/build/<package>/<hash>/out/...`) names the package and its
+/// hash as one component, so on Windows Cargo prints them with a `/` between
+/// them and `\` everywhere else: Supercov's line printed `\` there too, and
+/// differed from Cargo's.
+fn cargo_path(path: &Path, separator: char) -> String {
+    use std::path::Component;
+    let hash = |text: &str| text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let components = path.components().collect::<Vec<_>>();
+    let name = |at: usize| match components.get(at) {
+        Some(Component::Normal(name)) => Some(name.to_string_lossy()),
+        _ => None,
+    };
+    let mut printed = String::new();
+    let mut index = 0;
+    while index < components.len() {
+        match components[index] {
+            Component::Prefix(prefix) => printed.push_str(&prefix.as_os_str().to_string_lossy()),
+            Component::RootDir => printed.push(separator),
+            other => {
+                if !printed.is_empty() && !printed.ends_with(separator) {
+                    printed.push(separator);
+                }
+                printed.push_str(&other.as_os_str().to_string_lossy());
+                let unit = index >= 1
+                    && name(index - 1).as_deref() == Some("build")
+                    && name(index + 1).is_some_and(|next| hash(&next));
+                if unit {
+                    printed.push('/');
+                    printed.push_str(&name(index + 1).unwrap_or_default());
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    printed
 }
 
 /// Whether Cargo colours its own lines: as `--color` or `CARGO_TERM_COLOR`
@@ -3740,6 +3779,38 @@ mod tests {
                 "integration"
             )),
             "     Running tests/outside.rs (target/debug/deps/shop-0123456789abcdef)"
+        );
+        // Cargo's per-unit build directory: the package and its hash are one
+        // component, printed with `/` between them whatever the separator.
+        assert_eq!(
+            cargo_path(
+                Path::new("target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"),
+                '\\'
+            ),
+            "target\\debug\\build\\shop/f036352577a492b6\\out\\outside-0123456789abcdef"
+        );
+        assert_eq!(
+            cargo_path(
+                Path::new("target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"),
+                '/'
+            ),
+            "target/debug/build/shop/f036352577a492b6/out/outside-0123456789abcdef"
+        );
+        assert_eq!(
+            cargo_path(
+                Path::new("/work/target/debug/build/shop/f036352577a492b6/out/x"),
+                '/'
+            ),
+            "/work/target/debug/build/shop/f036352577a492b6/out/x"
+        );
+        // Not a unit's directory: a hash-like name elsewhere, the old layout.
+        assert_eq!(
+            cargo_path(Path::new("target/debug/deps/shop-0123456789abcdef"), '\\'),
+            "target\\debug\\deps\\shop-0123456789abcdef"
+        );
+        assert_eq!(
+            cargo_path(Path::new("target/debug/build/shop/notahash/out/x"), '\\'),
+            "target\\debug\\build\\shop\\notahash\\out\\x"
         );
         // As Windows gives them: the package resolved, the workspace not.
         let windows = running_line(
