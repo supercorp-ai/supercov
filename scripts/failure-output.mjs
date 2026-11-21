@@ -233,13 +233,10 @@ const languages = {
     const tidy = (line) => line
       .replace(/\(\d+\) panicked/u, 'panicked')
       .replace(/-[0-9a-f]{16}(?:\.exe)?\)$/u, '-HASH)')
-      // Cargo's newer build-directory layout puts the unit's hash in a
-      // directory of its own (`build/<package>/<hash>/out/`), and the hash
-      // depends on the flags a run under Supercov adds.
-      // On Windows Cargo writes that directory as `shop/<hash>\\out`, one
-      // separator of each kind, and a run under Supercov names the binary in
-      // its own build directory, with Windows' separator throughout.
-      .replace(/([\\/]build[\\/][^\\/\s]+)[\\/][0-9a-f]{16}[\\/]/u, '$1/HASH/')
+      // Cargo's newer build-directory layout puts each unit in a directory
+      // of its own hash (`target/debug/build/shop/<hash>/out/`), which the
+      // flags of a run under Supercov change as they change the binary's.
+      .replace(/([\\/]build[\\/][^\\/]+[\\/])[0-9a-f]{16}(?=[\\/])/gu, '$1HASH')
       .replace(/finished in [\d.]+s$/u, 'finished');
     // Cargo colours its own lines where it is told to (`CARGO_TERM_COLOR`,
     // as CI sets it), and so does Supercov's line for a binary: the colours

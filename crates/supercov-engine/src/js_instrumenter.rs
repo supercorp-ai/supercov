@@ -2827,6 +2827,7 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
         extra_expect_modules,
         capability_wrapper,
         None,
+        false,
     )
 }
 
@@ -2840,6 +2841,53 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
 /// requires the bootstrap relative to the file the stack's first frame names.
 const RUNTIME_LOADER_BODY: &str = r#""const host = globalThis.process; if (!host || !host.getBuiltinModule) return; const frame = /(?:file:\\/\\/)?((?:\\/|[A-Za-z]:[\\\\/])[^\\s()]+?)(?=:\\d+:\\d+)/.exec(String(stack)); if (!frame) return; host.getBuiltinModule(\"node:module\").createRequire(frame[0].startsWith(\"file:\") ? frame[0] : frame[1])(specifier);""#;
 
+/// Where a file's own code starts, as tools other than the engine that runs
+/// it read the file: a shebang stays on the first line, a test runner reads
+/// pragmas from the comment the file opens with (Jest's docblock,
+/// `/** @jest-environment node */`, only from the first comment), the
+/// TypeScript compiler from the comments before the first token (`//
+/// @ts-nocheck`, `/// <reference ...>`), and a directive (`'use strict'`,
+/// `'use client'`) is one only at the start of the code. So what Supercov
+/// adds to a file goes no earlier than `code_start` (a comment) or
+/// `statements_start` (a statement). Since 4.25.0 a lint banner in front of a
+/// test's docblock ran the test in the project's default environment
+/// (#235).
+pub(crate) struct Prologue {
+    /// The first token of the file's code: past its shebang and every
+    /// comment before it.
+    pub(crate) code_start: usize,
+    /// Past the directive prologue: where a statement may go.
+    pub(crate) statements_start: usize,
+    /// The last directive ends without a semicolon, so a statement on its
+    /// line needs one.
+    pub(crate) directive_needs_semicolon: bool,
+}
+
+impl Prologue {
+    pub(crate) fn of(program: &Program<'_>, source: &str) -> Self {
+        let first_directive = program.directives.first().map(|d| d.span.start as usize);
+        let first_statement = program.body.first().map(|s| s.span().start as usize);
+        let code_start = match (first_directive, first_statement) {
+            (Some(directive), Some(statement)) => directive.min(statement),
+            (Some(at), None) | (None, Some(at)) => at,
+            // No code at all: it starts at the end.
+            (None, None) => source.len(),
+        };
+        let last_directive = program.directives.last();
+        let statements_start = last_directive.map_or(code_start, |d| d.span.end as usize);
+        let directive_needs_semicolon = last_directive.is_some_and(|d| {
+            !source[d.span.start as usize..d.span.end as usize]
+                .trim_end()
+                .ends_with(';')
+        });
+        Self {
+            code_start,
+            statements_start,
+            directive_needs_semicolon,
+        }
+    }
+}
+
 /// How the statement [`runtime_loader`] writes starts.
 pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {";
 
@@ -2850,19 +2898,6 @@ pub(crate) const RUNTIME_LOADER_START: &str = "if (!globalThis.__SUPERCOV_DIRECT
 /// `globalThis.__SUPERCOV_DIRECT_RUNTIME__`, `Function` and `Error` outside a
 /// function body the type checker does not read. The file's own location
 /// comes from a stack taken at its top level; `bootstrap` is relative to it.
-/// The offset just past a block comment that opens the source at `from`
-/// (after any whitespace), or `from` when none does.
-pub(crate) fn after_leading_block_comment(source: &str, from: usize) -> usize {
-    let rest = &source[from..];
-    let start = from + (rest.len() - rest.trim_start().len());
-    if !source[start..].starts_with("/*") {
-        return from;
-    }
-    source[start + 2..]
-        .find("*/")
-        .map_or(from, |end| start + 2 + end + 2)
-}
-
 pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     let specifier = serde_json::to_string(bootstrap).expect("a path string serializes");
     format!(
@@ -2870,12 +2905,15 @@ pub(crate) fn runtime_loader(bootstrap: &str) -> String {
     )
 }
 
+/// `exempt_from_lint` puts `/* eslint-disable */` in a rewritten file, where
+/// its code starts (see [`Prologue`]).
 pub fn instrument_node_assertion_phases_with_runtime_imports(
     source: &str,
     file: &str,
     extra_expect_modules: &[String],
     capability_wrapper: Option<&str>,
     assertion_runtime: Option<&str>,
+    exempt_from_lint: bool,
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
     let _positions = PositionScope::enter();
     let assertion_candidate = source.contains("assert") || source.contains("expect");
@@ -2948,34 +2986,39 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         });
     }
     let module = parsed.program.source_type.is_module();
+    let prologue = Prologue::of(&parsed.program, source);
+    // A rewritten test file is exempt from the host project's lint (`next
+    // build` lints test files under the app's source directory, and their
+    // phase calls failed it), on the line its code starts: nothing is put
+    // above a line, which its runner's locations and stack traces name, and
+    // nothing in front of what a tool reads where the file opens.
+    if exempt_from_lint {
+        edits.push(TextEdit::insert(
+            prologue.code_start,
+            i64::MIN,
+            "/* eslint-disable */ ".into(),
+        ));
+    }
     // The runtime the assertion phases call, loaded where nothing installed
     // it. A statement rather than an `import`: an import's relative path broke
     // once the test command compiled the file somewhere else (`tsc` into
     // `dist/`), and the test failed on a module that was not there. It goes
-    // first, as the import was evaluated first, on the first line so every
-    // other line stays where it was.
-    // After a leading comment too: Jest reads a test's docblock pragmas
-    // (`/** @jest-environment jsdom */`) only from a comment the file opens
-    // with, so a loader in front of it ran the test in the wrong environment
-    // ("window is not defined").
+    // as early as it can, as the import was evaluated first, on a line the
+    // file already has so every line stays where it was: past the directive
+    // prologue (`'use strict'` is no directive behind a statement).
     if let Some(bootstrap) = assertion_runtime.filter(|_| assertions > 0) {
-        let mut at = if source.starts_with("#!") {
-            source
-                .find('\n')
-                .map_or(source.len(), |newline| newline + 1)
-        } else {
-            0
-        };
-        at = after_leading_block_comment(source, at);
-        let space = if source[..at].ends_with("*/") {
+        let at = prologue.statements_start;
+        let before = if prologue.directive_needs_semicolon {
+            "; "
+        } else if at > 0 && !source[..at].ends_with(char::is_whitespace) {
             " "
         } else {
             ""
         };
         edits.push(TextEdit::insert(
             at,
-            i64::MIN,
-            format!("{space}{} ", runtime_loader(bootstrap)),
+            i64::MIN + 1,
+            format!("{before}{} ", runtime_loader(bootstrap)),
         ));
     }
     // An inline map is resolved relative to the transformed file itself, and
@@ -13991,29 +14034,311 @@ export function shapes(n: number): unknown {
         assert!(output.code.contains("assert.equal(value(), 1)"));
     }
 
-    #[test]
-    fn a_docblock_the_test_opens_with_stays_first_for_jest_to_read() {
-        let source = "/** @jest-environment jsdom */\n\nimport assert from 'node:assert';\nassert.equal(value(), 1);\n";
-        let output = instrument_node_assertion_phases_with_runtime_imports(
+    /// What jest-docblock's `extract` reads: the block comment a file opens
+    /// with, after whitespace (a byte-order mark is whitespace to it). Jest
+    /// takes a test's pragmas (`@jest-environment`) from it alone.
+    fn jest_docblock(code: &str) -> Option<&str> {
+        let rest = code.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        rest.strip_prefix("/*")?
+            .find("*/")
+            .map(|end| &rest[..end + 4])
+    }
+
+    /// The pragmas Jest takes from that docblock (`@name value`), in order.
+    fn jest_pragmas(code: &str) -> Vec<String> {
+        let Some(docblock) = jest_docblock(code) else {
+            return Vec::new();
+        };
+        docblock
+            .split('@')
+            .skip(1)
+            .map(|pragma| {
+                let line = pragma.lines().next().unwrap_or_default();
+                line.trim_end_matches("*/").trim().to_owned()
+            })
+            .collect()
+    }
+
+    /// What Vitest reads: the first `@vitest-environment` or
+    /// `@jest-environment` followed by whitespace and a name, anywhere.
+    fn vitest_environment(code: &str) -> Option<String> {
+        let mut from = 0;
+        while let Some(at) = code[from..].find('@') {
+            let start = from + at + 1;
+            from = start;
+            let rest = &code[start..];
+            let Some(after) = rest
+                .strip_prefix("vitest-environment")
+                .or_else(|| rest.strip_prefix("jest-environment"))
+            else {
+                continue;
+            };
+            let name = after.trim_start();
+            if name.len() == after.len() {
+                continue;
+            }
+            let name: String = name
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// A file's directives, and whether it parses.
+    fn directives_of(code: &str, file: &str) -> Result<Vec<String>, Vec<String>> {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new(file)).unwrap();
+        let parsed = Parser::new(&allocator, code, source_type).parse();
+        if !parsed.errors.is_empty() {
+            return Err(parsed.errors.iter().map(ToString::to_string).collect());
+        }
+        Ok(parsed
+            .program
+            .directives
+            .iter()
+            .map(|directive| directive.directive.to_string())
+            .collect())
+    }
+
+    fn prologue_of(code: &str, file: &str) -> Prologue {
+        let allocator = Allocator::default();
+        let source_type = project_source_type(Path::new(file)).unwrap();
+        let parsed = Parser::new(&allocator, code, source_type).parse();
+        Prologue::of(&parsed.program, code)
+    }
+
+    fn rewritten(source: &str, file: &str, lint: bool, runtime: bool) -> String {
+        instrument_node_assertion_phases_with_runtime_imports(
             source,
-            "tests/view.test.ts",
+            file,
             &[],
             None,
-            Some("../.supercov/node_modules/bootstrap.cjs"),
+            runtime.then_some("../.supercov/node_modules/bootstrap.cjs"),
+            lint,
         )
-        .unwrap();
-        let lines = output.code.lines().collect::<Vec<_>>();
-        assert!(
-            lines[0].starts_with(
-                "/** @jest-environment jsdom */ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"
+        .unwrap_or_else(|error| panic!("{error:?}\n{source}"))
+        .code
+    }
+
+    /// Everything a rewritten test file opens with stays as the tools that
+    /// read it positionally read it, whatever the file opens with: a
+    /// byte-order mark, a shebang, docblocks (Jest reads pragmas from the
+    /// first comment only), line comments (`// @ts-nocheck`, `///
+    /// <reference>`), blank lines and Windows line ends, and directives with
+    /// or without semicolons (a statement in front of `'use strict'` turns it
+    /// into a string). Supercov's lint banner and runtime loader go after
+    /// them, on lines the file already has (#235).
+    #[test]
+    fn what_a_rewritten_test_opens_with_stays_where_tools_read_it() {
+        let comments = [
+            "/** @jest-environment node */\n",
+            "/**\n * @jest-environment node\n * @jest-environment-options {\"url\": \"http://a/\"}\n */\n",
+            "/* @jest-environment ./env.js */ ",
+            "// @vitest-environment happy-dom\n",
+            "// @ts-nocheck\n",
+            "/// <reference types=\"node\" />\n",
+            "/* @flow */\n",
+            "/** @jsx h */\r\n",
+            "\n\n",
+            "/* a */ /* b */\n",
+        ];
+        let mut openings = vec![String::new()];
+        for first in comments {
+            openings.push(first.to_owned());
+            for second in comments {
+                openings.push(format!("{first}{second}"));
+            }
+        }
+        let directives = [
+            "",
+            "'use strict';\n",
+            "\"use strict\"\n",
+            "'use strict'; 'use client';\n",
+            "'use strict' // why\n",
+            "\"use client\";\r\n",
+        ];
+        let bodies = [
+            (
+                "test/a.test.mjs",
+                "import assert from 'node:assert';\nassert.equal(f(), 1);\n",
             ),
-            "{}",
-            lines[0]
+            (
+                "test/a.test.cjs",
+                "const assert = require('node:assert');\nassert.equal(f(), 1);\n",
+            ),
+            (
+                "test/a.test.ts",
+                "import assert from 'node:assert';\nassert.equal(f(), 1);\n",
+            ),
+            (
+                "test/a.test.js",
+                "const assert = require('node:assert');\nassert.equal(f(), 1);\n",
+            ),
+        ];
+        let heads = ["", "\u{feff}", "#!/usr/bin/env node\n"];
+        let mut checked = 0;
+        for head in heads {
+            for opening in &openings {
+                for directive in directives {
+                    for (file, body) in bodies {
+                        for (lint, runtime) in [(true, true), (true, false), (false, true)] {
+                            let source = format!("{head}{opening}{directive}{body}");
+                            let code = rewritten(&source, file, lint, runtime);
+                            let case = format!(
+                                "{file} lint={lint} runtime={runtime}\n--- source\n{source}--- rewritten\n{code}"
+                            );
+                            let start = prologue_of(&source, file).code_start;
+                            assert!(
+                                code.starts_with(&source[..start]),
+                                "what comes before the code moved\n{case}"
+                            );
+                            assert_eq!(
+                                jest_pragmas(&code),
+                                jest_pragmas(&source),
+                                "Jest's pragmas\n{case}"
+                            );
+                            if jest_docblock(&source).is_some() {
+                                assert_eq!(
+                                    jest_docblock(&code),
+                                    jest_docblock(&source),
+                                    "Jest's docblock\n{case}"
+                                );
+                            }
+                            assert_eq!(
+                                vitest_environment(&code),
+                                vitest_environment(&source),
+                                "Vitest's environment\n{case}"
+                            );
+                            assert_eq!(
+                                directives_of(&code, file)
+                                    .unwrap_or_else(|errors| panic!("{errors:?}\n{case}")),
+                                directives_of(&source, file).unwrap(),
+                                "directives\n{case}"
+                            );
+                            if head.starts_with("#!") {
+                                assert_eq!(
+                                    code.lines().next(),
+                                    source.lines().next(),
+                                    "shebang\n{case}"
+                                );
+                            }
+                            assert_eq!(
+                                code.starts_with('\u{feff}'),
+                                source.starts_with('\u{feff}'),
+                                "byte-order mark\n{case}"
+                            );
+                            let banner = code.matches("/* eslint-disable */").count();
+                            assert_eq!(banner, usize::from(lint), "banner\n{case}");
+                            if lint {
+                                assert!(
+                                    code.find("/* eslint-disable */").unwrap() >= start,
+                                    "banner placement\n{case}"
+                                );
+                            }
+                            if runtime {
+                                let loader = code
+                                    .find(RUNTIME_LOADER_START)
+                                    .unwrap_or_else(|| panic!("no loader\n{case}"));
+                                // The loader is the rewritten file's first statement.
+                                let rewritten_start = prologue_of(&code, file).statements_start;
+                                assert!(
+                                    code[rewritten_start..]
+                                        .trim_start_matches(|c: char| c == ';' || c.is_whitespace())
+                                        .starts_with(RUNTIME_LOADER_START)
+                                        || loader == rewritten_start,
+                                    "loader placement\n{case}"
+                                );
+                            }
+                            let line_of = |text: &str, needle: &str| {
+                                text.lines().position(|line| line.contains(needle))
+                            };
+                            assert_eq!(
+                                line_of(&code, "\"node:assert.equal\""),
+                                line_of(&source, "assert.equal"),
+                                "the assertion's line\n{case}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+
+    /// Where code starts in a file with directives and statements, either
+    /// alone, or neither.
+    #[test]
+    fn a_prologue_is_read_from_directives_statements_or_neither() {
+        let of = |source: &str| {
+            let prologue = prologue_of(source, "a.js");
+            (
+                prologue.code_start,
+                prologue.statements_start,
+                prologue.directive_needs_semicolon,
+            )
+        };
+        assert_eq!(of("/* a */ 'use strict';\nf();\n"), (8, 21, false));
+        assert_eq!(of("/* a */ 'use strict'\n"), (8, 20, true));
+        assert_eq!(of("// a\nf();\n"), (5, 5, false));
+        assert_eq!(
+            of("#!/usr/bin/env node\n// only comments\n"),
+            (37, 37, false)
         );
+        assert_eq!(of(""), (0, 0, false));
+    }
+
+    /// The file of #235: a Jest docblock that picks the test's environment.
+    /// Jest reads it only as the file's first comment, so the lint banner and
+    /// the loader go after it, on its last line.
+    #[test]
+    fn a_jest_docblock_stays_the_first_comment_of_a_rewritten_test() {
+        let source = "/**\n * @jest-environment node\n */\nconst { runtime } = require('../src/runtime');\ntest('node', () => {\n  expect(runtime()).toBe('node');\n});\n";
+        let code = rewritten(source, "test/env.test.js", true, true);
+        assert!(code.starts_with("/**\n * @jest-environment node\n */\n/* eslint-disable */ if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {"), "{code}");
+        assert_eq!(
+            jest_docblock(&code),
+            Some("/**\n * @jest-environment node\n */")
+        );
+        let lines = code.lines().collect::<Vec<_>>();
         assert!(
-            lines[3].contains("assert.equal(value(), 1)"),
-            "lines stay where they were"
+            lines[3].ends_with("const { runtime } = require('../src/runtime');"),
+            "{code}"
         );
+        assert!(lines[5].contains("withNodeAssertionPhase"), "{code}");
+    }
+
+    /// `'use strict'` is a directive only in front of every statement: the
+    /// loader goes after it, on its line, and a directive without a
+    /// semicolon gets one.
+    #[test]
+    fn a_strict_test_stays_strict_once_rewritten() {
+        for (source, opens) in [
+            (
+                "'use strict';\nconst assert = require('node:assert');\nassert.equal(this, undefined);\n",
+                "/* eslint-disable */ 'use strict'; if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {",
+            ),
+            (
+                "\"use strict\"\nconst assert = require('node:assert');\nassert.equal(this, undefined);\n",
+                "/* eslint-disable */ \"use strict\"; if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {",
+            ),
+            (
+                "#!/usr/bin/env node\n'use strict'\nconst assert = require('node:assert');\nassert.ok(1);\n",
+                "#!/usr/bin/env node\n/* eslint-disable */ 'use strict'; if (!globalThis.__SUPERCOV_DIRECT_RUNTIME__) try {",
+            ),
+        ] {
+            let code = rewritten(source, "test/strict.test.cjs", true, true);
+            assert!(code.starts_with(opens), "{code}");
+            assert_eq!(
+                directives_of(&code, "test/strict.test.cjs").unwrap(),
+                ["use strict"],
+                "{code}"
+            );
+        }
     }
 
     #[test]
@@ -14025,6 +14350,7 @@ export function shapes(n: number): unknown {
             &[],
             None,
             Some("../.supercov/node_modules/bootstrap.cjs"),
+            false,
         )
         .unwrap();
         assert_eq!(output.assertions, 1);
