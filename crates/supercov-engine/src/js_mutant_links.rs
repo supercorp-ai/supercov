@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, BinaryExpression, CallExpression,
     ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression, ForStatement,
-    IfStatement, LogicalExpression, PrivateFieldExpression, Program, Statement,
-    StaticMemberExpression, UnaryExpression, WhileStatement,
+    IfStatement, LogicalExpression, PrivateFieldExpression, Program, StaticMemberExpression,
+    UnaryExpression, WhileStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
@@ -612,7 +612,8 @@ impl FactCollector<'_> {
     }
 
     /// The operator between two operands: the first text after the left one
-    /// that is not a comment, a space or a parenthesis.
+    /// that is not a comment, a space or a closing parenthesis (an opening
+    /// one cannot come before the operator).
     fn operator(&mut self, span: Span, left: Span, right: Span, text: &'static str) {
         let gap = &self.source[left.end as usize..right.start as usize];
         let mut offset = 0;
@@ -626,7 +627,7 @@ impl FactCollector<'_> {
             } else if rest.starts_with("/*") {
                 offset += rest.find("*/").map_or(rest.len(), |end| end + 2);
             } else if let Some(character) = rest.chars().next() {
-                if !(character.is_whitespace() || character == ')' || character == '(') {
+                if !(character.is_whitespace() || character == ')') {
                     break None;
                 }
                 offset += character.len_utf8();
@@ -682,10 +683,12 @@ impl<'a> Visit<'a> for FactCollector<'_> {
     fn visit_expression(&mut self, expression: &Expression<'a>) {
         if !matches!(expression, Expression::ParenthesizedExpression(_)) {
             let span = key(expression.span());
-            if self.decision_spans.contains(&span) && !self.facts.decisions.contains_key(&span) {
-                let mut shape = DecisionShape::default();
-                shape.build(expression);
-                self.facts.decisions.insert(span, shape);
+            if self.decision_spans.contains(&span) {
+                self.facts.decisions.entry(span).or_insert_with(|| {
+                    let mut shape = DecisionShape::default();
+                    shape.build(expression);
+                    shape
+                });
             }
         }
         walk::walk_expression(self, expression);
@@ -809,14 +812,12 @@ impl<'a> Visit<'a> for FactCollector<'_> {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        if arrow.expression
-            && let [Statement::ExpressionStatement(body)] = arrow.body.statements.as_slice()
-        {
+        if let Some(body) = arrow.get_expression() {
             self.facts.arrows.insert(
                 key(arrow.span),
                 ArrowLink {
-                    effects: expression_has_effects(&body.expression),
-                    never_undefined: never_undefined(&body.expression),
+                    effects: expression_has_effects(body),
+                    never_undefined: never_undefined(body),
                 },
             );
         }
@@ -892,8 +893,10 @@ impl<'p> Nested<'p> {
             .partition_point(|(item, _)| item.start <= span.start);
         let mut index = last.checked_sub(1);
         while let Some(at) = index {
+            // Each of these starts at or before `span`, so it contains
+            // `span` when it ends at or after it.
             let (item, id) = self.items[at];
-            if item.start <= span.start && item.end >= span.end {
+            if item.end >= span.end {
                 return Some(id);
             }
             index = self.parents[at];
@@ -1621,6 +1624,379 @@ mod tests {
             hinted.untestable.map(|(kind, _)| kind),
             Some(crate::coverage_index::Untestable::Clock)
         );
+    }
+
+    #[test]
+    fn decisions_under_negations_and_coalescing_are_shaped_by_their_and_or_operators() {
+        let source = concat!(
+            "export function f(a: number, b: number, c: boolean, d: boolean, x?: boolean) {\n",
+            "  if ((x ?? c) && d) return 1;\n",
+            "  if (c && -a) return 2;\n",
+            "  if (!!(c && d) || x) return 3;\n",
+            "  if (!-a && c) return 4;\n",
+            "  if (!(x ?? c) && d) return 5;\n",
+            "  if ((!(c && d) || x) && a > b) return 6;\n",
+            "  return 0;\n",
+            "}\n",
+        );
+        let output = instrumented(source, false);
+        let linked = |line: u32, original: &str, mutator: &str, replacement: &str| {
+            output
+                .mutants
+                .iter()
+                .find(|m| {
+                    m.start.0 == line
+                        && m.original == original
+                        && m.mutator == mutator
+                        && m.replacement == replacement
+                })
+                .unwrap_or_else(|| panic!("{mutator} on `{original}` at line {line}"))
+                .decision
+                .clone()
+        };
+        let condition = |source: &str, index| {
+            Some(DecisionLink {
+                id: decision(&output, source).into(),
+                condition: Some(index),
+                prefix: None,
+            })
+        };
+        let prefix = |source: &str, width| {
+            Some(DecisionLink {
+                id: decision(&output, source).into(),
+                condition: None,
+                prefix: Some(width),
+            })
+        };
+        // `??` is no `&&`/`||`: a coalescing is one condition, also under a
+        // `!`.
+        assert_eq!(
+            linked(2, "x ?? c", "LogicalOperator", "&&"),
+            condition("(x ?? c) && d", 0)
+        );
+        assert_eq!(
+            linked(6, "!(x ?? c)", "BooleanLiteral", "removed"),
+            condition("!(x ?? c) && d", 0)
+        );
+        // A negated number is a condition, and so is the `!` of one, whose
+        // operand then is no condition of its own.
+        assert_eq!(
+            linked(3, "-a", "UnaryOperator", "+"),
+            condition("c && -a", 1)
+        );
+        assert_eq!(
+            linked(5, "!-a", "BooleanLiteral", "removed"),
+            condition("!-a && c", 0)
+        );
+        assert_eq!(linked(5, "-a", "UnaryOperator", "+"), None);
+        // Through two `!`s the `&&` is still the decision's first two
+        // conditions.
+        assert_eq!(
+            linked(4, "c && d", "LogicalOperator", "||"),
+            prefix("!!(c && d) || x", 2)
+        );
+        // An `||` over a negated `&&` starts the decision but is no prefix
+        // made of `&&` and `||` alone.
+        assert_eq!(
+            linked(7, "c && d", "LogicalOperator", "||"),
+            prefix("(!(c && d) || x) && a > b", 2)
+        );
+        assert_eq!(linked(7, "!(c && d) || x", "LogicalOperator", "&&"), None);
+    }
+
+    #[test]
+    fn a_conditional_of_booleans_makes_its_logical_expression_boolean() {
+        let source = "export const g = (a: number, b: number, c: boolean, x: unknown) => [(c ? a > b : true) || a < b, (c ? a > b : x) || a < b];\n";
+        let output = instrumented(source, false);
+        // Both arms boolean: the `||` is a boolean, whose value is its
+        // truthiness.
+        assert!(
+            !mutant(
+                &output,
+                "(c ? a > b : true) || a < b",
+                "LogicalOperator",
+                "&&"
+            )
+            .value_used
+        );
+        assert!(mutant(&output, "(c ? a > b : x) || a < b", "LogicalOperator", "&&").value_used);
+    }
+
+    #[test]
+    fn a_concise_arrow_is_never_undefined_through_type_syntax_sequences_and_assignments() {
+        let source = concat!(
+            "export const k = (x: any, y: any) => [\n",
+            "  () => 1 as number,\n",
+            "  () => 1 satisfies number,\n",
+            "  () => x!,\n",
+            "  () => <number>1,\n",
+            "  () => (x, 1),\n",
+            "  () => (x = 1),\n",
+            "  () => (x = y),\n",
+            "];\n",
+        );
+        let output = instrumented(source, false);
+        let never_undefined = |original: &str| {
+            mutant(&output, original, "ArrowFunction", "undefined")
+                .arrow
+                .expect("a concise arrow's body")
+                .never_undefined
+        };
+        assert!(never_undefined("() => 1 as number"));
+        assert!(never_undefined("() => 1 satisfies number"));
+        assert!(!never_undefined("() => x!"));
+        assert!(never_undefined("() => <number>1"));
+        assert!(never_undefined("() => (x, 1)"));
+        assert!(never_undefined("() => (x = 1)"));
+        assert!(!never_undefined("() => (x = y)"));
+    }
+
+    #[test]
+    fn an_operator_is_found_past_comments_and_spaces_only() {
+        let source = "export function m(a: number, b: number) {\n  let c = a;\n  (c) += b;\n  return [c, a /* plus */ + b, a // minus\n    - b, a \u{feff}* b, a // times\r- b];\n}\n";
+        let output = instrumented(source, false);
+        let operator = |original: &str, replacement: &str| {
+            mutant(&output, original, "ArithmeticOperator", replacement)
+                .operator
+                .clone()
+        };
+        assert_eq!(
+            operator("a /* plus */ + b", "-"),
+            Some(MutantOperator {
+                text: "+".into(),
+                at: 13
+            })
+        );
+        assert_eq!(
+            operator("a // minus\n    - b", "+"),
+            Some(MutantOperator {
+                text: "-".into(),
+                at: 15
+            })
+        );
+        // The parentheses around an assignment's target are not the target's.
+        assert_eq!(
+            mutant(&output, "(c) += b", "AssignmentOperator", "-=").operator,
+            Some(MutantOperator {
+                text: "+=".into(),
+                at: 4
+            })
+        );
+        // A byte order mark is JavaScript whitespace the scan does not skip,
+        // and a line comment ended by a carriage return runs, for the scan,
+        // to the operand: no operator is shown for either.
+        assert_eq!(operator("a \u{feff}* b", "/"), None);
+        assert_eq!(operator("a // times\r- b", "+"), None);
+    }
+
+    #[test]
+    fn private_fields_and_non_null_assertions_are_links_of_a_chain() {
+        let source = concat!(
+            "export class C {\n",
+            "  #x: { y: number } | undefined;\n",
+            "  f(o?: C) {\n",
+            "    return [o?.#x?.y, this.#x?.y, o!?.#x];\n",
+            "  }\n",
+            "}\n",
+        );
+        let output = instrumented(source, false);
+        let id = |source: &str| branch(&output, "optional-chain", source).to_owned();
+        let chain = |original: &str, link: &str| {
+            mutant(&output, original, "OptionalChaining", link)
+                .chain
+                .clone()
+        };
+        assert_eq!(
+            chain("o?.#x?.y", ".y"),
+            Some(ChainLink {
+                id: id("o?.#x?.y"),
+                earlier: vec![id("o?.#x")]
+            })
+        );
+        assert_eq!(
+            chain("this.#x?.y", ".y"),
+            Some(ChainLink {
+                id: id("this.#x?.y"),
+                earlier: vec![]
+            })
+        );
+        assert_eq!(
+            chain("o!?.#x", ".#x"),
+            Some(ChainLink {
+                id: id("o!?.#x"),
+                earlier: vec![]
+            })
+        );
+    }
+
+    #[test]
+    fn a_span_is_found_only_at_a_line_and_column_that_hold_its_text() {
+        let lines = Lines::new("ab\n");
+        assert_eq!(lines.span(1, 2, "b"), Some(Span::new(1, 2)));
+        assert_eq!(lines.span(2, 1, ""), Some(Span::new(3, 3)));
+        assert_eq!(lines.span(0, 1, "a"), None);
+        assert_eq!(lines.span(3, 1, ""), None);
+        assert_eq!(lines.span(1, 0, "a"), None);
+        assert_eq!(lines.span(1, 5, "a"), None);
+    }
+
+    #[test]
+    fn evidence_that_names_no_known_code_links_nothing() {
+        let source = "export function f(a: number, b: number, x: unknown) {\n  if (a > b && b > 0) return x || a;\n  return 0;\n}\n";
+        let output = instrumented(source, false);
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        let ledger = crate::js_mutants::enumerate(&parsed.program, source);
+        let whole = output
+            .decisions
+            .iter()
+            .find(|decision| decision.source == "a > b && b > 0")
+            .expect("the decision");
+        let span = Lines::new(source)
+            .span(whole.line, whole.column, &whole.source)
+            .expect("the decision's span");
+        let mut elsewhere = whole.clone();
+        elsewhere.line = 9;
+        let decisions = [elsewhere, whole.clone()];
+        let evidence = Evidence {
+            points: &output.points,
+            decisions: &decisions,
+            branches: &output.branches,
+            comparisons: &[],
+            probes: &[],
+        };
+        let decision_of = |linked: &[CandidateMutant], original: &str| {
+            linked
+                .iter()
+                .find(|m| m.original == original && m.mutator == "ConditionalExpression")
+                .unwrap_or_else(|| panic!("a mutant of `{original}`"))
+                .decision
+                .clone()
+        };
+        // Facts that know the decision as a whole and none of its parts, and
+        // no logical expression's operands.
+        let mut facts = MutantFacts::default();
+        facts.decisions.insert(key(span), DecisionShape::default());
+        let linked = link("src/links.ts", source, ledger.clone(), &facts, &evidence);
+        assert_eq!(
+            decision_of(&linked, "a > b && b > 0"),
+            Some(DecisionLink {
+                id: whole.id.clone(),
+                condition: None,
+                prefix: None
+            })
+        );
+        assert_eq!(decision_of(&linked, "a > b"), None);
+        assert!(linked.iter().all(|m| m.branch.is_none()));
+        // Facts that do not know the decision link nothing to it.
+        let linked = link(
+            "src/links.ts",
+            source,
+            ledger,
+            &MutantFacts::default(),
+            &evidence,
+        );
+        assert!(linked.iter().all(|m| m.decision.is_none()));
+    }
+
+    #[test]
+    fn a_stored_file_keeps_the_ids_and_sites_it_cannot_work_out_again() {
+        let output = instrumented("export const h = (a: number, b: number) => a < b;\n", false);
+        let mut moved = mutant(&output, "a < b", "EqualityOperator", "<=").clone();
+        moved.id = "src/old.ts:1:1-1:6:EqualityOperator:<=".into();
+        moved.compare = Some("src/other.ts:3:7".into());
+        let file = MutantsFile {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            files: BTreeMap::from([
+                ("src/empty.ts".to_owned(), Vec::new()),
+                ("src/links.ts".to_owned(), vec![moved.clone()]),
+            ]),
+            tests_without_values: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&file).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let written = &stored["files"]["src/links.ts"][0];
+        assert_eq!(written["id"], moved.id.as_str());
+        assert_eq!(written["compare"], "src/other.ts:3:7");
+        assert_eq!(stored["files"]["src/empty.ts"], serde_json::json!([]));
+        let decoded: MutantsFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, file);
+        // A run that enumerated no file's mutants is read back as one.
+        let none = MutantsFile {
+            files: BTreeMap::new(),
+            ..file
+        };
+        let encoded = serde_json::to_string(&none).unwrap();
+        assert_eq!(serde_json::from_str::<MutantsFile>(&encoded).unwrap(), none);
+    }
+
+    #[test]
+    fn listing_a_runs_mutants_keeps_unchanged_files_and_names_the_changed_ones() {
+        let root =
+            std::env::temp_dir().join(format!("supercov-list-mutants-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let kept = "export const f = (a: number) => a + 1;\n";
+        let plain = "export {};\n";
+        for (file, source) in [
+            ("src/kept.ts", kept),
+            ("src/plain.ts", plain),
+            ("src/edited.ts", kept),
+            ("src/broken.ts", "export const = ;\n"),
+        ] {
+            std::fs::write(root.join(file), source).unwrap();
+        }
+        let points = |file: &str, source: &str| {
+            crate::js_instrumenter::listing_mutants(|| {
+                crate::js_instrumenter::instrument_with_import_policy(
+                    source,
+                    file,
+                    "capability.mjs",
+                    false,
+                )
+            })
+            .unwrap()
+            .points
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<std::collections::BTreeSet<_>>()
+        };
+        let recorded = BTreeMap::from([
+            ("src/kept.ts".to_owned(), points("src/kept.ts", kept)),
+            ("src/plain.ts".to_owned(), points("src/plain.ts", plain)),
+            (
+                "src/edited.ts".to_owned(),
+                std::collections::BTreeSet::from(["src/edited.ts:9:1".to_owned()]),
+            ),
+            ("src/broken.ts".to_owned(), Default::default()),
+            ("src/missing.ts".to_owned(), Default::default()),
+            ("styles/site.css".to_owned(), Default::default()),
+        ]);
+        let listed = list_mutants(&root, &recorded);
+        let nothing = list_mutants(&root, &BTreeMap::new());
+        std::fs::remove_dir_all(&root).unwrap();
+        // A file without mutants is listed with none; a stylesheet is no
+        // JavaScript file, changed or not.
+        assert_eq!(
+            listed.mutants.files.keys().collect::<Vec<_>>(),
+            ["src/kept.ts"]
+        );
+        assert!(
+            listed.mutants.files["src/kept.ts"]
+                .iter()
+                .any(|m| m.mutator == "ArithmeticOperator")
+        );
+        assert_eq!(
+            listed.changed,
+            ["src/broken.ts", "src/edited.ts", "src/missing.ts"]
+        );
+        assert_eq!(
+            listed.mutants.mutant_set.as_deref(),
+            Some(crate::js_mutants::MUTANT_SET)
+        );
+        assert!(nothing.mutants.files.is_empty() && nothing.changed.is_empty());
     }
 
     /// The JavaScript of every source a file of mutants could be made of:

@@ -49,7 +49,7 @@ use oxc_ast::{
         Argument, ArrowFunctionExpression, BinaryExpression, CallExpression, ChainElement,
         ChainExpression, ClassElement, Comment, ComputedMemberExpression, Decorator, Directive,
         Expression, Function, FunctionBody, FunctionType, Hashbang, ImportDeclaration,
-        MethodDefinitionKind, PrivateFieldExpression, Program, PropertyKey, RegExpFlags, Statement,
+        MethodDefinitionKind, PrivateFieldExpression, Program, PropertyKey, RegExpFlags,
         StaticMemberExpression, StringLiteral, TSAsExpression, TSEnumDeclaration,
         TSGlobalDeclaration, TSImportEqualsDeclaration, TSInterfaceDeclaration,
         TSModuleDeclaration, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
@@ -255,14 +255,14 @@ pub(crate) fn method_replaced(original: &str, descriptor: &str) -> Option<String
             Link::Computed(member) => (member.object.span(), member.expression.span()),
             _ => return None,
         };
-        let slice = |from: u32, to: u32| text.get(from as usize..to as usize);
+        // The spans are the parse of `text` itself, so they slice it.
         if descriptor == REMOVED {
-            slice(receiver.start, receiver.end).map(str::to_owned)
+            Some(text[receiver.start as usize..receiver.end as usize].to_owned())
         } else {
             Some(format!(
                 "{}{descriptor}{}",
-                slice(0, name.start)?,
-                text.get(name.end as usize..)?
+                &text[..name.start as usize],
+                &text[name.end as usize..]
             ))
         }
     })
@@ -305,20 +305,19 @@ fn compact(text: &str) -> String {
 /// Parses `text` as one expression, as TypeScript, TSX or JavaScript with JSX
 /// in turn, and reads it with `read`.
 fn with_expression<T>(text: &str, read: impl Fn(&Expression<'_>) -> Option<T>) -> Option<T> {
-    let source_types = [
+    [
         SourceType::ts(),
         SourceType::tsx(),
         SourceType::mjs().with_jsx(true),
-    ];
-    for source_type in source_types {
+    ]
+    .into_iter()
+    .find_map(|source_type| {
         let allocator = Allocator::default();
-        if let Ok(expression) = Parser::new(&allocator, text, source_type).parse_expression()
-            && let Some(value) = read(&expression)
-        {
-            return Some(value);
-        }
-    }
-    None
+        let expression = Parser::new(&allocator, text, source_type)
+            .parse_expression()
+            .ok()?;
+        read(&expression)
+    })
 }
 
 /// What an expression is once parentheses and an optional chain around it
@@ -749,13 +748,12 @@ impl<'s, 'a> Enumerator<'s, 'a> {
             }
             if run.target == start {
                 let line = self.lines.line(start);
-                for directive in &run.directives {
-                    self.rules.push(Rule {
+                self.rules
+                    .extend(run.directives.iter().map(|directive| Rule {
                         disable: directive.disable,
                         line: directive.next_line.then_some(line),
                         mutators: directive.mutators.clone(),
-                    });
-                }
+                    }));
             }
             self.next_run += 1;
         }
@@ -809,28 +807,29 @@ impl<'s, 'a> Enumerator<'s, 'a> {
     }
 
     fn mark_chain_calls(&mut self, chain: &ChainExpression<'_>) {
-        let mut next = match &chain.expression {
+        let mut expression = match &chain.expression {
             ChainElement::CallExpression(call) => {
                 self.chain_calls
                     .insert(std::ptr::from_ref::<CallExpression>(call) as usize);
-                Some(&call.callee)
+                &call.callee
             }
-            ChainElement::TSNonNullExpression(non_null) => Some(&non_null.expression),
-            ChainElement::StaticMemberExpression(member) => Some(&member.object),
-            ChainElement::ComputedMemberExpression(member) => Some(&member.object),
-            ChainElement::PrivateFieldExpression(member) => Some(&member.object),
+            ChainElement::TSNonNullExpression(non_null) => &non_null.expression,
+            ChainElement::StaticMemberExpression(member) => &member.object,
+            ChainElement::ComputedMemberExpression(member) => &member.object,
+            ChainElement::PrivateFieldExpression(member) => &member.object,
         };
-        while let Some(expression) = next {
-            next = match expression {
+        loop {
+            expression = match expression {
                 Expression::CallExpression(call) => {
                     self.chain_calls
                         .insert(std::ptr::from_ref::<CallExpression>(call) as usize);
-                    Some(&call.callee)
+                    &call.callee
                 }
-                Expression::TSNonNullExpression(non_null) => Some(&non_null.expression),
-                expression => expression
-                    .as_member_expression()
-                    .map(|member| member.object()),
+                Expression::TSNonNullExpression(non_null) => &non_null.expression,
+                expression => match expression.as_member_expression() {
+                    Some(member) => member.object(),
+                    None => break,
+                },
             };
         }
     }
@@ -879,8 +878,8 @@ impl<'s, 'a> Enumerator<'s, 'a> {
 
         // ArrowFunction
         if let AstKind::ArrowFunctionExpression(arrow) = kind
-            && arrow.expression
-            && !arrow_body(arrow).is_some_and(|body| is_identifier(body, "undefined"))
+            && let Some(body) = arrow.get_expression()
+            && !is_identifier(body, "undefined")
         {
             self.emit(span, ARROW_FUNCTION, "undefined");
         }
@@ -1228,14 +1227,6 @@ impl<'s, 'a> Enumerator<'s, 'a> {
     }
 }
 
-/// An expression-bodied arrow's expression.
-fn arrow_body<'b, 'a>(arrow: &'b ArrowFunctionExpression<'a>) -> Option<&'b Expression<'a>> {
-    match arrow.body.statements.first() {
-        Some(Statement::ExpressionStatement(statement)) => Some(&statement.expression),
-        _ => None,
-    }
-}
-
 struct SuperCallFinder {
     found: bool,
 }
@@ -1284,8 +1275,11 @@ impl<'a> Visit<'a> for Enumerator<'_, 'a> {
         if matches!(
             kind,
             AstKind::ExpressionStatement(_) | AstKind::ThrowStatement(_)
-        ) && let Some(frame) = self.statements.pop()
-        {
+        ) {
+            let frame = self
+                .statements
+                .pop()
+                .expect("entering a statement pushed its frame");
             self.filter_statement_call(kind.span(), &frame);
         }
         self.stack.pop();
@@ -1384,10 +1378,10 @@ impl<'a> Visit<'a> for Enumerator<'_, 'a> {
     /// Babel's expression-bodied arrow holds its expression directly, with no
     /// block or statement around it.
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        if !arrow.expression {
+        let Some(body) = arrow.get_expression() else {
             walk::walk_arrow_function_expression(self, arrow);
             return;
-        }
+        };
         let kind = AstKind::ArrowFunctionExpression(self.alloc(arrow));
         self.enter_node(kind);
         if let Some(type_parameters) = &arrow.type_parameters {
@@ -1397,9 +1391,7 @@ impl<'a> Visit<'a> for Enumerator<'_, 'a> {
         if let Some(return_type) = &arrow.return_type {
             self.visit_ts_type_annotation(return_type);
         }
-        if let Some(body) = arrow_body(arrow) {
-            self.visit_expression(body);
-        }
+        self.visit_expression(body);
         self.leave_node(kind);
     }
 }
@@ -1889,5 +1881,168 @@ mod tests {
         assert_eq!(lines.position(second), (1, 27));
         assert_eq!(lines.position(source.rfind('c').unwrap() as u32), (2, 1));
         assert_eq!(lines.position(source.rfind('d').unwrap() as u32), (3, 1));
+    }
+
+    #[test]
+    fn js_mutants_a_lone_carriage_return_ends_a_line_and_an_empty_source_has_one() {
+        let lines = LineIndex::new("a\rb");
+        assert_eq!(lines.position(2), (2, 1));
+        assert_eq!(LineIndex::new("").position(0), (1, 1));
+    }
+
+    #[test]
+    fn js_mutants_replacements_the_grammar_does_not_describe_have_no_descriptor() {
+        // A replacement that is not the shape its mutator makes names no
+        // mutant, rather than a guessed one.
+        for (mutator, original, replacement) in [
+            ("ArithmeticOperator", "a + b", "x"),
+            ("ArithmeticOperator", "a + b", "a +"),
+            ("AssignmentOperator", "a += b", "x"),
+            ("UpdateOperator", "i++", "x"),
+            ("UnaryOperator", "", "x"),
+            ("UnaryOperator", "!x", "x"),
+            ("BooleanLiteral", "true", "x"),
+            ("ConditionalExpression", "a < b", "x"),
+            // `case` must be a whole word.
+            ("ConditionalExpression", "a < b", "casex: go();"),
+            ("ConditionalExpression", "a < b", "case_: go();"),
+            ("ConditionalExpression", "a < b", "case$: go();"),
+            ("StringLiteral", "'a'", "x"),
+            ("StringLiteral", "'a'", "'ab'"),
+            ("MethodExpression", "a.b", "a"),
+            ("OptionalChaining", "a.b()", "a.b()"),
+            ("OptionalChaining", "a.b", "a.b"),
+            ("OptionalChaining", "this.#x", "this.#x"),
+            ("OptionalChaining", "a[0]", "a[0]"),
+            ("OptionalChaining", "x", "x"),
+            ("ArrowFunction", "() => 1", "x"),
+            ("BlockStatement", "{ go(); }", "{ go(1); }"),
+            ("ArrayDeclaration", "[1]", "[2]"),
+            ("CallExpression", "go();", "x"),
+        ] {
+            assert_eq!(
+                descriptor(mutator, original, replacement),
+                None,
+                "{mutator} {original:?} -> {replacement:?}"
+            );
+        }
+        // A non-null assertion after an optional link leaves the link.
+        assert_eq!(
+            descriptor("OptionalChaining", "a?.b!", "a.b!").as_deref(),
+            Some(".b")
+        );
+    }
+
+    #[test]
+    fn js_mutants_a_method_is_replaced_only_in_a_call_of_a_member() {
+        assert_eq!(
+            method_replaced("a[trim]()", "removed").as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            method_replaced("a[trim]()", "trimEnd").as_deref(),
+            Some("a[trimEnd]()")
+        );
+        assert_eq!(method_replaced("a.b", "removed"), None);
+        assert_eq!(method_replaced("f()", "removed"), None);
+    }
+
+    #[test]
+    fn js_mutants_directives_read_only_javascript_whitespace_and_known_verbs() {
+        // A byte order mark is JavaScript whitespace; a next-line character
+        // is not, though Unicode calls it whitespace.
+        assert_eq!(
+            parse_directive("\u{feff}Stryker disable all"),
+            Some(DirectiveComment {
+                disable: true,
+                next_line: false,
+                mutators: vec!["all".into()]
+            })
+        );
+        assert_eq!(parse_directive("\u{85}Stryker disable all"), None);
+        assert_eq!(parse_directive(" Stryker enable all"), None);
+        assert_eq!(parse_directive(" Stryker disable"), None);
+    }
+
+    #[test]
+    fn js_mutants_a_brace_is_a_quantifier_only_around_a_closed_numeric_range() {
+        assert!(regex_has_mutants("a{2,3}", false));
+        for pattern in ["a{2", "a{,2}", "a{2,x}"] {
+            assert!(!regex_has_mutants(pattern, false), "{pattern}");
+        }
+    }
+
+    fn enumerated(name: &str, source: &str) -> Vec<String> {
+        enumerate_file(Path::new(name), source)
+            .iter()
+            .map(|mutant| {
+                format!(
+                    "{}:{} {} {} {}",
+                    mutant.start.0,
+                    mutant.start.1,
+                    mutant.mutator,
+                    mutant.replacement,
+                    &source[mutant.span.start as usize..mutant.span.end as usize]
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn js_mutants_optional_private_fields_and_non_null_chains_lose_their_question_mark() {
+        let source = "class C {\n  #x: C | undefined;\n  f(o: C | undefined) {\n    return [o?.#x, o?.y!];\n  }\n}\n";
+        let mutants = enumerated("chains.ts", source);
+        assert!(
+            mutants.contains(&"4:13 OptionalChaining .#x o?.#x".to_owned()),
+            "{mutants:#?}"
+        );
+        assert!(
+            mutants.contains(&"4:20 OptionalChaining .y o?.y".to_owned()),
+            "{mutants:#?}"
+        );
+    }
+
+    #[test]
+    fn js_mutants_a_unicode_regex_keeps_a_statement_call_from_being_its_sole_mutant() {
+        // `\p{L}` is a property class to negate only in unicode mode, which
+        // the `u` and the `v` flag both turn on. The string literals are
+        // disabled so that the regex is the call's only other mutant.
+        let source = r#"go(/\p{L}/);
+go(/\p{L}/u);
+go(/\p{L}/v);
+// Stryker disable next-line StringLiteral
+go(new RegExp("\\p{L}"));
+// Stryker disable next-line StringLiteral
+go(new RegExp("\\p{L}", "u"));
+// Stryker disable next-line StringLiteral
+go(new RegExp("\\p{L}", "v"));
+"#;
+        let calls: Vec<String> = enumerated("regexes.js", source)
+            .into_iter()
+            .filter(|mutant| mutant.contains("CallExpression"))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "1:1 CallExpression empty go(/\\p{L}/);",
+                "5:1 CallExpression empty go(new RegExp(\"\\\\p{L}\"));",
+            ]
+        );
+    }
+
+    #[test]
+    fn js_mutants_a_string_key_of_an_assignment_pattern_is_not_mutated() {
+        let source = "({ \"a\": x } = { \"b\": \"c\" });\n";
+        let strings: Vec<String> = enumerated("pattern.js", source)
+            .into_iter()
+            .filter(|mutant| mutant.contains("StringLiteral"))
+            .collect();
+        assert_eq!(strings, ["1:22 StringLiteral empty \"c\""]);
+    }
+
+    #[test]
+    fn js_mutants_a_global_block_that_is_not_declared_is_mutated() {
+        let mutants = enumerated("global.ts", "global {\n  const n = 1 + 2;\n}\n");
+        assert_eq!(mutants, ["2:13 ArithmeticOperator - 1 + 2"]);
     }
 }
