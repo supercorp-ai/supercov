@@ -4225,6 +4225,8 @@ impl EqualityValueSites {
         }
     }
 
+    /// A returned value or an argument: noted unless an operand is one
+    /// TypeScript narrows through (a predicate, or an assertion's argument).
     fn note_returned(&mut self, expression: &Expression<'_>) {
         let mut inner = expression;
         while let Expression::ParenthesizedExpression(parenthesized) = inner {
@@ -4247,8 +4249,17 @@ impl<'a> Visit<'a> for EqualityValueSites {
         walk::walk_object_property(self, property);
     }
 
-    // No argument is noted: oxc walks a call's arguments as expressions,
-    // never through `visit_argument`, so an override of it never ran.
+    /// A call's or `new`'s arguments: oxc walks them as one list, never one
+    /// by one through `visit_argument`. An argument narrows where its callee
+    /// asserts it (`assert(x !== null)`), so one over a name stays as written.
+    fn visit_arguments(&mut self, arguments: &oxc_allocator::Vec<'a, Argument<'a>>) {
+        for argument in arguments {
+            if let Some(expression) = argument.as_expression() {
+                self.note_returned(expression);
+            }
+        }
+        walk::walk_arguments(self, arguments);
+    }
 
     fn visit_array_expression_element(&mut self, element: &ArrayExpressionElement<'a>) {
         if let Some(expression) = element.as_expression() {
@@ -17210,7 +17221,8 @@ export function shapes(n: number): unknown {
     /// A returned equality over a property TypeScript narrows its object by
     /// stays as written, through `!` and a private field too; one over a
     /// literal key of a call's result is only a value, and is recorded. A
-    /// block of one statement returns nothing.
+    /// block of one statement returns nothing. An argument is recorded the
+    /// same way: an assertion's argument over a name narrows.
     #[test]
     fn a_returned_equality_is_recorded_only_where_no_operand_narrows() {
         MUTANTS_FOR_TEST.with(|flag| flag.set(Some(true)));
@@ -17231,14 +17243,26 @@ export function shapes(n: number): unknown {
             "  void (o.kind === 'a');\n",
             "};\n",
             "export const counter = new Counter();\n",
+            "export function call(f: (b: boolean) => void, x: unknown, g: () => number) {\n",
+            "  f(g() === 1);\n",
+            "  new Set([0]).add(Number(g() !== 2));\n",
+            "  f(x !== null);\n",
+            "}\n",
         );
         let code = instrument_candidate(source, "src/sites.ts").unwrap().code;
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
-        assert!(code.contains("\"src/sites.ts:11:10\""), "{code}");
+        for recorded in [
+            "\"src/sites.ts:11:10\"",
+            "\"src/sites.ts:18:5\"",
+            "\"src/sites.ts:19:27\"",
+        ] {
+            assert!(code.contains(recorded), "{recorded}:\n{code}");
+        }
         for untouched in [
             "\"src/sites.ts:4:12\"",
             "\"src/sites.ts:8:10\"",
             "\"src/sites.ts:14:9\"",
+            "\"src/sites.ts:20:5\"",
         ] {
             assert!(!code.contains(untouched), "{untouched}:\n{code}");
         }

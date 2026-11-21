@@ -623,11 +623,15 @@ impl FactCollector<'_> {
                 break Some(offset);
             }
             if rest.starts_with("//") {
-                offset += rest.find('\n').map_or(rest.len(), |end| end + 1);
+                // Any line terminator ends it; the terminator is a space.
+                offset += rest
+                    .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                    .unwrap_or(rest.len());
             } else if rest.starts_with("/*") {
                 offset += rest.find("*/").map_or(rest.len(), |end| end + 2);
             } else if let Some(character) = rest.chars().next() {
-                if !(character.is_whitespace() || character == ')') {
+                // A byte order mark is JavaScript whitespace, not Unicode's.
+                if !(character.is_whitespace() || character == '\u{feff}' || character == ')') {
                     break None;
                 }
                 offset += character.len_utf8();
@@ -1782,11 +1786,22 @@ mod tests {
                 at: 4
             })
         );
-        // A byte order mark is JavaScript whitespace the scan does not skip,
-        // and a line comment ended by a carriage return runs, for the scan,
-        // to the operand: no operator is shown for either.
-        assert_eq!(operator("a \u{feff}* b", "/"), None);
-        assert_eq!(operator("a // times\r- b", "+"), None);
+        // A byte order mark is JavaScript whitespace, and a carriage return
+        // ends a line comment as a line feed does.
+        assert_eq!(
+            operator("a \u{feff}* b", "/"),
+            Some(MutantOperator {
+                text: "*".into(),
+                at: 5
+            })
+        );
+        assert_eq!(
+            operator("a // times\r- b", "+"),
+            Some(MutantOperator {
+                text: "-".into(),
+                at: 11
+            })
+        );
     }
 
     #[test]
