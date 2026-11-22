@@ -4303,7 +4303,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1389, 1409, 1498, 1542, 1553] {
+        for line in [1390, 1410, 1499, 1543, 1554] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4370,13 +4370,13 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1846@2", || {
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1847@2", || {
             instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1863, 1883, 1889, 1893, 1899, 1905, 1911, 2028] {
+        for line in [1864, 1884, 1890, 1894, 1900, 1906, 1912, 2029] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4476,13 +4476,13 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1997", || {
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1998", || {
             instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1974",
+            "fs.read_dir#jvm_run.rs:1975",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {
