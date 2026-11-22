@@ -75,6 +75,8 @@ const mappings = [
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
+    "strongJob.mjs",
+    "strongJobs.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",

@@ -123,6 +123,7 @@ type CandidateMutant, written and read = closed {
   original: string
   operator?: MutantOperator | null
   valueUsed?: boolean
+  effects?: boolean
   statement?: string | null
   function?: string | null
   decision?: DecisionLink | null

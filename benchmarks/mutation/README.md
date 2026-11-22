@@ -199,6 +199,86 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
 
+## Results of 2026-11-22, later: next batches within a stage, decided copies stopped
+
+Supercov's cold rows again (`results/2026-11-22/summary.md`), on the binary of `2cd0441e` (CI run
+4715437556747167), against the morning's binary (`e19bd687`) on the same machine type. A mutant's
+next batch now runs in the same stage once its copies before have ended with every test passing, and
+a copy's worker stops as soon as a failed test decides it.
+
+| project | ms per mutant run, morning | now | StrykerJS's mutant phase | soundness violations | extra kills |
+|---|---:|---:|---:|---:|---:|
+| defu, scule, cookie-es, pathe, ufo | 14-26 | 14-25 | 12-17 | 0 | 0 |
+| hono (6 shards) | 73 | 69 (64-66 in two other full runs) | 51 | the same 10 | 0 |
+| tRPC (32 shards) | 1,190 | 1,173 | 755 | the same 2 | 0 |
+
+- **hono:** workers busy 61% to 68-74%; a mutant its first copy leaves alive goes on within the stage.
+- **tRPC:** the same time; its workers were already busy 92%. Before the second change, one run in
+  three of tRPC's shard 12 ended with SIGTERM about a minute in: twelve workers held 2 GB each,
+  copies whose test had timed out, their runaway loops running until the copy's limit. Every shard
+  has finished since.
+- **Tried and dropped:** sending Vitest's "start" to workers started ahead (Vitest's setup in a
+  worker calls back to Vitest's process, so a worker started that way waited until stopped and the
+  workers ahead ran out); a mutant's later files all listed, one at a time (hono 102 ms); 24 workers
+  instead of 15.
+
+## Where StrykerJS's time goes on tRPC (2026-11-22)
+
+Measured with `diag/stryker-profile.sh` (CI run 8370474132027066): StrykerJS 10.1.1 as the cold
+scenario runs it, on tRPC's first cold shard (122 mutants, 111 with coverage), every Node process
+recording its start, end, forks and, in a Vitest worker, the test file of each "run" message.
+
+- **Processes.** 16 test runners, each holding one Vitest instance for the whole run. StrykerJS sets
+  Vitest's `maxWorkers: 1` and the pool it is told (`forks` here) and leaves `isolate` as the
+  project has it (true): every test file of every mutant run is a fresh worker process, one file
+  per worker. Nothing is shared between test files or mutants.
+- **Per mutant.** 728 workers in the 123 s mutant phase, 6.6 per mutant run (Supercov ran 11.5 copies
+  of a mutant over the whole of tRPC, plus 1.4 baselines and 0.4 confirmations). StrykerJS runs a
+  mutant's covering test files one after another in its runner, with `bail: 1`, so it stops at the
+  first file that fails; on this shard it ran 98 tests a mutant to Supercov's 49.
+- **Per worker.** Its process starts in 18 ms; Vitest's "start" to its "run" takes 314 ms (p50), and
+  a runner's next worker starts 25 ms after the one before ends. A worker lives 526 ms at the median
+  (1,366 ms on average, a long tail of slow files). Supercov's tRPC copy holds a worker 650 ms: 200
+  ms from handover to claim and 450 ms of the copy.
+- **Covering files.** Over all of tRPC, StrykerJS's covering tests span 33.5 files for a killed mutant
+  and 36.6 for a survivor (static mutants: every file); Supercov's candidates 30.1 and 38.0.
+
+So StrykerJS's advantage is not in how a worker starts or what it shares (nothing), but in running
+fewer files per mutant: a mutant's files one at a time with a stop at the first kill, across 16
+runners that each work on another mutant. Supercov runs a mutant's later files in batches of 1, 4, 16,
+which overshoot a kill that comes early in a batch. Running every mutant's files one at a time within
+a stage was tried and was slower on hono (102 against 64 ms a mutant): a file can start only once
+the copy before it has ended, and the stage barrier then holds the next file back.
+
+## Results of 2026-11-22: workers started ahead, a process only once the file is known
+
+Supercov's cold rows again (`results/2026-11-22/summary.md`; every other row is 2026-11-20's), on
+the binary of `e19bd687` (key `7bde1dc6674d633b`; CI runs 4633090738757946, 5286085914853970 and
+4678410489961734), against the spawner binary of the rows before, on the same 16-vCPU machine type:
+
+| project | strong pass s, spawner | strong pass s, now | ms per mutant run (StrykerJS's mutant phase) | soundness violations | extra kills |
+|---|---:|---:|---|---:|---:|
+| defu, scule, cookie-es, pathe, ufo | 2-18 | 2-16 | 14-26 (12-17) | 0 | 0 |
+| hono (6 shards) | 339 | 301 | 73 (51) | the same 10 diagnosed ground-truth artifacts | 0 |
+| tRPC (32 shards) | 3,774 | 2,912 | 1,190 (755) | the same 2 diagnosed ones | 0 |
+
+No mutant changed between detected and not against the spawner binary (a few between Killed and
+Timeout). Paired on the same day and machines (hono's 6 shards, tRPC's 1-12), with
+`SUPERCOV_STRONG_WORKERS_AHEAD=0` as the control: hono 81 to 73 ms a mutant, tRPC 1,443 to 1,142.
+
+Where the time goes now:
+
+- **tRPC.** 24 copies a mutant, of which 11 had nothing left to run and now cost no process; the
+  other 13 hold a worker 650 ms each: 200 ms from the worker's handover to its claim (Vitest's
+  start, the jsdom instance, setup files) and 450 ms of the copy itself (its test file's imports,
+  about 130 ms, and its tests). Workers are busy 92% of the pass but the machine's CPUs only 54%:
+  copies wait on their tests' servers and timers and on Vitest's process. 24 or 32 workers instead
+  of 15 gave 2-7% (`w24`, `w32`), within the spread between shards.
+- **hono.** 3 copies a mutant at 26 + 138 ms; workers busy 61%, CPUs 51%: what is left is each
+  stage's end, where a mutant's next files wait for the stage before.
+- **Tried and dropped:** Node's compile cache in the workers started ahead (no change on hono, 4% on
+  tRPC), and more workers (above).
+
 ## Results of 2026-11-21: the strong pass in stages
 
 Supercov's cold rows again (`results/2026-11-21/summary.md`), on the binary of the strong pass in

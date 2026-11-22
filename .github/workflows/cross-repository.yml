@@ -45,6 +45,10 @@ jobs:
         working-directory: external
         env:
           EXTERNAL_TEST_COMMAND: ${{ matrix.command }}
+          # `npm ci` installs the published native package of the version in
+          # package.json, which the launcher prefers: this commit's build is
+          # what is evaluated.
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
         run: node ../bin/supercov.js -- bash -lc "$EXTERNAL_TEST_COMMAND"
       - name: Verify evidence and source inventory
         working-directory: external

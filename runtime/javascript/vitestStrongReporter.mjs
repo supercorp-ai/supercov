@@ -39,6 +39,8 @@ const CANCEL_FORCE_AFTER_MS = 3_000;
 const CANCEL_GRACE_MS = 15_000;
 // The pass summary keeps this many stages' figures.
 const PROFILED_STAGES = 50;
+// How much each of a mutant's batches of later files grows over the one before.
+const BATCH_GROWTH = Math.max(1, Number(process.env["SUPERCOV_STRONG_BATCH_GROWTH"]) || 4);
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
@@ -87,6 +89,20 @@ function memoryOf() {
     return memory;
 }
 
+// Linux: the machine's CPU time so far, busy and in all, to tell how much of
+// the machine a stage kept busy.
+function machineCpu() {
+    try {
+        const fields = readFileSync("/proc/stat", "utf8").split("\n", 1)[0].trim().split(/\s+/).slice(1).map(Number);
+        const idle = fields[3] + (fields[4] ?? 0);
+        const total = fields.reduce((sum, value) => sum + value, 0);
+        return { busy: total - idle, total };
+    }
+    catch {
+        return undefined;
+    }
+}
+
 // What a copy reported (vitestStrong.mjs): its claim, its tests starting,
 // each test's outcome, errors outside any test, its end.
 function readOutcome(out) {
@@ -111,6 +127,7 @@ function readOutcome(out) {
             outcome.pid = record.pid;
             outcome.up = record.up;
             outcome.skipped = Boolean(record.skipped);
+            outcome.notRun = Boolean(record.notRun);
         }
         else if (record.started)
             outcome.startedAt = record.at;
@@ -144,6 +161,17 @@ const VITEST_WORKER = /[\\/]vitest[\\/]dist[\\/]workers[\\/](?:forks|vmForks)\.j
 // workers it forked.
 const spawnerPids = new Set();
 let spawnedWorkers = 0;
+// When the spawner handed each worker process to Vitest: a worker started
+// ahead was waiting before that, and its copy's start counts from here.
+const handedAt = new Map();
+// What the spawner reports of its workers started ahead.
+let spawnerStats;
+let askStats = async () => undefined;
+// While a stage runs: which of its assignments a copy of a test file takes
+// (vitestStrongSpawner.mjs's stand-ins ask as Vitest tells them the file),
+// and whether any copy got its assignment this way.
+let claimRun;
+let mainClaims = false;
 
 // Vitest's workers forked by a small process of their own instead of
 // Vitest's: forking copies the parent's memory map, and Vitest's process
@@ -151,7 +179,11 @@ let spawnedWorkers = 0;
 // 72% of its time, while its workers waited on it). Each worker Vitest asks
 // for is a stand-in here, relaying to and from the real one through the
 // spawner. SUPERCOV_STRONG_DIRECT_FORK=1 forks them directly.
-function forkThroughSpawner() {
+//
+// The spawner also keeps `ahead` workers started ahead of Vitest's requests
+// for them (vitestStrongSpawner.mjs; SUPERCOV_STRONG_WORKERS_AHEAD=0 starts
+// each when Vitest asks).
+function forkThroughSpawner(ahead) {
     if (process.env["SUPERCOV_STRONG_DIRECT_FORK"] === "1")
         return;
     const original = childProcess.fork;
@@ -182,7 +214,14 @@ function forkThroughSpawner() {
         });
         spawner.process = child;
         spawnerPids.add(child.pid);
-        child.on("message", (record) => standIns.get(record.id)?.receive(record));
+        child.send({ pool: ahead });
+        child.on("message", (record) => {
+            if (record.stats) {
+                spawnerStats = record.stats;
+                return;
+            }
+            standIns.get(record.id)?.receive(record);
+        });
         child.on("error", () => { });
         child.on("exit", () => {
             spawnerPids.delete(child.pid);
@@ -192,11 +231,35 @@ function forkThroughSpawner() {
                     standIn.receive({ exit: [null, "SIGKILL"] });
         });
     };
+    // The environments the spawner was told of, by worker entry.
+    const environments = new Set();
+    askStats = async () => {
+        if (!spawner.process?.connected)
+            return spawnerStats;
+        spawner.process.send({ stats: true });
+        for (let waited = 0; waited < 1_000 && !spawnerStats; waited += 20)
+            await pause(20);
+        return spawnerStats;
+    };
+    // A stand-in takes its process only once Vitest says which test file it
+    // runs. Vitest's first message ("start") is answered here, and kept; its
+    // "run" names the file, and the stage running (`claimRun`) says which of
+    // that file's assignments the copy takes. A copy with nothing to run
+    // (its mutant decided meanwhile, or beyond its file's assignments) gets
+    // no process at all: it ends here, as its setup file would have ended
+    // it. Any other copy's process gets the kept "start", then the "run".
+    const response = (type, extra) => ({ __vitest_worker_response__: true, type, ...extra });
     class Worker extends EventEmitter {
-        constructor(id, spawner) {
+        constructor(id, spawner, modulePath, forkRequest) {
             super();
             this.id = id;
             this.spawner = spawner;
+            this.modulePath = modulePath;
+            this.forkRequest = forkRequest;
+            // Before its process: what Vitest sent it, and how it ends.
+            this.attached = false;
+            this.ended = false;
+            this.held = [];
             this.pid = undefined;
             this.exitCode = null;
             this.signalCode = null;
@@ -208,32 +271,60 @@ function forkThroughSpawner() {
             this.stdio = [null, this.stdout, this.stderr];
             this.channel = { ref() { }, unref() { } };
         }
+        attach() {
+            this.attached = true;
+            spawnedWorkers += 1;
+            this.spawner.process.send(this.forkRequest);
+        }
         receive(record) {
             if (record.spawned !== undefined) {
                 this.pid = record.spawned;
+                handedAt.set(this.pid, Date.now());
                 this.emit("spawn");
             }
             else if (record.error) {
                 this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
             }
             else if (record.exit) {
-                [this.exitCode, this.signalCode] = record.exit;
-                this.connected = false;
-                standIns.delete(this.id);
-                this.spawner.live -= 1;
-                hold(this.spawner);
-                this.stdout.end();
-                this.stderr.end();
-                this.emit("disconnect");
-                this.emit("exit", this.exitCode, this.signalCode);
-                this.emit("close", this.exitCode, this.signalCode);
+                this.exited(...record.exit);
             }
             else if (record.stdout)
                 this.stdout.write(record.stdout);
             else if (record.stderr)
                 this.stderr.write(record.stderr);
-            else if ("message" in record)
-                this.emit("message", record.message);
+            else if ("message" in record) {
+                const message = record.message;
+                // The kept "start" was answered already: the process's own
+                // answer lets the "run" go, or fails it.
+                if (this.pendingRun && message?.__vitest_worker_response__ && message.type === "started") {
+                    const run = this.pendingRun;
+                    this.pendingRun = undefined;
+                    if (message.error)
+                        this.emit("message", response("testfileFinished", { error: message.error }));
+                    else
+                        this.relay(run);
+                    return;
+                }
+                this.emit("message", message);
+            }
+        }
+        exited(code, signal) {
+            if (this.ended)
+                return;
+            this.ended = true;
+            [this.exitCode, this.signalCode] = [code, signal];
+            this.connected = false;
+            standIns.delete(this.id);
+            this.spawner.live -= 1;
+            hold(this.spawner);
+            this.stdout.end();
+            this.stderr.end();
+            this.emit("disconnect");
+            this.emit("exit", this.exitCode, this.signalCode);
+            this.emit("close", this.exitCode, this.signalCode);
+        }
+        relay(message) {
+            this.spawner.process?.send({ id: this.id, send: true, message });
         }
         send(message, ...rest) {
             const callback = rest.find((value) => typeof value === "function");
@@ -242,20 +333,85 @@ function forkThroughSpawner() {
                 process.nextTick(() => callback ? callback(error) : this.emit("error", error));
                 return false;
             }
-            this.spawner.process.send({ id: this.id, send: true, message });
             if (callback)
                 process.nextTick(callback, null);
+            const request = message?.__vitest_worker_request__ ? message.type : undefined;
+            // Vitest's first message to a worker names the environment it
+            // runs in: workers started ahead load its package too.
+            const environment = request === "start" ? message.context?.environment?.name : undefined;
+            if (environment && !environments.has(`${this.modulePath}\0${environment}`)) {
+                environments.add(`${this.modulePath}\0${environment}`);
+                this.spawner.process.send({ environment, modulePath: this.modulePath });
+            }
+            if (this.attached) {
+                this.relay(message);
+                return true;
+            }
+            if (this.nothingToRun) {
+                if (request === "stop")
+                    process.nextTick(() => this.emit("message", response("stopped")));
+                return true;
+            }
+            if (request === "start" && !this.start) {
+                this.start = message;
+                process.nextTick(() => this.emit("message", response("started")));
+                return true;
+            }
+            const files = request === "run" ? message.context?.files : undefined;
+            if (this.start && files?.length === 1) {
+                const claimed = claimRun?.(files[0].filepath ?? files[0]);
+                if (claimed?.nothingToRun) {
+                    this.nothingToRun = true;
+                    process.nextTick(() => this.emit("message", response("testfileFinished")));
+                    return true;
+                }
+                if (claimed) {
+                    const provided = message.context.providedContext ?? {};
+                    message = {
+                        ...message,
+                        context: {
+                            ...message.context,
+                            providedContext: { ...provided, supercovStrong: { ...provided.supercovStrong, claim: claimed.index } },
+                        },
+                    };
+                }
+                this.attach();
+                this.relay(this.start);
+                this.pendingRun = message;
+                return true;
+            }
+            // Anything else: the process now, and what Vitest sent it so far.
+            this.attach();
+            if (this.start)
+                this.relay(this.start);
+            this.relay(message);
             return true;
         }
         kill(signal = "SIGTERM") {
-            if (this.exitCode !== null || this.signalCode !== null)
+            if (this.exitCode !== null || this.signalCode !== null || this.ended)
                 return false;
-            this.spawner.process?.send({ id: this.id, kill: signal });
             this.killed = true;
+            if (!this.attached) {
+                process.nextTick(() => this.exited(null, signal));
+                return true;
+            }
+            this.spawner.process?.send({ id: this.id, kill: signal });
             return true;
         }
         disconnect() {
-            this.spawner.process?.send({ id: this.id, disconnect: true });
+            if (this.attached)
+                this.spawner.process?.send({ id: this.id, disconnect: true });
+        }
+        // Vitest waits for "exit" when stopping a worker whose `exitCode` is
+        // null, as it is for a process a signal ended: one the pass stopped
+        // already (a copy a failed test decided) has emitted it, and would
+        // hold Vitest's close for its teardown limit.
+        once(event, listener) {
+            if (event === "exit" && this.ended) {
+                process.nextTick(listener, this.exitCode, this.signalCode);
+                return this;
+            }
+            return super.once(event, listener);
         }
         ref() { }
         unref() { }
@@ -270,15 +426,32 @@ function forkThroughSpawner() {
         }
         if (!spawner.process)
             start(spawner);
-        const worker = new Worker(nextId++, spawner);
+        const id = nextId++;
+        const worker = new Worker(id, spawner, path, { id, fork: true, modulePath: path, args, options: { ...options } });
         spawner.live += 1;
-        spawnedWorkers += 1;
         hold(spawner);
         standIns.set(worker.id, worker);
-        spawner.process.send({ id: worker.id, fork: true, modulePath: path, args, options: { ...options } });
         return worker;
     };
     syncBuiltinESMExports();
+}
+
+// How many workers the spawner keeps started ahead: one per worker Vitest
+// runs at once.
+function workersAhead(vitest) {
+    const set = process.env["SUPERCOV_STRONG_WORKERS_AHEAD"];
+    if (set !== undefined && set !== "")
+        return Math.max(0, Number(set) || 0);
+    return Math.max(1, Number(vitest.config?.maxWorkers) || availableParallelism());
+}
+
+// How long a copy's worker took to start before it claimed: from when the
+// spawner handed it to Vitest, or from its process's start.
+function startOf(outcome) {
+    const handed = outcome.pid ? handedAt.get(outcome.pid) : undefined;
+    if (handed !== undefined && outcome.claimedAt !== undefined)
+        return Math.max(0, outcome.claimedAt - handed);
+    return outcome.up ?? 0;
 }
 
 // Whether a process is one of this process's own workers: running, and its
@@ -402,7 +575,7 @@ export default class SupercovStrongReporter {
         const resultsPath = process.env["SUPERCOV_STRONG_RESULTS"];
         if (!planPath || !resultsPath)
             return;
-        forkThroughSpawner();
+        forkThroughSpawner(workersAhead(vitest));
         const original = vitest.runFiles.bind(vitest);
         vitest.runFiles = async (specs) => {
             const stopProfile = await profileMainProcess();
@@ -425,6 +598,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
     const tests = plan.tests;
     const started = Date.now();
+    const passCpu = machineCpu();
     let last;
 
     // The copy's own list: the mutant at each index must be the run's, and
@@ -504,7 +678,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let running;
     // Where the pass's time goes: each stage's wall time against the copies'
     // own (claim to end) and when its last copy started.
-    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
+    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
     // Runs one stage. `early(at, outcome)` is offered each copy's outcome as
     // soon as the copy ends, and says whether it took it; a stage's copies
     // are otherwise judged when its run has ended. `limitOf(assignment)` is
@@ -530,12 +704,48 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         });
         running = { placed };
         provide(vitest, { root, stage: directory });
+        // A copy whose worker Vitest has just told the file it runs takes
+        // the file's next assignment, here, in the order Vitest starts them.
+        // One with nothing to run ends without a process: its mutant was
+        // decided meanwhile (recorded as its setup file would), or it is
+        // beyond its file's assignments.
+        const nextOf = new Map();
+        // A copy held back (`gated`: a mutant's next files, listed after the
+        // stage's other work) runs only once its mutant's other copies in the
+        // stage have ended with every test passing, else it goes back to its
+        // mutant's files to run later.
+        const ended = (position) => stopped.has(position) || deferred.has(position) || decided.has(position) || readOutcome(outs[position]).done;
+        claimRun = (filepath) => {
+            mainClaims = true;
+            const key = keyOf(toRelative(root, String(filepath)));
+            const index = nextOf.get(key) ?? 0;
+            nextOf.set(key, index + 1);
+            const at = `${directory}/${key}/${index}`;
+            if (!existsSync(`${at}.json`))
+                return { nothingToRun: true };
+            const position = positionOf.get(`${key}/${index}`);
+            const assignment = assignments[position];
+            const skipped = existsSync(`${at}.skip`);
+            // Held back too where a copy before it failed a test: most such
+            // failures kill the mutant, which the stage judges a moment later.
+            const notRun = !skipped && assignment?.gated &&
+                assignment.job.positions.some((other) => !assignments[other].gated &&
+                    (!ended(other) || decided.has(other) || readOutcome(outs[other]).tests.some((test) => test.failed)));
+            if (skipped || notRun) {
+                const now = Date.now();
+                appendFileSync(`${at}.out`, `${JSON.stringify({ claimed: true, at: now, up: 0, skipped: true, notRun })}\n${JSON.stringify({ done: true, at: now })}\n`);
+                appendFileSync(`${directory}/claimed`, `${key}/${index}\n`);
+                return { nothingToRun: true };
+            }
+            return { index };
+        };
         // A copy sets its own test limit (vi.setConfig); the longest is the
         // run's, for a setup that cannot.
         const testTimeoutMs = Math.max(...assignments.map((assignment) => assignment.claim.testTimeout));
         setTestTimeout(vitest, testTimeoutMs);
         const hookMs = hookTimeoutOf(vitest);
         const stageStarted = Date.now();
+        const cpuBefore = machineCpu();
         let settled;
         const ran = runFiles(assignments.map((assignment) => specOf.get(assignment.file)), false)
             .then((result) => {
@@ -559,6 +769,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const going = new Map();
         const handled = new Set();
         const stopped = new Map();
+        // Copies stopped once a failed test decided them.
+        const decided = new Map();
+        const settles = (at, outcome) => {
+            const assignment = assignments[at];
+            return Boolean(assignment.job && assignment.claim.mutant && known(assignment.file) &&
+                failedTest(outcome) && ownWorker(outcome.pid));
+        };
         // Copies stopped at the stage's end, to run again in the next.
         const deferred = new Map();
         let claimedCount = 0;
@@ -617,6 +834,24 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     reported = true;
                 }
                 seen.outcome = outcome;
+                // A mutant's copy that has failed a test its file's known
+                // baseline passed is decided by that test: the rest of its
+                // tests are skipped, and what it does from here on cannot
+                // change its verdict. Its worker stops now, rather than at
+                // its file's end, which a timed-out test can leave a runaway
+                // loop holding (on tRPC such copies held 2 GB each).
+                if (!outcome.done && settles(at, outcome)) {
+                    try {
+                        process.kill(outcome.pid, "SIGKILL");
+                    }
+                    catch {
+                        // It ended meanwhile.
+                    }
+                    outcome = { ...outcome, done: true, doneAt: now };
+                    decided.set(at, outcome);
+                    seen.outcome = outcome;
+                    profile.settledCopies += 1;
+                }
                 if (outcome.done) {
                     going.delete(at);
                     if (early(at, outcome))
@@ -698,10 +933,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         if (settled?.result)
             last = settled.result;
         running = undefined;
+        claimRun = undefined;
         const stageEnded = Date.now();
         const outcomes = assignments.map((assignment, at) => {
             let outcome;
-            if (stopped.has(at))
+            if (decided.has(at))
+                outcome = decided.get(at);
+            else if (stopped.has(at))
                 outcome = { ...stopped.get(at), hung: true };
             else if (deferred.has(at))
                 outcome = { ...deferred.get(at), deferred: true };
@@ -728,14 +966,18 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             else if (assignments[at].claim.mutant)
                 profile.mutantCopies += 1;
             profile.testsRun += outcome.tests.length;
-            profile.startMs += outcome.up ?? 0;
+            profile.startMs += startOf(outcome);
             if (outcome.doneAt)
                 copyMs += outcome.doneAt - outcome.claimedAt;
         });
         profile.copyMs += copyMs;
         profile.wallMs += stageEnded - stageStarted;
+        const cpuAfter = machineCpu();
+        const cpuBusy = cpuBefore && cpuAfter && cpuAfter.total > cpuBefore.total
+            ? Math.round((cpuAfter.busy - cpuBefore.busy) / (cpuAfter.total - cpuBefore.total) * 100) / 100
+            : undefined;
         if (profile.stages.length < PROFILED_STAGES)
-            profile.stages.push({ copies: assignments.length, claimed, wallMs: stageEnded - stageStarted, lastClaimMs: lastClaim - stageStarted, copyMs, ...memoryOf() });
+            profile.stages.push({ copies: assignments.length, claimed, wallMs: stageEnded - stageStarted, lastClaimMs: lastClaim - stageStarted, copyMs, cpuBusy, ...memoryOf() });
         return { outcomes, handled };
     }
     // A baseline: each file with the union of its candidates, no mutant.
@@ -855,7 +1097,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const nextBatch = (job) => {
         job.later.sort((a, b) => killScore(b) - killScore(a));
         const batch = job.later.splice(0, job.batch);
-        job.batch *= 4;
+        job.batch *= BATCH_GROWTH;
         return batch;
     };
     // A mutant's copies of the stage running that no worker has taken yet
@@ -963,6 +1205,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         job.open -= 1;
         if (job.done)
             return;
+        // Held back: its mutant's other copies had not ended.
+        if (outcome.notRun) {
+            job.later.unshift(group);
+            return;
+        }
         // Skipped while a kill waits on its confirmation.
         if (outcome.skipped) {
             (job.deferred ??= []).push(group);
@@ -1104,6 +1351,19 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         for (const job of pending) {
             job.waiting.forEach((group, rank) => work.push({ job, group, rank }));
         }
+        // Where the reporter gives copies their assignments (Supercov's
+        // spawner), each mutant in the stage also takes its next batch of
+        // files, held back (`gated`) until its copies before them end: a
+        // mutant they leave alive goes on in the same stage, in what would
+        // be the stage's idle end, instead of waiting for the next stage.
+        // One its other copies killed skips them, and costs no process.
+        if (mainClaims && !oneAtATime) {
+            for (const job of pending) {
+                if (!job.waiting.length || !job.later.length || job.confirming?.length)
+                    continue;
+                nextBatch(job).forEach((group, rank) => work.push({ job, group, rank: rank + job.waiting.length, gated: true }));
+            }
+        }
         // Where files are not isolated, one copy at a time: its file's
         // baseline first.
         const stage = oneAtATime ? work.slice(0, 1) : work;
@@ -1124,7 +1384,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 return { ...item, file: check.file, estimate: work, claim: { ...check.claim, testTimeout: Math.ceil(budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) } };
             }
             const { job, group } = item;
-            job.waiting.splice(job.waiting.indexOf(group), 1);
+            if (!item.gated)
+                job.waiting.splice(job.waiting.indexOf(group), 1);
             job.open += 1;
             if (!job.started)
                 job.started = Date.now();
@@ -1165,7 +1426,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // long copies early, so that the stage does not end waiting on a
         // long copy that started last: by the copy's estimate over its rank.
         const priority = (assignment) => assignment.estimate / (Math.max(assignment.rank, 0) + 1);
-        assignments.sort((a, b) => Number(b.rank < 0) - Number(a.rank < 0) || priority(b) - priority(a));
+        assignments.sort((a, b) => Number(b.rank < 0) - Number(a.rank < 0) || Number(Boolean(a.gated)) - Number(Boolean(b.gated)) || priority(b) - priority(a));
         profile.checkCopies += assignments.filter((assignment) => assignment.check).length;
         for (const assignment of assignments) {
             if (assignment.job)
@@ -1231,6 +1492,12 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     if (!process.env["SUPERCOV_STRONG_KEEP_STAGES"])
         rmSync(stagesDirectory, { recursive: true, force: true });
     profile.spawnedWorkers = spawnedWorkers;
+    const endCpu = machineCpu();
+    if (passCpu && endCpu && endCpu.total > passCpu.total)
+        profile.cpuBusy = Math.round((endCpu.busy - passCpu.busy) / (endCpu.total - passCpu.total) * 100) / 100;
+    const ahead = await askStats();
+    if (ahead)
+        Object.assign(profile, ahead);
     write({ summary: true, durationMs: Date.now() - started, isolated: !oneAtATime, stalled, left: pending.filter((job) => !job.done).length, confirmations: confirmations.size, overturned, workers, stages: stageNumber, profile });
     if (stalled) {
         // A worker that will not end keeps Vitest from closing: the mutants

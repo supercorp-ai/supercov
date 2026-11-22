@@ -737,6 +737,8 @@ pub(crate) fn candidates(
             }),
             operator: None,
             value_used: false,
+            // A condition is probed only where it reads a variable.
+            effects: false,
             statement: innermost(PointKind::Statement, mutant.start, mutant.end),
             function: innermost(PointKind::Function, mutant.start, mutant.end),
             decision: None,

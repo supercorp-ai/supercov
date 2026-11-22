@@ -154,6 +154,44 @@ var builtinSetHas = Set.prototype.has;
 var builtinWeakMapGet = WeakMap.prototype.get;
 var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
+// Supercov keeps its state on globals, some first set while a test runs
+// (the test's id, an async scope). A suite that checks for globals its tests
+// add (Mocha's --check-leaks) lists the global object's enumerable keys, so
+// each is made here, before any test, and never enumerable.
+for (const name of [
+  "__SUPERCOV_ACTIVATE_PROBE_CONTEXT__",
+  "__SUPERCOV_ACTIVE_SCOPE__",
+  "__SUPERCOV_ASSERTION_PHASE_BRIDGE__",
+  "__SUPERCOV_ASSERTION_PHASE_OPENER__",
+  "__SUPERCOV_ASSERTION_PHASE_STARTED__",
+  "__SUPERCOV_ATTEMPT__",
+  "__SUPERCOV_BROWSER_FETCH_PATCHED__",
+  "__SUPERCOV_BUFFER_EXIT_INSTALLED__",
+  "__SUPERCOV_BUFFER_FLUSHERS__",
+  "__SUPERCOV_CHILD_PATCHED__",
+  "__SUPERCOV_COMPACT_SNAPSHOT__",
+  "__SUPERCOV_COVERAGE_SNAPSHOT__",
+  "__SUPERCOV_DIRECT_RUNTIME__",
+  "__SUPERCOV_EMITTER_CONTEXT_MAPS__",
+  "__SUPERCOV_EMITTER_PATCHED_INSTANCES__",
+  "__SUPERCOV_FETCH_PATCHED__",
+  "__SUPERCOV_MCDC_SNAPSHOT__",
+  "__SUPERCOV_MCDC_STATES__",
+  "__SUPERCOV_MCDC_TEST_ID__",
+  "__SUPERCOV_MODULE_LOADS__",
+  "__SUPERCOV_PHASE_ID__",
+  "__SUPERCOV_RESET__",
+  "__SUPERCOV_SERVER_PHASE_STORAGES__",
+  "__SUPERCOV_TERMINATION_FLUSHERS__",
+  "__SUPERCOV_TERMINATION_INSTALLED__",
+  "__SUPERCOV_WASM_REGIONS__",
+  "__SUPERCOV_WASM_REGISTRY__",
+  "__SUPERCOV_WORKER_EVIDENCE__",
+  "__SUPERCOV_WORKER_TOKEN__",
+]) {
+  if (!Object.prototype.hasOwnProperty.call(runtimeGlobal, name))
+    Object.defineProperty(runtimeGlobal, name, { value: void 0, writable: true, configurable: true, enumerable: false });
+}
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
@@ -1414,7 +1452,7 @@ function activateCoverageScope(scope) {
   if (scope)
     runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
   else
-    delete runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
+    runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = void 0;
   activateProbeV2Context(scope ? { scope } : {});
 }
 function coverageCarrier() {
@@ -1554,6 +1592,11 @@ function withNodeAssertionPhase(operation, source, callback) {
   // as Jest started from another tool's process. The assertion still fails
   // with the frames its author would see.
   if (!scope) {
+    // An adapter that makes such an assertion a test's (a node:test file's
+    // top level) is told, and the assertion runs as it would have.
+    const unscoped = runtimeGlobal.__SUPERCOV_UNSCOPED_ASSERTION__;
+    if (typeof unscoped === "function")
+      unscoped();
     try {
       return withStackRoom(callback);
     } catch (error) {

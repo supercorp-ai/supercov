@@ -6783,6 +6783,29 @@ mod tests {
         }
     }
 
+    /// A passed view whose decisions, branches or points differ from the
+    /// whole view's, its lines alike, is not the whole view's records.
+    #[test]
+    fn a_passed_view_whose_obligations_differ_is_not_copied() {
+        let whole = [report(), scoped_report(), phased_report()]
+            .into_iter()
+            .map(|run| run.view)
+            .find(|view| {
+                !view.decisions.is_empty() && !view.branches.is_empty() && !view.points.is_empty()
+            })
+            .expect("a fixture view with decisions, branches and points");
+        assert!(copies_whole(&whole, &whole.clone()));
+        let mut decisions = whole.clone();
+        decisions.decisions.pop();
+        assert!(!copies_whole(&whole, &decisions));
+        let mut branches = whole.clone();
+        branches.branches.pop();
+        assert!(!copies_whole(&whole, &branches));
+        let mut points = whole.clone();
+        points.points.pop();
+        assert!(!copies_whole(&whole, &points));
+    }
+
     fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
         let mut read = 0;
         index.model()?;

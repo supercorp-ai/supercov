@@ -58,7 +58,7 @@ only a change in shape fails it.
 
 Two files were written as ad hoc JSON and are now typed so the guard sees
 them: `statement-spans.json` (`StatementSpan`; the bytes are unchanged) and
-`strong-mutation.json` (`StrongVerdicts`, now in `js_strong`, read whole
+`strong-mutation.json` (`StrongVerdicts`, now in `strong_plan`, read whole
 rather than by its `mutants` field). The query index is binary; its
 identity's fields are what the snapshot holds, beside its version.
 
@@ -83,7 +83,7 @@ The fixture's tests run under `node:test`. A strong pass over such a run used
 to start the command, find no driver for the runner, and save an `error`
 verdict for every mutant it meant to run, reported as a mutation score of 0%.
 `mutants test` now refuses a pass with mutants to run and no test of a runner
-a strong driver drives (`js_strong::STRONG_RUNNERS`: Vitest and Playwright),
+a strong driver drives (`strong_driver::STRONG_RUNNERS`),
 naming the runners the run's tests used, before it runs anything or saves
 anything. The suite accepts either outcome, a verdict for every mutant or that
 refusal, so that a driver for `node:test` changes nothing here but the

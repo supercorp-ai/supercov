@@ -1,0 +1,150 @@
+{
+  "project": "pathe",
+  "scenario": "stryker-cold",
+  "shard": null,
+  "commit": "bc7477a01f0bd60ada017add8142c9f9d69ccdc5",
+  "startedAt": "2026-11-19T23:55:33.951Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "11.10.0",
+    "vitest": "4.1.9",
+    "vitestProject": "4.1.9"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/pathe bc7477a01f0bd60ada017add8142c9f9d69ccdc5 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.264,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0.01,
+        "cpuS": 0.03,
+        "cpuPercent": "12%",
+        "maxRssKiB": 19012,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@11.10.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.28,
+      "wallS": 1.658,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.73,
+        "sysS": 0.13,
+        "cpuS": 0.86,
+        "cpuPercent": "52%",
+        "maxRssKiB": 142088,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.94,
+      "wallS": 1.136,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.14,
+        "sysS": 0.31,
+        "cpuS": 2.45,
+        "cpuPercent": "216%",
+        "maxRssKiB": 886136,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 3.07,
+      "wallS": 1.548,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.05,
+        "sysS": 0.44,
+        "cpuS": 3.49,
+        "cpuPercent": "226%",
+        "maxRssKiB": 928368,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 4.63,
+      "wallS": 2.581,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.82,
+        "sysS": 0.13,
+        "cpuS": 2.95,
+        "cpuPercent": "114%",
+        "maxRssKiB": 230136,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 483,
+        "passed": 467,
+        "failed": 0,
+        "files": 28
+      }
+    },
+    {
+      "name": "stryker-cold",
+      "command": "node_modules/.bin/stryker run stryker.stryker-cold.json",
+      "startOffsetS": 7.21,
+      "wallS": 10.828,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 122,
+        "sysS": 6.39,
+        "cpuS": 128.39,
+        "cpuPercent": "1186%",
+        "maxRssKiB": 403492,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/_path.ts",
+          "src/utils.ts",
+          "src/_internal.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-cold.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-cold.json"
+    }
+  ],
+  "totalS": 18.04
+}
