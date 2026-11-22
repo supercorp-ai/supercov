@@ -86,10 +86,13 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
 
 const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
 
-Weak mutation: for each mutant StrykerJS would make, whether a test ran the
-mutated code (reach) and whether its value differed there (infection), read
-from the run without running anything. A JavaScript or TypeScript run lists
-its mutants from its sources the first time they are asked for.
+Weak mutation: for each mutant the language's established tool would make
+(StrykerJS for JavaScript and TypeScript, mutmut for Python, cargo-mutants
+for Rust, Gremlins for Go, mutant for Ruby, PIT for Java and Kotlin),
+whether a test ran the mutated code (reach) and whether
+its value differed there (infection), read from the run without running
+anything. A run lists its mutants from its sources the first time they are
+asked for.
 
 Without a file, a table of files by how many mutants no test infects, then
 by how many no test reaches; with a file, its mutants by line; with
@@ -97,7 +100,7 @@ file:line, that line's mutants and why.
 
 Options:
   --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent, or strong verdicts: survived, killed, timeout, no-coverage, error, unviable
-  --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
+  --mutator <name>          only this mutator's mutants, by its tool's name (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
   --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)

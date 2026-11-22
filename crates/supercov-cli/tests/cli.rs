@@ -23639,9 +23639,37 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     ] {
         contains_all(
             &project.supercov(help).succeeds(),
-            &["Usage: supercov mutants [options] [-- <test command>]"],
+            &[
+                "Usage: supercov mutants [options] [-- <test command>]",
+                // Every language with mutants is named, with its tool.
+                "StrykerJS",
+                "mutmut",
+                "cargo-mutants",
+                "Gremlins",
+                "mutant for Ruby",
+                "PIT",
+            ],
         );
     }
+    // The run's own command is an option, listed with the others.
+    let test_help = project
+        .supercov(&["runs", "latest", "mutants", "test", "--help"])
+        .succeeds();
+    let options = test_help
+        .split("Options:")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_default();
+    assert!(options.contains("-- <command>"), "{test_help}");
+    let weak_help = project
+        .supercov(&["runs", "latest", "mutants", "--help"])
+        .succeeds();
+    contains_all(&weak_help, &["cargo-mutants", "Gremlins", "PIT"]);
+    let overview = project.supercov(&["--help"]).succeeds();
+    assert!(
+        overview.contains("Test the tests with mutants (every language Supercov measures)"),
+        "{overview}"
+    );
 
     // Options that parse, and no run to read: said on the standard error
     // with exit 1, or as a JSON error with --json.
@@ -23838,12 +23866,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:946",
+            "fs.write#mutants_test_command.rs:948",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:946"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:948"),
         "{}",
         unwritten.stderr()
     );
@@ -24083,7 +24111,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:220")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:222")],
         )
         .exits(2);
     assert!(
@@ -24739,8 +24767,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:942",
-        "fs.read_dir entry#public_query.rs:942",
+        "fs.read_dir#public_query.rs:945",
+        "fs.read_dir entry#public_query.rs:945",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24753,7 +24781,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:942"),
+            fired_at(&unlisted, "public_query.rs:945"),
             "{fault}: {unlisted}"
         );
     }
