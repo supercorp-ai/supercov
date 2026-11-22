@@ -16541,7 +16541,7 @@ fn a_go_run_whose_own_step_fails_says_so() {
             // The project's Go listed again as the run prepares it.
             "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
             // The harness a test package is given.
-            "fs.write#go_run.rs:513 => go_run.rs:513",
+            "fs.write#go_run.rs:525 => go_run.rs:525",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -18020,10 +18020,9 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
         ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
-        ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
-        ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
-        ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
-        ("fs.create_dir_all#go_run.rs:400", "go_run.rs:400"),
+        ("fs.create_dir_all#go_run.rs:323", "go_run.rs:323"),
+        ("fs.create_dir_all#go_run.rs:373", "go_run.rs:373"),
+        ("fs.create_dir_all#go_run.rs:412", "go_run.rs:412"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18057,8 +18056,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
-        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
+        ("fs.write#go_run.rs:1131", "go_run.rs:1131"),
+        ("fs.create_dir_all#go_run.rs:1141", "go_run.rs:1141"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19415,7 +19414,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
+                ("fs.canonicalize#go_run.rs:657", "go_run.rs:657"),
                 ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
