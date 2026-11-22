@@ -145,9 +145,16 @@ switcher recorded each mutant's own code and each switch there.
 - Any other error at a switch may be the switch's doing (two branches of
   different types, a borrow the duplicated code makes): its mutants leave the
   switched build and are built on their own.
-- An error at no switch is found by halving: the switched mutants of its
-  file are added back half by half until the one that breaks the build is
-  found, and it is built on their own.
+- An error at no switch is found by halving: the switched mutants are
+  added back half by half until the one that breaks the build is found, and
+  it is built on its own. One such error: deleting an arm of a `match` whose
+  only `_` arm has a guard (cargo-mutants deletes arms wherever a `_` arm
+  exists) leaves the match without the arm that made it exhaustive, and the
+  compiler's error is at its scrutinee. That error is in the mutant's own
+  file; no error at no switch is known in another file, so the halving does
+  not narrow its suspects to the errors' files. Where the build fails with
+  no mutant switched, the project itself does not build, and the pass ends
+  saying so.
 
 The build is then repeated without them, so a pass costs a handful of
 incremental builds, not one per mutant.
@@ -232,7 +239,7 @@ v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
 
 ## Measured
 
-On SoroCI (16-CPU machines, one per job), 2026-11-22, run 8665618628123379:
+On 16-CPU machines (one per job), 2026-11-22:
 cargo-mutants 27.1.0 with `-j 8`, in shards of a crate's mutants; Supercov
 built from this tree, one job per crate, the strong pass with its default 8
 workers, from a run measured with `SUPERCOV_MUTANTS=1`. Every mutant of the
@@ -254,7 +261,9 @@ soundness violations on all three):
 | hex | 7 / 0 / 8 / 89 | 36 / 0 / 8 / 60 |
 | semver | 65 / 0 / 31 / 269 | 182 / 13 / 31 / 139 |
 
-The measured run's cost, each from a cold build of its own copy (seconds):
+The measured run's cost, each from a cold build of its own copy (seconds,
+16-CPU machines, 2026-11-22, before the probes' length check and the
+`open` gate below):
 
 | Crate | `cargo test` | Supercov | Supercov with value probes |
 | --- | --- | --- | --- |
@@ -262,15 +271,34 @@ The measured run's cost, each from a cold build of its own copy (seconds):
 | hex | 6.37 | 6.13 (0.96×) | 6.47 (1.02×) |
 | semver | 0.63 | 1.15 (1.84×) | 3.41 (5.44×) |
 
-On the two small crates the fixed cost of a measured run (the copy, the
-instrumentation, a process per test) is most of it; on hex, whose build
-dominates, Supercov costs what `cargo test` does. The probes cost 6-9% on
-strsim and hex and nearly triple semver's measured run, whose tests call
-the probed comparisons and returns in hot loops: each probe reads its
-operands' type names. That figure was measured before probes decided an
-operand's type by its name's length first, which skips the comparisons
-for every type longer than five characters; it has not been measured
-again. A plain run places no probe.
+The same, warm: each kind run once to build, then seven times, the median
+(seconds, 16-CPU machines, 2026-11-22, this tree):
+
+| Crate | `cargo test` | Supercov | Supercov with value probes | Probes over Supercov |
+| --- | --- | --- | --- | --- |
+| strsim | 0.083 | 0.276 (3.34×) | 0.308 (3.72×) | +11% |
+| hex | 0.120 | 0.395 (3.31×) | 0.411 (3.44×) | +4% |
+| semver | 0.110 | 0.564 (5.12×) | 0.627 (5.69×) | +11% |
+
+Warm, `cargo test` does no build, so a measured run's fixed cost (the copy,
+the instrumentation, a process per test) is nearly all of what it adds; on
+hex, cold, the build dominates and Supercov costs what `cargo test` does.
+The probes add 4-11% to a measured run. Cold, they had nearly tripled
+semver's, whose tests call probed comparisons and returns in hot loops; two
+changes since bring that to 11%: a probe decides an operand's type by its
+name's length first, and a site's probe is called behind `rt::open(site)`,
+one relaxed atomic load, so a site whose verdicts no further evaluation can
+change reads no operands at all (`returned` checks the same load first).
+
+Where semver's evaluations go, from the runtime patched to log each site's
+count at every power of two (so each is a lower bound): 24 sites reach 16
+evaluations in one test process; together 13,696 evaluations, 8,720 of them
+on a site already decided. The hottest, `identifier.rs:175`, a
+`returned::<bool>` of `is_empty`, is evaluated 3,136 times across 22 test
+processes, 3,104 of them after it decided. The three hottest that never
+decide, `identifier.rs:361` (1,040) and `parse.rs:164` (944) and `:177`
+(784), read their operands at every evaluation: no test process saw the
+outcomes that settle them. A plain run places no probe.
 
 The five viability disagreements, each applied by hand:
 

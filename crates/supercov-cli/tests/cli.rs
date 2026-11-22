@@ -17628,11 +17628,11 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:1366",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1641",
-        "fs.create_dir_all#javascript_run.rs:1643",
+        "fs.create_dir_all#javascript_run.rs:1644",
+        "fs.create_dir_all#javascript_run.rs:1646",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1743",
-        "fs.create_dir_all#javascript_run.rs:1745",
+        "fs.create_dir_all#javascript_run.rs:1746",
+        "fs.create_dir_all#javascript_run.rs:1748",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -20311,7 +20311,7 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
 fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
     for (fault, place) in [
         ("spawn#rust_project.rs:182", "rust_project.rs:182"),
-        ("fs.create_dir_all#rust_wasm.rs:179", "rust_wasm.rs:179"),
+        ("fs.create_dir_all#rust_wasm.rs:185", "rust_wasm.rs:185"),
     ] {
         let project = Project::cart("wasm-library-unprepared");
         project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
