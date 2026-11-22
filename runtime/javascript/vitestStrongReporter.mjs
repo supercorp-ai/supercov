@@ -1895,43 +1895,48 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const files = [...base.keys()].filter((file) => specOf.has(file));
         const firstEstimate = (file) => (testsOf.get(file) ?? []).reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
         files.sort((x, y) => firstEstimate(y) - firstEstimate(x));
-        const bound = pending.reduce((sum, job) => sum + job.files.length * 2 + 2, 0) + files.length * 2 + workers;
+        const bound = pending.reduce((sum, job) => sum + job.files.length * 3 + 4, 0) + files.length * 2 + workers;
         const slots = files.map((file) => specOf.get(file));
         for (let at = 0; slots.length < bound && files.length; at++)
             slots.push(specOf.get(files[at % files.length]));
         setTestTimeout(vitest, Math.max(testTimeoutMs, ...pending.flatMap((job) => job.files.map((group) => claimOf(job, group).testTimeout))));
-        const runStarted = Date.now();
-        let settledRun;
-        const ran = slots.length
-            ? runFiles(slots, false).then((result) => {
+        // A slot a waiting copy gives up uses one, so a run can run out of
+        // slots before the pass is over: another run of the same slots goes
+        // on where it stopped, for as long as runs make progress.
+        for (let runs = 0; !over && slots.length; runs++) {
+            const decidedBefore = pending.filter((job) => job.done).length;
+            const runStarted = Date.now();
+            let settledRun;
+            const ran = runFiles(slots, false).then((result) => {
                 settledRun = { result };
             }, (error) => {
                 settledRun = { error };
-            })
-            : Promise.resolve().then(() => {
-                settledRun = {};
             });
-        let cancelled = false;
-        while (!settledRun) {
-            await Promise.race([ran, pause(CONTINUOUS_LOOK_MS)]);
-            look();
-            if (over && !cancelled) {
-                cancelled = true;
-                dispatch();
-                try {
-                    vitest.cancelCurrentRun?.("supercov: the strong pass is over")?.catch?.(() => { });
-                }
-                catch {
-                    // Nothing to cancel.
+            let cancelled = false;
+            while (!settledRun) {
+                await Promise.race([ran, pause(CONTINUOUS_LOOK_MS)]);
+                look();
+                if (over && !cancelled) {
+                    cancelled = true;
+                    dispatch();
+                    try {
+                        vitest.cancelCurrentRun?.("supercov: the strong pass is over")?.catch?.(() => { });
+                    }
+                    catch {
+                        // Nothing to cancel.
+                    }
                 }
             }
+            look();
+            if (settledRun.result)
+                last = settledRun.result;
+            profile.wallMs += Date.now() - runStarted;
+            profile.continuousRuns = runs + 1;
+            if (!over && runs > 0 && pending.filter((job) => job.done).length === decidedBefore)
+                break;
         }
-        look();
-        if (settledRun.result)
-            last = settledRun.result;
         claimRun = undefined;
         observeRun = undefined;
-        profile.wallMs += Date.now() - runStarted;
         // Whatever the run left undecided (its slots ran out): an error,
         // which the next `mutants test` runs again.
         for (const job of pending)
