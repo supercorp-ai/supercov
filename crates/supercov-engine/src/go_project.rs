@@ -675,11 +675,11 @@ mod tests {
         for fault in [
             "fs.read_dir",
             "fs.read_dir entry",
-            "fs.read_dir#go_project.rs:139@2",
-            "fs.read_dir#go_project.rs:279",
-            "fs.read_dir entry#go_project.rs:279",
-            "fs.file_type#go_project.rs:285",
-            "fs.read_dir#go_project.rs:279@2",
+            "fs.read_dir#go_project.rs:142@2",
+            "fs.read_dir#go_project.rs:282",
+            "fs.read_dir entry#go_project.rs:282",
+            "fs.file_type#go_project.rs:288",
+            "fs.read_dir#go_project.rs:282@2",
         ] {
             assert!(
                 crate::fault::during(fault, || discover_go_files(&root)).is_err(),
