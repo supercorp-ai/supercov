@@ -1133,6 +1133,12 @@ class _PytestRunner:
         terminal = manager.get_plugin("terminalreporter")
         if terminal is not None:
             manager.unregister(terminal)
+        # Nor does a failure's report matter here, only that it failed:
+        # pytest's, with each frame's source parsed and its paths resolved,
+        # was most of what a fork spent on a test a mutant failed.
+        for item in items:
+            item.repr_failure = _bare_failure
+            item._repr_failure_py = _bare_failure
         for at, item in enumerate(items):
             nextitem = items[at + 1] if at + 1 < len(items) else None
             _reports.clear()
@@ -1145,6 +1151,11 @@ class _PytestRunner:
 
 
 _reports: list = []
+
+
+def _bare_failure(excinfo, style=None) -> str:
+    """A failed test's report in a fork: the exception's type alone."""
+    return excinfo.typename
 
 
 def configure_pytest(config) -> None:
