@@ -219,7 +219,7 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
     }
     match mutant.mutator.as_str() {
         "StringLiteral" | "BooleanLiteral" | "ArrayDeclaration" | "ObjectLiteral"
-        | "UpdateOperator" => verdict_of(
+        | "UpdateOperator" | "Regex" => verdict_of(
             INFECTED,
             "reached",
             "the code ran, and this replacement differs wherever it is evaluated",
@@ -1295,6 +1295,14 @@ fn replaced(mutant: &CandidateMutant) -> String {
         "ArrowFunction" => Some("() => undefined".to_owned()),
         "BlockStatement" | "ObjectLiteral" => Some("{}".to_owned()),
         "ArrayDeclaration" => Some(descriptor.to_owned()),
+        // The literal with the mutated pattern and its own flags, or the
+        // string `new RegExp` is given.
+        "Regex" => match original.rfind('/') {
+            Some(end) if original.starts_with('/') && end > 0 => {
+                Some(format!("/{descriptor}{}", &original[end..]))
+            }
+            _ => Some(format!("{descriptor:?}")),
+        },
         _ => None,
     };
     text.unwrap_or_else(|| descriptor.to_owned())
@@ -1461,6 +1469,8 @@ mod tests {
             (mutant("BlockStatement", "{}", "{ x(); }"), "{}"),
             (mutant("ArrayDeclaration", "[]", "[1, 2]"), "[]"),
             (mutant("CallExpression", "empty", "x();"), "empty"),
+            (mutant("Regex", "a", "/^a/gu"), "/a/gu"),
+            (mutant("Regex", "\\D", "\"\\\\d\""), "\"\\\\D\""),
         ];
         for (mutant, written) in cases {
             assert_eq!(replaced(&mutant), written, "{}", mutant.id);
@@ -1689,6 +1699,7 @@ mod tests {
             "ArrayDeclaration",
             "ObjectLiteral",
             "UpdateOperator",
+            "Regex",
         ] {
             expect(&mutant(mutator, "x", "x"), &ran(), INFECTED, "reached");
         }

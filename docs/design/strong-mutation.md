@@ -696,8 +696,7 @@ its own), then Supercov, and joins every mutant's verdicts.
 Measured on SoroCI, one project per 16-CPU machine (c8a/m8a.4xlarge), both
 tools with 15 workers. Times in seconds; Supercov's are its measured run
 (with the mutants' values) and its strong pass. "Joined" counts the mutants
-both list: StrykerJS's `Regex` mutants are not listed by Supercov (see
-`mutants.md`), and are left out.
+both list, Regex mutants included.
 
 | project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -758,4 +757,3 @@ against 7.5 s.
 - A Vitest run whose tests run both in node and in the browser: the browser's
   mutants are run by the jobs pass, and those with candidates in node too are
   `error`.
-- StrykerJS's `Regex` mutator: its mutants are not listed (bytes.js: 20 of 146).

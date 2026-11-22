@@ -1,7 +1,7 @@
 {
 "mutantSet": "stryker-js@10.1.1",
 "file": "directives.js",
-"skipped": {"Regex":2,"ignored":28},
+"skipped": {"ignored":28},
 "mutants": [
   {"file":"directives.js","mutator":"StringLiteral","start":[11,16],"end":[11,22],"replacement":"empty","text":"\"\""},
   {"file":"directives.js","mutator":"StringLiteral","start":[14,11],"end":[14,14],"replacement":"empty","text":"\"\""},
@@ -28,6 +28,8 @@
   {"file":"directives.js","mutator":"BlockStatement","start":[57,25],"end":[65,2],"replacement":"{}","text":"{}"},
   {"file":"directives.js","mutator":"CallExpression","start":[59,3],"end":[59,37],"replacement":"empty","text":";"},
   {"file":"directives.js","mutator":"CallExpression","start":[61,3],"end":[61,26],"replacement":"empty","text":";"},
+  {"file":"directives.js","mutator":"Regex","start":[62,10],"end":[62,19],"replacement":"regex$","text":"/regex$/"},
+  {"file":"directives.js","mutator":"Regex","start":[62,10],"end":[62,19],"replacement":"^regex","text":"/^regex/"},
   {"file":"directives.js","mutator":"ArrayDeclaration","start":[69,10],"end":[69,92],"replacement":"[]","text":"[]"},
   {"file":"directives.js","mutator":"BlockStatement","start":[72,33],"end":[79,2],"replacement":"{}","text":"{}"},
   {"file":"directives.js","mutator":"ArrowFunction","start":[76,18],"end":[76,64],"replacement":"undefined","text":"() => undefined"},
