@@ -21,6 +21,7 @@ use crate::evidence_archive::EvidenceArchiveEntry;
 use crate::interned::{FastMap, Id, Interner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionMeta {
     pub id: String,
@@ -33,6 +34,7 @@ pub struct DecisionMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PointMeta {
     pub id: String,
@@ -46,6 +48,7 @@ pub struct PointMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchAlternativeMeta {
     pub id: String,
@@ -53,6 +56,7 @@ pub struct BranchAlternativeMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchMeta {
     pub id: String,
@@ -65,6 +69,7 @@ pub struct BranchMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoverageManifest {
     pub decisions: Vec<DecisionMeta>,
@@ -93,6 +98,7 @@ pub struct CoverageManifest {
 
 /// A module's point and decision ids, in the order its probes number them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProbeTableIds {
     pub points: Vec<String>,
@@ -104,6 +110,7 @@ pub struct ProbeTableIds {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -121,12 +128,14 @@ pub struct DecisionSnapshot {
 /// decision's text beside its id. Their runs are still read; the manifest has
 /// the text, so the id is all that is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RecordedDecision {
     pub id: String,
 }
 
 /// [`DecisionSnapshot`] as evidence holds it, in either release's shape.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DecisionSnapshotRecord {
     #[serde(default)]
@@ -154,6 +163,7 @@ impl TryFrom<DecisionSnapshotRecord> for DecisionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeEvent {
     #[serde(rename = "type")]
@@ -169,6 +179,7 @@ pub struct RuntimeEvent {
 
 /// One observed (side selected, result truthy) pair of a value-position logical expression.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogicalVector {
     /// The right operand was evaluated (the left did not short-circuit).
@@ -180,6 +191,7 @@ pub struct LogicalVector {
 /// Distinct outcomes of one `logical-value` branch within a test; gives per-operand outcomes
 /// once combined with the operator recorded in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogicalSnapshot {
     pub id: String,
@@ -191,6 +203,7 @@ pub struct LogicalSnapshot {
 /// outcomes: carried through the evidence for weak-mutation verdicts, never
 /// counted in coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComparisonSnapshot {
     pub id: String,
@@ -198,6 +211,7 @@ pub struct ComparisonSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -230,6 +244,7 @@ pub struct RuntimeSnapshot {
 /// a quarter of the size. The columns decode to exactly the events they hold,
 /// so nothing that reads a snapshot sees which form it was written in.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeSnapshotWire {
     #[serde(default)]
@@ -256,6 +271,7 @@ struct RuntimeSnapshotWire {
 /// `hits`: a test's every first hit is in both, and writing each id twice
 /// was a third of what a test's evidence held.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EventColumns {
     types: Vec<String>,
@@ -276,6 +292,19 @@ struct EventColumns {
 enum EventId {
     Text(String),
     Hit(usize),
+}
+
+/// Written out, or a hit's position.
+#[cfg(test)]
+impl schemars::JsonSchema for EventId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "EventId".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [generator.subschema_for::<String>(), generator.subschema_for::<usize>()]
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for EventId {
@@ -382,6 +411,7 @@ impl TryFrom<RuntimeSnapshotWire> for RuntimeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionScope {
     pub version: usize,
@@ -394,6 +424,7 @@ pub struct ExecutionScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -434,6 +465,7 @@ pub const SERVER_VALUES_RECORD: &str = "values";
 /// [`ServerRecord`] as evidence holds it. A decision record of a release
 /// before 4.24.0 named its decision in `meta` rather than by `id`.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerRecordWire {
     #[serde(rename = "type")]
@@ -478,6 +510,7 @@ impl TryFrom<ServerRecordWire> for ServerRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoveragePhase {
     pub id: String,
@@ -497,6 +530,7 @@ pub struct CoveragePhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestProvenance {
     pub runner: String,
@@ -525,6 +559,7 @@ impl Default for TestProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RawTestResult {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -980,6 +1015,7 @@ pub struct CoverageModelDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistedCoverageModel {
     pub schema_version: u32,
@@ -1143,22 +1179,25 @@ pub struct TransportStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(untagged)]
-enum ExecutionSafeArgument {
+pub(crate) enum ExecutionSafeArgument {
     Text(String),
     Digest(ExecutionArgumentDigest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExecutionArgumentDigest {
+pub(crate) struct ExecutionArgumentDigest {
     bytes: usize,
     sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExecutionCommandSummary {
+pub(crate) struct ExecutionCommandSummary {
     #[serde(default)]
     executable: Option<ExecutionSafeArgument>,
     arguments: Vec<ExecutionSafeArgument>,
@@ -1166,13 +1205,14 @@ struct ExecutionCommandSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(
     tag = "event",
     rename_all = "kebab-case",
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
-enum ExecutionTraceEvent {
+pub(crate) enum ExecutionTraceEvent {
     Process {
         at: String,
         pid: u32,

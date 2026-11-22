@@ -6,6 +6,7 @@
 import * as runtime from "./runtime.mjs";
 import { callerLocation, runnerExecutionScope, runnerTestId, writeRunnerEvidence } from "./runnerEvidence.mjs";
 import { adaptRunnerEntry } from "./runnerEntry.mjs";
+import { strongJob } from "./strongJob.mjs";
 
 // Bun runs no Node preload: a runner it starts is adapted here.
 await adaptRunnerEntry(process.argv[1]?.replaceAll("\\", "/") ?? "");
@@ -72,6 +73,14 @@ function adapt(api) {
             for (const active of [...suites.map(suite => suite.flags), flags]) {
                 for (const [key, value] of Object.entries(active)) effective[key] ||= value;
             }
+            // A strong pass's job runs its own tests.
+            const job = kind === "test" ? strongJob() : null;
+            if (job && callback && !job.selects(identity.file, runnerExecutionScope(identity).testId)) {
+                const skip = Reflect.get(original, "skip", original);
+                const next = [...args];
+                next[index] = () => { };
+                return Reflect.apply(typeof skip === "function" ? skip : original, original, next);
+            }
             if (!callback) {
                 const result = Reflect.apply(original, this, args);
                 writeEvidence(identity, effective.todo ? "todo" : "skipped", runnerExecutionScope(identity), evidenceDirectory);
@@ -90,9 +99,17 @@ function adapt(api) {
                 attempts.set(scope.attemptId, { identity: current, phases: [] });
                 writeEvidence(current, "unknown", scope, evidenceDirectory);
                 let finished = false;
+                // None after the job's first failure.
+                if (job?.stopped) {
+                    writeEvidence(current, "skipped", scope, evidenceDirectory);
+                    const done = values[row.bound ?? 0];
+                    if (callback.length > (row.bound ?? 0) && typeof done === "function") done();
+                    return;
+                }
                 function finish(failed = false) {
                     if (finished) return;
                     finished = true;
+                    if (failed !== Boolean(effective.failing)) job?.fail();
                     attempts.delete(scope.attemptId);
                     const status = effective.todo ? "todo" : failed === Boolean(effective.failing) ? "passed" : "failed";
                     writeEvidence(current, status, scope, evidenceDirectory, runtime.takeNodeAssertionPhases(scope));

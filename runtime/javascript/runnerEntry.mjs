@@ -4,6 +4,7 @@
 // probe a test reaches is counted as background. Node runs this from
 // register.mjs before the CLI parses argv; Bun loads no Node preload, so its
 // adapter does instead.
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // A project's own coverage tool measures what runs, and under Supercov that is
@@ -66,6 +67,17 @@ function useGeneratedVitestConfig(entrypoint) {
         process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG = originalConfig;
     }
     process.argv.push("--config", generatedVitestConfig);
+    // A strong pass's job runs one test file: Vitest's file filter keeps it
+    // from collecting the others (its adapter would skip their tests).
+    const job = process.env.SUPERCOV_STRONG_JOB;
+    if (job) {
+        try {
+            process.argv.push(...Object.keys(JSON.parse(readFileSync(job, "utf8")).files ?? {}));
+        }
+        catch {
+            // Without its job the adapter runs every test.
+        }
+    }
     if (process.env.SUPERCOV_DEBUG === "1") {
         console.error("[supercov] Vitest argv configured", {
             entrypoint,
@@ -78,6 +90,14 @@ function useGeneratedVitestConfig(entrypoint) {
 
 /** Adapt the runner whose entry point `entrypoint` is, if any. */
 export async function adaptRunnerEntry(entrypoint) {
+    // A strong pass's job runs one test file: node:test and tap start a
+    // process for each of the run's, and those of the others end here,
+    // before they load anything.
+    if ((process.env.NODE_TEST_CONTEXT || process.env.TAP_CHILD_ID) && process.env.SUPERCOV_STRONG_JOB && entrypoint) {
+        const { strongJob } = await import(new URL("./strongJob.mjs", import.meta.url).href);
+        if (strongJob()?.runsFile(entrypoint) === false)
+            process.exit(0);
+    }
     useGeneratedVitestConfig(entrypoint);
     // The Mocha CLI, the child it forks for Node options, and each --parallel
     // worker run tests through Mocha's Runner, which the adapter patches before

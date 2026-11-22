@@ -1,0 +1,753 @@
+# The shape of every file a run keeps, from the types that write and read it.
+# crates/supercov-engine/src/store_shapes.rs checks this against the types.
+#
+# `field?` may be left out: a field written only when it has a value, or read
+# with a default. `closed` refuses fields it does not know. `uint` is an
+# integer that is never negative. A type is shown once where what is written
+# and what is read are the same, and once each where they differ.
+
+file run.json
+  version: RUN_INTEGRITY_SCHEMA_VERSION = 2
+  written and read: RunMetadata
+
+file evidence.raw.gz: the header before each entry
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: EntryHeader
+
+file evidence.raw.gz: frontend.json
+  version: LANGUAGE_FRONTEND_PROTOCOL_VERSION = 2
+  written and read: FrontendRunDeclaration
+
+file evidence.raw.gz: coverage-model.json
+  version: COVERAGE_MODEL_SCHEMA_VERSION = 1
+  written and read: PersistedCoverageModel
+
+file evidence.raw.gz: manifest.json
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: CoverageManifest
+
+file evidence.raw.gz: mcdc.json, and each line of *.mcdc.jsonl
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: RawTestResult
+
+file evidence.raw.gz: each line of server/**/*.jsonl
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: ServerRecord
+
+file evidence.raw.gz: each line of execution.*.jsonl
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  read: ExecutionTraceEvent
+
+file evidence.raw.gz: source-inputs.json
+  version: source_manifest::MANIFEST_SCHEMA = 3
+  written and read: InputManifest
+
+file evidence.raw.gz: statement-exclusions.json
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: [any]
+
+file evidence.raw.gz: support-reach.json
+  version: EVIDENCE_ARCHIVE_SCHEMA_VERSION = 3
+  written and read: SupportReach
+
+file evidence.raw.gz: mutants.json; mutants-listed.json beside it
+  version: mutant_list::MUTANTS_SCHEMA_VERSION = 1
+  written and read: MutantsFile
+
+file source-manifest.cache.json
+  version: source_manifest::MANIFEST_SCHEMA = 3
+  written and read: ManifestCache
+
+file test-executions.json
+  version: none
+  written and read: Executions
+
+file statement-spans.json
+  version: none
+  written and read: [StatementSpan]
+
+file assessment-input.json.gz
+  version: none
+  written and read: AssessmentInput
+
+file strong-mutation.json
+  version: strong_plan::STRONG_VERDICTS_SCHEMA_VERSION = 1
+  written and read: StrongVerdicts
+
+file query-index.v1.bin: the identity in its header
+  version: QUERY_INDEX_SCHEMA_VERSION = 6
+  written and read: QueryIndexIdentity
+
+type ArrowLink, written and read = closed {
+  effects: boolean
+  neverUndefined: boolean
+}
+
+type AssessmentInput, written and read = {
+  tests: [InputTest]
+  points: [InputPoint]
+  decisions: [InputPoint]
+}
+
+type AttributionPrecision, written and read = "exact" | "aggregate" | "unavailable"
+
+type BranchAlternativeMeta, written and read = closed {
+  id: string
+  label: string
+}
+
+type BranchLink, written and read = closed {
+  id: string
+  role: BranchRole
+  operator: string
+}
+
+type BranchMeta, written and read = closed {
+  id: string
+  kind: string
+  file: string
+  line: uint
+  column: uint
+  source: string
+  alternatives: [BranchAlternativeMeta]
+}
+
+type BranchRole, written and read = "value" | "left" | "right"
+
+type CandidateMutant, written and read = closed {
+  id?: string
+  mutator: string
+  replacement: string
+  start: (uint, uint)
+  end: (uint, uint)
+  original: string
+  operator?: MutantOperator | null
+  valueUsed?: boolean
+  statement?: string | null
+  function?: string | null
+  decision?: DecisionLink | null
+  branch?: BranchLink | null
+  chain?: ChainLink | null
+  compare?: string | null
+  probe?: string | null
+  arrow?: ArrowLink | null
+  equivalent?: StaticNote | null
+  untestable?: StaticNote | null
+  static?: boolean
+  unplaceable?: string | null
+}
+
+type ChainLink, written and read = closed {
+  id: string
+  earlier?: [string]
+}
+
+type Code, written and read = closed {
+  semantic: string
+  structure: string
+  units: [Unit]
+  erased?: [uint]
+}
+
+type CompanionRun, written and read = closed {
+  id: string
+  language: string
+  role: string
+}
+
+type ComparisonSnapshot, written and read = closed {
+  id: string
+  outcomes: [string]
+}
+
+type CoverageManifest, written and read = closed {
+  decisions: [DecisionMeta]
+  points: [PointMeta]
+  branches: [BranchMeta]
+  limitations?: [any]
+  unmeasured?: [string]
+  scope?: any
+  assertionSites?: [PointMeta]
+  probeTables?: {string: ProbeTableIds}
+}
+
+type CoveragePhase, written and read = closed {
+  id: string
+  kind: string
+  operation: string
+  source?: string | null
+  causedByPhaseId?: string | null
+  startedAtMs: int
+  endedAtMs?: int | null
+  status?: string | null
+  error?: string | null
+}
+
+type DecisionLink, written and read = closed {
+  id: string
+  condition?: uint | null
+  prefix?: uint | null
+}
+
+type DecisionMeta, written and read = closed {
+  id: string
+  file: string
+  line: uint
+  column: uint
+  source: string
+  conditions: [string]
+  kind: string
+}
+
+type DecisionSnapshot, written = closed {
+  id: string
+  vectors: [McdcVector]
+}
+
+type DecisionSnapshot, read = closed {
+  id?: string | null
+  meta?: RecordedDecision | null
+  vectors: [McdcVector]
+}
+
+type EntryHeader, written and read = closed {
+  path: string
+  bytes: uint
+}
+
+type EventColumns, read = closed {
+  types: [string]
+  phases: [string]
+  environments: [string]
+  id: [EventId]
+  type: [uint]
+  phase: [int]
+  environment: [uint]
+  t: [int]
+  vector?: {uint: McdcVector}
+}
+
+type EventId, read = string | uint
+
+type Execution, written = closed {
+  test: TestSelector
+  passed: boolean
+  files: {string: [uint]}
+  attribution: string
+}
+
+type Execution, read = closed {
+  test: TestSelector
+  passed: boolean
+  files: {string: [uint]}
+  attribution?: string
+}
+
+type ExecutionArgumentDigest, read = closed {
+  bytes: uint
+  sha256: string
+}
+
+type ExecutionCommandSummary, read = closed {
+  executable?: ExecutionSafeArgument | null
+  arguments: [ExecutionSafeArgument]
+  argumentCount: uint
+}
+
+type ExecutionModel, written and read = "process-per-test" | "serial-in-process" | "parallel-context-propagated" | "parallel-unattributed"
+
+type ExecutionSafeArgument, read = string | ExecutionArgumentDigest
+
+type ExecutionScope, written and read = closed {
+  version: uint
+  runId: string
+  workerId: string
+  testId: string
+  testKey: string
+  retry: uint
+  attemptId: string
+}
+
+type ExecutionTraceEvent, read =
+| closed {
+    event: "process"
+    at: string
+    pid: uint
+    ppid: uint
+    cwd: string
+    command: ExecutionCommandSummary
+    entrypoint?: string | null
+  }
+| closed {
+    event: "child-launch"
+    at: string
+    pid: uint
+    ppid: uint
+    method: string
+    command: ExecutionSafeArgument
+  }
+| closed {
+    event: "child-exit"
+    at: string
+    pid: uint
+    ppid: uint
+    child?: uint | null
+    signal?: string | null
+    code?: int | null
+    command: ExecutionSafeArgument
+    ranMs: uint
+  }
+| closed {
+    event: "remote-launch"
+    at: string
+    pid: uint
+    ppid: uint
+    command: ExecutionCommandSummary
+    guestRoot: string
+  }
+| closed {
+    event: "workspace-capability"
+    at: string
+    pid: uint
+    ppid: uint
+    hostRoot: string
+    guestRoot: string
+    cacheIdentities: [string]
+  }
+| closed {
+    event: "guest-process"
+    at: string
+    pid: uint
+    ppid: uint
+    guestRoot: string
+  }
+
+type Executions, written = closed {
+  tests: [Execution]
+  probed: {string: [uint]}
+  covered: {string: [uint]}
+}
+
+type Executions, read = closed {
+  tests: [Execution]
+  probed: {string: [uint]}
+  covered?: {string: [uint]}
+}
+
+type FileFingerprint, written and read = closed {
+  sha256: string
+  bytes: uint
+  code?: Code | null
+}
+
+type FrontendAttribution, written and read = closed {
+  run: AttributionPrecision
+  worker: AttributionPrecision
+  test: AttributionPrecision
+  retry: AttributionPrecision
+  phase: AttributionPrecision
+  action: AttributionPrecision
+  assertion: AttributionPrecision
+}
+
+type FrontendLimitation, written and read = closed {
+  id: string
+  scopes: [FrontendLimitationScope]
+  reason: string
+}
+
+type FrontendLimitationScope, written and read = "worker" | "test" | "retry" | "phase" | "action" | "assertion"
+
+type FrontendRunDeclaration, written and read = closed {
+  protocolVersion: uint
+  frontendId: string
+  frontendVersion: string
+  language: string
+  structuralSource: StructuralSource
+  runners: [FrontendRunnerDeclaration]
+  structuralLimitations: [string]
+}
+
+type FrontendRunnerDeclaration, written and read = closed {
+  runner: string
+  executionModel: ExecutionModel
+  attribution: FrontendAttribution
+  limitations: [FrontendLimitation]
+}
+
+type GitIntegrity, written and read = closed {
+  revision?: string | null
+  branch?: string | null
+  dirty: boolean
+}
+
+type InputManifest, written and read = closed {
+  schemaVersion: uint
+  language: string
+  files: {string: FileFingerprint}
+}
+
+type InputPoint, written and read = {
+  file: string
+  line: uint
+  source: string
+  tests: [uint]
+}
+
+type InputTest, written = {
+  id: string
+  file: string | null
+  name: string
+  role: string
+  runner: string
+}
+
+type InputTest, read = {
+  id: string
+  file?: string | null
+  name: string
+  role: string
+  runner: string
+}
+
+type InstrumentedBuildCache, written and read = closed {
+  key: string
+  reused: boolean
+}
+
+type LogicalSnapshot, written and read = closed {
+  id: string
+  vectors: [LogicalVector]
+}
+
+type LogicalVector, written and read = closed {
+  right: boolean
+  truthy: boolean
+}
+
+type ManifestCache, written = closed {
+  evidenceDigest: string
+  manifest: InputManifest
+  statementExclusions: [any]
+}
+
+type ManifestCache, read = closed {
+  evidenceDigest: string
+  manifest: InputManifest
+  statementExclusions?: [any]
+}
+
+type McdcVector, written and read = closed {
+  values: [boolean | null]
+  outcome: boolean
+}
+
+type MutantOperator, written and read = closed {
+  text: string
+  at: uint
+}
+
+type MutantsFile, written = closed {
+  schemaVersion: uint
+  mutantSet: string | null
+  mutantSets?: {string: string}
+  languages?: {string: string}
+  files: {string: [CandidateMutant]}
+  testsWithoutValues?: [string]
+}
+
+type MutantsFile, read = closed {
+  schemaVersion: uint
+  mutantSet?: string | null
+  mutantSets?: {string: string}
+  languages?: {string: string}
+  files: {string: [CandidateMutant]}
+  testsWithoutValues?: [string]
+}
+
+type PersistedCoverageModel, written and read = closed {
+  schemaVersion: uint
+  language: string
+  variant: string
+  name: string
+  completenessMeaning: string
+  measured: [string]
+  notMeasured: [string]
+}
+
+type PointKind, written and read = "statement" | "function"
+
+type PointMeta, written and read = closed {
+  id: string
+  kind: PointKind
+  file: string
+  line: uint
+  column: uint
+  source: string
+  label?: string | null
+}
+
+type ProbeTableIds, written and read = closed {
+  points: [string]
+  decisions: [string]
+  follows?: [[uint; 2]]
+}
+
+type QueryIndexIdentity, written and read = {
+  evidence_sha256: [uint; 32]
+  evidence_bytes: uint
+  analysis_sha256: [uint; 32]
+  producer_sha256: [uint; 32]
+  archive_schema_version: uint
+}
+
+type RawEvidenceMetadata, written and read = closed {
+  schemaVersion: uint
+  format: string
+  file: string
+  files: uint
+  uncompressedBytes: uint
+  compressedBytes: uint
+}
+
+type RawTestResult, written = closed {
+  testId?: string | null
+  scope?: ExecutionScope | null
+  test: string
+  testFile?: string | null
+  title?: string | null
+  retry?: uint | null
+  status?: string | null
+  expectedStatus?: string | null
+  flaky?: boolean
+  provenance: TestProvenance
+  role: string
+  attribution: string
+  phases: [CoveragePhase]
+  runtime: [RuntimeSnapshot]
+  browser: [RuntimeSnapshot]
+  server: [ServerRecord]
+  span?: [int; 2] | null
+  durationMs?: uint | null
+}
+
+type RawTestResult, read = closed {
+  testId?: string | null
+  scope?: ExecutionScope | null
+  test: string
+  testFile?: string | null
+  title?: string | null
+  retry?: uint | null
+  status?: string | null
+  expectedStatus?: string | null
+  flaky?: boolean
+  provenance?: TestProvenance
+  role?: string
+  attribution?: string
+  phases?: [CoveragePhase]
+  runtime?: [RuntimeSnapshot]
+  browser?: [RuntimeSnapshot]
+  server?: [ServerRecord]
+  span?: [int; 2] | null
+  durationMs?: uint | null
+}
+
+type RecordedDecision, read = {
+  id: string
+}
+
+type RunFingerprint, written and read = closed {
+  algorithm: string
+  source: string
+  tests: string
+  dependencies: string
+  configuration: string
+  instrumenter: string
+  execution: string
+  combined: string
+  sourceFiles: uint
+  testFiles: uint
+}
+
+type RunIntegrity, written and read = closed {
+  schemaVersion: uint
+  instrumenterVersion: string
+  git?: GitIntegrity | null
+  fingerprint: RunFingerprint
+  stale?: boolean | null
+  staleReasons?: [string] | null
+}
+
+type RunMetadata, written = closed {
+  id: string
+  startedAt: string
+  durationMs: number
+  command: [string]
+  testExitCode: int | null
+  integrity: RunIntegrity
+  rawEvidence: RawEvidenceMetadata
+  isolatedBuild?: boolean | null
+  instrumentedBuildCache?: InstrumentedBuildCache | null
+  timings?: RunTimings | null
+  merged?: boolean | null
+  parents?: [string] | null
+  sourceRoots?: [string] | null
+  copy?: uint | null
+  mergedAcross?: [string] | null
+  recordedBy?: string | null
+  companions?: [CompanionRun] | null
+  supersedes?: [string] | null
+}
+
+type RunMetadata, read = closed {
+  id: string
+  startedAt: string
+  durationMs: number
+  command: [string]
+  testExitCode?: int | null
+  integrity: RunIntegrity
+  rawEvidence: RawEvidenceMetadata
+  isolatedBuild?: boolean | null
+  instrumentedBuildCache?: InstrumentedBuildCache | null
+  timings?: RunTimings | null
+  merged?: boolean | null
+  parents?: [string] | null
+  sourceRoots?: [string] | null
+  copy?: uint | null
+  mergedAcross?: [string] | null
+  recordedBy?: string | null
+  companions?: [CompanionRun] | null
+  supersedes?: [string] | null
+}
+
+type RunTimings, written and read = closed {
+  initializationMs: number
+  workspacePreparationMs: number
+  adapterSetupMs: number
+  instrumentedBuildMs: number
+  testCommandMs: number
+  evidencePublicationMs: number
+}
+
+type RuntimeEvent, written and read = closed {
+  type: string
+  id: string
+  vector?: McdcVector | null
+  timestampMs: int
+  phaseId?: string | null
+  environment: string
+}
+
+type RuntimeSnapshot, written = closed {
+  decisions: [DecisionSnapshot]
+  hits: [string]
+  events: [RuntimeEvent]
+  logicals?: [LogicalSnapshot]
+  comparisons?: [ComparisonSnapshot]
+  phaseId?: string | null
+}
+
+type RuntimeSnapshot, read = closed {
+  decisions?: [DecisionSnapshot]
+  hits?: [string]
+  events?: [RuntimeEvent]
+  eventColumns?: EventColumns | null
+  logicals?: [LogicalSnapshot]
+  comparisons?: [ComparisonSnapshot]
+  phaseId?: string | null
+}
+
+type ServerRecord, written = closed {
+  type: string
+  vector?: McdcVector | null
+  id?: string | null
+  timestampMs?: int | null
+  phaseId?: string | null
+  scope?: ExecutionScope | null
+  request?: uint | null
+  outcome?: string | null
+}
+
+type ServerRecord, read = closed {
+  type: string
+  meta?: RecordedDecision | null
+  vector?: McdcVector | null
+  id?: string | null
+  timestampMs?: int | null
+  phaseId?: string | null
+  scope?: ExecutionScope | null
+  request?: uint | null
+  outcome?: string | null
+}
+
+type StatementSpan, written and read = {
+  file: string
+  line: uint
+  end: uint
+  covered: boolean
+}
+
+type StaticNote, written and read = closed {
+  rule: string
+  reason: string
+}
+
+type StrongVerdicts, written and read = {
+  schemaVersion: uint
+  run: string
+  mutantSet: string
+  mutants: {string: Verdict}
+}
+
+type StructuralSource, written and read = "owned-probes" | "native-import" | "mixed"
+
+type SupportReach, written = {
+  files: {string: [string]}
+  names: {string: string}
+}
+
+type SupportReach, read = {
+  files: {string: [string]}
+  names?: {string: string}
+}
+
+type TestProvenance, written and read = closed {
+  runner: string
+  kind: string
+  project?: string | null
+  source: string
+  tags?: [string]
+}
+
+type TestSelector, written and read = closed {
+  file: string
+  name: string
+}
+
+type Unit, written and read = closed {
+  path: string
+  kind: string
+  line: uint
+  column: uint
+  endLine: uint
+  endColumn: uint
+  digest: string
+  parent?: uint | null
+  inert?: boolean
+}
+
+type Verdict, written = {
+  status: string
+  killedBy?: string | null
+  tests: uint
+  durationMs: uint
+  reason?: string | null
+}
+
+type Verdict, read = {
+  status: string
+  killedBy?: string | null
+  tests?: uint
+  durationMs?: uint
+  reason?: string | null
+}

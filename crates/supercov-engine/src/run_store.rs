@@ -34,6 +34,7 @@ pub const STATEMENT_SPANS_FILE: &str = "statement-spans.json";
 pub const ASSESSMENT_INPUT_FILE: &str = "assessment-input.json.gz";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunFingerprint {
     pub algorithm: String,
@@ -49,6 +50,7 @@ pub struct RunFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitIntegrity {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +62,7 @@ pub struct GitIntegrity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunIntegrity {
     pub schema_version: u32,
@@ -74,6 +77,7 @@ pub struct RunIntegrity {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunTimings {
     #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
@@ -91,6 +95,7 @@ pub struct RunTimings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InstrumentedBuildCache {
     pub key: String,
@@ -98,6 +103,7 @@ pub struct InstrumentedBuildCache {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RawEvidenceMetadata {
     pub schema_version: u32,
@@ -109,6 +115,7 @@ pub struct RawEvidenceMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunMetadata {
     pub id: String,
@@ -169,6 +176,7 @@ pub struct RunMetadata {
 
 /// A run published from the same command as another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompanionRun {
     pub id: String,
@@ -1320,13 +1328,27 @@ pub fn statement_spans(report: &CoverageReport) -> Vec<serde_json::Value> {
         .filter_map(|p| {
             let extra = p.meta.source.matches('\n').count();
             (extra > 0).then(|| {
-                serde_json::json!({
-                    "file": p.meta.file, "line": p.meta.line,
-                    "end": p.meta.line + extra, "covered": p.covered,
+                serde_json::to_value(StatementSpan {
+                    file: p.meta.file.clone(),
+                    line: p.meta.line,
+                    end: p.meta.line + extra,
+                    covered: p.covered,
                 })
+                .expect("plain data serializes")
             })
         })
         .collect()
+}
+
+/// A statement that runs over more than one line, as `statement-spans.json`
+/// holds it: its first and last line, and whether it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct StatementSpan {
+    pub file: String,
+    pub line: usize,
+    pub end: usize,
+    pub covered: bool,
 }
 
 /// The spans publication wrote, when it did.
@@ -1702,7 +1724,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1280", || {
+        crate::fault::during("fs.read_dir#run_store.rs:1288", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());
