@@ -1047,9 +1047,15 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
     };
     let Some(outcomes) = records.comparisons(site) else {
         // A Python value the mutant replaces with `None` records nothing
-        // where its own evaluation raised, which the mutant skips: its
-        // silence is no sign the mutant changes nothing.
-        if site.ends_with("#none") {
+        // where its own evaluation raised, which the mutant skips; and a
+        // Python `None` or arithmetic site another context of the same test
+        // decided is not probed again: its silence is no sign the mutant
+        // changes nothing.
+        let python = site
+            .split(':')
+            .next()
+            .is_some_and(|file| file.ends_with(".py"));
+        if site.ends_with("#none") || (python && site.ends_with("#arith")) {
             return verdict_of(
                 Status::Unknown,
                 "value-not-recorded",
@@ -2591,6 +2597,18 @@ mod tests {
             ..mutant("AssignmentValue", "None", "x = f()")
         };
         expect(&none, &ran(), UNKNOWN, "value-not-recorded");
+        // A Python arithmetic site may go unprobed once decided; a
+        // JavaScript one that recorded nothing never ran.
+        let python_arith = CandidateMutant {
+            probe: Some("m.py:1:5-1:10#arith".into()),
+            ..mutant("ArithmeticOperator", "-", "a + b")
+        };
+        expect(&python_arith, &ran(), UNKNOWN, "value-not-recorded");
+        let javascript_arith = CandidateMutant {
+            probe: Some("m.js:1:5-1:10#arith".into()),
+            ..mutant("ArithmeticOperator", "-", "a + b")
+        };
+        expect(&javascript_arith, &ran(), NOT_REACHED, "not-evaluated");
         expect(
             &none,
             &with_outcomes("m.py:1:5-1:9#none", &["same"]),

@@ -12,6 +12,7 @@ Stdlib only, CPython 3.9 or newer.
 from __future__ import annotations
 
 import ast
+import copy
 
 from supercov_probes import PROBE_NAMES, FileProbes, SiteProbes
 
@@ -639,6 +640,57 @@ class _MutantProbes(ast.NodeTransformer):
         return node
 
 
+_BINARY = {
+    "__add__": ast.Add, "__sub__": ast.Sub, "__mul__": ast.Mult, "__truediv__": ast.Div,
+    "__floordiv__": ast.FloorDiv, "__mod__": ast.Mod, "__pow__": ast.Pow, "__lshift__": ast.LShift,
+    "__rshift__": ast.RShift, "__and__": ast.BitAnd, "__or__": ast.BitOr, "__xor__": ast.BitXor,
+    "__matmul__": ast.MatMult,
+}
+
+
+class _DecidedNone(ast.NodeTransformer):
+    """`mn(site, value)` becomes `value if site in dn else mn(site, value)`,
+    and `ma(site, op, mutated, a, b)` `a op b if site in dn else ...`: once
+    the test has seen a site's mutant give another value, the mutant is
+    decided, and the program's own expression runs without a call. Only a
+    small expression is written twice."""
+
+    LIMIT = 40
+
+    def __init__(self, names: dict[str, str]):
+        self.none = names["mutant_none"]
+        self.arith = names["mutant_arith"]
+        self.decided = names["mutant_decided"]
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if not isinstance(node.func, ast.Name):
+            return node
+        if node.func.id == self.none and len(node.args) == 2:
+            site, value = node.args
+        elif node.func.id == self.arith and len(node.args) == 5 and node.args[1].value in _BINARY:
+            site, operator, _, left, right = node.args
+            value = ast.BinOp(left=left, op=_BINARY[operator.value](), right=right)
+            _at(value.op, node.lineno, node.col_offset)
+            value.lineno, value.col_offset = node.lineno, node.col_offset
+            value.end_lineno, value.end_col_offset = node.end_lineno, node.end_col_offset
+        else:
+            return node
+        if sum(1 for _ in ast.walk(value)) > self.LIMIT:
+            return node
+        test = ast.Compare(
+            left=ast.Constant(site.value),
+            ops=[ast.In()],
+            comparators=[ast.Name(id=self.decided, ctx=ast.Load())],
+        )
+        guarded = ast.IfExp(test=test, body=copy.deepcopy(value), orelse=node)
+        for part in (test, test.left, test.comparators[0]):
+            _at(part, node.lineno, node.col_offset)
+        guarded.lineno, guarded.col_offset = node.lineno, node.col_offset
+        guarded.end_lineno, guarded.end_col_offset = node.end_lineno, node.end_col_offset
+        return guarded
+
+
 def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
     """Insert the plan's probes into a parsed module, in place."""
     if isinstance(probes, SiteProbes):
@@ -648,7 +700,12 @@ def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
         return tree
     taken = _identifiers(tree)
     names = {}
+    mutant_probes = getattr(probes, "mutant_probes", None)
     for attribute, stem in PROBE_NAMES.items():
+        # A module with no mutant probe binds none of their names, as a plain
+        # run's modules did before there were any.
+        if attribute.startswith("mutant_") and not mutant_probes:
+            continue
         candidate = f"_scv_{stem}"
         counter = 0
         while candidate in taken:
@@ -656,11 +713,12 @@ def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
             candidate = f"_scv_{stem}{counter}"
         taken.add(candidate)
         names[attribute] = candidate
-    mutant_probes = getattr(probes, "mutant_probes", None)
     if mutant_probes:
         _MutantProbes(mutant_probes, names).visit(tree)
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
+    if mutant_probes:
+        _DecidedNone(names).visit(tree)
     _import_aliases(tree, names)
     if report is not None:
         for limitation in inserter.limitations:
@@ -701,6 +759,7 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
         "mutant_sign": "lambda site, op, mutated, operand: getattr(__import__('operator'), op)(operand)",
         "mutant_method": "lambda site, receiver, name, mutated: getattr(receiver, name)",
         "mutant_test": "lambda false_site, true_site, value: value",
+        "mutant_decided": "frozenset()",
     }
     sinks = "\n".join(
         f"    {alias} = {fallbacks.get(attribute, '_scv_sink')}"

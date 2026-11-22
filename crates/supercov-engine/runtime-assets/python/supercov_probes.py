@@ -67,7 +67,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 10
+PROBE_VERSION = 11
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -106,6 +106,9 @@ mutant_none = lambda site, value: value  # noqa: E731
 mutant_sign = lambda site, op, mutated, operand: getattr(__import__("operator"), op)(operand)  # noqa: E731
 mutant_method = lambda site, receiver, name, mutated: getattr(receiver, name)  # noqa: E731
 mutant_test = lambda false_site, true_site, value: value  # noqa: E731
+# The `None` probe sites the current test has decided: their value is not
+# probed again until the next test.
+mutant_decided: frozenset | set = frozenset()
 
 
 # -- the plan, indexed for probing -------------------------------------------
@@ -571,6 +574,7 @@ PROBE_NAMES = {
     "mutant_sign": "ms",
     "mutant_method": "mm",
     "mutant_test": "mt",
+    "mutant_decided": "dn",
 }
 
 

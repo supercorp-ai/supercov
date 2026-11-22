@@ -335,17 +335,27 @@ mutant's copy before.
 The suite alone, under `supercov --`, and under `supercov --` with
 `SUPERCOV_MUTANTS=1`, each the best of three (`overhead.sh`; humanize's
 pytest-benchmark tests run once, since they size their rounds to the speed
-they measure), on 16 CPUs and on GitHub's 4:
+they measure), on 16-CPU Linux machines (c8a/m8a.4xlarge):
 
-| Project | Tests alone | Measured | Measured with values | 4 CPUs: measured | with values |
-| --- | --- | --- | --- | --- | --- |
-| python-slugify | 0.63 s | 0.85 s (1.33×) | 0.95 s (1.50×) | 1.35× | 1.62× |
-| cachetools | 0.52 s | 0.98 s (1.88×) | 1.92 s (3.65×) | 1.84× | 3.46× |
-| parse | 0.58 s | 0.72 s (1.24×) | 0.83 s (1.43×) | 1.24× | 1.44× |
-| humanize | 1.05 s | 1.25 s (1.19×) | 1.33 s (1.27×) | 1.25× | 1.44× |
+| Project | Tests alone | Measured | Measured with values | Values over measured |
+| --- | --- | --- | --- | --- |
+| python-slugify | 0.65 s | 0.86 s (1.34×) | 0.95 s (1.47×) | 1.10× |
+| cachetools | 0.53 s | 0.99 s (1.88×) | 1.17 s (2.23×) | 1.19× |
+| parse | 0.58 s | 0.71 s (1.22×) | 0.88 s (1.52×) | 1.24× |
+| humanize | 0.97 s | 1.21 s (1.25×) | 1.34 s (1.38×) | 1.11× |
 
 These include the interpreter's start and pytest's collection, which the
-probes do not slow. cachetools' values cost has not been profiled yet.
+probes do not slow. A value probe stops working where its mutant can no
+longer change a verdict: once a site's mutant gave another value in a test,
+the site's probe in that test only runs the program's own operation, and a
+`None` or arithmetic site the instrumented code guards with
+`value if site in decided else probe(...)` skips the call altogether until
+the next test begins. A guarded site another thread decided records nothing
+in its own context, which reads as unknown (the test stays a candidate),
+never as not infected. That took cachetools' values from 1.95× its measured
+run to 1.19×. What is left there is comparisons whose operands are never
+equal, which every evaluation must still check, and on parse one record per
+test and site.
 
 ## Not yet
 

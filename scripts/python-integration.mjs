@@ -806,6 +806,18 @@ try {
     ]) {
       assert.equal(verdicts[id], status, `${id}: ${JSON.stringify(verdicts)}`);
     }
+    // `countdown`'s `n - 1` (`n -= 1`'s value, made `None`) and `fee`'s
+    // `None` site differ at their first evaluation in a test, and the
+    // guarded code skips them afterwards: the mutants read as infected.
+    const weak = Object.fromEntries(listed.mutants.map((mutant) => [mutant.id, mutant.status]));
+    for (const id of ['shop/cart.py:4:5-4:12:AssignmentValue:None', 'shop/cart.py:11:12-11:30:ArithmeticOperator:-']) {
+      assert.equal(weak[id], 'infected', `${id}: ${JSON.stringify(weak)}`);
+    }
+    // A plain run's modules bind none of the mutant probes' names.
+    rmSync(resolve(strong, '.supercov/cache'), { recursive: true, force: true });
+    successfulSupercov(strong, ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider'], strongEnvironment);
+    const probedNames = run(venvPython, ['-c', 'import sys, marshal, glob\nnames = set()\npaths = glob.glob(".supercov/cache/python/*.pyc")\nassert paths\nfor path in paths:\n    code = marshal.loads(open(path, "rb").read())[2]\n    names.update(n for n in code.co_names if n.startswith("_scv_m") or n.startswith("_scv_dn"))\nprint(sorted(names))'], { cwd: strong });
+    assert.equal(probedNames.stdout.trim(), '[]', probedNames.stdout);
   }
 
   console.log(

@@ -418,6 +418,15 @@ class Runtime:
         self.real_directories: dict[str, str] = {}
         self.under_root = False
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
+        # The value probe sites whose mutants this context has already
+        # infected: no later evaluation there changes a verdict, so their
+        # probes only run the program's own operation.
+        self.decided = contextvars.ContextVar("supercov_python_decided", default=set())
+        # The `None` and arithmetic sites decided since the last test
+        # began, whichever thread decided them: the instrumented code skips
+        # their probe. A site skipped where it would have recorded reads as
+        # unknown, never as not infected or not reached.
+        self.shared_decided: set[str] = set()
         self.identities: dict[int, dict] = {}
         # The phase a test started this process in, through SUPERCOV_CONTEXT.
         self.inherited_identity = None
@@ -758,6 +767,8 @@ class Runtime:
             del leaving
             self._reclaim()
             self.context.set(context)
+            self.decided.set(set())
+            self.shared_decided.clear()
         return context
 
     def current_identity(self) -> dict | None:
@@ -860,9 +871,24 @@ class Runtime:
                 b'{"ctx":%d,"id":%s,"o":"%s","t":"cmp"}' % (context, self._json_id(site), outcome.encode("ascii"))
             )
 
+    def _infected(self, site: str) -> None:
+        """A mutant of `site` gives another value in this context: recorded,
+        and the site's probe is decided for the rest of the context."""
+        self._value(site, "differs")
+        self.decided.get().add(site)
+
+    def _infected_shared(self, site: str) -> None:
+        """`_infected`, for a site whose instrumented code skips its probe
+        once decided."""
+        self._infected(site)
+        self.shared_decided.add(site)
+
     def _mutant_compare(self, site: str, op: str, a, b):
         """A relational comparison a boundary mutant changes: the operands'
         relation, where they are numbers, strings or bytes."""
+        decided = self.decided.get()
+        if site in decided:
+            return getattr(_operator, op)(a, b)
         try:
             result = getattr(_operator, op)(a, b)
         except BaseException:
@@ -879,6 +905,9 @@ class Runtime:
             else:
                 relation = "unordered"
             self._value(site, relation)
+            if relation == "eq":
+                # Equal operands are where the boundary mutant differs.
+                decided.add(site)
         else:
             self._value(site, "other")
         return result
@@ -887,11 +916,13 @@ class Runtime:
         """A binary operation whose operator a mutant swaps: whether the
         swapped operator gives the same value, where both operands are
         built-in values the swapped one cannot run code of."""
+        if site in self.decided.get():
+            return getattr(_operator, op)(a, b)
         try:
             result = getattr(_operator, op)(a, b)
         except BaseException:
             # The mutant may not raise: a difference, at worst.
-            self._value(site, "differs")
+            self._infected_shared(site)
             raise
         if type(a) not in _PLAIN or type(b) not in _PLAIN:
             self._value(site, "other")
@@ -899,27 +930,42 @@ class Runtime:
         if mutated in ("__lshift__", "__rshift__") and type(b) is int and type(a) in (int, bool) and b > 4096:
             # A shift by this much: both are 0 where `a` is, and differ
             # otherwise; the mutant's value is not worked out.
-            self._value(site, "same" if a == 0 else "differs")
+            if a == 0:
+                self._value(site, "same")
+            else:
+                self._infected_shared(site)
             return result
         try:
             changed = getattr(_operator, mutated)(a, b)
         except Exception:
-            self._value(site, "differs")
+            self._infected_shared(site)
             return result
-        self._value(site, "same" if _same(result, changed) else "differs")
+        if _same(result, changed):
+            self._value(site, "same")
+        else:
+            self._infected_shared(site)
         return result
 
     def _mutant_none(self, site: str, value):
         """A value a mutant replaces with `None`: the same only where it is."""
-        self._value(site, "same" if value is None else "differs")
+        if value is None:
+            self._value(site, "same")
+        elif site not in self.decided.get():
+            self._infected(site)
+            self.shared_decided.add(site)
         return value
 
     def _mutant_sign(self, site: str, op: str, mutated: str, operand):
         result = getattr(_operator, op)(operand)
+        if site in self.decided.get():
+            return result
         if type(operand) not in _NUMBERS:
             self._value(site, "other")
             return result
-        self._value(site, "same" if _same(result, getattr(_operator, mutated)(operand)) else "differs")
+        if _same(result, getattr(_operator, mutated)(operand)):
+            self._value(site, "same")
+        else:
+            self._infected(site)
         return result
 
     def _mutant_method(self, site: str, receiver, name: str, mutated: str):
@@ -927,11 +973,13 @@ class Runtime:
         comparing its result with the swapped method's where the receiver is
         a built-in string, whose methods run no code of the program's."""
         method = getattr(receiver, name)
+        if site in self.decided.get():
+            return method
         if type(receiver) not in (str, bytes):
             self._value(site, "other")
             return method
         swapped = getattr(receiver, mutated)
-        record = self._value
+        record, infected = self._value, self._infected
 
         def call(*arguments, **keywords):
             try:
@@ -942,9 +990,12 @@ class Runtime:
             try:
                 changed = swapped(*arguments, **keywords)
             except Exception:
-                record(site, "differs")
+                infected(site)
                 return result
-            record(site, "same" if _same(result, changed) else "differs")
+            if _same(result, changed):
+                record(site, "same")
+            else:
+                infected(site)
             return result
 
         return call
@@ -957,11 +1008,12 @@ class Runtime:
                 if site is not None:
                     self._value(site, "other")
             return value
-        truth = bool(value)
-        if false_site is not None:
-            self._value(false_site, "differs" if truth else "same")
-        if true_site is not None:
-            self._value(true_site, "same" if truth else "differs")
+        # The mutant that forces the test the other way differs.
+        same, differs = (true_site, false_site) if value else (false_site, true_site)
+        if same is not None:
+            self._value(same, "same")
+        if differs is not None and differs not in self.decided.get():
+            self._infected(differs)
         return value
 
     def _wide_vector(self, context: int, d: int, mask: int, outcome: bool) -> None:
@@ -1457,6 +1509,7 @@ class Runtime:
                 "mutant_sign": self._mutant_sign,
                 "mutant_method": self._mutant_method,
                 "mutant_test": self._mutant_test,
+                "mutant_decided": self.shared_decided,
                 "limitation": self.limitation,
             },
             self.probe_sites,
