@@ -366,6 +366,26 @@ Mutants one tool lists and the other does not:
   collection, a string) that the compiler refuses: `unviable`. picnic's
   include `debug { }` lambdas whose code kotlinc removes.
 
+### Release QA's projects
+
+java-diff-utils 4.12 (Maven, JUnit 5, Checkstyle) and aedile 3.0.4 (Gradle,
+Kotlin, Kotest), on the same machines:
+
+- **java-diff-utils.** The measured run skips Checkstyle in the copy and
+  says so. PIT 909 mutants, Supercov 916, 902 matched, 900 agree. The
+  strong pass took 178 s (PIT as a team runs it 322 s, its full matrix
+  556 s). Before the two-step time limit and the evaluation limit's time
+  allowance, 7 of the then 9 violations were Supercov timeouts on the
+  linear-space Myers diff, whose hot loops pass a million evaluations of
+  a mutant in a normal run. The 2 left are `factory()` returning `null`:
+  PIT kills them through a `@MethodSource` and `@BeforeAll`/`@AfterAll`,
+  code that runs for a test class rather than a test, which the JUnit
+  Platform listener does not yet credit to the class's tests (one
+  candidate for one, none for the other). Not yet fixed.
+- **aedile.** All 28 mutants killed (before: all 28 `error`, the Kotest
+  tests not found). Each candidate runs its whole spec, so the pass took
+  548 s for 28 mutants; a Kotest test filter would run one test.
+
 ### Ant
 
 Apache Ant 1.10.15's own `util` package (`src/main/org/apache/tools/ant/util/*.java`,
