@@ -1335,18 +1335,27 @@ module Supercov
       Operand.new(self, key, left)
     end
 
+    # `String#<<` appends to its receiver: the one operator among plain
+    # values with an effect beside its value.
+    def effectful?(left, operator)
+      operator.to_sym == :<< && left.is_a?(String)
+    end
+
     def probe_binary(key, left, operator, right)
       result = left.public_send(operator, right)
       target = @probes[key]
       plain = plain_value?(left) && plain_value?(right)
+      # An operand alone has the original's value only where the original
+      # did nothing else.
+      pure = !effectful?(left, operator)
       context = current_context
       target["kinds"].each do |kind|
         outcome =
           case kind
-          when "left" then same_value(result, left)
-          when "right" then same_value(result, right)
+          when "left" then pure ? same_value(result, left) : "unknown"
+          when "right" then pure ? same_value(result, right) : "unknown"
           else
-            if plain
+            if plain && pure && !effectful?(left, kind.delete_prefix("not:"))
               negate = kind.start_with?("not:")
               name = negate ? kind.delete_prefix("not:") : kind
               begin
