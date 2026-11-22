@@ -372,10 +372,30 @@ pub enum ProbeTarget {
     },
     /// `bo(k, left)` around a binary operator's receiver, measuring the
     /// mutant gem's mutants of that operator: each `kind` (another operator,
-    /// `left`, `right`, `not:eql?`) is recorded at `<site>#<kind>` as the
-    /// mutant's value `same` as the original's, `differs`, or `unknown`.
+    /// `left`, `right`, `not:eql?`, `true`, `false`, `nil`) is recorded at
+    /// `<site>#<kind>` as the mutant's value `same` as the original's,
+    /// `differs`, or `unknown`. In a `condition`, values are compared by
+    /// their truth alone.
     #[serde(rename_all = "camelCase")]
-    Operand { site: String, kinds: Vec<String> },
+    Operand {
+        site: String,
+        kinds: Vec<String>,
+        condition: bool,
+    },
+    /// `mc(k, receiver)` around a method call's receiver: the call is made
+    /// on the probe's stand-in, which computes the original and each
+    /// mutant's value -- another method, the receiver alone, `true`,
+    /// `false`, `nil` -- where the receiver and arguments are plain values.
+    #[serde(rename_all = "camelCase")]
+    Call {
+        site: String,
+        kinds: Vec<String>,
+        condition: bool,
+    },
+    /// `cv(k, predicate)` around an `if`/`unless` predicate that reads a
+    /// variable: whether its truth is that of `true` or `false`.
+    #[serde(rename_all = "camelCase")]
+    Truth { site: String, kinds: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -508,7 +528,9 @@ fn probe_obligations_of(probes: &BTreeMap<u64, ProbeTarget>) -> Vec<String> {
                     }
                 }
                 // Values, not obligations.
-                ProbeTarget::Operand { .. } => {}
+                ProbeTarget::Operand { .. }
+                | ProbeTarget::Call { .. }
+                | ProbeTarget::Truth { .. } => {}
             }
         }
         ids.into_iter().collect()
@@ -591,7 +613,9 @@ fn target_ids(target: &ProbeTarget) -> Vec<String> {
         }
         ProbeTarget::SafeNavigation { nil, called } => vec![nil.clone(), called.clone()],
         ProbeTarget::Hits { ids } => ids.clone(),
-        ProbeTarget::Operand { .. } => Vec::new(),
+        ProbeTarget::Operand { .. } | ProbeTarget::Call { .. } | ProbeTarget::Truth { .. } => {
+            Vec::new()
+        }
     }
 }
 
@@ -656,8 +680,8 @@ fn stdlib_provable(
 pub struct RubyFileObligations {
     pub manifest: CoverageManifest,
     /// The infection probe sites placed (`file:L:C-EL:EC`), where values
-    /// were asked for: each records its mutants' values.
-    pub value_sites: BTreeSet<String>,
+    /// were asked for, with the kinds each records on every evaluation.
+    pub value_sites: BTreeMap<String, BTreeSet<String>>,
     /// Each statement and function point's byte span, by id: where a
     /// mutant's reach is read from.
     pub point_spans: BTreeMap<String, (PointKind, usize, usize)>,
@@ -754,7 +778,13 @@ struct Collector<'a> {
     depth: i64,
     /// Whether to place infection probes (`SUPERCOV_MUTANTS=1`).
     values: bool,
-    value_sites: BTreeSet<String>,
+    value_sites: BTreeMap<String, BTreeSet<String>>,
+    /// Spans of `if`/`unless`/loop predicates: a value there is read only
+    /// for its truth.
+    predicates: BTreeSet<(usize, usize)>,
+    /// Whether the file activates a refinement (`using`), which a call made
+    /// from the runtime would not see.
+    refined: bool,
     point_spans: BTreeMap<String, (PointKind, usize, usize)>,
     begin_unmeasured: Vec<(String, usize)>,
     /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
@@ -798,7 +828,11 @@ impl<'a> Collector<'a> {
             point_ids: BTreeSet::new(),
             point_spans: BTreeMap::new(),
             values: false,
-            value_sites: BTreeSet::new(),
+            value_sites: BTreeMap::new(),
+            predicates: BTreeSet::new(),
+            refined: source
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.trim_ascii_start().starts_with(b"using ")),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             claimed_lines: BTreeSet::new(),
@@ -887,9 +921,58 @@ impl<'a> Collector<'a> {
         key
     }
 
+    /// The site of a value probe over `start..end`, as the mutant gem's
+    /// located node spans it, unless the span is inside a `Ractor.new` block.
+    fn value_site(&self, start: usize, end: usize) -> Option<String> {
+        if self
+            .ractor_blocks
+            .iter()
+            .any(|(from, to)| *from <= start && end <= *to)
+        {
+            return None;
+        }
+        let (start_line, start_column) = crate::ruby_mutants::position(self.source, start);
+        let (end_line, end_column) = crate::ruby_mutants::position(self.source, end);
+        Some(format!(
+            "{}:{start_line}:{start_column}-{end_line}:{end_column}",
+            self.file
+        ))
+    }
+
+    fn is_predicate(&self, location: &Location<'_>) -> bool {
+        self.predicates
+            .contains(&(location.start_offset(), location.end_offset()))
+    }
+
+    /// Marks a predicate, and probes its truth when it reads a variable:
+    /// the call probes cover predicates that call something.
+    fn predicate_probe(&mut self, predicate: &Node<'_>, truth: bool) {
+        let location = predicate.location();
+        let (start, end) = (location.start_offset(), location.end_offset());
+        self.predicates.insert((start, end));
+        if !self.values || !truth || !variable_read(predicate) {
+            return;
+        }
+        let Some(site) = self.value_site(start, end) else {
+            return;
+        };
+        let kinds = vec!["true".to_owned(), "false".to_owned()];
+        let key = self.probe_key(ProbeTarget::Truth {
+            site: site.clone(),
+            kinds: kinds.clone(),
+        });
+        // Innermost of the wrappers that span the predicate.
+        self.depth += 3;
+        self.wrap(start, end, format!("{RUBY_PROBE_RECEIVER}.cv({key}, ("));
+        self.depth -= 3;
+        self.value_sites.entry(site).or_default().extend(kinds);
+    }
+
     /// An infection probe on a binary operator's receiver: the operator is
     /// then called on the probe's stand-in, which computes the original and
-    /// each mutant's value from the same operands.
+    /// each mutant's value from the same operands. A mutant that leaves an
+    /// operand out is measured only where that operand reads a value and so
+    /// does nothing else.
     fn operand_probe(&mut self, node: &CallNode<'_>) {
         let operator = String::from_utf8_lossy(node.name().as_slice()).into_owned();
         // `=~`, `!~` and `===` are left out: a regexp's match sets `$~`
@@ -914,37 +997,38 @@ impl<'a> Collector<'a> {
                 | "^"
                 | "|"
         );
-        let (Some(receiver), Some(arguments)) = (node.receiver(), node.arguments()) else {
+        // Written as an operator, `a < b` has its receiver and one argument.
+        let operands = node.receiver().zip(
+            node.arguments()
+                .and_then(|arguments| only(arguments.arguments().iter())),
+        );
+        let Some((receiver, argument)) = operands.filter(|(receiver, _)| {
+            binary
+                && node.call_operator_loc().is_none()
+                && receiver.as_regular_expression_node().is_none()
+                && receiver.as_self_node().is_none()
+        }) else {
             return;
         };
-        if !binary
-            || node.call_operator_loc().is_some()
-            || node.block().is_some()
-            || arguments.arguments().iter().count() != 1
-            || receiver.as_regular_expression_node().is_some()
-        {
-            return;
-        }
         let location = node.location();
-        let (start, end) = (location.start_offset(), location.end_offset());
-        if self
-            .ractor_blocks
-            .iter()
-            .any(|(from, to)| *from <= start && end <= *to)
-        {
+        let Some(site) = self.value_site(location.start_offset(), location.end_offset()) else {
             return;
-        }
-        let (start_line, start_column) = crate::ruby_mutants::position(self.source, start);
-        let (end_line, end_column) = crate::ruby_mutants::position(self.source, end);
-        let site = format!(
-            "{}:{start_line}:{start_column}-{end_line}:{end_column}",
-            self.file
-        );
+        };
+        let (left_pure, right_pure) = (pure_value(&receiver), pure_value(&argument));
         let mut kinds = crate::ruby_mutants::operator_kinds(&operator);
-        kinds.extend(["left".to_owned(), "right".to_owned()]);
+        if right_pure {
+            kinds.push("left".to_owned());
+        }
+        if left_pure {
+            kinds.push("right".to_owned());
+        }
+        if left_pure && right_pure {
+            kinds.extend(SINGLETON_KINDS.map(str::to_owned));
+        }
         let key = self.probe_key(ProbeTarget::Operand {
             site: site.clone(),
-            kinds,
+            kinds: kinds.clone(),
+            condition: self.is_predicate(&location),
         });
         let receiver_location = receiver.location();
         // The receiver is inside the call, and so inside any wrapper of the
@@ -956,7 +1040,77 @@ impl<'a> Collector<'a> {
             format!("{RUBY_PROBE_RECEIVER}.bo({key}, ("),
         );
         self.depth -= 1;
-        self.value_sites.insert(site);
+        self.value_sites.entry(site).or_default().extend(kinds);
+    }
+
+    /// An infection probe on a method call's receiver, where the mutant gem
+    /// replaces the call: another method from its table, the receiver
+    /// alone, or `true`/`false` for a predicate, and `nil`. The call goes
+    /// through the probe's stand-in, which makes it on the receiver and
+    /// computes the replacements where the receiver is a plain value.
+    fn call_probe(&mut self, node: &CallNode<'_>) {
+        let name = String::from_utf8_lossy(node.name().as_slice()).into_owned();
+        let Some(receiver) = node.receiver() else {
+            return;
+        };
+        let replacements: Vec<String> = crate::ruby_mutants::selector_replacements(&name)
+            .iter()
+            .filter(|each| !mutating_method(each))
+            .map(|each| (*each).to_owned())
+            .collect();
+        let predicate = name.ends_with('?');
+        let arguments: Vec<Node<'_>> = node
+            .arguments()
+            .map(|arguments| arguments.arguments().iter().collect())
+            .unwrap_or_default();
+        if self.refined
+            || (replacements.is_empty() && !predicate)
+            || mutating_method(&name)
+            || BASIC_OBJECT_METHODS.contains(&name.as_str())
+            // Operators, `[]` and unary calls: a name from the table or a
+            // predicate that is a word is called with a `.`.
+            || !name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+            || node.is_safe_navigation()
+            || node.block().is_some()
+            || receiver.as_self_node().is_some()
+            || arguments.len() > 2
+            || arguments.iter().any(|argument| {
+                argument.as_splat_node().is_some()
+                    || argument.as_keyword_hash_node().is_some()
+                    || argument.as_forwarding_arguments_node().is_some()
+            })
+        {
+            return;
+        }
+        let location = node.location();
+        let Some(site) = self.value_site(location.start_offset(), location.end_offset()) else {
+            return;
+        };
+        let arguments_pure = arguments.iter().all(pure_value);
+        let mut kinds = replacements;
+        if arguments_pure {
+            kinds.push("receiver".to_owned());
+            if pure_value(&receiver) {
+                if predicate {
+                    kinds.extend(["true".to_owned(), "false".to_owned()]);
+                }
+                kinds.push("nil".to_owned());
+            }
+        }
+        let key = self.probe_key(ProbeTarget::Call {
+            site: site.clone(),
+            kinds: kinds.clone(),
+            condition: self.is_predicate(&location),
+        });
+        let receiver_location = receiver.location();
+        self.depth += 1;
+        self.wrap(
+            receiver_location.start_offset(),
+            receiver_location.end_offset(),
+            format!("{RUBY_PROBE_RECEIVER}.mc({key}, ("),
+        );
+        self.depth -= 1;
+        self.value_sites.entry(site).or_default().extend(kinds);
     }
 
     fn wrap(&mut self, start: usize, end: usize, opener: String) {
@@ -1614,6 +1768,7 @@ impl<'a> Collector<'a> {
     // -- constructs ---------------------------------------------------------
 
     fn if_node(&mut self, node: &IfNode<'_>, kind: &str) {
+        self.predicate_probe(&node.predicate(), true);
         let location = node.location();
         let node_span = self.location_span(&location);
         let then_statements = self.statements_span(&node.statements());
@@ -1689,6 +1844,7 @@ impl<'a> Collector<'a> {
     }
 
     fn unless_node(&mut self, node: &UnlessNode<'_>) {
+        self.predicate_probe(&node.predicate(), true);
         let node_span = self.location_span(&node.location());
         let then_statements = self.statements_span(&node.statements());
         let (then_span, then_kind) = match then_statements {
@@ -1752,6 +1908,7 @@ impl<'a> Collector<'a> {
         until: bool,
     ) {
         let kind = if until { "until" } else { "while" };
+        self.predicate_probe(&predicate, false);
         let (start, end) = (location.start_offset(), location.end_offset());
         let loop_target = if begin_modifier {
             // `begin ... end while` always enters the body once.
@@ -3122,6 +3279,84 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// The mutant gem's replacements of a whole expression by a literal.
+const SINGLETON_KINDS: [&str; 3] = ["true", "false", "nil"];
+
+/// What `BasicObject` defines itself: a stand-in receiver would answer
+/// these instead of passing them on.
+const BASIC_OBJECT_METHODS: [&str; 8] = [
+    "equal?",
+    "instance_eval",
+    "instance_exec",
+    "method_missing",
+    "singleton_method_added",
+    "singleton_method_removed",
+    "singleton_method_undefined",
+    "initialize",
+];
+
+/// Methods with an effect on their receiver (or a call of something
+/// named), whose replacement could not be computed beside the original.
+fn mutating_method(name: &str) -> bool {
+    name.ends_with('!')
+        || matches!(
+            name,
+            "append"
+                | "prepend"
+                | "push"
+                | "pop"
+                | "shift"
+                | "unshift"
+                | "send"
+                | "__send__"
+                | "public_send"
+                | "method"
+                | "public_method"
+                | "sample"
+                | "shuffle"
+        )
+}
+
+/// A read of a variable or `self`, with nothing else in it: its truth can
+/// be read without running anything.
+fn variable_read(node: &Node<'_>) -> bool {
+    if let Some(parentheses) = node.as_parentheses_node() {
+        // `(x)` holds one statement; `()` none, `(x; y)` two.
+        return parentheses
+            .body()
+            .and_then(|body| body.as_statements_node())
+            .and_then(|statements| only(statements.body().iter()))
+            .is_some_and(|inner| variable_read(&inner));
+    }
+    node.as_local_variable_read_node().is_some()
+        || node.as_instance_variable_read_node().is_some()
+        || node.as_global_variable_read_node().is_some()
+        || node.as_self_node().is_some()
+}
+
+/// The one item, where there is exactly one.
+fn only<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
+    match (items.next(), items.next()) {
+        (Some(first), None) => Some(first),
+        _ => None,
+    }
+}
+
+/// An expression whose evaluation does nothing but give its value: a
+/// variable read or a literal without interpolation. A mutant that leaves
+/// it out changes nothing else.
+fn pure_value(node: &Node<'_>) -> bool {
+    variable_read(node)
+        || node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_rational_node().is_some()
+        || node.as_nil_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_string_node().is_some()
+}
+
 /// The statement lists of a ternary's two arms.
 fn arm_statements<'n>(node: &IfNode<'n>) -> Vec<StatementsNode<'n>> {
     let otherwise = node
@@ -3423,6 +3658,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         }
         if self.values {
             self.operand_probe(node);
+            self.call_probe(node);
         }
         self.depth += 1;
         ruby_prism::visit_call_node(self, node);
@@ -3743,9 +3979,160 @@ mod tests {
             "{text}"
         );
         assert_eq!(
-            obligations.value_sites.iter().cloned().collect::<Vec<_>>(),
-            ["a.rb:2:18-2:31", "a.rb:6:3-6:12", "a.rb:6:7-6:12"]
+            obligations.value_sites.keys().cloned().collect::<Vec<_>>(),
+            [
+                "a.rb:2:18-2:31",
+                "a.rb:2:35-2:48",
+                "a.rb:6:3-6:12",
+                "a.rb:6:7-6:12"
+            ]
         );
+    }
+
+    /// Value probes on predicates that read a variable and on calls the
+    /// mutant gem replaces: each records only the kinds whose replacement
+    /// leaves out nothing but values; a call with an effect, a `self`
+    /// receiver or a block is not probed.
+    #[test]
+    fn truth_and_call_probes_record_the_kinds_they_can_compute() {
+        let source = b"def m(a, s, b)\n  return 1 if a\n  t = s.empty? ? 2 : 3\n  s.strip\n  s.upcase!\n  self.size?\n  s.start_with?(b.to_s)\n  s.map { 1 }\n  a + b.size\nend\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations_with("a.rb", source, &mut next, true).unwrap();
+        let text = String::from_utf8(apply_edits(source, &obligations.plan.edits)).unwrap();
+        assert!(
+            ruby_prism::parse(text.as_bytes()).errors().next().is_none(),
+            "{text}"
+        );
+        let sites: Vec<String> = obligations
+            .value_sites
+            .iter()
+            .map(|(site, kinds)| {
+                format!(
+                    "{site} {}",
+                    kinds.iter().cloned().collect::<Vec<_>>().join(",")
+                )
+            })
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                "a.rb:2:15-2:16 false,true",
+                "a.rb:3:7-3:15 any?,false,nil,receiver,true",
+                "a.rb:4:3-4:10 lstrip,nil,receiver,rstrip",
+                "a.rb:7:17-7:23 nil,receiver,to_str",
+                "a.rb:7:3-7:24 end_with?",
+                "a.rb:9:3-9:13 -,right"
+            ],
+            "{text}"
+        );
+        assert!(text.contains("cv(") && text.contains("mc("), "{text}");
+    }
+
+    /// Calls a probe could not make beside the original, or whose
+    /// replacement could have an effect, are left alone; a predicate's
+    /// probes compare by truth; a file with a refinement has no call probes.
+    #[test]
+    fn value_probes_leave_out_what_they_cannot_compute() {
+        let source = b"def m(a, s, b, *r)\n  a.push(1)\n  s.equal?(b)\n  s&.strip\n  s.start_with?(a, b, s)\n  s.start_with?(*r)\n  s.start_with?(x: 1)\n  s.map(&b)\n  self + 1\n  a.+(b)\n  Ractor.new { s.strip }\n  return 1 if (a)\n  return 2 unless @i\n  return 3 if $g\n  return 4 if (a; b)\n  return 5 if a.b\n  s.strip while a < b\nend\ndef f(...) = g.start_with?(...)\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations_with("a.rb", source, &mut next, true).unwrap();
+        let text = String::from_utf8(apply_edits(source, &obligations.plan.edits)).unwrap();
+        assert!(
+            ruby_prism::parse(text.as_bytes()).errors().next().is_none(),
+            "{text}"
+        );
+        let sites: Vec<String> = obligations
+            .value_sites
+            .iter()
+            .map(|(site, kinds)| {
+                format!(
+                    "{site} {}",
+                    kinds.iter().cloned().collect::<Vec<_>>().join(",")
+                )
+            })
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                "a.rb:12:15-12:18 false,true",
+                "a.rb:13:19-13:21 false,true",
+                "a.rb:14:15-14:17 false,true",
+                "a.rb:17:17-17:22 ==,eql?,equal?,false,left,nil,right,true",
+                "a.rb:17:3-17:10 lstrip,nil,receiver,rstrip"
+            ],
+            "{text}"
+        );
+        let conditions: Vec<bool> = obligations
+            .probes
+            .values()
+            .filter_map(|target| match target {
+                ProbeTarget::Operand { condition, .. } | ProbeTarget::Call { condition, .. } => {
+                    Some(*condition)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(conditions, [true, false], "{text}");
+
+        assert!(
+            obligations
+                .probes
+                .values()
+                .filter(|target| matches!(
+                    target,
+                    ProbeTarget::Operand { .. }
+                        | ProbeTarget::Call { .. }
+                        | ProbeTarget::Truth { .. }
+                ))
+                .all(|target| target_ids(target).is_empty())
+        );
+
+        let refined = b"using Refinements\ndef m(s)\n  s.strip\nend\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations_with("b.rb", refined, &mut next, true).unwrap();
+        assert!(obligations.value_sites.is_empty());
+    }
+
+    /// What a mutant leaves out decides whether it is linked: each literal
+    /// and read counts as a value alone, a call does not; a Ractor's block
+    /// and an empty or two-statement parenthesis get no probe.
+    #[test]
+    fn value_probes_link_a_mutant_only_where_what_it_leaves_out_is_a_value() {
+        let source = b"def m(a, s)\n  a.size + a\n  a + 1.5\n  a + 2r\n  a == nil\n  a == true\n  a == false\n  s.end_with?(:x)\n  s.start_with?(\"x\")\n  s._hidden?\n  return 1 if self\n  return 2 if ()\n  return 3 if (a; s)\n  Ractor.new { a + 1 if a }\nend\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations_with("a.rb", source, &mut next, true).unwrap();
+        let text = String::from_utf8(apply_edits(source, &obligations.plan.edits)).unwrap();
+        assert!(
+            ruby_prism::parse(text.as_bytes()).errors().next().is_none(),
+            "{text}"
+        );
+        let kinds = |site: &str| {
+            obligations
+                .value_sites
+                .get(site)
+                .map(|kinds| kinds.iter().cloned().collect::<Vec<_>>().join(","))
+                .unwrap_or_default()
+        };
+        // The left operand is a call: only what keeps it is linked.
+        assert_eq!(kinds("a.rb:2:3-2:13"), "-,left", "{text}");
+        for (site, kinds_wanted) in [
+            ("a.rb:3:3-3:10", "-,false,left,nil,right,true"),
+            ("a.rb:4:3-4:9", "-,false,left,nil,right,true"),
+            ("a.rb:5:3-5:11", "false,left,nil,right,true"),
+            ("a.rb:6:3-6:12", "false,left,nil,right,true"),
+            ("a.rb:7:3-7:13", "false,left,nil,right,true"),
+            ("a.rb:8:3-8:18", "false,nil,receiver,start_with?,true"),
+            ("a.rb:9:3-9:21", "end_with?,false,nil,receiver,true"),
+            ("a.rb:10:3-10:13", "false,nil,receiver,true"),
+            ("a.rb:11:15-11:19", "false,true"),
+        ] {
+            assert_eq!(kinds(site), kinds_wanted, "{site}: {text}");
+        }
+        assert!(
+            !text.contains("cv(0, (())") && text.matches("cv(").count() == 1,
+            "{text}"
+        );
+        assert!(!text.contains("Ractor.new { $__supercov"), "{text}");
     }
 
     /// Shapes probes go around -- jumps out of `unless`/`else` and

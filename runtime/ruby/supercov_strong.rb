@@ -13,10 +13,10 @@
 #    past the hit limit, raises `Supercov::Strong::MutantTimeout`, an
 #    Exception no `rescue => e` catches, and notes the mutant in the
 #    timeouts file.
-# 3. When the suite has loaded and RSpec or Minitest is about to run it,
-#    runs the plan instead, as mutant does: one fork of the loaded process
-#    per mutant, with the mutant switched on, running its candidate tests
-#    and stopping at the first that fails.
+# 3. When the suite has loaded and RSpec, Minitest, test-unit or Cucumber
+#    is about to run it, runs the plan instead, as mutant does: one fork of
+#    the loaded process per mutant, with the mutant switched on, running its
+#    candidate tests and stopping at the first that fails.
 #
 # It requires nothing outside the standard library.
 
@@ -595,6 +595,186 @@ module Supercov
       end
     end
 
+    # test-unit: tests as `Class#method`, collected as its own runner
+    # collects them. A data-driven test runs every data set under its id.
+    class TestUnitRunner
+      # What a failure outside any test (a class's `startup`) is reported as.
+      OUTSIDE = "(outside tests)"
+
+      def initialize(suite)
+        @tests = {}
+        flatten = lambda do |test|
+          if test.is_a?(::Test::Unit::TestSuite)
+            test.tests.each(&flatten)
+          else
+            (@tests["#{test.class.name}##{test.method_name}"] ||= []) << test
+          end
+        end
+        flatten.call(suite)
+      end
+
+      def tests = @tests
+
+      def whole(ids)
+        classes = ids.filter_map { |id| @tests[id]&.first&.class }.uniq
+        @tests.select { |_, (test, *)| classes.include?(test.class) }.keys
+      end
+
+      # Runs the tests `ids` names through test-unit's own mediator, a suite
+      # per class so each class's `startup` and `shutdown` run around them.
+      def run(ids, all)
+        failed = []
+        sequence = []
+        durations = {}
+        root = ::Test::Unit::TestSuite.new("supercov")
+        ids.group_by { |id| @tests.fetch(id).first.class }.each do |klass, class_ids|
+          suite = ::Test::Unit::TestSuite.new(klass.name, klass)
+          class_ids.each { |id| @tests.fetch(id).each { |test| suite << test } }
+          root << suite
+        end
+        mediator = ::Test::Unit::UI::TestRunnerMediator.new(root)
+        current = nil
+        started = nil
+        failing = false
+        timed_out = false
+        mediator.add_listener(::Test::Unit::TestCase::STARTED_OBJECT) do |test|
+          current = "#{test.class.name}##{test.method_name}"
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          failing = false
+        end
+        mediator.add_listener(::Test::Unit::TestResult::FAULT) do |fault|
+          next unless fault.is_a?(::Test::Unit::Failure) || fault.is_a?(::Test::Unit::Error)
+
+          timed_out ||= fault.is_a?(::Test::Unit::Error) && fault.exception.is_a?(MutantTimeout)
+          failing = true
+          # A class's `startup` or `shutdown`, outside any test.
+          failed << OUTSIDE if current.nil? && !failed.include?(OUTSIDE)
+        end
+        mediator.add_listener(::Test::Unit::TestCase::FINISHED_OBJECT) do |_test|
+          raise MutantTimeout, TIMEOUT_CODE if timed_out
+
+          durations[current] = (durations[current] || 0) + Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+          sequence << current unless sequence.last == current
+          failed << current if failing && !failed.include?(current)
+          id = current
+          current = nil
+          throw :supercov_stop if failing && !all && id
+        end
+        $stdout.reopen(File::NULL)
+        catch(:supercov_stop) { mediator.run }
+        raise MutantTimeout, TIMEOUT_CODE if timed_out
+
+        { failed: failed, sequence: sequence, durations: durations }
+      end
+    end
+
+    # Cucumber: scenarios by their location (`features/a.feature:3`), the
+    # feature files compiled through Cucumber's own filters and runner.
+    class CucumberRunner
+      # Collects the test cases the selecting filters let through.
+      class Collect
+        attr_reader :cases
+
+        def initialize
+          @cases = []
+        end
+
+        def test_case(test_case)
+          @cases << test_case
+          self
+        end
+
+        def done = self
+      end
+
+      # The filters that choose scenarios (tags, names, lines): the ones
+      # before step activation, which run nothing.
+      SELECTING = %w[TagLimits TagFilter NameFilter LocationsFilter].freeze
+
+      def initialize(runtime)
+        @runtime = runtime
+        collect = Collect.new
+        selecting = runtime.send(:filters).select { |filter| SELECTING.include?(filter.class.name.to_s.split("::").last) }
+        runtime.compile(runtime.send(:features), collect, selecting, ::Cucumber::Core::EventBus.new)
+        @tests = collect.cases.to_h { |test_case| [test_case.location.to_s, test_case] }
+      end
+
+      def tests = @tests
+
+      def whole(ids)
+        files = ids.filter_map { |id| @tests[id]&.location&.file }.uniq
+        @tests.select { |_, test_case| files.include?(test_case.location.file) }.keys
+      end
+
+      # Cucumber runs the chosen scenarios in the features' order.
+      def run(ids, all)
+        selected = ids.to_h { |id| [id, true] }
+        failed = []
+        sequence = []
+        durations = {}
+        started = nil
+        timed_out = false
+        configuration = @runtime.configuration
+        bus = configuration.event_bus
+        bus.on(:test_case_started) { started = Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+        bus.on(:test_case_finished) do |event|
+          id = event.test_case.location.to_s
+          result = event.result
+          timed_out ||= result.respond_to?(:exception) && result.exception.is_a?(MutantTimeout)
+          raise MutantTimeout, TIMEOUT_CODE if timed_out
+
+          durations[id] = (durations[id] || 0) + Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+          sequence << id unless sequence.last == id
+          if result.failed?
+            failed << id unless failed.include?(id)
+            throw :supercov_stop unless all
+          end
+        end
+        filters = @runtime.send(:filters)
+        at = filters.index { |filter| SELECTING.include?(filter.class.name.to_s.split("::").last) && filter.class.name.to_s.end_with?("LocationsFilter") }
+        filters.insert(at ? at + 1 : 0, Select.new(selected))
+        $stdout.reopen(File::NULL)
+        catch(:supercov_stop) { @runtime.compile(@runtime.send(:features), receiver(bus), filters, bus) }
+        raise MutantTimeout, TIMEOUT_CODE if timed_out
+
+        { failed: failed, sequence: sequence, durations: durations }
+      end
+
+      # Passes on only the chosen test cases.
+      class Select
+        def initialize(ids, receiver = nil)
+          @ids = ids
+          @receiver = receiver
+        end
+
+        def with_receiver(receiver) = self.class.new(@ids, receiver)
+
+        def test_case(test_case)
+          test_case.describe_to(@receiver) if @ids.key?(test_case.location.to_s)
+          self
+        end
+
+        def done
+          @receiver.done
+          self
+        end
+      end
+
+      private
+
+      # Cucumber's test runner, with the options `Runtime#run!` gives it.
+      def receiver(bus)
+        runner = ::Cucumber::Core::Test::Runner
+        keywords = runner.instance_method(:initialize).parameters.filter_map { |kind, name| name if %i[key keyreq].include?(kind) }
+        configuration = @runtime.configuration
+        options = {}
+        options[:id_generator] = configuration.id_generator if keywords.include?(:id_generator)
+        options[:backtrace_filter] = ::Cucumber::Formatter::BacktraceFilter if keywords.include?(:backtrace_filter)
+        options[:retry_policy] = configuration.retry_policy if keywords.include?(:retry_policy)
+        runner.new(bus, **options)
+      end
+    end
+
     module RSpecHook
       def run_specs(example_groups)
         return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
@@ -620,6 +800,33 @@ module Supercov
       end
     end
 
+    # test-unit's autorunner, from the `at_exit` that `require "test/unit"`
+    # sets: its collector gives the suite it would run.
+    module TestUnitHook
+      def run
+        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+
+        Strong.ran = true
+        self.class.need_auto_run = false
+        suite = @collector[self]
+        Pass.new(TestUnitRunner.new(suite)).run if suite
+        true
+      end
+    end
+
+    # Cucumber's runtime, once its step definitions and support files have
+    # loaded.
+    module CucumberHook
+      def run!
+        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+
+        Strong.ran = true
+        load_step_definitions
+        fire_install_plugin_hook
+        Pass.new(CucumberRunner.new(self)).run
+      end
+    end
+
     def self.install
       path = ENV[PLAN_ENV].to_s
       return if path.empty?
@@ -637,10 +844,14 @@ module Supercov
         case trace.self.name
         when "RSpec::Core::Runner" then ::RSpec::Core::Runner.prepend(RSpecHook)
         when "Minitest" then ::Minitest.singleton_class.prepend(MinitestHook)
+        when "Test::Unit::AutoRunner" then ::Test::Unit::AutoRunner.prepend(TestUnitHook)
+        when "Cucumber::Runtime" then ::Cucumber::Runtime.prepend(CucumberHook)
         end
       end.enable
       ::RSpec::Core::Runner.prepend(RSpecHook) if defined?(::RSpec::Core::Runner)
       ::Minitest.singleton_class.prepend(MinitestHook) if defined?(::Minitest) && ::Minitest.respond_to?(:run)
+      ::Test::Unit::AutoRunner.prepend(TestUnitHook) if defined?(::Test::Unit::AutoRunner)
+      ::Cucumber::Runtime.prepend(CucumberHook) if defined?(::Cucumber::Runtime)
     end
   end
 end

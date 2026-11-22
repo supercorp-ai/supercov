@@ -24163,6 +24163,82 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
 /// boundary the test checks is killed, a literal it cannot tell from 0
 /// survives, and a method no test calls is no coverage.
 #[cfg(unix)]
+/// A Ruby process a test starts with `--disable-gems` (test-unit's
+/// `assert_separately`) loads Supercov's runtime through RUBYOPT without
+/// RubyGems, which loaded `rbconfig` for it: the runtime disabled itself
+/// and said so on the child's error output, which such tests read.
+#[test]
+fn ruby_children_without_rubygems_keep_their_error_output_clean() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-disable-gems");
+    project.write("lib/noop.rb", "def noop\n  1\nend\n");
+    project.write(
+        "test/child_test.rb",
+        "require 'minitest/autorun'\nrequire 'open3'\nrequire 'noop'\n\nclass ChildTest < Minitest::Test\n  def test_child\n    noop\n    out, err, = Open3.capture3(RbConfig.ruby, '--disable-gems', '-e', 'print 1')\n    assert_equal ['1', ''], [out, err]\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/child_test.rb"])
+        .succeeds();
+}
+
+/// A Ruby run measured for mutants records, per test, whether each mutant
+/// a value probe computes would have given the original's value: a call's
+/// other method, its receiver alone, a condition's truth.
+#[test]
+fn ruby_value_probes_tell_which_mutants_no_test_infects() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-values");
+    project.write(
+        "lib/label.rb",
+        "class Label\n  def tidy(s)\n    s.strip\n  end\n\n  def pick(flag)\n    flag ? :on : :off\n  end\n\n  def small?(n)\n    n < 10\n  end\nend\n",
+    );
+    project.write(
+        "test/label_test.rb",
+        "require 'minitest/autorun'\nrequire 'label'\n\nclass LabelTest < Minitest::Test\n  def test_tidy\n    assert_equal 'a', Label.new.tidy('a')\n  end\n\n  def test_pick\n    assert_equal :on, Label.new.pick(true)\n  end\n\n  def test_small\n    assert Label.new.small?(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov_with(
+            &["--", ruby.as_str(), "-Ilib", "test/label_test.rb"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .map(|mutant| mutant["status"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_else(|| format!("missing: {listed}"))
+    };
+    for (id, expected) in [
+        // `"a".lstrip` and `"a"` are `"a".strip`; `nil` is not.
+        ("lib/label.rb:3:5-3:12:Send:s.lstrip", "not-infected"),
+        ("lib/label.rb:3:5-3:12:Send:s", "not-infected"),
+        ("lib/label.rb:3:5-3:12:Send:nil", "infected"),
+        // The flag was only ever true.
+        ("lib/label.rb:7:5-7:9:NamedValue:true", "not-infected"),
+        ("lib/label.rb:7:5-7:9:NamedValue:false", "infected"),
+        // `3 < 10` is true; `3 == 10`, `10` and `nil` are not.
+        ("lib/label.rb:11:5-11:11:Send:n == 10", "infected"),
+        ("lib/label.rb:11:5-11:11:Send:10", "infected"),
+        ("lib/label.rb:11:5-11:11:Send:nil", "infected"),
+    ] {
+        assert_eq!(status(id), expected, "{id}");
+    }
+}
+
 #[test]
 fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
     let Some(ruby) = ruby() else {

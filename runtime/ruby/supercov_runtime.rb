@@ -23,6 +23,9 @@
 # the standard library.
 
 require "coverage"
+# RubyGems loads it, but a process started with `--disable-gems` (test-unit's
+# `assert_separately`) has not: the process record names the interpreter.
+require "rbconfig"
 # No `require "json"`: this file loads through RUBYOPT before Bundler sets up,
 # and activating the json default gem here would clash with an application
 # whose Gemfile pins another version. The plan is a Ruby literal and the
@@ -412,7 +415,12 @@ module Supercov
       @id_numbers = {}
       @line_ids = {}
       @seen_vectors = {}
-      @seen_values = {}
+      # Per context, each value record's outcomes seen, as bits.
+      @value_bits = {}
+      # Per context, the value probes whose every kind has differed there.
+      @values_done = {}
+      @value_counts = {}
+      @builtins = {}
       @vector_counts = {}
       @open = {}
       @loop_state = {}
@@ -1332,6 +1340,9 @@ module Supercov
     end
 
     def probe_operand(key, left)
+      context = current_context
+      return left if values_done?(context, key) || !value_turn(context, key)
+
       Operand.new(self, key, left)
     end
 
@@ -1341,48 +1352,227 @@ module Supercov
       operator.to_sym == :<< && left.is_a?(String)
     end
 
+    # The values the mutant gem puts in place of a whole expression.
+    SINGLETONS = { "true" => true, "false" => false, "nil" => nil }.freeze
+
+    # A condition reads a value only for its truth.
+    def compare(target, original, other)
+      return (original ? true : false) == (other ? true : false) ? "same" : "differs" if target["condition"]
+
+      same_value(original, other)
+    end
+
+    # Each kind's record id (`site#kind`), made once per probe.
+    def value_ids(target)
+      target["ids"] ||= target["kinds"].to_h { |kind| [kind, "#{target['site']}##{kind}"] }
+    end
+
+    # The original raised: what a mutant would have done is not known.
+    def note_unknown(target, context)
+      value_ids(target).each_value { |id| note_value(context, id, "unknown") }
+    end
+
     def probe_binary(key, left, operator, right)
-      result = left.public_send(operator, right)
       target = @probes[key]
+      context = current_context
+      begin
+        result = left.public_send(operator, right)
+      rescue ::Exception
+        note_unknown(target, context)
+        raise
+      end
       plain = plain_value?(left) && plain_value?(right)
       # An operand alone has the original's value only where the original
       # did nothing else.
       pure = !effectful?(left, operator)
-      context = current_context
-      target["kinds"].each do |kind|
-        outcome =
-          case kind
-          when "left" then pure ? same_value(result, left) : "unknown"
-          when "right" then pure ? same_value(result, right) : "unknown"
-          else
-            if plain && pure && !effectful?(left, kind.delete_prefix("not:"))
-              negate = kind.start_with?("not:")
-              name = negate ? kind.delete_prefix("not:") : kind
-              begin
-                other = left.public_send(name, right)
-                same_value(result, negate ? !other : other)
-              rescue StandardError
-                "differs"
-              end
-            else
-              "unknown"
-            end
-          end
-        note_value(context, "#{target['site']}##{kind}", outcome)
+      unless plain
+        # No kind is compared over other values: unknown for the rest of
+        # the test.
+        note_unknown(target, context)
+        note_values_done(context, key)
+        return result
       end
+      seen = value_bits(context)
+      value_ids(target).each do |kind, id|
+        # A test that saw a mutant's value differ has its verdict there.
+        next if (seen[id] || 0) & DIFFERS != 0
+
+        outcome =
+          if SINGLETONS.key?(kind)
+            plain && pure ? compare(target, result, SINGLETONS[kind]) : "unknown"
+          elsif kind == "left"
+            pure ? compare_operand(target, plain, result, left) : "unknown"
+          elsif kind == "right"
+            pure ? compare_operand(target, plain, result, right) : "unknown"
+          elsif plain && pure && !effectful?(left, kind.delete_prefix("not:"))
+            negate = kind.start_with?("not:")
+            name = negate ? kind.delete_prefix("not:") : kind
+            begin
+              other = left.public_send(name, right)
+              compare(target, result, negate ? !other : other)
+            rescue StandardError
+              "differs"
+            end
+          else
+            "unknown"
+          end
+        note_value(context, id, outcome)
+      end
+      note_values_done(context, key) if settled?(target, seen)
       result
     end
 
+    # An operand alone: a user's operator may have done something beside
+    # giving its value, so only plain operands are compared by truth.
+    def compare_operand(target, plain, result, operand)
+      return same_value(result, operand) unless target["condition"]
+
+      plain ? compare(target, result, operand) : "unknown"
+    end
+
+    # `cv`: an `if`/`unless` predicate that reads a variable, against the
+    # mutant gem's `true` and `false` in its place.
+    def probe_truth(key, value)
+      context = current_context
+      return value if values_done?(context, key) || !value_turn(context, key)
+
+      target = @probes[key]
+      truth = value ? true : false
+      value_ids(target).each do |kind, id|
+        note_value(context, id, truth == (SINGLETONS[kind] ? true : false) ? "same" : "differs")
+      end
+      note_values_done(context, key) if settled?(target, value_bits(context))
+      value
+    end
+
+    # `mc`: a method call's receiver. A plain value is stood in for, so the
+    # call reaches `probe_call_result`; anything else is the receiver
+    # itself, and its call is not measured.
+    def probe_call(key, receiver)
+      context = current_context
+      return receiver if values_done?(context, key) || !value_turn(context, key)
+      return Call.new(self, key, receiver) if plain_value?(receiver)
+
+      # Nothing more is learnt here in this test: a later plain receiver
+      # could still differ, but `unknown` already keeps its mutants from
+      # being called not infected.
+      note_unknown(@probes[key], context)
+      note_values_done(context, key)
+      receiver
+    end
+
+    # A method of Ruby's own, which does nothing beside giving its value on
+    # a plain receiver: not one a project defined or redefined. Asked once
+    # per test, class and name: a method redefined within a test is seen in
+    # the next.
+    def builtin?(context, receiver, name)
+      by_class = ((@builtins[context] ||= {})[receiver.class] ||= {})
+      known = by_class[name]
+      return known unless known.nil?
+
+      by_class[name] =
+        begin
+          location = receiver.method(name).source_location
+          location.nil? || location.first.start_with?("<internal:")
+        rescue NameError
+          false
+        end
+    end
+
+    def probe_call_result(key, receiver, name, arguments)
+      target = @probes[key]
+      context = current_context
+      begin
+        result = receiver.public_send(name, *arguments)
+      rescue ::Exception
+        note_unknown(target, context)
+        raise
+      end
+      known = arguments.all? { |argument| plain_value?(argument) } && builtin?(context, receiver, name)
+      seen = value_bits(context)
+      value_ids(target).each do |kind, id|
+        # A test that saw a mutant's value differ has its verdict there.
+        next if (seen[id] || 0) & DIFFERS != 0
+
+        outcome =
+          if !known then "unknown"
+          elsif SINGLETONS.key?(kind) then compare(target, result, SINGLETONS[kind])
+          elsif kind == "receiver" then compare(target, result, receiver)
+          elsif !receiver.respond_to?(kind)
+            # The mutant raises NoMethodError where the original gave a value.
+            "differs"
+          elsif builtin?(context, receiver, kind)
+            begin
+              compare(target, result, receiver.public_send(kind, *arguments))
+            rescue StandardError
+              "differs"
+            end
+          else
+            "unknown"
+          end
+        note_value(context, id, outcome)
+      end
+      note_values_done(context, key) if settled?(target, seen)
+      result
+    end
+
+    OUTCOME_BITS = { "same" => 1, "differs" => 2, "unknown" => 4 }.freeze
+    DIFFERS = OUTCOME_BITS["differs"]
+    # A kind that has differed, or met a value it could not compare, can no
+    # longer be called not infected in this test.
+    SETTLED = DIFFERS | OUTCOME_BITS["unknown"]
+
+    def settled?(target, seen)
+      value_ids(target).each_value.all? { |id| (seen[id] || 0) & SETTLED != 0 }
+    end
+
+    def value_bits(context)
+      @value_bits[context] || @seen_lock.synchronize { @value_bits[context] ||= {} }
+    end
+
     def note_value(context, id, outcome)
-      key = [context, id, outcome]
-      return if @seen_values[key]
+      seen = value_bits(context)
+      bit = OUTCOME_BITS.fetch(outcome)
+      return if (seen[id] || 0) & bit != 0
 
       @seen_lock.synchronize do
-        return if @seen_values[key]
+        bits = seen[id] || 0
+        return if bits & bit != 0
 
-        @seen_values[key] = true
+        seen[id] = bits | bit
       end
       record("t" => "cmp", "ctx" => context, "id" => id, "o" => outcome)
+    end
+
+    # A probe every kind of which has differed in this context has nothing
+    # left to find there: its call goes straight to the receiver.
+    def values_done?(context, key)
+      done = @values_done[context]
+      !done.nil? && done.key?(key)
+    end
+
+    # How many evaluations of one probe a test compares: past them, what has
+    # not differed yet is `unknown` there, and the probe steps aside. A loop
+    # that runs a probe thousands of times then costs its first few, and a
+    # suite whose every test runs the same code costs a few per test.
+    VALUE_TURNS = 8
+
+    def value_turn(context, key)
+      counts = @value_counts[context] || @seen_lock.synchronize { @value_counts[context] ||= {} }
+      turn = (counts[key] || 0) + 1
+      counts[key] = turn
+      return true if turn <= VALUE_TURNS
+
+      seen = value_bits(context)
+      value_ids(@probes[key]).each_value do |id|
+        note_value(context, id, "unknown") if (seen[id] || 0) & DIFFERS == 0
+      end
+      note_values_done(context, key)
+      false
+    end
+
+    def note_values_done(context, key)
+      (@values_done[context] || @seen_lock.synchronize { @values_done[context] ||= {} })[key] = true
     end
 
     # while/until predicate: a decision plus the loop's zero/entered outcomes.
@@ -1634,6 +1824,8 @@ module Supercov
     def ok(key, value) = @runtime.probe_ok(key, value)
     def ok0(key) = @runtime.probe_ok0(key)
     def bo(key, left) = @runtime.probe_operand(key, left)
+    def mc(key, receiver) = @runtime.probe_call(key, receiver)
+    def cv(key, value) = @runtime.probe_truth(key, value)
   end
 
   # The receiver of a project that uses Ractors. A non-main Ractor cannot
@@ -1653,6 +1845,20 @@ module Supercov
     %i[!= % & * ** + - / < << <= <=> == > >= >> ^ |].each do |operator|
       define_method(operator) { |right| @runtime.probe_binary(@key, @left, operator, right) }
     end
+  end
+
+  # A method call's plain receiver, standing in for it until the method is
+  # called (`Runtime#probe_call`).
+  class Call < BasicObject
+    def initialize(runtime, key, receiver)
+      @runtime = runtime
+      @key = key
+      @receiver = receiver
+    end
+
+    def method_missing(name, *arguments) = @runtime.probe_call_result(@key, @receiver, name, arguments)
+
+    def respond_to_missing?(name, include_private = false) = @receiver.respond_to?(name, include_private)
   end
 
   module RactorSafe
@@ -1676,6 +1882,8 @@ module Supercov
     def self.ok(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.ok(key, value) : value
     def self.ok0(key) = MAIN.equal?(Ractor.current) ? $__supercov.ok0(key) : nil
     def self.bo(key, left) = MAIN.equal?(Ractor.current) ? $__supercov.bo(key, left) : left
+    def self.mc(key, receiver) = MAIN.equal?(Ractor.current) ? $__supercov.mc(key, receiver) : receiver
+    def self.cv(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.cv(key, value) : value
 
     # What a Ractor runs is not recorded, and the first one each file starts
     # says so: against that file when it is measured source, for the run when
@@ -1725,26 +1933,41 @@ module Supercov
 
   # Runner adapters attach when their classes finish defining.
   module Attach
+    # Each runner's class whose end installs its adapter.
+    ADAPTERS = {
+      "RSpec::Core::Example" => ["supercov_rspec", :RSpecAdapter],
+      "Minitest::Test" => ["supercov_minitest", :MinitestAdapter],
+      "Test::Unit::TestCase" => ["supercov_testunit", :TestUnitAdapter],
+      "Cucumber::Runtime" => ["supercov_cucumber", :CucumberAdapter],
+    }.freeze
+
     def self.install(runtime)
-      tracer = TracePoint.new(:end) do |tp|
-        name = tp.self.name
-        if name == "RSpec::Core::Example"
-          require_relative "supercov_rspec"
-          Supercov::RSpecAdapter.install(runtime)
-        elsif name == "Minitest::Test"
-          require_relative "supercov_minitest"
-          Supercov::MinitestAdapter.install(runtime)
-        elsif name == "Test::Unit::TestCase"
-          require_relative "supercov_testunit"
-          Supercov::TestUnitAdapter.install(runtime)
-        elsif name == "Cucumber::Runtime"
-          require_relative "supercov_cucumber"
-          Supercov::CucumberAdapter.install(runtime)
-        end
-      rescue StandardError => error
-        runtime.limitation("ruby-runner-adapter-failed", "runner adapter failed to install: #{error.class}: #{error.message}")
-      end
+      tracer = TracePoint.new(:end) { |tp| adapt(runtime, tp.self.name) }
       tracer.enable
+      # A runner loaded before this runtime (`ruby -rhelper`: a command
+      # line's `-r` loads before RUBYOPT's) ended its class before the
+      # tracer was on.
+      ADAPTERS.each_key { |name| adapt(runtime, name) if loaded?(name) }
+    end
+
+    def self.adapt(runtime, name)
+      file, adapter = ADAPTERS[name]
+      return unless file
+
+      require_relative file
+      Supercov.const_get(adapter).install(runtime)
+    rescue StandardError => error
+      runtime.limitation("ruby-runner-adapter-failed", "runner adapter failed to install: #{error.class}: #{error.message}")
+    end
+
+    # Defined, without loading anything an autoload would.
+    def self.loaded?(name)
+      scope = Object
+      name.split("::").all? do |part|
+        next false if scope.autoload?(part) || !scope.const_defined?(part, false)
+
+        scope = scope.const_get(part, false)
+      end
     end
   end
 
@@ -1953,6 +2176,29 @@ module Supercov
     (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 3]) >= 0
   end
 
+  # Closes the evidence at exit, or once test-unit has run its tests where
+  # they are still to run. A suite that required test-unit before this
+  # runtime loaded (`ruby -rhelper`, as Rake's test task runs Ruby's own
+  # gems: a command line's `-r` loads before RUBYOPT's) has its autorun
+  # `at_exit` registered first, so Ruby calls it after this one: closed
+  # here, every test after it wrote to a closed file.
+  module CloseAfterAutoRun
+    def run(...)
+      super
+    ensure
+      Supercov.runtime&.close
+    end
+  end
+
+  def self.close_after_tests(runtime)
+    auto = defined?(::Test::Unit::AutoRunner) && ::Test::Unit::AutoRunner
+    if auto && auto.respond_to?(:need_auto_run?) && auto.need_auto_run? && $!.nil?
+      auto.singleton_class.prepend(CloseAfterAutoRun)
+    else
+      runtime.close
+    end
+  end
+
   def self.runtime
     @runtime
   end
@@ -1995,7 +2241,7 @@ module Supercov
     Attach.install(runtime)
     Propagation.install(runtime)
     Requests.install(runtime)
-    at_exit { runtime.close }
+    at_exit { close_after_tests(runtime) }
     runtime
   rescue StandardError => error
     warn("[supercov] Ruby runtime disabled: #{error.class}: #{error.message}")
