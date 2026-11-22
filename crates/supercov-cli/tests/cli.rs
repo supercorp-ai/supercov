@@ -22281,6 +22281,27 @@ fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
         "{plan}"
     );
     assert_cart_verdicts(&browser, &["npx", "vitest", "run"], "vitest-browser");
+    // A run of node tests and browser tests: its node tests run as jobs
+    // beside the browser's.
+    let mixed = job_runner_project(
+        "strong-jobs-vitest-mixed",
+        "module",
+        &[
+            (
+                "vitest.config.js",
+                "import { defineConfig } from \"vitest/config\";\nimport { playwright } from \"@vitest/browser-playwright\";\nexport default defineConfig({ test: { projects: [\n  { test: { name: \"node\", include: [\"test/cart.test.js\"] } },\n  { test: { name: \"browser\", include: [\"test/count.test.js\"], browser: { enabled: true, provider: playwright(), headless: true, instances: [{ browser: \"chromium\" }] } } },\n] } });\n",
+            ),
+            (
+                "test/cart.test.js",
+                "import { expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\nit(\"charges small orders\", () => expect(shipping(10)).toBe(5));\nit(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import { expect, it } from \"vitest\";\nimport { countdown } from \"../src/cart.js\";\nit(\"counts down\", () => expect(countdown(3)).toBe(0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&mixed, &["npx", "vitest", "run"], "vitest node and browser");
 }
 
 /// Two inline snapshots in one file, and a test that fakes the clock: the

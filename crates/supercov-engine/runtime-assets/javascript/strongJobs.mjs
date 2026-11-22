@@ -31,7 +31,9 @@ import { fileURLToPath } from "node:url";
 // included, runs all its baseline's tests beside a mutant's own candidates
 // rather than confirm a kill apart (`tryFile`).
 const UNION_MS = 1_500;
-const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
+// Vitest's node tests run here where the run also had browser tests, which
+// Vitest's own driver cannot run beside them.
+const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser", "vitest"]);
 
 function parallelism() {
     const given = Number(process.env.SUPERCOV_STRONG_WORKERS);
