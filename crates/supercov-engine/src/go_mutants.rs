@@ -851,7 +851,10 @@ mod tests {
     #[test]
     #[ignore = "reads modules and goldens named by SUPERCOV_GREMLINS_PARITY"]
     fn the_list_is_gremlins_own_on_named_modules() {
-        let named = std::env::var("SUPERCOV_GREMLINS_PARITY").unwrap();
+        // A run of every test, ignored ones too, names none.
+        let Ok(named) = std::env::var("SUPERCOV_GREMLINS_PARITY") else {
+            return;
+        };
         for pair in named.split(',') {
             let (module, golden) = pair.split_once('=').unwrap();
             let golden: Vec<String> =

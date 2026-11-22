@@ -235,22 +235,30 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
     let source =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/go_strong.rs"))
             .unwrap();
-    let lines = source.lines().map(str::trim).collect::<Vec<_>>();
-    let line = |snippet: &str| {
-        lines
-            .iter()
-            .position(|line| *line == snippet)
-            .unwrap_or_else(|| panic!("no line {snippet}"))
-            + 1
+    // The line a statement is on, by its text: the first line holding its
+    // expression, without the binding before it or the `?;` after it, as
+    // a measured build's probes leave every line where it was but wrap
+    // what is on it.
+    let lines = source.lines().collect::<Vec<_>>();
+    let core = |snippet: &'static str| {
+        let bound = snippet
+            .strip_prefix("let ")
+            .and_then(|rest| rest.split_once(" = "))
+            .map_or(snippet, |(_, value)| value);
+        bound
+            .strip_suffix("?;")
+            .or_else(|| bound.strip_suffix(';'))
+            .unwrap_or(bound)
     };
-    let after = |anchor: &str, snippet: &str| {
-        let from = line(anchor);
+    let line_from = |from: usize, snippet: &'static str| {
         from + lines[from..]
             .iter()
-            .position(|line| *line == snippet)
-            .unwrap_or_else(|| panic!("no line {snippet} after {anchor}"))
+            .position(|line| line.contains(core(snippet)))
+            .unwrap_or_else(|| panic!("no line {snippet} after line {from}"))
             + 1
     };
+    let line = |snippet: &'static str| line_from(0, snippet);
+    let after = |anchor: &'static str, snippet: &'static str| line_from(line(anchor), snippet);
     let (constant, constant_index) = mutant("Limit = ", "+", "ArithmeticOperator", "-");
     let (boundary, boundary_index) = mutant("if n > Limit", ">", "EqualityOperator", "<=");
     let mutants = || {
@@ -280,8 +288,9 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
         (
             at(
                 "fs.create_dir_all",
-                line(
-                    ".try_for_each(|directory| fs::create_dir_all(directory).map_err(failed(directory)))?;",
+                after(
+                    "pub fn run_go_strong(",
+                    "fs::create_dir_all(directory).map_err(failed(directory))",
                 ),
             ),
             true,
@@ -325,7 +334,7 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
             ),
             true,
         ),
-        (at("spawn", line(".launch()")), true),
+        (at("spawn", after("fn run_helper(", ".launch()")), true),
         (
             at(
                 "fs.remove_dir_all",
