@@ -70,6 +70,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
+    "strongJob.mjs",
+    "strongJobs.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
@@ -1757,7 +1759,7 @@ fn write_playwright_config(
 }
 
 fn write_vitest_commands(generated: &Path) -> Result<(), JavascriptFrontendError> {
-    let adapter = "import { mkdirSync } from 'node:fs';\n\
+    let adapter = "import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';\n\
 import { relative, resolve, sep } from 'node:path';\n\
 import { atomicWriteFileSync } from './node_modules/atomic.mjs';\n\
 import { inferTestProvenance } from './node_modules/provenance.mjs';\n\
@@ -1798,6 +1800,23 @@ export function supercovBrowserCommands(root) {\n\
       const directory = resolve(root, evidenceDirectory, suffix);\n\
       mkdirSync(directory, { recursive: true });\n\
       atomicWriteFileSync(resolve(directory, 'mcdc.json'), JSON.stringify(complete) + '\\n');\n\
+    },\n\
+    // A strong pass's job (strongJob.mjs): which mutant the browser switches\n\
+    // on before the test file loads, and which of its tests run.\n\
+    __supercovStrongJob(context) {\n\
+      const path = process.env['SUPERCOV_STRONG_JOB'];\n\
+      if (!path) return null;\n\
+      const absolute = context.testPath;\n\
+      return {\n\
+        mutant: process.env['SUPERCOV_ACTIVE_MUTANT'] ?? '-',\n\
+        file: absolute ? relative(root, absolute).split(sep).join('/') : undefined,\n\
+        job: JSON.parse(readFileSync(path, 'utf8')),\n\
+      };\n\
+    },\n\
+    // The mutant passed its hit limit in the browser, which can write nothing.\n\
+    __supercovMutantTimeout(context, mutant) {\n\
+      const results = process.env['SUPERCOV_STRONG_RESULTS'];\n\
+      if (results) appendFileSync(results + '.timeouts.jsonl', JSON.stringify({ mutant, attemptId: null, pass: 'main' }) + '\\n');\n\
     },\n\
   };\n\
 }\n";
@@ -2182,12 +2201,17 @@ pub fn prepare_javascript_frontend(
         &evidence.join("statement-exclusions.json"),
         &serde_json::to_vec(&exclusions).expect("plain data serializes"),
     )?;
-    let mutants = crate::js_mutant_links::MutantsFile {
-        schema_version: crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
-        mutant_set: crate::js_instrumenter::mutants_enabled()
-            .then(|| crate::js_mutants::MUTANT_SET.to_owned()),
-        files: mutants,
-        tests_without_values: Vec::new(),
+    let mutants = if crate::js_instrumenter::mutants_enabled() {
+        crate::mutant_list::MutantsFile::listed(
+            crate::mutant_list::JAVASCRIPT,
+            crate::js_mutants::MUTANT_SET,
+            mutants,
+        )
+    } else {
+        crate::mutant_list::MutantsFile {
+            files: mutants,
+            ..crate::mutant_list::MutantsFile::unlisted()
+        }
     };
     atomic_write(
         &evidence.join("mutants.json"),
@@ -2303,9 +2327,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:475",
-            "javascript-source-path#javascript_frontend.rs:1885",
-            "javascript-source-path#javascript_frontend.rs:1814",
+            "javascript-source-path#javascript_frontend.rs:477",
+            "javascript-source-path#javascript_frontend.rs:1904",
+            "javascript-source-path#javascript_frontend.rs:1833",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2416,8 +2440,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:519",
-            "javascript-source-path#javascript_frontend.rs:475",
+            "fs.read_to_string#javascript_frontend.rs:521",
+            "javascript-source-path#javascript_frontend.rs:477",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

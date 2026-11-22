@@ -605,8 +605,157 @@ Candidates under another runner (a Vitest test of the same run) are not run
 by this pass: a mutant no Playwright test kills is then an `error`, never a
 `survived` it has not earned.
 
+## Runners that start a process per test file (jobs)
+
+Jest, node:test, Mocha, AVA, node-tap, bun:test and Vitest's Browser Mode have
+no resident instance to hand copies to as Vitest's node pool does. Their pass
+is `runtime/javascript/strongJobs.mjs`, which the engine starts in place of the
+run's command (`node strongJobs.mjs -- <command>`, on Bun where the command is
+Bun's) when a mutant to run has a candidate under one of them. A plan's test
+runs under `vitest-browser` where its evidence came from the browser.
+
+**A job** is one start of the command for one test file. The mutant is on in
+every process from its start (`SUPERCOV_ACTIVE_MUTANT`), so its module-level
+code is mutated too; under Browser Mode the setup file asks node for the job
+over Vitest's command channel and switches the mutant on in the page before
+the test file loads. The job file (`SUPERCOV_STRONG_JOB`, read through
+`strongJob.mjs`) names the file's tests to run, every test file of the run,
+and whether to stop at the first failure. Each runner's adapter does what the
+runner allows:
+
+| runner | the job's file only | its tests only | first failure |
+| --- | --- | --- | --- |
+| Jest | `testPathIgnorePatterns` for the run's other files | Circus's tests marked `skip` before the first test runs | the rest marked `skip` |
+| Mocha | `Mocha#files` filtered before loading | tests removed from their suites (a suite left empty runs no hook) | `Runner#abort` |
+| node:test | a child of another file ends before it loads | registered as skipped | `t.skip()` |
+| AVA | (each worker loads its file) | `runTest` not run | later tests not run |
+| tap | the file run by itself | top-level subtests `skip` | later subtests `skip` |
+| bun:test | the file named on the command line | registered through `test.skip` | later tests return |
+| Vitest Browser Mode | the file as a CLI filter | `context.skip()` | `context.skip()` |
+
+tap and node:test count a test file as a test of its own: assertions at its
+top level, outside any subtest, pass or fail it, and StrykerJS's tap runner
+kills a mutant on them. So the adapters record a file's top level as a test,
+`(top level)`, where it asserts there (tap) or has no `test()` (node:test),
+with what ran there; in a file with subtests it is the file's module setup
+(tap) or counts for the run (node:test). Before, what such a file ran was in
+no test's evidence, and a mutant only its top-level assertions caught was
+never run against it (ini: 14 mutants StrykerJS killed through `win32.js`
+and `proto.js`). A tap job runs its JavaScript file by itself, `node <file>`,
+as tap's runner and StrykerJS's do: tap's command keeps its working files in
+the project, and two of them side by side broke each other's (`External ID
+used by multiple processes`).
+
+A subtest runs with its parent. A job's outcomes are the adapter's ordinary
+evidence records, in the job's own evidence directory: nothing new is
+reported, and Jest's two records of a test (its evidence, then its outcome)
+are read as one.
+
+A fresh process per job is how these runners isolate a test file anyway, so
+what one mutant leaves behind (a timer, a changed global, a fake clock) never
+reaches another's tests, for the reasons warm workers were dropped for Vitest.
+The cost is a start of the runner per job: npx is skipped where the project
+has the tool (`npx mocha` runs `node_modules/.bin/mocha`), and jobs run side
+by side, one fewer than the machine's CPUs (`SUPERCOV_STRONG_WORKERS`).
+
+**Order, baselines, confirmation, time.** As for Vitest, with one job at a
+time per mutant and its files cheapest first:
+
+- Each file's baseline runs, without a mutant, the union of the candidates
+  every mutant has there. A file whose baseline fails or leaves a chosen test
+  without a record (a subtest whose parent was not chosen) runs whole from
+  then on, and a test that fails in the whole file's baseline is no kill (nor
+  stops a job early).
+- Where the baseline's tests took under a second together, a job runs all of
+  them: its kill is then judged by a baseline that ran the same tests. Else it
+  runs its own candidates, and a kill is confirmed by running the job's tests
+  again without the mutant; where the killing test fails that way too, the
+  mutant runs again with its file whole (`overturned`).
+- A job's limit is 3× its baseline and 10 s; past it the job's process group
+  is stopped, and the mutant is a `timeout` unless a test had already failed.
+  A mutant that passed its hit limit (`<results>.timeouts.jsonl`; under
+  Browser Mode, sent to node) is a `timeout`.
+- A job that ended without reporting a test its baseline reported (a module
+  that throws as it loads, a process that exits) killed the mutant: the test
+  file did not finish.
+- A mutant whose candidates ran under a runner this pass does not run (a
+  plan mixing Vitest's node tests and its browser tests) is an `error`, never
+  `survived`.
+
+The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
+confirmations, overturned kills, stopped jobs and their time.
+
+### Validation against StrykerJS
+
+`benchmarks/mutation/js-runners/` holds the corpus (`corpus.json`: public
+projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
+`disableBail` (its Mocha, Jest and tap runners with per-test coverage; its
+command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
+its own), then Supercov, and joins every mutant's verdicts.
+
+Measured on SoroCI, one project per 16-CPU machine (c8a/m8a.4xlarge), both
+tools with 15 workers. Times in seconds; Supercov's are its measured run
+(with the mutants' values) and its strong pass. "Joined" counts the mutants
+both list: StrykerJS's `Regex` mutants are not listed by Supercov (see
+`mutants.md`), and are left out.
+
+| project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| bytes.js | Mocha | mocha | 126 | 0 | 2.7 | 1.0 + 1.7 |
+| negotiator | Mocha | mocha | 544 | 0 | 2.9 | 1.1 + 5.9 |
+| ms | Jest | jest | 204 | 0 | 4.9 | 2.0 + 21.8 |
+| cron-parser | Jest | jest | 429 | 1 (error) | 33.6 | 2.8 + 37.3 |
+| classnames | node:test | command | 159 | 0 | 7.8 | 0.7 + 2.5 |
+| camelcase | node:test | command | 217 | 0 | 10.5 | 1.3 + 3.6 |
+| dot-prop | AVA | command | 584 | 0 | 50.1 | 1.4 + 28.5 |
+| p-map | AVA | command | 512 | 1 | 347.8 | 23.4 + 110.7 |
+| ini | tap | tap | 389 | 0 (28 StrykerJS errors) | 13.4 | 1.6 + 5.9 |
+| remix-auth | bun:test | command | 625 | 0 | 7.2 | 0.8 + 2.0 |
+| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.3 | 9.0 + 27.9 |
+
+No mutant StrykerJS detected (killed or timed out) is `survived` or
+`no-coverage` in Supercov, and none it let live is detected by Supercov but
+the ones explained here, each applied by hand:
+
+- p-map, `index.js:426` `preserveOrder` to `true`: Supercov kills it with
+  "with `preserveOrder: false`, a mapper error drops pending input while the
+  consumer is busy". Applied by hand, that test fails run alone (`ava --match`)
+  and passes in the whole suite, where AVA runs every test of the file at
+  once and the consumer is never busy at that moment. StrykerJS's command
+  runner runs the whole suite. A kill of the subset, as on hono.
+- ini: StrykerJS's tap runner ended 28 mutants in `RuntimeError`, which its
+  score leaves out; Supercov kills 22 and times out 6. Applied by hand
+  (`ini.js:52` `&&` to `||`), `bar.js`, `foo.js` and `win32.js` fail.
+- cron-parser `CronExpressionParser.ts:454` and mini-throttle `index.ts:25`,
+  a function body emptied: no switch could be placed
+  (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
+  An error is no verdict either way.
+- Verdicts StrykerJS and Supercov both detect differ in kind 48 times
+  (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
+  wrong is whichever the runner sees first.
+
+The validation found three soundness bugs, fixed before these numbers:
+assertions at a tap or node:test file's top level belonged to no test (ini:
+14 mutants only `win32.js` and `proto.js` killed survived); a condition that
+calls something was decided `survived` from its value alone (dot-prop
+`index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
+no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
+runs the whole command per mutant, and Supercov's jobs of one file and its
+candidates are 3-4 times faster (p-map 348 s against 134 s). Against
+StrykerJS's in-process Mocha runner a job's process start costs more: bytes.js
+about even, negotiator 2.4 times slower. Jest is slowest: each job starts Jest
+(about 1 s), where StrykerJS's runner keeps it resident; ms takes 4.9 s under
+StrykerJS and 23.8 s under Supercov, cron-parser 33.6 s and 40.1 s. Under tap,
+a job runs its file with `node` alone, as StrykerJS's runner does: ini 13.4 s
+against 7.5 s.
+
 ## Not yet
 
-- Jest, Mocha and node:test drivers (Vitest and Playwright first).
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
+- A Vitest run whose tests run both in node and in the browser: the browser's
+  mutants are run by the jobs pass, and those with candidates in node too are
+  `error`.
+- StrykerJS's `Regex` mutator: its mutants are not listed (bytes.js: 20 of 146).

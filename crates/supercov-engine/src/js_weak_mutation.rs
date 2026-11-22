@@ -247,6 +247,10 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             probed_operation(mutant, records)
         }
         "ArrowFunction" => arrow_function(mutant, records),
+        // Another language's mutator whose probe evaluated the original and
+        // the replacement side by side: `differs` or `same` at each
+        // evaluation (`docs/design/mutation-drivers.md`).
+        _ if mutant.probe.is_some() => probed_operation(mutant, records),
         other => verdict_of(
             Status::Unknown,
             "no-rule",
@@ -448,6 +452,23 @@ fn not_infected_unless_value_used(
 }
 
 fn conditional_expression(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let (status, reason) = conditional_value(mutant, records);
+    if status == Status::NotInfected && mutant.effects {
+        return verdict_of(
+            Status::Unknown,
+            "condition-effects",
+            format!(
+                "{} has effects the replacement skips ({})",
+                quoted(&mutant.original),
+                reason.sentence
+            ),
+        );
+    }
+    (status, reason)
+}
+
+/// `conditional_expression` from the condition's values alone.
+fn conditional_value(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
     let forced = match mutant.replacement.as_str() {
         "true" => true,
         "false" => false,
@@ -1546,6 +1567,7 @@ mod tests {
             original: original.into(),
             operator: None,
             value_used: false,
+            effects: false,
             statement: Some("s".into()),
             function: Some("f".into()),
             decision: None,
@@ -1676,6 +1698,31 @@ mod tests {
             UNKNOWN,
             "no-rule",
         );
+        // Another language's mutator with no rule of its own is decided by
+        // its probe, where it has one: the values it saw side by side.
+        let probed = CandidateMutant {
+            probe: Some("src/a.py:1:5-1:10#value".into()),
+            ..mutant("AugmentedAssignment", "-=", "x += 1")
+        };
+        let saw = |outcomes: &[&str]| {
+            let mut seen = ran();
+            seen.comparisons.insert(
+                "src/a.py:1:5-1:10#value".into(),
+                outcomes
+                    .iter()
+                    .map(|outcome| (*outcome).to_owned())
+                    .collect(),
+            );
+            seen
+        };
+        expect(
+            &probed,
+            &saw(&["same", "differs"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        expect(&probed, &saw(&["same"]), NOT_INFECTED, "replacement-same");
+        expect(&probed, &ran(), NOT_REACHED, "not-evaluated");
     }
 
     #[test]
@@ -2379,6 +2426,13 @@ mod tests {
             ..mutant("ConditionalExpression", "true", "a && b")
         };
         expect(&decision, &vectors, NOT_INFECTED, "decision-always");
+        // A condition that calls something: always true, yet the literal
+        // skips the call.
+        let calling = CandidateMutant {
+            effects: true,
+            ..decision.clone()
+        };
+        expect(&calling, &vectors, UNKNOWN, "condition-effects");
         // A statement never run is not reached wherever the code lives.
         let mut elsewhere = Observations::default();
         elsewhere.server_hits.insert("t".into());
@@ -2610,6 +2664,8 @@ mod tests {
         let listed = |files: Vec<(&str, Vec<CandidateMutant>)>| MutantsFile {
             schema_version: 1,
             mutant_set: Some("stryker-js@10.1.1".into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: files
                 .into_iter()
                 .map(|(file, mutants)| (file.to_owned(), mutants))
@@ -2636,6 +2692,8 @@ mod tests {
         // A list that names no mutant set lists none.
         let unnamed = MutantsFile {
             mutant_set: None,
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             ..listed(vec![])
         };
         assert!(super::results(&[], Some(unnamed)).is_none());

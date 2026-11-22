@@ -4,6 +4,7 @@
 // probe a test reaches is counted as background. Node runs this from
 // register.mjs before the CLI parses argv; Bun loads no Node preload, so its
 // adapter does instead.
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // A project's own coverage tool measures what runs, and under Supercov that is
@@ -66,6 +67,17 @@ function useGeneratedVitestConfig(entrypoint) {
         process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG = originalConfig;
     }
     process.argv.push("--config", generatedVitestConfig);
+    // A strong pass's job runs one test file: Vitest's file filter keeps it
+    // from collecting the others (its adapter would skip their tests).
+    const job = process.env.SUPERCOV_STRONG_JOB;
+    if (job) {
+        try {
+            process.argv.push(...Object.keys(JSON.parse(readFileSync(job, "utf8")).files ?? {}));
+        }
+        catch {
+            // Without its job the adapter runs every test.
+        }
+    }
     if (process.env.SUPERCOV_DEBUG === "1") {
         console.error("[supercov] Vitest argv configured", {
             entrypoint,
@@ -78,6 +90,20 @@ function useGeneratedVitestConfig(entrypoint) {
 
 /** Adapt the runner whose entry point `entrypoint` is, if any. */
 export async function adaptRunnerEntry(entrypoint) {
+    // A strong pass's job runs one test file: node:test and tap start a
+    // process for each of the run's, and those of the others end here,
+    // before they load anything.
+    if ((process.env.NODE_TEST_CONTEXT || process.env.TAP_CHILD_ID) && process.env.SUPERCOV_STRONG_JOB && entrypoint) {
+        const { strongJob } = await import(new URL("./strongJob.mjs", import.meta.url).href);
+        if (strongJob()?.runsFile(entrypoint) === false)
+            process.exit(0);
+    }
+    // node:test counts a test file with no test() in it as a test of its
+    // own, passing or failing by what its top level asserts. What runs there
+    // is that test's. A file that names node:test keeps its top level
+    // counting for the run, as it always did.
+    if (process.env.NODE_TEST_CONTEXT && process.env.SUPERCOV_EVIDENCE_DIR && entrypoint && !namesNodeTest(entrypoint))
+        await recordNodeTestTopLevel(entrypoint);
     useGeneratedVitestConfig(entrypoint);
     // The Mocha CLI, the child it forks for Node options, and each --parallel
     // worker run tests through Mocha's Runner, which the adapter patches before
@@ -105,4 +131,40 @@ export async function adaptRunnerEntry(entrypoint) {
         const { adaptTap } = await import(new URL("./tap.mjs", import.meta.url).href);
         await adaptTap(entrypoint);
     }
+}
+
+// Whether a test file's source names node:test: a file that does not can
+// register no test of its own.
+function namesNodeTest(file) {
+    try {
+        return /\bnode:test\b|["']test["']/.test(readFileSync(file.startsWith("file:") ? new URL(file) : file, "utf8"));
+    }
+    catch {
+        return true;
+    }
+}
+
+async function recordNodeTestTopLevel(file) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { runnerExecutionScope, writeRunnerEvidence } = await import(new URL("./runnerEvidence.mjs", import.meta.url).href);
+    const identity = { runner: "node:test", file, name: "(top level)" };
+    const scope = runnerExecutionScope(identity);
+    // From the file's first assertion outside any test on, what runs is the
+    // file's test. What ran before it (loading its modules) counts for the
+    // run, as in any file; a file that asserts nothing is no test.
+    let asserted = false;
+    globalThis.__SUPERCOV_UNSCOPED_ASSERTION__ = () => {
+        if (asserted || (globalThis[Symbol.for("supercov.nodeTestRegistrations")] ?? 0) > 0)
+            return;
+        asserted = true;
+        runtime.beginBufferedServerEvidence(scope);
+        runtime.activateCoverageScope(scope);
+    };
+    process.once("exit", (code) => {
+        if (!asserted)
+            return;
+        writeRunnerEvidence(identity, code === 0 ? "passed" : "failed", scope, process.env.SUPERCOV_EVIDENCE_DIR, runtime.takeNodeAssertionPhases(scope), runtime.flushBufferedServerEvidence(scope));
+    });
 }

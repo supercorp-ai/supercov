@@ -1,5 +1,9 @@
 //! Strong mutation's plan (`docs/design/strong-mutation.md`): which of a
-//! run's mutants need running, and against which of its tests.
+//! run's mutants need running, and against which of its tests. It reads
+//! only what every language records -- each test's hits, and the values its
+//! probes saw where the language records them -- and the run's mutant list
+//! (`mutant_list`), so one plan serves every language's driver
+//! (`docs/design/mutation-drivers.md`).
 //!
 //! A test can kill a mutant only if the mutant's value differed somewhere in
 //! that test's own execution: until then, the test runs exactly as it ran
@@ -21,8 +25,8 @@ use serde::Serialize;
 use crate::coverage_report::{
     ATTRIBUTION_BY_TIME, ATTRIBUTION_EXACT, ArchiveReportRequest, RawTestResult, ReportError,
 };
-use crate::js_mutant_links::{CandidateMutant, MutantsFile};
 use crate::js_weak_mutation::{Observations, Status, observations, verdict};
+use crate::mutant_list::{CandidateMutant, MutantsFile};
 
 /// A test the plan may run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,6 +113,8 @@ pub enum Decided {
 pub struct PlannedMutant {
     pub id: String,
     pub file: String,
+    /// Its file's language: which driver runs it.
+    pub language: String,
     /// Its position in its file's list: the index its switch carries.
     pub index: usize,
     pub mutator: String,
@@ -154,10 +160,6 @@ pub struct StrongPlan {
     pub tests: Vec<PlannedTest>,
     pub mutants: Vec<PlannedMutant>,
 }
-
-/// The runners whose tests a strong pass runs: those with a driver in
-/// `runtime/javascript` (`vitestStrong.mjs`, `playwrightStrong.mjs`).
-pub const STRONG_RUNNERS: [&str; 2] = ["vitest", "playwright"];
 
 /// The file in a run's directory that holds its strong verdicts.
 pub const STRONG_VERDICTS_FILE: &str = "strong-mutation.json";
@@ -238,7 +240,7 @@ pub fn list_run_mutants(
 pub fn run_recorded_mutant_values(archive_path: &std::path::Path) -> bool {
     let listed_after = archive_path.with_file_name(crate::coverage_report::LISTED_MUTANTS_FILE);
     if let Ok(bytes) = std::fs::read(&listed_after)
-        && let Ok(listed) = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&bytes)
+        && let Ok(listed) = serde_json::from_slice::<MutantsFile>(&bytes)
     {
         // An empty list there marks a run that had its own.
         return listed.mutant_set.is_none();
@@ -248,7 +250,7 @@ pub fn run_recorded_mutant_values(archive_path: &std::path::Path) -> bool {
         archive_path,
         |path| path == "mutants.json",
         |entry| {
-            listed = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&entry.contents)
+            listed = serde_json::from_slice::<MutantsFile>(&entry.contents)
                 .is_ok_and(|mutants| mutants.mutant_set.is_some());
             Ok(())
         },
@@ -269,23 +271,21 @@ fn beside(request: &ArchiveReportRequest) -> std::path::PathBuf {
 fn listed_or_list(
     request: &ArchiveReportRequest,
     root: &std::path::Path,
-    listed: Option<crate::js_mutant_links::MutantsFile>,
+    listed: Option<MutantsFile>,
     points: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-) -> Result<(Option<crate::js_mutant_links::MutantsFile>, Vec<String>), ReportError> {
+) -> Result<(Option<MutantsFile>, Vec<String>), ReportError> {
     let path = beside(request);
     let (kept, written, changed) = match listed {
         Some(own) if own.mutant_set.is_some() => {
-            let none = crate::js_mutant_links::MutantsFile {
+            let none = MutantsFile {
                 schema_version: own.schema_version,
-                mutant_set: None,
-                files: std::collections::BTreeMap::new(),
-                tests_without_values: Vec::new(),
+                ..MutantsFile::unlisted()
             };
             (Some(own), none, Vec::new())
         }
         _ if points.is_empty() => return Ok((None, Vec::new())),
         _ => {
-            let fresh = crate::js_mutant_links::list_mutants(root, points);
+            let fresh = crate::mutant_list::list_from_sources(root, points);
             (Some(fresh.mutants.clone()), fresh.mutants, fresh.changed)
         }
     };
@@ -476,6 +476,9 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     let mut tests = Vec::<PlannedTest>::new();
     let mut test_index = HashMap::<String, usize>::new();
     let mut runnable = Vec::<bool>::new();
+    // Whether any record of the test said how it ended: Jest writes a test's
+    // evidence (`unknown`) and its outcome in two records.
+    let mut stated = Vec::<bool>::new();
     let mut by_file = BTreeMap::<String, Vec<usize>>::new();
     for raw in raw_results.iter().filter(|raw| role_of(raw) == "test") {
         let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
@@ -485,12 +488,23 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 file: raw.test_file.clone(),
                 name: raw.test.clone(),
                 title: raw.title.clone(),
-                runner: raw.provenance.runner.clone(),
+                // Vitest's Browser Mode runs a test in the browser, where
+                // a mutant is switched on another way than in its workers.
+                runner: if raw
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.worker_id == "vitest-browser")
+                {
+                    "vitest-browser".to_owned()
+                } else {
+                    raw.provenance.runner.clone()
+                },
                 duration_ms: None,
                 span: raw.span,
                 runnable: true,
             });
             runnable.push(true);
+            stated.push(false);
             if let Some(file) = &raw.test_file {
                 by_file
                     .entry(file.clone())
@@ -499,7 +513,12 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             }
             tests.len() - 1
         });
-        runnable[index] &= passed(raw);
+        if raw.status.as_deref() == Some("unknown") && !raw.flaky {
+            // Its evidence alone: the outcome is another record's.
+        } else {
+            runnable[index] &= passed(raw);
+            stated[index] = true;
+        }
         // An attempt has two records under Playwright, the reporter's (its
         // status, no span) and the fixture's (its evidence, its span), in
         // either order: the span is the first attempt's, whichever record
@@ -528,7 +547,8 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         record: usize,
         seen: Observations,
     }
-    for (test, ok) in tests.iter_mut().zip(&runnable) {
+    for ((test, ok), stated) in tests.iter_mut().zip(&mut runnable).zip(&stated) {
+        *ok &= *stated;
         test.runnable = *ok;
     }
     let mut seen = Vec::<Seen>::new();
@@ -581,6 +601,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     mutant.id.clone()
                 },
                 file: file.clone(),
+                language: listed.language_of(file).to_owned(),
                 index,
                 mutator: mutant.mutator.clone(),
                 weak: weak_name(status),
@@ -685,7 +706,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                 }
                             }
                             // A file's module setup: every test of the file.
-                            "setup" => {
+                            "setup" if raw.test_file.is_some() => {
                                 if let Some(file) = &raw.test_file {
                                     whole_files.insert(file.clone());
                                     for &test in by_file.get(file).into_iter().flatten() {
@@ -693,8 +714,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                     }
                                 }
                             }
-                            // Work no test was credited with: any test of the
-                            // run may have caused it.
+                            // Work no test was credited with, a module setup
+                            // that names no test file among it (Mocha loads
+                            // every test file before the first test): any test
+                            // of the run may have caused it.
                             _ => {
                                 for test in 0..tests.len() {
                                     take(test, CandidateReason::Unattributed);
@@ -803,6 +826,8 @@ mod tests {
         MutantsFile {
             schema_version: 1,
             mutant_set: Some("set".into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: if mutants.is_empty() {
                 BTreeMap::new()
             } else {
@@ -898,7 +923,7 @@ mod tests {
     /// Each mutant's candidates are the tests whose own evidence, with what
     /// their file's modules did as they loaded, may infect it: module-level
     /// code takes every test of the file it ran in, a setup no file owns
-    /// takes none, and a mutant no passing test may infect survives.
+    /// takes every test, and a mutant no passing test may infect survives.
     #[test]
     fn a_mutant_s_candidates_are_the_tests_whose_own_evidence_may_infect_it() {
         let mut load = record("load", "setup", Some("t/a.test.js"), &["s-load"]);
@@ -1008,16 +1033,25 @@ mod tests {
         assert_eq!(module.whole_files, ["t/a.test.js"]);
         assert_eq!(module.covering, 1);
 
-        for survivor in ["loose", "nobody"] {
-            let survived = planned(&plan, survivor);
-            assert_eq!(
-                (survived.decided, survived.reason.as_deref()),
-                (Some(Decided::Survived), Some("no-passing-candidate")),
-                "{survivor}"
-            );
-            assert!(survived.candidates.is_empty(), "{survivor}");
-        }
-        assert!(planned(&plan, "loose").whole_files.is_empty());
+        let survived = planned(&plan, "nobody");
+        assert_eq!(
+            (survived.decided, survived.reason.as_deref()),
+            (Some(Decided::Survived), Some("no-passing-candidate"))
+        );
+        assert!(survived.candidates.is_empty());
+        // A setup that names no file (Mocha loads every test file before
+        // its first test): every test of the run.
+        let loose = planned(&plan, "loose");
+        assert_eq!(loose.decided, None);
+        assert!(
+            loose
+                .candidates
+                .iter()
+                .all(|candidate| candidate.reason == CandidateReason::Unattributed)
+                && loose.candidates.len() == plan.tests.iter().filter(|test| test.runnable).count(),
+            "{loose:?}"
+        );
+        assert!(loose.whole_files.is_empty());
         assert_eq!(planned(&plan, "nobody").whole_files, ["t/nobody.test.js"]);
 
         // A test measured without the probes ran the comparison and
