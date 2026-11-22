@@ -81,6 +81,11 @@ const LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovListener";
 /// its switches call.
 const STRONG_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrong.java");
+const STRONG_PASS_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongPass.java");
+const STRONG_TESTNG_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongTestNG.java");
+const STRONG_TESTNG_CLASS: &str = "com.supercorp.supercov.SupercovStrongTestNG";
 const KOTLIN_SWITCH_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovSwitch.kt");
 const STRONG_CLASS: &str = "com.supercorp.supercov.SupercovStrong";
@@ -1192,9 +1197,14 @@ fn instrument_workspace(
         write(&workspace.join(relative), instrumented)?;
     }
 
+    if strong.is_some() {
+        project.value_sites.clear();
+        project.mutants = None;
+    }
     let probe_count = project
         .probes
         .keys()
+        .chain(project.value_sites.keys())
         .max()
         .map_or(0, |highest| *highest as usize + 1);
     if build == JvmBuild::Ant {
@@ -1329,6 +1339,12 @@ fn instrument_workspace(
                 write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
                 if strong.is_some() {
                     write(&test.join("SupercovStrong.java"), STRONG_SOURCE)?;
+                }
+            }
+            if strong.is_some() {
+                write(&test.join("SupercovStrongPass.java"), STRONG_PASS_SOURCE)?;
+                if frameworks.testng {
+                    write(&test.join("SupercovStrongTestNG.java"), STRONG_TESTNG_SOURCE)?;
                 }
             }
             if let Some(strong) = strong
@@ -1510,7 +1526,14 @@ fn instrument_workspace(
         if frameworks.testng {
             write(
                 &resources.join(TESTNG_SERVICES_FILE),
-                &format!("{TESTNG_LISTENER_CLASS}\n"),
+                &format!(
+                    "{}\n",
+                    if strong.is_some() {
+                        STRONG_TESTNG_CLASS
+                    } else {
+                        TESTNG_LISTENER_CLASS
+                    }
+                ),
             )?;
         }
     }
@@ -2375,7 +2398,7 @@ pub fn run_direct_jvm(
         }
         let evidence = merge_evidence(parts);
         measured.set(true);
-        let run = build_frontend_run(OwnedRunInputs {
+        let mut run = build_frontend_run(OwnedRunInputs {
             declaration: jvm_declaration(),
             environment: "jvm",
             manifest: &instrumented.project.manifest,
@@ -2387,11 +2410,25 @@ pub fn run_direct_jvm(
             test_exit_code: exit_code,
             coverage_model: jvm_coverage_model(),
         });
+        add_values(&mut run, &evidence, &instrumented.project.value_sites);
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
+        let mut entries = run.archive_entries();
+        if let Some(mutants) = &instrumented.project.mutants {
+            // The run's mutants, as it listed them, beside its evidence.
+            let list = crate::mutant_list::MutantsFile::listed(
+                crate::mutant_list::JVM,
+                crate::jvm_mutants::MUTANT_SET,
+                mutants.clone(),
+            );
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&list).expect("plain data serializes"),
+            });
+        }
         let raw = write_archive(
-            crate::source_capture::append(run.archive_entries(), &source_inputs),
+            crate::source_capture::append(entries, &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -2465,6 +2502,49 @@ pub fn run_direct_jvm(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Each test's value probes, as its snapshot's comparisons: the outcomes a
+/// mutant's weak verdict reads (`jvm_strong::value_outcomes`).
+fn add_values(
+    run: &mut crate::owned_evidence::OwnedFrontendRun,
+    evidence: &crate::owned_evidence::OwnedEvidence,
+    sites: &BTreeMap<u64, crate::jvm_strong::ValueSite>,
+) {
+    if sites.is_empty() {
+        return;
+    }
+    let mut by_name = BTreeMap::<&str, BTreeMap<u64, u32>>::new();
+    for test in evidence.tests.iter().filter(|test| !test.unattributed) {
+        let values = by_name.entry(test.name.as_str()).or_default();
+        for (probe, bits) in &test.probes {
+            if sites.contains_key(&u64::from(*probe)) {
+                *values.entry(u64::from(*probe)).or_default() |= *bits;
+            }
+        }
+    }
+    for raw in run
+        .request
+        .raw_results
+        .iter_mut()
+        .filter(|raw| raw.role == "test")
+    {
+        let Some(values) = by_name.get(raw.test.as_str()) else {
+            continue;
+        };
+        let Some(snapshot) = raw.runtime.first_mut() else {
+            continue;
+        };
+        for (probe, bits) in values {
+            let site = &sites[probe];
+            snapshot
+                .comparisons
+                .push(crate::coverage_report::ComparisonSnapshot {
+                    id: site.site.clone(),
+                    outcomes: crate::jvm_strong::value_outcomes(site.kind, *bits),
+                });
+        }
     }
 }
 
@@ -4701,16 +4781,24 @@ pub fn run_strong_jvm(
                     let name = test["name"].as_str().unwrap_or_default().to_owned();
                     let file = test["file"].as_str().unwrap_or_default();
                     let duration = test["durationMs"].as_u64();
+                    let class = class_of(&name).unwrap_or_default();
                     StrongTest {
-                        class: class_of(&name).unwrap_or_default().to_owned(),
+                        // TestNG names a class by its simple name: its file
+                        // says the rest.
+                        class: if class.contains('.') || file.is_empty() {
+                            class.to_owned()
+                        } else {
+                            class_of_file(file, class)
+                        },
                         module: if file.is_empty() {
                             ".".to_owned()
                         } else {
                             module_of(file)
                         },
-                        // Twice StrykerJS's limit, as for Vitest: the slowest
-                        // the test ran × 3, and 10 s.
-                        limit_ms: duration.map_or(60_000, |ms| ms * 3 + 10_000),
+                        // What the measured run took, where it said: the
+                        // driver's limit is the longer of it and the test's
+                        // baseline, × 3 and 10 s.
+                        limit_ms: duration.unwrap_or(0),
                         runnable: test["runnable"].as_bool().unwrap_or(false),
                         name,
                     }
@@ -4990,6 +5078,23 @@ pub fn run_strong_jvm(
     match (result, release) {
         (Ok(code), Ok(())) => Ok(code),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// The class a test file declares, by its path below a source root
+/// (`src/test/java/com/x/FooTest.java` declares `com.x.FooTest`), for a
+/// class a framework named by its simple name.
+fn class_of_file(file: &str, simple: &str) -> String {
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    let package = ["/java/", "/kotlin/", "/groovy/", "/scala/"]
+        .iter()
+        .find_map(|root| stem.split_once(root).map(|(_, rest)| rest))
+        .unwrap_or(stem);
+    let package = package.rsplit_once('/').map_or("", |(package, _)| package);
+    if package.is_empty() {
+        simple.to_owned()
+    } else {
+        format!("{}.{simple}", package.replace('/', "."))
     }
 }
 

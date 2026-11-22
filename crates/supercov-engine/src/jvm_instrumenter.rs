@@ -1129,6 +1129,19 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
     crate::go_instrumenter::rewrite(source, edits)
 }
 
+/// `rewrite` without the position comments Go's rewrite leaves at each
+/// edit, which Java and Kotlin do not read: a value probe keeps the operator
+/// it stands for in a comment, and a comment placed inside it would end it.
+pub fn rewrite_plain(source: &str, edits: &[GoEdit]) -> String {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
+    let mut out = source.to_owned();
+    for edit in ordered {
+        out.insert_str(edit.at, &edit.text);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

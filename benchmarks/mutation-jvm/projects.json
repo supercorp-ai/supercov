@@ -1,0 +1,44 @@
+{
+  "commons-cli": {
+    "repository": "https://github.com/apache/commons-cli.git",
+    "tag": "rel/commons-cli-1.9.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip",
+    "targets": "org.apache.commons.cli.*",
+    "junit5": true
+  },
+  "commons-csv": {
+    "repository": "https://github.com/apache/commons-csv.git",
+    "tag": "rel/commons-csv-1.12.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip -Dmaven.javadoc.skip",
+    "targets": "org.apache.commons.csv.*",
+    "junit5": true
+  },
+  "jcommander": {
+    "repository": "https://github.com/cbeust/jcommander.git",
+    "tag": "jcommander-1.48",
+    "build": "maven",
+    "flags": "-Dmaven.javadoc.skip",
+    "targets": "com.beust.jcommander.*",
+    "testng": true
+  },
+  "kotlinpoet": {
+    "repository": "https://github.com/square/kotlinpoet.git",
+    "tag": "1.14.2",
+    "build": "gradle",
+    "module": "kotlinpoet",
+    "flags": "-x spotlessCheck -x apiCheck",
+    "targets": "com.squareup.kotlinpoet.*",
+    "junit5": false
+  },
+  "klaxon": {
+    "repository": "https://github.com/cbeust/klaxon.git",
+    "tag": "v5.0.13",
+    "build": "gradle",
+    "module": "klaxon",
+    "flags": "",
+    "targets": "com.beust.klaxon.*",
+    "testng": true
+  }
+}

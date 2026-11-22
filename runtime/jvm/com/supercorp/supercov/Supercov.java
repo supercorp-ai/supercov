@@ -978,6 +978,616 @@ public final class Supercov {
   }
 
 
+  // --- Weak mutation: value probes -------------------------------------------
+  //
+  // A run that lists its mutants (SUPERCOV_MUTANTS=1) calls these where a
+  // mutant's value can be told from the original's: each returns exactly
+  // what the code as written computes, and ORs into its slot a bit for what
+  // decides the mutant (`jvm_strong::value_outcomes` names the bits). The
+  // slot is swept at each test boundary as every probe is.
+
+  private static void value(int slot, int bit) {
+    if (slot >= 0 && slot < HITS.length) {
+      HITS[slot] |= bit;
+    }
+  }
+
+  private static int relation(long a, long b) {
+    return a < b ? 1 : a == b ? 2 : 4;
+  }
+
+  private static int relation(double a, double b) {
+    return a < b ? 1 : a == b ? 2 : a > b ? 4 : 8;
+  }
+
+  private static int sameOrDiffers(boolean same) {
+    return same ? 1 : 2;
+  }
+
+  public static boolean wlt(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a < b;
+  }
+
+  public static boolean wlt(int slot, double a, double b) {
+    value(slot, relation((double) a, (double) b));
+    return a < b;
+  }
+
+  public static boolean wle(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a <= b;
+  }
+
+  public static boolean wle(int slot, double a, double b) {
+    value(slot, relation((double) a, (double) b));
+    return a <= b;
+  }
+
+  public static boolean wgt(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a > b;
+  }
+
+  public static boolean wgt(int slot, double a, double b) {
+    value(slot, relation((double) a, (double) b));
+    return a > b;
+  }
+
+  public static boolean wge(int slot, int a, int b) {
+    value(slot, relation(a, b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, long a, long b) {
+    value(slot, relation(a, b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, float a, float b) {
+    value(slot, relation((double) a, (double) b));
+    return a >= b;
+  }
+
+  public static boolean wge(int slot, double a, double b) {
+    value(slot, relation((double) a, (double) b));
+    return a >= b;
+  }
+
+  public static int wadd(int slot, int a, int b) {
+    int result = a + b;
+    boolean same;
+    try {
+      int mutant = a - b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wadd(int slot, long a, long b) {
+    long result = a + b;
+    boolean same;
+    try {
+      long mutant = a - b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wadd(int slot, float a, float b) {
+    float result = a + b;
+    boolean same;
+    try {
+      float mutant = a - b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wadd(int slot, double a, double b) {
+    double result = a + b;
+    boolean same;
+    try {
+      double mutant = a - b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wsub(int slot, int a, int b) {
+    int result = a - b;
+    boolean same;
+    try {
+      int mutant = a + b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wsub(int slot, long a, long b) {
+    long result = a - b;
+    boolean same;
+    try {
+      long mutant = a + b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wsub(int slot, float a, float b) {
+    float result = a - b;
+    boolean same;
+    try {
+      float mutant = a + b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wsub(int slot, double a, double b) {
+    double result = a - b;
+    boolean same;
+    try {
+      double mutant = a + b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wmul(int slot, int a, int b) {
+    int result = a * b;
+    boolean same;
+    try {
+      int mutant = a / b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wmul(int slot, long a, long b) {
+    long result = a * b;
+    boolean same;
+    try {
+      long mutant = a / b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wmul(int slot, float a, float b) {
+    float result = a * b;
+    boolean same;
+    try {
+      float mutant = a / b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wmul(int slot, double a, double b) {
+    double result = a * b;
+    boolean same;
+    try {
+      double mutant = a / b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wdiv(int slot, int a, int b) {
+    int result = a / b;
+    boolean same;
+    try {
+      int mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wdiv(int slot, long a, long b) {
+    long result = a / b;
+    boolean same;
+    try {
+      long mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wdiv(int slot, float a, float b) {
+    float result = a / b;
+    boolean same;
+    try {
+      float mutant = a * b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wdiv(int slot, double a, double b) {
+    double result = a / b;
+    boolean same;
+    try {
+      double mutant = a * b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static int wrem(int slot, int a, int b) {
+    int result = a % b;
+    boolean same;
+    try {
+      int mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static long wrem(int slot, long a, long b) {
+    long result = a % b;
+    boolean same;
+    try {
+      long mutant = a * b;
+      same = result == mutant;
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static float wrem(int slot, float a, float b) {
+    float result = a % b;
+    boolean same;
+    try {
+      float mutant = a * b;
+      same = Float.floatToIntBits(result) == Float.floatToIntBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static double wrem(int slot, double a, double b) {
+    double result = a % b;
+    boolean same;
+    try {
+      double mutant = a * b;
+      same = Double.doubleToLongBits(result) == Double.doubleToLongBits(mutant);
+    } catch (ArithmeticException thrown) {
+      same = false;
+    }
+    value(slot, sameOrDiffers(same));
+    return result;
+  }
+
+  public static boolean wand(int slot, boolean a, boolean b) {
+    boolean result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static int wand(int slot, int a, int b) {
+    int result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static long wand(int slot, long a, long b) {
+    long result = a & b;
+    value(slot, sameOrDiffers(result == (a | b)));
+    return result;
+  }
+
+  public static boolean wor(int slot, boolean a, boolean b) {
+    boolean result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wor(int slot, int a, int b) {
+    int result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static long wor(int slot, long a, long b) {
+    long result = a | b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static boolean wxor(int slot, boolean a, boolean b) {
+    boolean result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wxor(int slot, int a, int b) {
+    int result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static long wxor(int slot, long a, long b) {
+    long result = a ^ b;
+    value(slot, sameOrDiffers(result == (a & b)));
+    return result;
+  }
+
+  public static int wshl(int slot, int a, int b) {
+    int result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static int wshl(int slot, int a, long b) {
+    int result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static long wshl(int slot, long a, int b) {
+    long result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static long wshl(int slot, long a, long b) {
+    long result = a << b;
+    value(slot, sameOrDiffers(result == (a >> b)));
+    return result;
+  }
+
+  public static int wshr(int slot, int a, int b) {
+    int result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wshr(int slot, int a, long b) {
+    int result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wshr(int slot, long a, int b) {
+    long result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wshr(int slot, long a, long b) {
+    long result = a >> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wushr(int slot, int a, int b) {
+    int result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wushr(int slot, int a, long b) {
+    int result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wushr(int slot, long a, int b) {
+    long result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static long wushr(int slot, long a, long b) {
+    long result = a >>> b;
+    value(slot, sameOrDiffers(result == (a << b)));
+    return result;
+  }
+
+  public static int wneg(int slot, int a) {
+    int result = -a;
+    value(slot, sameOrDiffers(result == a));
+    return result;
+  }
+
+  public static long wneg(int slot, long a) {
+    long result = -a;
+    value(slot, sameOrDiffers(result == a));
+    return result;
+  }
+
+  public static float wneg(int slot, float a) {
+    float result = -a;
+    value(slot, sameOrDiffers(Float.floatToIntBits(result) == Float.floatToIntBits(a)));
+    return result;
+  }
+
+  public static double wneg(int slot, double a) {
+    double result = -a;
+    value(slot, sameOrDiffers(Double.doubleToLongBits(result) == Double.doubleToLongBits(a)));
+    return result;
+  }
+
+  // A returned value: bit 0 false, 1 true, 2 zero, 3 not zero (a float's
+  // zero is +0.0 alone, as the mutant returns), 4 null, then the replacements
+  // the return mutants make where the value is that very object.
+
+  public static boolean wr(int slot, boolean value) {
+    value(slot, value ? 2 : 1);
+    return value;
+  }
+
+  public static int wr(int slot, int value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static long wr(int slot, long value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static byte wr(int slot, byte value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static short wr(int slot, short value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static char wr(int slot, char value) {
+    value(slot, value == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static float wr(int slot, float value) {
+    value(slot, Float.floatToIntBits(value) == 0 ? 4 : 8);
+    return value;
+  }
+
+  public static double wr(int slot, double value) {
+    value(slot, Double.doubleToLongBits(value) == 0L ? 4 : 8);
+    return value;
+  }
+
+  public static <T> T wr(int slot, T value) {
+    value(slot, returned(value));
+    return value;
+  }
+
+  private static Object emptyOptional;
+  private static boolean emptyOptionalRead;
+
+  private static int returned(Object value) {
+    if (value == null) {
+      return 1 << 4;
+    }
+    if (value == "") {
+      return 1 << 5;
+    }
+    if (value == java.util.Collections.emptyList()) {
+      return 1 << 6;
+    }
+    if (value == java.util.Collections.emptySet()) {
+      return 1 << 7;
+    }
+    if (value == java.util.Collections.emptyMap()) {
+      return 1 << 8;
+    }
+    if (!emptyOptionalRead) {
+      emptyOptionalRead = true;
+      try {
+        emptyOptional = Class.forName("java.util.Optional").getMethod("empty").invoke(null);
+      } catch (ReflectiveOperationException | LinkageError absent) {
+        emptyOptional = null;
+      }
+    }
+    if (emptyOptional != null && value == emptyOptional) {
+      return 1 << 9;
+    }
+    if (value == Integer.valueOf(0)
+        || value == Long.valueOf(0L)
+        || value == Short.valueOf((short) 0)
+        || value == Character.valueOf((char) 0)) {
+      return 1 << 10;
+    }
+    if (value == Boolean.TRUE) {
+      return 1 << 11;
+    }
+    if (value == Boolean.FALSE) {
+      return 1 << 12;
+    }
+    return 1 << 13;
+  }
+
   /** Little-endian, matching every other Supercov transport. */
   private static void putLong(DataOutputStream out, long value) throws IOException {
     for (int shift = 0; shift < 64; shift += 8) {

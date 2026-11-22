@@ -107,6 +107,7 @@ pub const STRONG_RUNNERS: &[&str] = &[
     // Java and Kotlin: the build's test JVM drives itself through the JUnit
     // Platform (`SupercovStrong.java`).
     "junit-platform",
+    "testng",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job

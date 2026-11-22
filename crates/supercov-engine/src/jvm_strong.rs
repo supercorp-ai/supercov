@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::coverage_analysis::PointKind;
-use crate::js_mutant_links::{CandidateMutant, MutantOperator};
 use crate::jvm_instrumenter::JvmLanguage;
 use crate::jvm_mutants::{JvmMutant, ProjectIndex};
+use crate::mutant_list::{CandidateMutant, MutantOperator};
 
 /// Whether a run's file is Java or Kotlin, by its name.
 pub fn language_of(file: &str) -> Option<JvmLanguage> {
@@ -25,6 +25,135 @@ pub fn language_of(file: &str) -> Option<JvmLanguage> {
     } else {
         None
     }
+}
+
+/// A value probe's slot in the probe array, what it records and the site
+/// id its outcomes are reported under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueSite {
+    pub site: String,
+    pub kind: crate::jvm_mutants::ProbeKind,
+}
+
+/// The outcome each bit of a value probe's slot stands for
+/// (`Supercov.java`'s `w*` helpers write them).
+pub fn value_outcomes(kind: crate::jvm_mutants::ProbeKind, bits: u32) -> Vec<String> {
+    use crate::jvm_mutants::ProbeKind;
+    let names: &[&str] = match kind {
+        ProbeKind::Compare => &["lt", "eq", "gt", "unordered"],
+        ProbeKind::Operation => &["same", "differs"],
+        ProbeKind::Return => &[
+            "false",
+            "true",
+            "zero",
+            "nonzero",
+            "null",
+            "empty-string",
+            "empty-list",
+            "empty-set",
+            "empty-map",
+            "empty-optional",
+            "boxed-zero",
+            "boolean-true",
+            "boolean-false",
+            "other",
+        ],
+    };
+    names
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| bits & (1 << bit) != 0)
+        .map(|(_, name)| (*name).to_owned())
+        .collect()
+}
+
+/// The site id of a probe in `file`: a comparison's start (`file:L:C`), or
+/// an operation's or a return's span and kind.
+fn site_id(file: &str, source: &str, probe: &crate::jvm_mutants::ValueProbe) -> String {
+    use crate::jvm_mutants::ProbeKind;
+    let start = crate::jvm_mutants::position(source, probe.span.0);
+    let end = crate::jvm_mutants::position(source, probe.span.1);
+    match probe.kind {
+        ProbeKind::Compare => format!("{file}:{}:{}", start.0, start.1),
+        ProbeKind::Operation => format!(
+            "{file}:{}:{}-{}:{}#operation",
+            start.0, start.1, end.0, end.1
+        ),
+        ProbeKind::Return => format!("{file}:{}:{}-{}:{}#return", start.0, start.1, end.0, end.1),
+    }
+}
+
+/// A file's value probes, given slots from `next_probe` on: the edits that
+/// place them, each slot's site, and each listed mutant's links to them
+/// (`compare` for a comparison, `probe` for the rest). A comparison's probe
+/// decides its boundary mutant and tells whether its negation ran; a
+/// return's serves every return mutant of the value.
+pub fn probe_edits(
+    file: &str,
+    source: &str,
+    mutants: &[JvmMutant],
+    listed: &mut [CandidateMutant],
+    next_probe: &mut u64,
+) -> (
+    Vec<crate::go_instrumenter::GoEdit>,
+    BTreeMap<u64, ValueSite>,
+) {
+    use crate::jvm_mutants::ProbeKind;
+    let mut edits = Vec::new();
+    let mut sites = BTreeMap::new();
+    for mutant in mutants {
+        let Some(probe) = &mutant.probe else {
+            continue;
+        };
+        *next_probe += 1;
+        let slot = *next_probe;
+        let site = site_id(file, source, probe);
+        for (at, rank, text) in &probe.edits {
+            edits.push(crate::go_instrumenter::GoEdit {
+                at: *at,
+                rank: *rank,
+                text: text.replace('\u{2}', &slot.to_string()),
+            });
+        }
+        for (other, link) in mutants.iter().zip(listed.iter_mut()) {
+            if other.range != probe.span {
+                continue;
+            }
+            let linked = match probe.kind {
+                ProbeKind::Compare => {
+                    matches!(
+                        other.mutator,
+                        crate::jvm_mutants::Mutator::ConditionalsBoundary
+                            | crate::jvm_mutants::Mutator::NegateConditionals
+                    ) && {
+                        link.compare = Some(site.clone());
+                        true
+                    }
+                }
+                ProbeKind::Operation => {
+                    std::ptr::eq(other, mutant) && {
+                        link.probe = Some(site.clone());
+                        true
+                    }
+                }
+                ProbeKind::Return => {
+                    is_return(other.mutator) && {
+                        link.probe = Some(site.clone());
+                        true
+                    }
+                }
+            };
+            let _ = linked;
+        }
+        sites.insert(
+            slot,
+            ValueSite {
+                site,
+                kind: probe.kind,
+            },
+        );
+    }
+    (edits, sites)
 }
 
 /// One file's mutants, with the ids of its points.
@@ -98,7 +227,10 @@ fn innermost(
         .map(|(id, ..)| id.clone())
 }
 
-fn candidate(mutant: &JvmMutant, spans: &[(String, PointKind, usize, usize)]) -> CandidateMutant {
+pub(crate) fn candidate(
+    mutant: &JvmMutant,
+    spans: &[(String, PointKind, usize, usize)],
+) -> CandidateMutant {
     CandidateMutant {
         id: String::new(),
         mutator: mutant.mutator.name().to_owned(),

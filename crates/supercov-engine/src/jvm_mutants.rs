@@ -202,7 +202,41 @@ pub struct JvmMutant {
     /// instruction on the line of the statement or call it belongs to, which
     /// need not be the operator's.
     pub lines: (u32, u32),
+    /// The weak-mutation probe that records what decides whether the
+    /// mutant's value differs, where one can be placed without changing
+    /// what compiles (`jvm_strong::probe_edits`).
+    pub probe: Option<ValueProbe>,
 }
+
+/// What a value probe records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProbeKind {
+    /// A relational comparison's operands: `lt`, `eq`, `gt`, `unordered`.
+    Compare,
+    /// An operation and the mutant's beside it: `same`, `differs`.
+    Operation,
+    /// A returned value: what it is, as the return mutants replace it.
+    Return,
+}
+
+/// A probe around a mutant's code: insertions only, so it composes with the
+/// coverage probes; `\u{2}` stands for its slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueProbe {
+    pub kind: ProbeKind,
+    pub span: Range,
+    /// (offset, rank, text), ranked as `jvm_instrumenter`'s edits are.
+    pub edits: Vec<(usize, i32, String)>,
+}
+
+/// The rank of a probe's opening at its span's start: inside the coverage
+/// probes' wrappers (5, 20), and the shorter span inside the longer.
+fn opening_rank(span: Range) -> i32 {
+    30 + (1_000_000 - (span.1 - span.0).min(999_999) as i32)
+}
+
+/// The runtime class a probe calls.
+const PROBES: &str = "com.supercorp.supercov.Supercov";
 
 // --- Types -----------------------------------------------------------------
 
@@ -1166,6 +1200,7 @@ impl<'a> Enumerator<'a> {
             class: self.class_name(),
             key,
             lines,
+            probe: None,
         });
     }
 
@@ -1989,6 +2024,14 @@ impl Enumerator<'_> {
             }
         }
         let method_name = method.name.clone();
+        let cast = match (&returns, self.language) {
+            (Ty::Prim(prim @ (Prim::Byte | Prim::Short | Prim::Char)), JvmLanguage::Java) => {
+                Some(prim.java())
+            }
+            _ => None,
+        };
+        let probe = return_probe(range, cast);
+        let before = self.mutants.len();
         for value_replacement in replacements {
             self.push(
                 value_replacement.mutator(),
@@ -2005,6 +2048,12 @@ impl Enumerator<'_> {
                 method_name.clone(),
                 lines,
             );
+        }
+        // One probe serves every return mutant of the value.
+        if self.mutants.len() > before
+            && let Some(first) = self.mutants.get_mut(before)
+        {
+            first.probe = Some(probe);
         }
     }
 
@@ -2480,6 +2529,17 @@ impl Enumerator<'_> {
         let (operator_range, _) = operator_range(node, left, right, self.source);
         let replacement = self.spliced(range, operator_range, to);
         let lines = (self.line(range.0), self.line(range.1));
+        let before = self.mutants.len();
+        let probe = self.binary_probe_safe(left, right, operator).then(|| {
+            binary_probe(
+                ProbeKind::Compare,
+                &format!("w{helper}"),
+                range,
+                left,
+                operator_range,
+                right,
+            )
+        });
         self.push(
             Mutator::ConditionalsBoundary,
             to,
@@ -2498,6 +2558,7 @@ impl Enumerator<'_> {
             String::new(),
             lines,
         );
+        self.attach(before, probe);
     }
 
     fn arith(
@@ -2521,6 +2582,17 @@ impl Enumerator<'_> {
         };
         let replacement = self.spliced(range, operator_range, written_to);
         let lines = (self.line(range.0), self.line(range.1));
+        let before = self.mutants.len();
+        let probe = self.binary_probe_safe(left, right, operator).then(|| {
+            binary_probe(
+                ProbeKind::Operation,
+                &format!("w{helper}"),
+                range,
+                left,
+                operator_range,
+                right,
+            )
+        });
         let from = match operator {
             "and" => "&",
             "or" => "|",
@@ -2548,11 +2620,78 @@ impl Enumerator<'_> {
             format!("{from}>{to}"),
             lines,
         );
+        self.attach(before, probe);
+    }
+
+    /// Gives the mutant `push` just added its probe.
+    fn attach(&mut self, before: usize, probe: Option<ValueProbe>) {
+        if self.mutants.len() > before
+            && let Some(mutant) = self.mutants.last_mut()
+        {
+            mutant.probe = probe;
+        }
+    }
+
+    /// Whether a probe call in place of this operator compiles exactly
+    /// where the operator did: Java's operators other than `+` take only
+    /// numbers (and booleans, which the helpers take too); a `+` and every
+    /// Kotlin operator only where both operands' types are known primitives
+    /// the helpers take, the same type in Kotlin, which does not widen.
+    fn binary_probe_safe(&self, left: Node, right: Node, operator: &str) -> bool {
+        match self.language {
+            JvmLanguage::Java => {
+                operator != "+"
+                    || [left, right].iter().all(|side| {
+                        self.java_type_of(*side)
+                            .prim()
+                            .is_some_and(|prim| prim.numeric())
+                    })
+            }
+            JvmLanguage::Kotlin => {
+                let (Ty::Prim(a), Ty::Prim(b)) =
+                    (self.kotlin_type_of(left), self.kotlin_type_of(right))
+                else {
+                    return false;
+                };
+                let shift = matches!(operator, "shl" | "shr" | "ushr");
+                let logical = matches!(operator, "and" | "or" | "xor");
+                let wide = matches!(a, Prim::Int | Prim::Long | Prim::Float | Prim::Double);
+                if shift {
+                    matches!(a, Prim::Int | Prim::Long) && b == Prim::Int
+                } else if logical {
+                    a == b && matches!(a, Prim::Int | Prim::Long | Prim::Boolean)
+                } else {
+                    a == b && wide
+                }
+            }
+        }
     }
 
     fn invert(&mut self, node: Node, operand: Node) {
         let range = (node.start_byte(), node.end_byte());
         let lines = (self.line(range.0), self.line(range.1));
+        let before = self.mutants.len();
+        let safe = match self.language {
+            JvmLanguage::Java => true,
+            JvmLanguage::Kotlin => matches!(
+                self.kotlin_type_of(operand),
+                Ty::Prim(Prim::Int | Prim::Long | Prim::Float | Prim::Double)
+            ),
+        };
+        let minus = (range.0, operand.start_byte());
+        let probe = safe.then(|| ValueProbe {
+            kind: ProbeKind::Operation,
+            span: range,
+            edits: vec![
+                (
+                    minus.0,
+                    opening_rank(range),
+                    format!("{PROBES}.wneg(\u{2}, /*"),
+                ),
+                (minus.1, 10, "*/".to_owned()),
+                (operand.end_byte(), 10, ")".to_owned()),
+            ],
+        });
         self.push(
             Mutator::InvertNegs,
             "removed",
@@ -2568,6 +2707,7 @@ impl Enumerator<'_> {
             String::new(),
             lines,
         );
+        self.attach(before, probe);
     }
 }
 
@@ -2584,6 +2724,46 @@ fn in_resource_try(node: Node) -> bool {
         }
     }
     false
+}
+
+/// A probe in place of a binary operator: `helper(slot, left /*op*/, right)`,
+/// the operator kept in a comment so that nothing is taken out of the
+/// source and the probe composes with the coverage probes' insertions.
+fn binary_probe(
+    kind: ProbeKind,
+    helper: &str,
+    range: Range,
+    left: Node,
+    operator: Range,
+    right: Node,
+) -> ValueProbe {
+    ValueProbe {
+        kind,
+        span: range,
+        edits: vec![
+            (
+                left.start_byte(),
+                opening_rank(range),
+                format!("{PROBES}.{helper}(\u{2}, "),
+            ),
+            (operator.0, opening_rank(range), "/*".to_owned()),
+            (operator.1, 10, "*/,".to_owned()),
+            (right.end_byte(), 10, ")".to_owned()),
+        ],
+    }
+}
+
+/// A probe around a returned value: outside every coverage wrapper of it.
+fn return_probe(range: Range, cast: Option<&str>) -> ValueProbe {
+    let (open, close) = match cast {
+        Some(cast) => (format!("(({cast}) {PROBES}.wr(\u{2}, "), "))".to_owned()),
+        None => (format!("{PROBES}.wr(\u{2}, "), ")".to_owned()),
+    };
+    ValueProbe {
+        kind: ProbeKind::Return,
+        span: range,
+        edits: vec![(range.0, 1, open), (range.1, 40, close)],
+    }
 }
 
 /// How a returned value ends, as javac lays it out.
@@ -4260,6 +4440,14 @@ impl Enumerator<'_> {
             }
         }
         let method_name = method.name.clone();
+        let cast = match (&returns, self.language) {
+            (Ty::Prim(prim @ (Prim::Byte | Prim::Short | Prim::Char)), JvmLanguage::Java) => {
+                Some(prim.java())
+            }
+            _ => None,
+        };
+        let probe = return_probe(range, cast);
+        let before = self.mutants.len();
         for replacement in replacements {
             self.push(
                 replacement.mutator(),
@@ -4276,6 +4464,12 @@ impl Enumerator<'_> {
                 method_name.clone(),
                 lines,
             );
+        }
+        // One probe serves every return mutant of the value.
+        if self.mutants.len() > before
+            && let Some(first) = self.mutants.get_mut(before)
+        {
+            first.probe = Some(probe);
         }
     }
 

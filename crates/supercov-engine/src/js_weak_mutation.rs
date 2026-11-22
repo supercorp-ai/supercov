@@ -214,6 +214,9 @@ fn operands(mutant: &CandidateMutant) -> Option<(&str, String, String)> {
 }
 
 fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    if let Some(decided) = pit_mutator(mutant, records) {
+        return decided;
+    }
     if let Some(unreached) = reach(mutant, records) {
         return unreached;
     }
@@ -257,6 +260,135 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             format!("no rule decides {other} mutants yet"),
         ),
     }
+}
+
+/// PIT's mutators (`jvm_mutants`), decided by their value probes where the
+/// run placed one, and by reach otherwise. `None` for another mutator.
+fn pit_mutator(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Reason)> {
+    let name = mutant.mutator.as_str();
+    let returns = matches!(
+        name,
+        "PrimitiveReturns"
+            | "BooleanTrueReturnVals"
+            | "BooleanFalseReturnVals"
+            | "NullReturnVals"
+            | "EmptyObjectReturnVals"
+    );
+    if !returns
+        && !matches!(
+            name,
+            "ConditionalsBoundary"
+                | "NegateConditionals"
+                | "Math"
+                | "Increments"
+                | "InvertNegs"
+                | "VoidMethodCall"
+        )
+    {
+        return None;
+    }
+    // A probe that was placed and recorded nothing says its code never ran:
+    // that holds where no statement point does (a Kotlin expression body).
+    let site = mutant.compare.as_ref().or(mutant.probe.as_ref());
+    if let Some(site) = site {
+        let Some(outcomes) = records.comparisons(site) else {
+            return Some(verdict_of(
+                Status::NotReached,
+                "not-evaluated",
+                "the mutated code never ran",
+            ));
+        };
+        let only = |allowed: &[&str]| {
+            outcomes
+                .iter()
+                .all(|outcome| allowed.contains(&outcome.as_str()))
+        };
+        return Some(match name {
+            "ConditionalsBoundary" => {
+                if outcomes.contains("eq") {
+                    verdict_of(INFECTED, "operands-equal", "the operands were equal")
+                } else if only(&["lt", "gt", "unordered"]) {
+                    let shown = operands(mutant)
+                        .map(|(_, left, right)| format!("{left} never equal to {right}"))
+                        .unwrap_or_else(|| "the operands were never equal".to_owned());
+                    verdict_of(Status::NotInfected, "operands-never-equal", shown)
+                } else {
+                    verdict_of(
+                        Status::Unknown,
+                        "unrecorded-outcome",
+                        "outcomes the probe does not name",
+                    )
+                }
+            }
+            "NegateConditionals" => {
+                verdict_of(INFECTED, "condition-evaluated", "the condition ran")
+            }
+            _ if returns => {
+                let same: &[&str] = match (name, mutant.replacement.as_str()) {
+                    ("PrimitiveReturns", _) => &["zero"],
+                    ("BooleanTrueReturnVals", _) => &["true", "boolean-true"],
+                    ("BooleanFalseReturnVals", _) => &["false", "boolean-false"],
+                    ("NullReturnVals", _) => &["null"],
+                    (_, "\"\"") => &["empty-string"],
+                    (_, "emptyList") => &["empty-list"],
+                    (_, "emptySet") => &["empty-set"],
+                    (_, "emptyMap") => &["empty-map"],
+                    (_, "Optional.empty") => &["empty-optional"],
+                    (_, "0") => &["boxed-zero"],
+                    _ => &[],
+                };
+                if only(same) {
+                    verdict_of(
+                        Status::NotInfected,
+                        "returned-replacement",
+                        format!(
+                            "every evaluation returned {} already",
+                            mutant.replacement.trim_matches('"').replace("\"\"", "\"\"")
+                        ),
+                    )
+                } else {
+                    verdict_of(INFECTED, "returned-other", "it returned another value")
+                }
+            }
+            _ => {
+                if outcomes.contains("differs") {
+                    verdict_of(INFECTED, "value-differs", "the mutant's value differed")
+                } else if only(&["same"]) {
+                    verdict_of(
+                        Status::NotInfected,
+                        "value-same",
+                        "the mutant's value was the original's at every evaluation",
+                    )
+                } else {
+                    verdict_of(
+                        Status::Unknown,
+                        "unrecorded-outcome",
+                        "outcomes the probe does not name",
+                    )
+                }
+            }
+        });
+    }
+    if let Some(unreached) = reach(mutant, records) {
+        return Some(unreached);
+    }
+    Some(match name {
+        "Increments" | "NegateConditionals" => verdict_of(
+            INFECTED,
+            "reached",
+            "the code ran, and this replacement differs wherever it is evaluated",
+        ),
+        "VoidMethodCall" => verdict_of(
+            PROXY,
+            "statement-ran",
+            "the call ran (a proxy: removing it may change nothing)",
+        ),
+        _ => verdict_of(
+            Status::Unknown,
+            "no-probe",
+            "no probe recorded its operands",
+        ),
+    })
 }
 
 /// Whether the mutated code ran: its statement, and its function where the
