@@ -134,3 +134,25 @@ pub fn path_cut_short() -> u8 {
 pub fn empty_cfg() -> u8 {
     1 + 1
 }
+
+const _: () = assert!(LIMIT > 1 + 1);
+
+pub const LIMIT: u32 = 3;
+
+pub struct Limited;
+
+impl Limited {
+    const LIMIT: u32 = 1 + 0;
+
+    pub fn limit() -> u32 {
+        Self::LIMIT * 2
+    }
+}
+
+pub fn count() -> u32 {
+    let mut seen = 0;
+    for _ in 0..LIMIT {
+        seen += 1;
+    }
+    seen
+}

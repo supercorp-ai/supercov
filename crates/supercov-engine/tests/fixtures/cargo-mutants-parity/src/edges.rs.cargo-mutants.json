@@ -68,6 +68,16 @@
   {"file":"src/edges.rs","genre":"FnValue","start":[135,5],"end":[135,10],"replacement":"0"},
   {"file":"src/edges.rs","genre":"FnValue","start":[135,5],"end":[135,10],"replacement":"1"},
   {"file":"src/edges.rs","genre":"BinaryOperator","start":[135,7],"end":[135,8],"replacement":"-"},
-  {"file":"src/edges.rs","genre":"BinaryOperator","start":[135,7],"end":[135,8],"replacement":"*"}
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[135,7],"end":[135,8],"replacement":"*"},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[145,26],"end":[145,27],"replacement":"-"},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[145,26],"end":[145,27],"replacement":"*"},
+  {"file":"src/edges.rs","genre":"FnValue","start":[148,9],"end":[148,24],"replacement":"0"},
+  {"file":"src/edges.rs","genre":"FnValue","start":[148,9],"end":[148,24],"replacement":"1"},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[148,21],"end":[148,22],"replacement":"+"},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[148,21],"end":[148,22],"replacement":"/"},
+  {"file":"src/edges.rs","genre":"FnValue","start":[153,5],"end":[157,9],"replacement":"0"},
+  {"file":"src/edges.rs","genre":"FnValue","start":[153,5],"end":[157,9],"replacement":"1"},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[155,14],"end":[155,16],"replacement":"-="},
+  {"file":"src/edges.rs","genre":"BinaryOperator","start":[155,14],"end":[155,16],"replacement":"*="}
 ]
 }
