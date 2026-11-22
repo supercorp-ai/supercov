@@ -136,6 +136,39 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
         .supercov(&["runs", "latest", "mutants", "test", "--json"])
         .json();
     assert_eq!(again["summary"]["ran"], 0, "{again}");
+
+    // Measured with the value probes, the run says which mutants its values
+    // infect: `is_big` saw 11 and 3, never 10, so `>` to `>=` gives the same
+    // value at every evaluation, and `>` to `==` does not.
+    project
+        .supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let probed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        probed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {probed}"))["status"]
+            .clone()
+    };
+    assert_eq!(
+        status("src/lib.rs:9:11-9:12:BinaryOperator:>="),
+        "not-infected"
+    );
+    assert_eq!(status("src/lib.rs:9:11-9:12:BinaryOperator:=="), "infected");
+    // `value * 2` with 2: `*` to `+` gives the same, `/` does not.
+    assert_eq!(
+        status("src/lib.rs:5:11-5:12:BinaryOperator:+"),
+        "not-infected"
+    );
+    assert_eq!(status("src/lib.rs:5:11-5:12:BinaryOperator:/"), "infected");
+    // `is_big` returned both: whichever value replaces its body differs.
+    assert_eq!(status("src/lib.rs:9:5-9:15:FnValue:true"), "infected");
+    assert_eq!(status("src/lib.rs:13:5-13:14:FnValue:0"), "not-reached");
 }
 
 /// Under `cargo nextest run` each test runs through nextest with the
