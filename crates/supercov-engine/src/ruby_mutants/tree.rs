@@ -1247,11 +1247,21 @@ impl<'s> Converter<'s> {
             Node::AssocNode { .. } => {
                 let assoc = value.as_assoc_node().expect("pair");
                 let key = assoc.key();
-                if let Some(implicit) = assoc.value().as_implicit_node() {
-                    let _ = implicit;
-                    return self.unsupported("a hash shorthand", &location);
-                }
-                let value_node = self.convert(&assoc.value())?;
+                // `{x:}`: the value is the local, the method or the constant
+                // the key names, and has no text of its own.
+                let shorthand = assoc.value().as_implicit_node().is_some();
+                let value_node = match assoc.value().as_implicit_node() {
+                    Some(implicit) => {
+                        let mut converted = (*self.convert(&implicit.value())?).clone();
+                        converted.span = key
+                            .as_symbol_node()
+                            .and_then(|symbol| symbol.value_loc())
+                            .map(|loc| span(&loc));
+                        converted.syntax |= syntax::WORD;
+                        Rc::new(converted)
+                    }
+                    None => self.convert(&assoc.value())?,
+                };
                 let label = assoc.operator_loc().is_none();
                 let key_node = self.convert(&key)?;
                 let key_node = match (
@@ -1266,6 +1276,13 @@ impl<'s> Converter<'s> {
                     }
                     (true, None) => marked(key_node, syntax::LABEL),
                     _ => key_node,
+                };
+                // A shorthand's key is its value's name too: neither is
+                // written apart, so a change to either rewrites the pair.
+                let key_node = if shorthand {
+                    marked(key_node, syntax::WORD)
+                } else {
+                    key_node
                 };
                 Ok(made_with(
                     "pair",

@@ -57,3 +57,9 @@ class Sends
     end
   end
 end
+
+class Shorthand
+  def build(name, value)
+    pair(name:, value:)
+  end
+end

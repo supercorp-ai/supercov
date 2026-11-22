@@ -5022,6 +5022,144 @@
           "replacement": "(yield (lvar :left) (lvar :right))"
         }
       ]
+    },
+    {
+      "subject": "build:62",
+      "sexp": "(def :build (args (arg :name) (arg :value)) (send nil :pair (kwargs (pair (sym :name) (lvar :name)) (pair (sym :value) (lvar :value)))))",
+      "mutants": [
+        {
+          "start": [
+            63,
+            5
+          ],
+          "end": [
+            63,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            63,
+            5
+          ],
+          "end": [
+            63,
+            24
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            63,
+            5
+          ],
+          "end": [
+            63,
+            24
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            63,
+            5
+          ],
+          "end": [
+            63,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            63,
+            5
+          ],
+          "end": [
+            63,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send nil :pair)"
+        },
+        {
+          "start": [
+            63,
+            10
+          ],
+          "end": [
+            63,
+            23
+          ],
+          "node": "kwargs",
+          "replacement": "(kwargs (pair (sym :value) (lvar :value)))"
+        },
+        {
+          "start": [
+            63,
+            10
+          ],
+          "end": [
+            63,
+            23
+          ],
+          "node": "kwargs",
+          "replacement": "(kwargs (pair (sym :name) (lvar :name)))"
+        },
+        {
+          "start": [
+            63,
+            10
+          ],
+          "end": [
+            63,
+            14
+          ],
+          "node": "sym",
+          "replacement": "(sym :name__mutant__)"
+        },
+        {
+          "start": [
+            63,
+            10
+          ],
+          "end": [
+            63,
+            14
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            63,
+            17
+          ],
+          "end": [
+            63,
+            22
+          ],
+          "node": "sym",
+          "replacement": "(sym :value__mutant__)"
+        },
+        {
+          "start": [
+            63,
+            17
+          ],
+          "end": [
+            63,
+            22
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        }
+      ]
     }
   ]
 }
