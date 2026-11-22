@@ -1783,7 +1783,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
             overturned += 1;
             // A copy of the whole file runs again, past what fails without
-            // the mutant; a copy of some tests runs the file whole.
+            // the mutant; a copy of some tests runs the file whole, once its
+            // whole baseline is known.
+            if (!whole)
+                need(group.file, "whole");
             job.chain.unshift(whole ? group : { file: group.file, tests: [], cost: group.cost, whole: true });
         };
         const recordCheck = (check, outcome) => {
@@ -1939,9 +1942,20 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         observeRun = undefined;
         // Whatever the run left undecided (its slots ran out): an error,
         // which the next `mutants test` runs again.
-        for (const job of pending)
-            if (!job.done)
-                finishC(job, { status: "error", reason: "the pass ended before its files ran" });
+        for (const job of pending) {
+            if (job.done)
+                continue;
+            // What it was waiting for, for the pass summary.
+            if ((profile.left ??= []).length < 20)
+                profile.left.push({
+                    id: job.mutant.id,
+                    open: job.open,
+                    confirming: job.confirmingKills,
+                    chain: job.chain.map((group) => ({ file: group.file, shape: shapeOf(group), baseline: baseOf(group.file)[shapeOf(group)].state, class: classOf.has(group.file) })),
+                    checks: checks.filter((check) => check.jobs?.some((waiting) => waiting.job === job)).map((check) => ({ file: check.file, running: check.running, tries: check.tries })),
+                });
+            finishC(job, { status: "error", reason: "the pass ended before its files ran" });
+        }
     }
     const continuous = spawnerInstalled && !oneAtATime && Number(String(vitest.version ?? "0").split(".")[0]) >= 4 &&
         process.env["SUPERCOV_STRONG_STAGES"] !== "1";

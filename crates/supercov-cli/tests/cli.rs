@@ -22725,6 +22725,54 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     assert_eq!(never["strong"]["status"], "killed", "{never}");
 }
 
+/// The same, where no mutant of module-level code has the file run whole
+/// already: a kill a test left out caused is overturned, and the mutant runs
+/// the file whole once its whole baseline, run for it, is known.
+#[cfg(unix)]
+#[test]
+fn an_overturned_kill_runs_its_file_whole_after_its_whole_baseline() {
+    let project = vitest_mutants_project("strong-overturn-whole");
+    project.write(
+        "src/items.js",
+        "const state = {};\nexport function register(item) {\n  if (item) (state.items ??= []).push(item);\n}\nexport function count() {\n  const items = state.items ?? [];\n  return items.length > 0 ? items.length : 0;\n}\n",
+    );
+    project.write(
+        "test/items.test.js",
+        "import { expect, it } from \"vitest\";\nimport { count, register } from \"../src/items.js\";\nit(\"registers\", () => register(\"a\"));\nit(\"counts what was registered\", () => expect(count()).toBe(1));\n",
+    );
+    project.commit("items");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(
+        reply["passes"][0]["overturned"].as_u64().unwrap_or(0) > 0,
+        "{reply}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/items.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let equal = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:7:") && id.contains(":EqualityOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+}
+
 /// A mutant that makes work a test left running loop forever (a timer that
 /// fires after the test passed): its evaluations pass the limit outside any
 /// test, and the mutant is a timeout, not a survivor.
