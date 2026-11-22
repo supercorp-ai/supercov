@@ -304,11 +304,18 @@ time as Supercov reports it and the whole run's:
 
 | Project | without probes | with probes | tests' time | whole run |
 | --- | --- | --- | --- | --- |
-| dry-inflector | 988 ms / 1.37 s | 1,098 ms / 1.56 s | 1.11× | 1.13× |
-| dotenv | 826 ms / 0.90 s | 916 ms / 1.00 s | 1.11× | 1.11× |
-| erubi | 262 ms / 0.33 s | 292 ms / 0.38 s | 1.12× | 1.15× |
-| ostruct | 296 ms / 0.33 s | 302 ms / 0.34 s | 1.02× | 1.03× |
+| dry-inflector | 876 ms / 1.26 s | 987 ms / 1.43 s | 1.13× | 1.14× |
+| dotenv | 836 ms / 0.91 s | 866 ms / 0.96 s | 1.04× | 1.06× |
+| erubi | 268 ms / 0.34 s | 302 ms / 0.39 s | 1.13× | 1.16× |
+| ostruct | 284 ms / 0.32 s | 295 ms / 0.33 s | 1.04× | 1.04× |
 | json_test_data | 312 ms / 0.35 s | 312 ms / 0.35 s | 1.00× | 1.02× |
+
+Records are checksummed with zlib's CRC-32 (transport version 2), loaded
+from Ruby's own extension directory, where they were checksummed with
+FNV-1a byte by byte in Ruby (version 1, still written where zlib cannot be
+loaded without activating a zlib gem the project's lockfile names): that
+made dry-inflector's measured run 11 % faster with probes and without, so
+its ratio stayed where it was.
 
 Before the changes in "What the probes cost", dry-inflector's tests took
 1.43 times as long with probes and erubi's 1.50. What is left is each
@@ -351,7 +358,6 @@ Disagreements found on the way, each applied by hand and fixed:
 - The test-unit and Cucumber drivers have run under test-unit 3.7 and
   Cucumber 12 only. The Cucumber one uses cucumber-core's filters and event
   bus, which releases before 3 do not have.
-- The value probes cost erubi's tests 1.12 times their time without them
-  and dry-inflector's 1.11, past the 1.1 aimed for: each test's first evaluations of each probe
-  still compare, and each record is framed with a checksum computed in Ruby
-  byte by byte.
+- The value probes cost erubi's and dry-inflector's tests 1.13 times their
+  time without them, past the 1.1 aimed for: each test's first evaluations
+  of each probe still compare its mutants' values.
