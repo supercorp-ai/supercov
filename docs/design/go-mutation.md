@@ -100,6 +100,15 @@ an element at a name or a literal). Floating-point operations are not
 probed: `-0` and `+0` compare equal and a program can tell them apart. A
 mutant no evaluation gave another value is `not-infected`.
 
+A comparison whose operand is worked out from a clock or random reading in
+its function (`Now()`, `UnixNano()`, `Since(`, `Until(`, `rand.`, or a name
+an assignment there gives such a value, as far as assignments carry it)
+gets an `untestable` note (`clock` or `random`). One run's values never
+being equal says nothing of the next run's: uuid's `if now <= lastV7time`
+(`now` from `timeNow().UnixNano()`) never saw equal operands in the measured
+run, and its `<` mutant fails the suite 10 times in 10. A `not-infected`
+mutant with such a note is still a strong candidate and runs.
+
 ## Which mutants compile
 
 A Go mutant can fail to compile: `+` of strings has no `-`, `continue` needs

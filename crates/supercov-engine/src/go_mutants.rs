@@ -415,6 +415,72 @@ pub fn comparison_site(file: &str, source: &str, operator: usize) -> String {
     format!("{file}:{line}:{column}")
 }
 
+/// Whether a comparison's operands are worked out from a clock reading
+/// (`Now()`, `UnixNano()`, `Since(`, `Until(`) or a random one (`rand.`),
+/// in the function around it: either directly, or through the names its
+/// assignments give them, as far as they go (`nano := timeNow().UnixNano()`,
+/// `now := nano >> 8`, `last = now`). `clock`, `random`, or none.
+fn reading(node: Node, source: &str) -> Option<&'static str> {
+    let function = std::iter::successors(node.parent(), Node::parent)
+        .find(|ancestor| function_point(*ancestor))?;
+    let mut assignments = Vec::new();
+    collect_assignments(function, source, &mut assignments);
+    let operands = &source[node.byte_range()];
+    [
+        ("clock", &["Now()", "UnixNano()", "Since(", "Until("][..]),
+        ("random", &["rand."][..]),
+    ]
+    .into_iter()
+    .find(|(_, seeds)| {
+        let seeded = |text: &str| seeds.iter().any(|seed| text.contains(seed));
+        let mut tainted = std::collections::BTreeSet::<String>::new();
+        // Each round taints the names a tainted value is assigned to; a
+        // round that adds none is the last.
+        while {
+            let reached = assignments
+                .iter()
+                .filter(|(_, value)| seeded(value) || mentions(value, &tainted))
+                .flat_map(|(names, _)| names.iter().cloned())
+                .collect::<Vec<_>>();
+            let before = tainted.len();
+            tainted.extend(reached);
+            tainted.len() > before
+        } {}
+        seeded(operands) || mentions(operands, &tainted)
+    })
+    .map(|(rule, _)| rule)
+}
+
+/// Each assignment and short declaration in `node`: its names and its
+/// values' text.
+fn collect_assignments(node: Node, source: &str, found: &mut Vec<(Vec<String>, String)>) {
+    if matches!(
+        node.kind(),
+        "assignment_statement" | "short_var_declaration"
+    ) {
+        let names = field(node, "left")
+            .named_children(&mut node.walk())
+            .map(|name| source[name.byte_range()].to_owned())
+            .collect();
+        found.push((names, source[field(node, "right").byte_range()].to_owned()));
+    }
+    node.named_children(&mut node.walk())
+        .for_each(|child| collect_assignments(child, source, found));
+}
+
+fn field<'t>(node: Node<'t>, name: &str) -> Node<'t> {
+    node.child_by_field_name(name)
+        .expect("a parsed node has its field")
+}
+
+/// Whether `text` names any of `names` as a whole word.
+fn mentions(text: &str, names: &std::collections::BTreeSet<String>) -> bool {
+    let words = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .collect::<std::collections::HashSet<_>>();
+    names.iter().any(|name| words.contains(name.as_str()))
+}
+
 /// Whether coverage gives this node a statement point: a statement in a
 /// statement list (`go_instrumenter`'s rule).
 fn statement_point(node: Node) -> bool {
@@ -503,6 +569,17 @@ pub(crate) fn candidates_of(
         // An operation's probe, where the run put one there: its swap's
         // value at `#0`, a removed self-assignment's at `#1`.
         let operation = probed_here.filter(|_| !relational);
+        // A comparison of a clock or random reading: this run's values never
+        // being equal says nothing of the next run's.
+        let untestable = relational
+            .then(|| reading(node, source))
+            .flatten()
+            .map(|rule| crate::js_mutant_links::StaticNote {
+                rule: rule.to_owned(),
+                reason: format!(
+                    "an operand is worked out from a {rule} reading in its function: another run's values may meet where this run's did not"
+                ),
+            });
         let original = source[site.node.0..site.node.1].to_owned();
         let start = position(source, site.token.0);
         let end = position(source, site.token.1);
@@ -539,7 +616,7 @@ pub(crate) fn candidates_of(
                         ),
                     }
                 }),
-                untestable: None,
+                untestable: untestable.clone(),
                 is_static: false,
                 unplaceable: None,
             });
@@ -610,6 +687,30 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn comparisons_of_clock_or_random_readings_are_untestable() {
+        let source = "package p\n\nvar limit = 3 < 4\n\nfunc f(last int64, n int) bool {\n\tnano := timeNow().UnixNano()\n\tnow := nano >> 8\n\tvar seen int64\n\tseen = now\n\tif seen <= last {\n\t\treturn true\n\t}\n\tif rand.Intn(9) > n {\n\t\treturn false\n\t}\n\treturn n < 2\n}\n";
+        let rules = candidate_mutants("a.go", source)
+            .unwrap()
+            .into_iter()
+            .filter(|mutant| {
+                let operator = mutant.operator.as_ref().map_or("", |op| op.text.as_str());
+                gremlins_name(&mutant.mutator, operator, &mutant.replacement)
+                    == "CONDITIONALS_BOUNDARY"
+            })
+            .map(|mutant| (mutant.start.0, mutant.untestable.map(|note| note.rule)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rules,
+            [
+                (3, None),
+                (10, Some("clock".to_owned())),
+                (13, Some("random".to_owned())),
+                (16, None),
+            ]
+        );
     }
 
     #[test]
