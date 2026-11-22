@@ -2790,6 +2790,19 @@ mod tests {
         let place = format!("fs.create_dir_all#rust_strong.rs:{metadata}");
         let failed = crate::fault::during(&place, || run_strong_rust(&request, &mut Vec::new()));
         assert!(failed.is_err(), "{place}: {failed:?}");
+        // The build of a mutant on its own (the constant's) that nextest
+        // cannot list ends the pass too.
+        let command = request.command.clone();
+        request.command[0] = script(
+            &root.join("bin/plain-unlisted/cargo"),
+            "if [ \"$1 $2\" = \"nextest list\" ]; then case \"$CARGO_TARGET_DIR\" in *plain-target*) echo plainly >&2; exit 1 ;; esac; fi\nexec cargo \"$@\"\n",
+        );
+        request.results = root.join("plain-unlisted.jsonl");
+        assert_eq!(
+            run_strong_rust(&request, &mut Vec::new()),
+            Err("cargo nextest list failed: plainly".into())
+        );
+        request.command = command;
         // A test that cannot be found when its mutant runs (after its
         // baseline) is passed over.
         request.command[0] = "cargo".into();
