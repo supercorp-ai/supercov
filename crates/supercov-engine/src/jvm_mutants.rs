@@ -540,12 +540,68 @@ impl ReturnValue {
 /// parameters, so that a call statement is known to call a `void` method.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectIndex {
-    /// Method name to each declaration's parameter count and whether it is
-    /// `void` (or `Unit`). `None` for a variable count (varargs).
-    methods: HashMap<String, Vec<(Option<usize>, bool)>>,
+    /// Method name to each declaration: its class's simple name, its
+    /// parameter count (`None` for a variable count: varargs, Kotlin
+    /// defaults), whether it returns nothing (`void`, `Unit`), and its
+    /// parameters' types as written.
+    methods: HashMap<String, Vec<Declared>>,
     /// Methods' declared return types by name, where every declaration
     /// agrees.
     returns: HashMap<String, Option<Ty>>,
+    /// The classes the project declares, by simple name.
+    classes: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Declared {
+    class: String,
+    arity: Option<usize>,
+    void: bool,
+    parameters: Vec<String>,
+}
+
+/// JDK types a call's receiver may be declared as, whose methods' results
+/// `known_void` knows: a project method of the same name says nothing of
+/// them.
+fn jdk_receiver(name: &str) -> bool {
+    matches!(
+        name,
+        "List"
+            | "ArrayList"
+            | "LinkedList"
+            | "Set"
+            | "HashSet"
+            | "LinkedHashSet"
+            | "TreeSet"
+            | "Map"
+            | "HashMap"
+            | "LinkedHashMap"
+            | "TreeMap"
+            | "Collection"
+            | "Deque"
+            | "ArrayDeque"
+            | "Queue"
+            | "StringBuilder"
+            | "StringBuffer"
+            | "Str"
+            | "Iterator"
+            | "Optional"
+            | "Stream"
+            | "MutableList"
+            | "MutableSet"
+            | "MutableMap"
+            | "SortedMap"
+            | "SortedSet"
+            | "NavigableMap"
+            | "EnumMap"
+            | "Appendable"
+            | "Writer"
+            | "PrintStream"
+            | "PrintWriter"
+            | "OutputStream"
+            | "InputStream"
+            | "Reader"
+    )
 }
 
 impl ProjectIndex {
@@ -561,12 +617,12 @@ impl ProjectIndex {
             let Ok(tree) = crate::jvm_instrumenter::parse(source, language) else {
                 continue;
             };
-            index.add(tree.root_node(), source, language);
+            index.add(tree.root_node(), source, language, "");
         }
         index
     }
 
-    fn add(&mut self, node: Node, source: &str, language: JvmLanguage) {
+    fn add(&mut self, node: Node, source: &str, language: JvmLanguage, class: &str) {
         let declaration = match (language, node.kind()) {
             (JvmLanguage::Java, "method_declaration") => {
                 let name = node
@@ -575,10 +631,17 @@ impl ProjectIndex {
                 let ty = node
                     .child_by_field_name("type")
                     .map_or(Ty::Unknown, |ty| java_type(text(ty, source)));
-                let arity = node
-                    .child_by_field_name("parameters")
-                    .map(|parameters| java_arity(parameters));
-                name.map(|name| (name, arity.unwrap_or(Some(0)), ty))
+                let parameters = node.child_by_field_name("parameters");
+                let arity = parameters.map(|parameters| java_arity(parameters));
+                let types = parameters
+                    .map(|parameters| {
+                        named_children(parameters)
+                            .filter_map(|parameter| parameter.child_by_field_name("type"))
+                            .map(|ty| text(ty, source).to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                name.map(|name| (name, arity.unwrap_or(Some(0)), ty, types))
             }
             (JvmLanguage::Kotlin, "function_declaration") => {
                 let name = named_children(node)
@@ -586,31 +649,49 @@ impl ProjectIndex {
                     .map(|name| text(name, source));
                 let parameters =
                     named_children(node).find(|child| child.kind() == "function_value_parameters");
-                let arity = parameters.map_or(Some(0), |parameters| {
-                    let list = named_children(parameters)
-                        .filter(|child| child.kind() == "parameter")
-                        .collect::<Vec<_>>();
-                    // A parameter with a default may be left out, and a
-                    // `vararg` takes any number.
-                    if text(parameters, source).contains('=')
-                        || text(parameters, source).contains("vararg")
+                let list = parameters
+                    .map(|parameters| {
+                        named_children(parameters)
+                            .filter(|child| child.kind() == "parameter")
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                // A parameter with a default may be left out, and a
+                // `vararg` takes any number.
+                let arity = match parameters {
+                    Some(parameters)
+                        if text(parameters, source).contains('=')
+                            || text(parameters, source).contains("vararg") =>
                     {
                         None
-                    } else {
-                        Some(list.len())
                     }
-                });
+                    _ => Some(list.len()),
+                };
+                let types = list
+                    .iter()
+                    .map(|parameter| {
+                        named_children(*parameter)
+                            .find(|child| child.kind().ends_with("type"))
+                            .map(|ty| text(ty, source).to_owned())
+                            .unwrap_or_default()
+                    })
+                    .collect();
                 let ty = kotlin_declared_return(node, source);
-                name.map(|name| (name, arity, ty))
+                name.map(|name| (name, arity, ty, types))
             }
             _ => None,
         };
-        if let Some((name, arity, ty)) = declaration {
+        if let Some((name, arity, ty, parameters)) = declaration {
             let name = name.to_owned();
             self.methods
                 .entry(name.clone())
                 .or_default()
-                .push((arity, ty == Ty::Void));
+                .push(Declared {
+                    class: class.to_owned(),
+                    arity,
+                    void: ty == Ty::Void,
+                    parameters,
+                });
             match self.returns.get(&name) {
                 None => {
                     self.returns.insert(name, Some(ty));
@@ -621,30 +702,85 @@ impl ProjectIndex {
                 _ => {}
             }
         }
+        let inner = match node.kind() {
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "object_declaration" => {
+                let name = node
+                    .child_by_field_name("name")
+                    .or_else(|| named_children(node).find(|child| child.kind() == "identifier"))
+                    .map(|name| text(name, source).to_owned());
+                if let Some(name) = &name {
+                    self.classes.insert(name.clone());
+                }
+                name
+            }
+            _ => None,
+        };
+        let class = inner.as_deref().unwrap_or(class);
         for child in named_children(node) {
-            self.add(child, source, language);
+            self.add(child, source, language, class);
         }
     }
 
-    /// Whether a call of `name` with `arguments` arguments returns nothing:
+    /// Whether a call of `name` with `arguments` arguments, on a receiver of
+    /// the type named `receiver` where it is known, returns nothing:
     /// `Some` where the project declares the method, or the JDK's is known.
-    fn void_call(&self, name: &str, arguments: usize) -> Option<bool> {
+    fn void_call(&self, name: &str, arguments: usize, receiver: Option<&str>) -> Option<bool> {
+        if receiver.is_some_and(jdk_receiver) {
+            return known_void(name, arguments);
+        }
         if let Some(declarations) = self.methods.get(name) {
-            let matching = declarations
+            let fitting = declarations
                 .iter()
-                .filter(|(arity, _)| arity.is_none_or(|arity| arity == arguments))
+                .filter(|declared| declared.arity.is_none_or(|arity| arity == arguments))
                 .collect::<Vec<_>>();
+            // The receiver's own class's declarations, where it declares the
+            // method; any class's otherwise (an inherited method).
+            let own = fitting
+                .iter()
+                .copied()
+                .filter(|declared| receiver.is_some_and(|receiver| declared.class == receiver))
+                .collect::<Vec<_>>();
+            let matching = if own.is_empty() { fitting } else { own };
             if !matching.is_empty() {
-                if matching.iter().all(|(_, void)| *void) {
+                if matching.iter().all(|declared| declared.void) {
                     return Some(true);
                 }
-                if matching.iter().all(|(_, void)| !*void) {
+                if matching.iter().all(|declared| !declared.void) {
                     return Some(false);
                 }
                 return None;
             }
         }
         known_void(name, arguments)
+    }
+
+    /// The type a project method of this name declares for its parameter at
+    /// `position`, where every declaration of `arguments` parameters agrees.
+    fn parameter_type(&self, name: &str, arguments: usize, position: usize) -> Option<&str> {
+        let declarations = self.methods.get(name)?;
+        let mut found: Option<&str> = None;
+        // A lambda goes only where a functional interface is taken: an
+        // overload taking a `String` there is not the one called.
+        for declared in declarations
+            .iter()
+            .filter(|declared| declared.arity.is_none_or(|arity| arity == arguments))
+        {
+            let Some(ty) = declared.parameters.get(position).map(String::as_str) else {
+                continue;
+            };
+            if !names_functional_type(ty) {
+                continue;
+            }
+            match found {
+                Some(seen) if seen != ty => return None,
+                _ => found = Some(ty),
+            }
+        }
+        found
     }
 
     fn return_type(&self, name: &str) -> Option<&Ty> {
@@ -693,8 +829,9 @@ fn kotlin_declared_return(node: Node, source: &str) -> Ty {
 }
 
 /// Calls of library methods whose result is known: `Some(true)` for one that
-/// returns nothing. A statement calling anything else is taken to call a
-/// method that returns nothing, unless its name says it returns something.
+/// returns nothing. A statement calling any other method the project does
+/// not declare is taken to keep a result it discards: on the validation
+/// projects that guess matched PIT more often than the other.
 fn known_void(name: &str, arguments: usize) -> Option<bool> {
     const VOID: &[&str] = &[
         "println",
@@ -959,6 +1096,9 @@ struct Method {
     not_null: bool,
     /// Code that runs while the class initialises, which PIT does not mutate.
     static_init: bool,
+    /// A static field's initializer whose type names a functional
+    /// interface: a lambda in it runs later, when called, and PIT mutates it.
+    functional_field: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1601,11 +1741,19 @@ impl Enumerator<'_> {
                         .map(|name| text(name, self.source).to_owned())
                         .unwrap_or_default()
                 };
-                (name, *member)
+                let arity = member
+                    .child_by_field_name("parameters")
+                    .map_or(Some(0), java_arity);
+                (declaration_key(&name, arity), *member)
             })
             .collect::<Vec<_>>();
         let mut initializing = BTreeSet::new();
         let mut pending = Vec::new();
+        let class_name = self
+            .classes
+            .last()
+            .map(|class| class.name.clone())
+            .unwrap_or_default();
         for member in &members {
             let is_static_code = match member.kind() {
                 "static_initializer" => true,
@@ -1614,26 +1762,23 @@ impl Enumerator<'_> {
                 _ => false,
             };
             if is_static_code {
-                collect_calls(*member, self.source, &mut pending);
+                collect_calls_in(*member, self.source, &class_name, &mut pending);
                 if enumeration && member.kind() == "enum_constant" {
-                    pending.push("<init>".to_owned());
+                    let arguments = member
+                        .child_by_field_name("arguments")
+                        .map_or(0, |arguments| named_children(arguments).count());
+                    pending.push(format!("<init>/{arguments}"));
                 }
             }
         }
         while let Some(name) = pending.pop() {
-            if initializing.contains(&name) {
-                continue;
-            }
             let bodies = private
                 .iter()
-                .filter(|(private_name, _)| *private_name == name)
+                .filter(|(key, _)| calls_declaration(&name, key) && !initializing.contains(key))
                 .collect::<Vec<_>>();
-            if bodies.is_empty() {
-                continue;
-            }
-            initializing.insert(name.clone());
-            for (_, body) in bodies {
-                collect_calls(*body, self.source, &mut pending);
+            for (key, body) in bodies {
+                initializing.insert(key.clone());
+                collect_calls_in(*body, self.source, &class_name, &mut pending);
             }
         }
         if let Some(class) = self.classes.last_mut() {
@@ -1650,15 +1795,21 @@ impl Enumerator<'_> {
                         returns: None,
                         not_null: false,
                         static_init: is_static || static_context || enumeration,
+                        functional_field: is_static
+                            && member
+                                .child_by_field_name("type")
+                                .is_some_and(|ty| names_functional_type(text(ty, self.source))),
                     });
                     // An enum's instance fields are set in its constructor,
                     // which the static initializer calls.
                     if enumeration
                         && !is_static
-                        && !self
-                            .classes
-                            .last()
-                            .is_some_and(|class| class.initializing.contains("<init>"))
+                        && !self.classes.last().is_some_and(|class| {
+                            class
+                                .initializing
+                                .iter()
+                                .any(|key| key.starts_with("<init>/"))
+                        })
                     {
                         self.methods.last_mut().expect("pushed").static_init = false;
                     }
@@ -1683,6 +1834,7 @@ impl Enumerator<'_> {
                         returns: Some(Ty::Void),
                         not_null: false,
                         static_init: static_context,
+                        functional_field: false,
                     });
                     self.java_node(member, Context::Statement);
                     self.methods.pop();
@@ -1722,10 +1874,39 @@ impl Enumerator<'_> {
             node.child_by_field_name("type")
                 .map_or(Ty::Unknown, |ty| java_type(text(ty, self.source)))
         };
+        // A type variable returns its bound's erasure: `<M extends Map<K, V>>
+        // M` returns a `Map` to PIT.
+        let returns = match &returns {
+            Ty::Object(name) => {
+                let bound = named_children(node)
+                    .filter(|child| child.kind() == "type_parameters")
+                    .flat_map(named_children)
+                    .find(|parameter| {
+                        named_children(*parameter)
+                            .next()
+                            .is_some_and(|first| text(first, self.source) == name)
+                    })
+                    .map(|parameter| {
+                        named_children(parameter)
+                            .find(|child| child.kind() == "type_bound")
+                            .and_then(|bound| named_children(bound).next())
+                            .map_or(Ty::Object("Object".into()), |bound| {
+                                java_type(text(bound, self.source))
+                            })
+                    });
+                bound.unwrap_or(returns)
+            }
+            _ => returns,
+        };
+        let key = declaration_key(
+            &name,
+            node.child_by_field_name("parameters")
+                .map_or(Some(0), java_arity),
+        );
         let initializing = self
             .classes
             .last()
-            .is_some_and(|class| class.initializing.contains(&name));
+            .is_some_and(|class| class.initializing.contains(&key));
         let generated = modifiers.contains("@Generated")
             || modifiers.contains("@DoNotMutate")
             || modifiers.contains("@CoverageIgnore");
@@ -1737,6 +1918,7 @@ impl Enumerator<'_> {
                 .any(|word| word == "@NotNull")
                 || modifiers.contains(".NotNull"),
             static_init: initializing || generated,
+            functional_field: false,
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) = node.child_by_field_name("parameters") {
@@ -1795,11 +1977,10 @@ impl Enumerator<'_> {
             .method()
             .map(|method| method.name.clone())
             .unwrap_or_default();
-        let static_init = self.suppressed()
-            || self
-                .classes
-                .last()
-                .is_some_and(|class| class.initializing.contains(&enclosing));
+        // A lambda a static field of a functional type keeps runs when it is
+        // called, not as the class initialises: PIT mutates it.
+        let functional = self.method().is_some_and(|method| method.functional_field);
+        let static_init = self.suppressed() && !functional;
         let enclosing = match enclosing.as_str() {
             "<init>" => "new".to_owned(),
             "<clinit>" => "static".to_owned(),
@@ -1811,6 +1992,7 @@ impl Enumerator<'_> {
             returns,
             not_null: false,
             static_init,
+            functional_field: false,
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) = node.child_by_field_name("parameters") {
@@ -1861,7 +2043,13 @@ impl Enumerator<'_> {
                 let name = call
                     .child_by_field_name("name")
                     .map(|name| text(name, self.source))?;
-                functional_return(name, body_ty)
+                // A project method says what it takes; the JDK's are known.
+                let arguments = named_children(parent).collect::<Vec<_>>();
+                let position = arguments.iter().position(|argument| *argument == node)?;
+                match self.index.parameter_type(name, arguments.len(), position) {
+                    Some(declared) => functional_type_return(declared, body_ty),
+                    None => functional_return(name, body_ty),
+                }
             }
             "variable_declarator" => {
                 let declaration = parent.parent()?;
@@ -1930,7 +2118,22 @@ impl Enumerator<'_> {
         let arguments = expression
             .child_by_field_name("arguments")
             .map_or(0, |arguments| named_children(arguments).count());
-        if self.index.void_call(&name, arguments) == Some(false) {
+        let receiver = match expression.child_by_field_name("object") {
+            None => self.classes.last().map(|class| class.name.clone()),
+            Some(object) if text(object, self.source) == "this" => {
+                self.classes.last().map(|class| class.name.clone())
+            }
+            Some(object) => match self.java_type_of(object) {
+                Ty::Object(name) => Some(name),
+                Ty::Str => Some("Str".to_owned()),
+                _ => {
+                    // A class's own name: a static call.
+                    let named = text(object, self.source);
+                    self.index.classes.contains(named).then(|| named.to_owned())
+                }
+            },
+        };
+        if self.index.void_call(&name, arguments, receiver.as_deref()) != Some(true) {
             return;
         }
         let range = (statement.start_byte(), statement.end_byte());
@@ -2726,6 +2929,19 @@ fn in_resource_try(node: Node) -> bool {
     false
 }
 
+/// Whether a type as written names one of the JDK's functional interfaces,
+/// anywhere among its arguments: PIT's `StaticInitializerInterceptor` leaves
+/// a lambda stored in such a field to be mutated.
+fn names_functional_type(ty: &str) -> bool {
+    ty.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| {
+            matches!(word, "Runnable" | "Callable" | "Comparator")
+                || ["Function", "Supplier", "Consumer", "Predicate", "Operator"]
+                    .iter()
+                    .any(|suffix| word.ends_with(suffix))
+        })
+}
+
 /// A probe in place of a binary operator: `helper(slot, left /*op*/, right)`,
 /// the operator kept in a comment so that nothing is taken out of the
 /// source and the probe composes with the coverage probes' insertions.
@@ -2817,27 +3033,73 @@ fn modifiers_text(node: Node, source: &str) -> String {
         .join(" ")
 }
 
-/// Every method a member calls by its simple name, unqualified or on `this`.
+/// Every method a member calls by its simple name, unqualified or on
+/// `this`, as `name/arguments`: PIT follows a call to one overload.
 fn collect_calls(node: Node, source: &str, out: &mut Vec<String>) {
+    collect_calls_in(node, source, "", out);
+}
+
+/// `collect_calls` within the class named `class`: a constructor call is
+/// its own class's only where it creates one.
+fn collect_calls_in(node: Node, source: &str, class: &str, out: &mut Vec<String>) {
+    let count = |arguments: Option<Node>| arguments.map_or(0, |a| named_children(a).count());
     if node.kind() == "method_invocation" {
         let qualified = node
             .child_by_field_name("object")
             .is_some_and(|object| !matches!(text(object, source), "this"));
         if !qualified && let Some(name) = node.child_by_field_name("name") {
-            out.push(text(name, source).to_owned());
+            out.push(format!(
+                "{}/{}",
+                text(name, source),
+                count(node.child_by_field_name("arguments"))
+            ));
         }
     }
     if node.kind() == "object_creation_expression" {
-        out.push("<init>".to_owned());
+        let created = node
+            .child_by_field_name("type")
+            .map(|ty| text(ty, source))
+            .unwrap_or("");
+        let created = created.split('<').next().unwrap_or(created);
+        let created = created.rsplit('.').next().unwrap_or(created);
+        if class.is_empty() || created == class {
+            out.push(format!(
+                "<init>/{}",
+                count(node.child_by_field_name("arguments"))
+            ));
+        }
     }
     if node.kind() == "call_expression"
         && let Some(callee) = named_children(node).next()
         && callee.kind() == "identifier"
     {
-        out.push(text(callee, source).to_owned());
+        let arguments = named_children(node)
+            .filter(|child| child.kind() == "value_arguments")
+            .map(|arguments| named_children(arguments).count())
+            .sum::<usize>()
+            + named_children(node)
+                .filter(|child| child.kind() == "annotated_lambda")
+                .count();
+        out.push(format!("{}/{arguments}", text(callee, source)));
     }
     for child in named_children(node) {
-        collect_calls(child, source, out);
+        collect_calls_in(child, source, class, out);
+    }
+}
+
+/// Whether a call key (`name/arguments`) calls a declaration's key
+/// (`name/parameters`, `name/*` for a variable count).
+fn calls_declaration(call: &str, declaration: &str) -> bool {
+    let (called, arguments) = call.rsplit_once('/').unwrap_or((call, "*"));
+    let (declared, parameters) = declaration.rsplit_once('/').unwrap_or((declaration, "*"));
+    called == declared && (parameters == "*" || arguments == parameters)
+}
+
+/// A declaration's key: its name and parameter count.
+fn declaration_key(name: &str, arity: Option<usize>) -> String {
+    match arity {
+        Some(arity) => format!("{name}/{arity}"),
+        None => format!("{name}/*"),
     }
 }
 
@@ -2868,7 +3130,7 @@ fn functional_return(name: &str, body: impl FnOnce() -> Option<Ty>) -> Option<Ty
         | "ifPresentOrElse" | "execute" | "submit_runnable" => Ty::Void,
         "map" | "flatMap" | "computeIfAbsent" | "orElseGet" | "mapToObj" | "thenApply"
         | "supplyAsync" | "comparing" | "thenComparing" | "reduce" | "merge"
-        | "computeIfPresent" | "compute" | "collect" | "orElseThrow" => {
+        | "computeIfPresent" | "compute" | "collect" | "orElseThrow" | "setAll" => {
             return match body() {
                 Some(Ty::Prim(prim)) => Some(Ty::Boxed(prim)),
                 Some(Ty::Unknown) | None => None,
@@ -3451,6 +3713,7 @@ impl Enumerator<'_> {
                     returns: None,
                     not_null: false,
                     static_init: is_static,
+                    functional_field: false,
                 });
                 self.scopes.push(HashMap::new());
                 for child in named_children(node) {
@@ -3464,6 +3727,7 @@ impl Enumerator<'_> {
                                 returns: None,
                                 not_null: false,
                                 static_init: is_static,
+                                functional_field: false,
                             });
                         }
                         "property_delegate" => {}
@@ -3479,6 +3743,7 @@ impl Enumerator<'_> {
                     returns: Some(Ty::Void),
                     not_null: false,
                     static_init: static_context,
+                    functional_field: false,
                 });
                 self.kotlin_children(node, Context::Statement);
                 self.methods.pop();
@@ -3489,6 +3754,7 @@ impl Enumerator<'_> {
                     returns: Some(Ty::Void),
                     not_null: false,
                     static_init: static_context,
+                    functional_field: false,
                 });
                 self.scopes.push(HashMap::new());
                 for child in named_children(node) {
@@ -3542,9 +3808,20 @@ impl Enumerator<'_> {
                         && modifiers_text(**member, self.source).contains("private")
                 })
                 .filter_map(|member| {
-                    named_children(*member)
-                        .find(|child| child.kind() == "identifier")
-                        .map(|name| (text(name, self.source).to_owned(), *member))
+                    let name =
+                        named_children(*member).find(|child| child.kind() == "identifier")?;
+                    let parameters = named_children(*member)
+                        .find(|child| child.kind() == "function_value_parameters");
+                    let arity = match parameters {
+                        Some(parameters) if text(parameters, self.source).contains('=') => None,
+                        Some(parameters) => Some(
+                            named_children(parameters)
+                                .filter(|child| child.kind() == "parameter")
+                                .count(),
+                        ),
+                        None => Some(0),
+                    };
+                    Some((declaration_key(text(name, self.source), arity), *member))
                 })
                 .collect::<Vec<_>>();
             let mut pending = Vec::new();
@@ -3558,18 +3835,12 @@ impl Enumerator<'_> {
             }
             let mut initializing = BTreeSet::new();
             while let Some(name) = pending.pop() {
-                if initializing.contains(&name) {
-                    continue;
-                }
                 let bodies = private
                     .iter()
-                    .filter(|(private_name, _)| *private_name == name)
+                    .filter(|(key, _)| calls_declaration(&name, key) && !initializing.contains(key))
                     .collect::<Vec<_>>();
-                if bodies.is_empty() {
-                    continue;
-                }
-                initializing.insert(name.clone());
-                for (_, body) in bodies {
+                for (key, body) in bodies {
+                    initializing.insert(key.clone());
                     collect_calls(*body, self.source, &mut pending);
                 }
             }
@@ -3630,6 +3901,7 @@ impl Enumerator<'_> {
             returns,
             not_null: true,
             static_init: self.suppressed_context(),
+            functional_field: false,
         });
         self.scopes.push(HashMap::new());
         self.kotlin_children(accessor, Context::Statement);
@@ -3655,10 +3927,24 @@ impl Enumerator<'_> {
                 .then(|| named_children(body).last())
                 .flatten()
         });
+        let arity = named_children(node)
+            .find(|child| child.kind() == "function_value_parameters")
+            .map_or(Some(0), |parameters| {
+                if text(parameters, self.source).contains('=') {
+                    None
+                } else {
+                    Some(
+                        named_children(parameters)
+                            .filter(|child| child.kind() == "parameter")
+                            .count(),
+                    )
+                }
+            });
+        let key = declaration_key(&name, arity);
         let initializing = self
             .classes
             .last()
-            .is_some_and(|class| class.initializing.contains(&name));
+            .is_some_and(|class| class.initializing.contains(&key));
         let modifiers = modifiers_text(node, self.source);
         let abstract_or_external = body.is_none();
         self.methods.push(Method {
@@ -3666,6 +3952,7 @@ impl Enumerator<'_> {
             returns: None,
             not_null: false,
             static_init: initializing || abstract_or_external,
+            functional_field: false,
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) =
@@ -3777,7 +4064,17 @@ impl Enumerator<'_> {
             + named_children(call)
                 .filter(|child| child.kind() == "annotated_lambda")
                 .count();
-        if self.index.void_call(&name, arguments) == Some(false) {
+        let receiver = match callee.kind() {
+            "navigation_expression" => named_children(callee).next().and_then(|object| match self
+                .kotlin_type_of(object)
+            {
+                Ty::Object(name) => Some(name),
+                Ty::Str => Some("Str".to_owned()),
+                _ => None,
+            }),
+            _ => self.classes.last().map(|class| class.name.clone()),
+        };
+        if self.index.void_call(&name, arguments, receiver.as_deref()) != Some(true) {
             return;
         }
         let _ = safe;
@@ -3882,6 +4179,7 @@ impl Enumerator<'_> {
                         returns: None,
                         not_null: true,
                         static_init: enclosing.static_init,
+                        functional_field: false,
                     });
                 }
                 if let Some(parameters) =

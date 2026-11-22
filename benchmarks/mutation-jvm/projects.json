@@ -5,7 +5,8 @@
     "build": "maven",
     "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip",
     "targets": "org.apache.commons.cli.*",
-    "junit5": true
+    "junit5": true,
+    "jdk": "21"
   },
   "commons-csv": {
     "repository": "https://github.com/apache/commons-csv.git",
@@ -13,15 +14,17 @@
     "build": "maven",
     "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip -Dmaven.javadoc.skip",
     "targets": "org.apache.commons.csv.*",
-    "junit5": true
+    "junit5": true,
+    "jdk": "21"
   },
-  "jcommander": {
-    "repository": "https://github.com/cbeust/jcommander.git",
-    "tag": "jcommander-1.48",
+  "typetools": {
+    "repository": "https://github.com/jhalterman/typetools.git",
+    "tag": "typetools-0.6.3",
     "build": "maven",
     "flags": "-Dmaven.javadoc.skip",
-    "targets": "com.beust.jcommander.*",
-    "testng": true
+    "targets": "net.jodah.typetools.*",
+    "testng": true,
+    "jdk": "11"
   },
   "kotlinpoet": {
     "repository": "https://github.com/square/kotlinpoet.git",
@@ -30,7 +33,8 @@
     "module": "kotlinpoet",
     "flags": "-x spotlessCheck -x apiCheck",
     "targets": "com.squareup.kotlinpoet.*",
-    "junit5": false
+    "junit5": false,
+    "jdk": "17"
   },
   "klaxon": {
     "repository": "https://github.com/cbeust/klaxon.git",
@@ -39,6 +43,7 @@
     "module": "klaxon",
     "flags": "",
     "targets": "com.beust.klaxon.*",
-    "testng": true
+    "testng": true,
+    "jdk": "11"
   }
 }

@@ -35,6 +35,14 @@ targets="$(field targets)"
 module="$(field module)"
 junit5="$(field junit5)"
 testng="$(field testng)"
+jdk="$(field jdk)"
+# The JDK the project builds with: setup-java leaves each one it installed
+# in JAVA_HOME_<version>_X64.
+jdk_home="JAVA_HOME_${jdk}_X64"
+if [ -n "$jdk" ] && [ -n "${!jdk_home:-}" ]; then
+  export JAVA_HOME="${!jdk_home}"
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
 
 mkdir -p "$work"
 source="$work/$project"

@@ -59,16 +59,19 @@ public final class SupercovStrongPass {
     public final String name;
     /** How long the measured run took for it, where it said; 0 where not. */
     final long measuredMillis;
+    /** The module whose JVM runs it. */
+    final String module;
     /** What the executor found for it (a unique id, a method). */
     public Object handle;
     Boolean baseline;
     long baselineMillis;
 
-    Test(int index, String className, String name, long measuredMillis) {
+    Test(int index, String className, String name, long measuredMillis, String module) {
       this.index = index;
       this.className = className;
       this.name = name;
       this.measuredMillis = measuredMillis;
+      this.module = module;
     }
 
     /**
@@ -149,7 +152,12 @@ public final class SupercovStrongPass {
           int index = Integer.parseInt(parts[1]);
           tests.put(
               index,
-              new Test(index, unescape(parts[2]), unescape(parts[3]), Long.parseLong(parts[4])));
+              new Test(
+                  index,
+                  unescape(parts[2]),
+                  unescape(parts[3]),
+                  Long.parseLong(parts[4]),
+                  parts.length > 5 ? unescape(parts[5]) : "."));
         } else if (parts[0].equals("M") && parts.length >= 7) {
           List<String> modules = new ArrayList<>();
           for (String each : parts[5].split(",")) {
@@ -285,16 +293,22 @@ public final class SupercovStrongPass {
         continue;
       }
       List<Test> mine = new ArrayList<>();
+      List<String> missing = new ArrayList<>();
       for (int candidate : mutant.candidates) {
         Test test = tests.get(candidate);
-        if (test != null && executor.resolve(test)) {
+        if (test == null || !test.module.equals(module)) {
+          continue;
+        }
+        if (executor.resolve(test)) {
           mine.add(test);
+        } else {
+          missing.add(test.name);
         }
       }
-      if (mine.isEmpty() || !claim(mutant)) {
+      if ((mine.isEmpty() && missing.isEmpty()) || !claim(mutant)) {
         continue;
       }
-      if (!runMutant(mutant, mine)) {
+      if (!runMutant(mutant, mine, missing)) {
         // This JVM cannot be trusted with another mutant.
         return;
       }
@@ -316,7 +330,8 @@ public final class SupercovStrongPass {
   }
 
   /** Runs one mutant; false when the JVM must stop after it. */
-  private boolean runMutant(Mutant mutant, List<Test> candidates) throws IOException {
+  private boolean runMutant(Mutant mutant, List<Test> candidates, List<String> missing)
+      throws IOException {
     long started = System.nanoTime();
     int ran = 0;
     for (Test test : candidates) {
@@ -354,6 +369,13 @@ public final class SupercovStrongPass {
         write(mutant, "killed", test.name, ran, started, outcome.reason);
         return true;
       }
+    }
+    if (!missing.isEmpty()) {
+      // A candidate this JVM could not find may be the one that kills it.
+      write(mutant, "error", null, ran, started,
+          "its candidate test " + missing.get(0) + " was not found in the build's test JVM"
+              + (missing.size() > 1 ? " (and " + (missing.size() - 1) + " more)" : ""));
+      return true;
     }
     write(mutant, "survived", null, ran, started, ran == 0 ? "no-passing-candidate" : null);
     return true;

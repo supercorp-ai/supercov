@@ -500,7 +500,11 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                     !taken[*at]
                         && match pass {
                             0 => pit[*at].line == mutant.start.0,
-                            1 => (mutant.lines.0..=mutant.lines.1.max(mutant.end.0))
+                            // javac gives an operator on a continuation line
+                            // the line of the operand before it, or of the
+                            // statement.
+                            1 => (mutant.lines.0.saturating_sub(3)
+                                ..=mutant.lines.1.max(mutant.end.0))
                                 .contains(&pit[*at].line),
                             _ => is_return(mutant.mutator),
                         }
@@ -564,4 +568,139 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
         return "a `when` branch's comparison with its subject";
     }
     "other"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixtures of `tests/fixtures/pit-parity` and PIT 1.17.1's own
+    /// mutants of them (`*.pit.json`: its DEFAULTS group, from the
+    /// `mutations.xml` of Maven with javac 21 for the Java, Gradle with
+    /// Kotlin 2.0.21 for the Kotlin, read by `scripts/pit-parity.py`),
+    /// joined as `supercov runs <id> mutants pit` joins them: what each side
+    /// has that the other does not.
+    fn parity(language: &str, files: &[&str]) -> (Vec<String>, Vec<String>) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/pit-parity")
+            .join(language);
+        let golden: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(root.with_extension("pit.json")).unwrap(),
+        )
+        .unwrap();
+        let pit = golden
+            .iter()
+            .map(|row| PitMutant {
+                file: row["file"].as_str().unwrap().into(),
+                line: row["line"].as_u64().unwrap() as u32,
+                mutator: row["mutator"].as_str().unwrap().into(),
+                key: row["key"].as_str().unwrap().into(),
+                class: String::new(),
+                method: row["method"].as_str().unwrap_or("").into(),
+                description: row["description"].as_str().unwrap_or("").into(),
+                status: "SURVIVED".into(),
+                killing_tests: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let sources = files
+            .iter()
+            .map(|file| {
+                (
+                    file.to_string(),
+                    std::fs::read_to_string(root.join(file)).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let index = ProjectIndex::of(sources.iter().map(|(f, s)| (f.as_str(), s.as_str())));
+        let ours = sources
+            .iter()
+            .map(|(file, source)| {
+                (
+                    file.clone(),
+                    file_mutants(file, source, &index).unwrap().mutants,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let join = join_pit(&ours, &pit);
+        let only_pit = join
+            .only_pit
+            .iter()
+            .map(|at| {
+                format!(
+                    "{}:{} {} {}",
+                    pit[*at].file, pit[*at].line, pit[*at].mutator, pit[*at].description
+                )
+            })
+            .collect();
+        (only_pit, join.only_supercov)
+    }
+
+    /// `PROJECT=<dir> PIT=<mutations.xml>`: a project's mutants joined with
+    /// PIT's report, printed: what each side lists that the other does not.
+    #[test]
+    #[ignore]
+    fn join_project() {
+        let root = std::path::PathBuf::from(std::env::var("PROJECT").unwrap());
+        let pit =
+            parse_pit_report(&std::fs::read_to_string(std::env::var("PIT").unwrap()).unwrap());
+        let files = crate::jvm_project::discover_jvm_files(&root)
+            .unwrap()
+            .sources
+            .into_iter()
+            .map(|(file, _)| file)
+            .collect::<Vec<_>>();
+        let index = index_of(&root, &files);
+        let ours = files
+            .iter()
+            .filter_map(|file| {
+                let source = std::fs::read_to_string(root.join(file)).ok()?;
+                Some((
+                    file.clone(),
+                    file_mutants(file, &source, &index).ok()?.mutants,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let join = join_pit(&ours, &pit);
+        println!(
+            "pit {} ours {} matched {}",
+            pit.len(),
+            ours.values().map(Vec::len).sum::<usize>(),
+            join.pairs.len()
+        );
+        for at in &join.only_pit {
+            let m = &pit[*at];
+            println!("PIT  {}:{} {} {}", m.file, m.line, m.mutator, m.description);
+        }
+        for id in &join.only_supercov {
+            println!("OURS {id}");
+        }
+    }
+
+    #[test]
+    fn java_mutants_are_pit_s() {
+        let (only_pit, only_supercov) = parity("java", &["fixture/Ops.java", "fixture/More.java"]);
+        // A lambda passed to `Stream.map` returns whatever its body does;
+        // the body's type (`x + 1` of an unknown `x`) is not in the source.
+        assert_eq!(
+            only_pit,
+            [
+                "fixture/More.java:118 EmptyObjectReturnVals replaced Integer return value with 0 for fixture/More::lambda$lambdas$6"
+            ],
+        );
+        assert_eq!(only_supercov, Vec::<String>::new());
+    }
+
+    #[test]
+    fn kotlin_mutants_are_pit_s_but_the_compiler_s_own_code() {
+        let (only_pit, only_supercov) = parity("kotlin", &["fixture/Ops.kt"]);
+        for missing in &only_pit {
+            println!("{missing}");
+        }
+        assert_eq!(only_supercov, Vec::<String>::new());
+        // What kotlinc writes that the source does not say: a property's
+        // getter, a range loop's counter, a `when` subject's comparisons,
+        // `?.`, `?:` and `!!`'s null checks, and a standard library function
+        // inlined at a line past the file's end.
+        assert_eq!(only_pit.len(), 23, "{only_pit:#?}");
+    }
 }

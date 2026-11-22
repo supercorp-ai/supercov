@@ -2724,6 +2724,105 @@ impl JvmServer {
 }
 
 #[cfg(test)]
+mod strong_tests {
+    use super::*;
+
+    #[test]
+    fn a_build_s_compiler_errors_are_read_in_every_format() {
+        let workspace = Path::new("/w/copy");
+        let output = "\
+[ERROR] /w/copy/src/main/java/a/A.java:[12,34] no suitable method found for add(int,int,java.lang.String,int)
+/w/copy/src/main/java/a/B.java:7: error: incompatible types: int cannot be converted to String
+        return com.supercorp.supercov.Supercov.rZ(0, 3, s);
+                                                 ^
+e: file:///w/copy/src/main/kotlin/a/C.kt:3:9 Unresolved reference 'minus'.
+e: /w/copy/src/main/kotlin/a/D.kt: (4, 2): Type mismatch
+[ERROR] /elsewhere/E.java:[1,1] not the copy's
+";
+        assert_eq!(
+            compile_errors(output, workspace),
+            [
+                (
+                    "src/main/java/a/A.java".to_owned(),
+                    12,
+                    34,
+                    "no suitable method found for add(int,int,java.lang.String,int)".to_owned()
+                ),
+                (
+                    "src/main/java/a/B.java".to_owned(),
+                    7,
+                    50,
+                    "incompatible types: int cannot be converted to String".to_owned()
+                ),
+                (
+                    "src/main/kotlin/a/C.kt".to_owned(),
+                    3,
+                    9,
+                    "Unresolved reference 'minus'.".to_owned()
+                ),
+                (
+                    "src/main/kotlin/a/D.kt".to_owned(),
+                    4,
+                    2,
+                    "Type mismatch".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_class_named_by_its_simple_name_is_found_from_its_file() {
+        assert_eq!(
+            class_of_file("src/test/java/net/x/FooTest.java", "FooTest"),
+            "net.x.FooTest"
+        );
+        assert_eq!(
+            class_of_file("module/src/test/kotlin/a/BarTest.kt", "BarTest"),
+            "a.BarTest"
+        );
+        assert_eq!(class_of_file("Top.java", "Top"), "Top");
+    }
+
+    #[test]
+    fn the_jvm_plan_names_runnable_candidates_and_their_modules() {
+        let tests = vec![
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#one()".into(),
+                module: ".".into(),
+                limit_ms: 5,
+                runnable: true,
+            },
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#t\two()".into(),
+                module: "core".into(),
+                limit_ms: 0,
+                runnable: true,
+            },
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#failed()".into(),
+                module: ".".into(),
+                limit_ms: 0,
+                runnable: false,
+            },
+        ];
+        let mutants = vec![StrongMutant {
+            id: "src/A.java:1:1-1:5:Math:-".into(),
+            file: "src/A.java".into(),
+            index: 3,
+            candidates: vec![0, 1, 2],
+        }];
+        let slots = BTreeMap::from([("src/A.java".to_owned(), 7)]);
+        assert_eq!(
+            strong_plan_text(&tests, &mutants, &slots),
+            "T\t0\ta.T\ta.T#one()\t5\t.\nT\t1\ta.T\ta.T#t\\two()\t0\tcore\nM\t0\tsrc/A.java:1:1-1:5:Math:-\t7\t3\t.,core\t0,1\n"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn an_ant_command_naming_another_build_file_is_sent_to_its_directory() {
@@ -4983,6 +5082,15 @@ pub fn run_strong_jvm(
                 maven_opts.clone().map(|value| ("MAVEN_OPTS", value)),
                 &request.run_id,
             );
+            // JVMs that share the pass: half the machine's processors, at
+            // most eight, unless asked.
+            if std::env::var_os("SUPERCOV_STRONG_JVMS").is_none() {
+                let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+                environment.push((
+                    OsString::from("SUPERCOV_STRONG_JVMS"),
+                    OsString::from((processors / 2).clamp(1, 8).to_string()),
+                ));
+            }
             for (name, value) in [
                 ("SUPERCOV_STRONG_JVM_PLAN", jvm_plan.as_os_str()),
                 ("SUPERCOV_STRONG_RESULTS", request.results.as_os_str()),
@@ -5142,10 +5250,11 @@ fn strong_plan_text(
         .map(|index| {
             let test = &tests[index];
             format!(
-                "T\t{index}\t{}\t{}\t{}\n",
+                "T\t{index}\t{}\t{}\t{}\t{}\n",
                 escape(&test.class),
                 escape(&test.name),
-                test.limit_ms
+                test.limit_ms,
+                escape(&test.module)
             )
         })
         .collect::<String>();

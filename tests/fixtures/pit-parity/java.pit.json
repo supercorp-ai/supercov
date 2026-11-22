@@ -1,0 +1,2522 @@
+[
+ {
+  "file": "fixture/More.java",
+  "line": 16,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "<init>"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 17,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "lambda$new$",
+  "description": "replaced Integer return value with 0 for fixture/More::lambda$new$0",
+  "method": "lambda$new$0"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 17,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "lambda$new$0"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 25,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "<init>"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 41,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "width"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 41,
+  "mutator": "PrimitiveReturns",
+  "key": "width",
+  "description": "replaced int return with 0 for fixture/More::width",
+  "method": "width"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 45,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 46,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 48,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 50,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 51,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 53,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 57,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 58,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 58,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 58,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 58,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 58,
+  "mutator": "PrimitiveReturns",
+  "key": "iincLike",
+  "description": "replaced int return with 0 for fixture/More::iincLike",
+  "method": "iincLike"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 63,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "logs"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 63,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "logs"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 68,
+  "mutator": "NullReturnVals",
+  "key": "generic",
+  "description": "replaced return value with null for fixture/More::generic",
+  "method": "generic"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 73,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "mapOf",
+  "description": "replaced return value with Collections.emptyMap for fixture/More::mapOf",
+  "method": "mapOf"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 74,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "boxedTrue",
+  "description": "replaced Boolean return with False for fixture/More::boxedTrue",
+  "method": "boxedTrue"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 75,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "boxedFalse",
+  "description": "replaced Boolean return with True for fixture/More::boxedFalse",
+  "method": "boxedFalse"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 76,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "ternaryBool",
+  "description": "replaced boolean return with true for fixture/More::ternaryBool",
+  "method": "ternaryBool"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 76,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryBool"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 76,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryBool"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 77,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryZero"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 77,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryZero"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 80,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced integer division with multiplication",
+  "method": "divMinusOne"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 80,
+  "mutator": "PrimitiveReturns",
+  "key": "divMinusOne",
+  "description": "replaced int return with 0 for fixture/More::divMinusOne",
+  "method": "divMinusOne"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 84,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "conditionTernary"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 84,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "conditionTernary"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 84,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "conditionTernary"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 85,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "conditionTernary",
+  "description": "replaced boolean return with false for fixture/More::conditionTernary",
+  "method": "conditionTernary"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 87,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "conditionTernary",
+  "description": "replaced boolean return with true for fixture/More::conditionTernary",
+  "method": "conditionTernary"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 92,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 92,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 93,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 95,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 95,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 95,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 96,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 98,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 98,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 98,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 98,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 99,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 102,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 102,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 103,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 107,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 107,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 110,
+  "mutator": "PrimitiveReturns",
+  "key": "loops",
+  "description": "replaced int return with 0 for fixture/More::loops",
+  "method": "loops"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 114,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "lambda$lambdas$",
+  "description": "replaced Integer return value with 0 for fixture/More::lambda$lambdas$2",
+  "method": "lambda$lambdas$2"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 114,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "lambda$lambdas$2"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 115,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "lambda$lambdas$",
+  "description": "replaced boolean return with true for fixture/More::lambda$lambdas$3",
+  "method": "lambda$lambdas$3"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 115,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "lambda$lambdas$3"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 115,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lambda$lambdas$3"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 116,
+  "mutator": "VoidMethodCall",
+  "key": "forEach",
+  "description": "removed call to java/util/List::forEach",
+  "method": "lambdas"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 116,
+  "mutator": "VoidMethodCall",
+  "key": "println",
+  "description": "removed call to java/io/PrintStream::println",
+  "method": "lambda$lambdas$4"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 117,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "lambda$lambdas$5"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 117,
+  "mutator": "PrimitiveReturns",
+  "key": "lambda$lambdas$",
+  "description": "replaced int return with 0 for fixture/More::lambda$lambdas$5",
+  "method": "lambda$lambdas$5"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 117,
+  "mutator": "VoidMethodCall",
+  "key": "sort",
+  "description": "removed call to java/util/List::sort",
+  "method": "lambdas"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 118,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "lambda$lambdas$",
+  "description": "replaced Integer return value with 0 for fixture/More::lambda$lambdas$6",
+  "method": "lambda$lambdas$6"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 118,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "lambdas",
+  "description": "replaced return value with Collections.emptyList for fixture/More::lambdas",
+  "method": "lambdas"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 118,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "lambda$lambdas$6"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 123,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "twice"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 123,
+  "mutator": "PrimitiveReturns",
+  "key": "twice",
+  "description": "replaced int return with 0 for fixture/More$Shape::twice",
+  "method": "twice"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 128,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "apply"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 128,
+  "mutator": "PrimitiveReturns",
+  "key": "apply",
+  "description": "replaced int return with 0 for fixture/More$Op$1::apply",
+  "method": "apply"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 131,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "apply"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 131,
+  "mutator": "PrimitiveReturns",
+  "key": "apply",
+  "description": "replaced int return with 0 for fixture/More$Op$2::apply",
+  "method": "apply"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 136,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "code"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 136,
+  "mutator": "PrimitiveReturns",
+  "key": "code",
+  "description": "replaced int return with 0 for fixture/More$Op::code",
+  "method": "code"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 140,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced integer modulus with multiplication",
+  "method": "value"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 140,
+  "mutator": "PrimitiveReturns",
+  "key": "value",
+  "description": "replaced int return with 0 for fixture/More$Inner::value",
+  "method": "value"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 144,
+  "mutator": "NullReturnVals",
+  "key": "anon",
+  "description": "replaced return value with null for fixture/More::anon",
+  "method": "anon"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 146,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "run"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 146,
+  "mutator": "VoidMethodCall",
+  "key": "println",
+  "description": "removed call to java/io/PrintStream::println",
+  "method": "run"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 153,
+  "mutator": "VoidMethodCall",
+  "key": "add",
+  "description": "removed call to java/util/List::add",
+  "method": "calls"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 156,
+  "mutator": "VoidMethodCall",
+  "key": "setLength",
+  "description": "removed call to java/lang/StringBuilder::setLength",
+  "method": "calls"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 158,
+  "mutator": "VoidMethodCall",
+  "key": "reverse",
+  "description": "removed call to java/util/Collections::reverse",
+  "method": "calls"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 159,
+  "mutator": "VoidMethodCall",
+  "key": "arraycopy",
+  "description": "removed call to java/lang/System::arraycopy",
+  "method": "calls"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 161,
+  "mutator": "VoidMethodCall",
+  "key": "unknownVoidish",
+  "description": "removed call to fixture/More::unknownVoidish",
+  "method": "calls"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 167,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "equals",
+  "description": "replaced boolean return with false for fixture/More::equals",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 167,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 168,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "equals",
+  "description": "replaced boolean return with true for fixture/More::equals",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 168,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 168,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 169,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "equals",
+  "description": "replaced boolean return with true for fixture/More::equals",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 169,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "equals"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 172,
+  "mutator": "PrimitiveReturns",
+  "key": "hashCode",
+  "description": "replaced int return with 0 for fixture/More::hashCode",
+  "method": "hashCode"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 176,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "tryRes"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 183,
+  "mutator": "Increments",
+  "key": "3",
+  "description": "Changed increment from 3 to -3",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 186,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 188,
+  "mutator": "PrimitiveReturns",
+  "key": "sw",
+  "description": "replaced int return with 0 for fixture/More::sw",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "Math",
+  "key": "<<>>>",
+  "description": "Replaced Shift Left with Shift Right",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "Math",
+  "key": ">>><<",
+  "description": "Replaced Shift Right with Shift Left",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "Math",
+  "key": ">>>><<",
+  "description": "Replaced Unsigned Shift Right with Shift Left",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 191,
+  "mutator": "PrimitiveReturns",
+  "key": "shifts",
+  "description": "replaced long return with 0 for fixture/More::shifts",
+  "method": "shifts"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 192,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "charMath"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 192,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "charMath"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 192,
+  "mutator": "PrimitiveReturns",
+  "key": "charMath",
+  "description": "replaced int return with 0 for fixture/More::charMath",
+  "method": "charMath"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 193,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced float multiplication with division",
+  "method": "fmath"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 193,
+  "mutator": "PrimitiveReturns",
+  "key": "fmath",
+  "description": "replaced float return with 0.0f for fixture/More::fmath",
+  "method": "fmath"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "nested",
+  "description": "replaced boolean return with true for fixture/More::nested",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/More.java",
+  "line": 194,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "nested"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 21,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "lt",
+  "description": "replaced boolean return with true for fixture/Ops::lt",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 21,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 21,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 22,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "le",
+  "description": "replaced boolean return with true for fixture/Ops::le",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 22,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 22,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 23,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "gt",
+  "description": "replaced boolean return with true for fixture/Ops::gt",
+  "method": "gt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 23,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "gt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 23,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "gt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 24,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "ge",
+  "description": "replaced boolean return with true for fixture/Ops::ge",
+  "method": "ge"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 24,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ge"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 24,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ge"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 25,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "eq",
+  "description": "replaced boolean return with true for fixture/Ops::eq",
+  "method": "eq"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 25,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "eq"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 26,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "ne",
+  "description": "replaced boolean return with true for fixture/Ops::ne",
+  "method": "ne"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 26,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ne"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 27,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "isNull",
+  "description": "replaced boolean return with true for fixture/Ops::isNull",
+  "method": "isNull"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 27,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "isNull"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 28,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "zero",
+  "description": "replaced boolean return with true for fixture/Ops::zero",
+  "method": "zero"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 28,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "zero"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 28,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "zero"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 29,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "flag",
+  "description": "replaced boolean return with false for fixture/Ops::flag",
+  "method": "flag"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 29,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "flag",
+  "description": "replaced boolean return with true for fixture/Ops::flag",
+  "method": "flag"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 30,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "notFlag",
+  "description": "replaced boolean return with true for fixture/Ops::notFlag",
+  "method": "notFlag"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 30,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "notFlag"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 31,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "and",
+  "description": "replaced boolean return with true for fixture/Ops::and",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 31,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 31,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 32,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "or",
+  "description": "replaced boolean return with true for fixture/Ops::or",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 32,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 32,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 33,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "band",
+  "description": "replaced boolean return with false for fixture/Ops::band",
+  "method": "band"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 33,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "band",
+  "description": "replaced boolean return with true for fixture/Ops::band",
+  "method": "band"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 33,
+  "mutator": "Math",
+  "key": "&>|",
+  "description": "Replaced bitwise AND with OR",
+  "method": "band"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 34,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "inst",
+  "description": "replaced boolean return with false for fixture/Ops::inst",
+  "method": "inst"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 34,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "inst",
+  "description": "replaced boolean return with true for fixture/Ops::inst",
+  "method": "inst"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 37,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 37,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 38,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 40,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 40,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 40,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 40,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 41,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 43,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 43,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 46,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 46,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 47,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 50,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 51,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 51,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 52,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 52,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 52,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 56,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 57,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 58,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 59,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced integer division with multiplication",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 59,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 60,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced integer modulus with multiplication",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 61,
+  "mutator": "Math",
+  "key": "&>|",
+  "description": "Replaced bitwise AND with OR",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 62,
+  "mutator": "Math",
+  "key": "|>&",
+  "description": "Replaced bitwise OR with AND",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 63,
+  "mutator": "Math",
+  "key": "^>&",
+  "description": "Replaced XOR with AND",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 64,
+  "mutator": "Math",
+  "key": "<<>>>",
+  "description": "Replaced Shift Left with Shift Right",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 65,
+  "mutator": "Math",
+  "key": ">>><<",
+  "description": "Replaced Shift Right with Shift Left",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 66,
+  "mutator": "Math",
+  "key": ">>>><<",
+  "description": "Replaced Unsigned Shift Right with Shift Left",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 67,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 68,
+  "mutator": "Increments",
+  "key": "-2",
+  "description": "Changed increment from -2 to 2",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 69,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 70,
+  "mutator": "PrimitiveReturns",
+  "key": "math",
+  "description": "replaced int return with 0 for fixture/Ops::math",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced long multiplication with division",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced long subtraction with addition",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced long division with multiplication",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 73,
+  "mutator": "PrimitiveReturns",
+  "key": "lmath",
+  "description": "replaced long return with 0 for fixture/Ops::lmath",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced float modulus with multiplication",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced double multiplication with division",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced double addition with subtraction",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced double subtraction with addition",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced float division with multiplication",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 74,
+  "mutator": "PrimitiveReturns",
+  "key": "dmath",
+  "description": "replaced double return with 0.0d for fixture/Ops::dmath",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 75,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "concat",
+  "description": "replaced return value with \"\" for fixture/Ops::concat",
+  "method": "concat"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 76,
+  "mutator": "PrimitiveReturns",
+  "key": "folded",
+  "description": "replaced int return with 0 for fixture/Ops::folded",
+  "method": "folded"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 77,
+  "mutator": "InvertNegs",
+  "key": "",
+  "description": "removed negation",
+  "method": "neg"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 77,
+  "mutator": "PrimitiveReturns",
+  "key": "neg",
+  "description": "replaced int return with 0 for fixture/Ops::neg",
+  "method": "neg"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 78,
+  "mutator": "InvertNegs",
+  "key": "",
+  "description": "removed negation",
+  "method": "dneg"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 78,
+  "mutator": "PrimitiveReturns",
+  "key": "dneg",
+  "description": "replaced double return with 0.0d for fixture/Ops::dneg",
+  "method": "dneg"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 82,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 83,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 84,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 85,
+  "mutator": "Increments",
+  "key": "5",
+  "description": "Changed increment from 5 to -5",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 86,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 87,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 88,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 89,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 91,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 93,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 95,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 96,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 96,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced integer modulus with multiplication",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 97,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 97,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 97,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 97,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 97,
+  "mutator": "PrimitiveReturns",
+  "key": "increments",
+  "description": "replaced int return with 0 for fixture/Ops::increments",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 102,
+  "mutator": "VoidMethodCall",
+  "key": "clear",
+  "description": "removed call to java/util/List::clear",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 103,
+  "mutator": "VoidMethodCall",
+  "key": "println",
+  "description": "removed call to java/io/PrintStream::println",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 104,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 105,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 106,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 107,
+  "mutator": "VoidMethodCall",
+  "key": "sort",
+  "description": "removed call to java/util/Collections::sort",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 118,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "str",
+  "description": "replaced return value with \"\" for fixture/Ops::str",
+  "method": "str"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 119,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "boxedInt",
+  "description": "replaced Integer return value with 0 for fixture/Ops::boxedInt",
+  "method": "boxedInt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 120,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "boxedLong",
+  "description": "replaced Long return value with 0L for fixture/Ops::boxedLong",
+  "method": "boxedLong"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 121,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "boxedBool",
+  "description": "replaced Boolean return with False for fixture/Ops::boxedBool",
+  "method": "boxedBool"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 121,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "boxedBool",
+  "description": "replaced Boolean return with True for fixture/Ops::boxedBool",
+  "method": "boxedBool"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 122,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "boxedChar",
+  "description": "replaced Character return value with 0 for fixture/Ops::boxedChar",
+  "method": "boxedChar"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 123,
+  "mutator": "NullReturnVals",
+  "key": "obj",
+  "description": "replaced return value with null for fixture/Ops::obj",
+  "method": "obj"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 124,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "list",
+  "description": "replaced return value with Collections.emptyList for fixture/Ops::list",
+  "method": "list"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 125,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "set",
+  "description": "replaced return value with Collections.emptySet for fixture/Ops::set",
+  "method": "set"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 126,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "map",
+  "description": "replaced return value with Collections.emptyMap for fixture/Ops::map",
+  "method": "map"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 127,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "coll",
+  "description": "replaced return value with Collections.emptyList for fixture/Ops::coll",
+  "method": "coll"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 128,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "opt",
+  "description": "replaced return value with Optional.empty for fixture/Ops::opt",
+  "method": "opt"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 129,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "stream",
+  "description": "replaced return value with Stream.empty for fixture/Ops::stream",
+  "method": "stream"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 130,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "iterable",
+  "description": "replaced return value with Collections.emptyList for fixture/Ops::iterable",
+  "method": "iterable"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 131,
+  "mutator": "NullReturnVals",
+  "key": "array",
+  "description": "replaced return value with null for fixture/Ops::array",
+  "method": "array"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 132,
+  "mutator": "PrimitiveReturns",
+  "key": "ch",
+  "description": "replaced char return with 0 for fixture/Ops::ch",
+  "method": "ch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 133,
+  "mutator": "PrimitiveReturns",
+  "key": "by",
+  "description": "replaced byte return with 0 for fixture/Ops::by",
+  "method": "by"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 134,
+  "mutator": "PrimitiveReturns",
+  "key": "sh",
+  "description": "replaced short return with 0 for fixture/Ops::sh",
+  "method": "sh"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 135,
+  "mutator": "PrimitiveReturns",
+  "key": "fl",
+  "description": "replaced float return with 0.0f for fixture/Ops::fl",
+  "method": "fl"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 136,
+  "mutator": "PrimitiveReturns",
+  "key": "db",
+  "description": "replaced double return with 0.0d for fixture/Ops::db",
+  "method": "db"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 139,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "t",
+  "description": "replaced boolean return with false for fixture/Ops::t",
+  "method": "t"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 140,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "f",
+  "description": "replaced boolean return with true for fixture/Ops::f",
+  "method": "f"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 144,
+  "mutator": "PrimitiveReturns",
+  "key": "sw",
+  "description": "replaced int return with 0 for fixture/Ops::sw",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 145,
+  "mutator": "PrimitiveReturns",
+  "key": "sw",
+  "description": "replaced int return with 0 for fixture/Ops::sw",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 146,
+  "mutator": "PrimitiveReturns",
+  "key": "sw",
+  "description": "replaced int return with 0 for fixture/Ops::sw",
+  "method": "sw"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 153,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "foreach"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 155,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "foreach"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 155,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "foreach"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 156,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "foreach"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 158,
+  "mutator": "PrimitiveReturns",
+  "key": "foreach",
+  "description": "replaced int return with 0 for fixture/Ops::foreach",
+  "method": "foreach"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 162,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "lambda$lambda$0"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 162,
+  "mutator": "PrimitiveReturns",
+  "key": "lambda$lambda$",
+  "description": "replaced int return with 0 for fixture/Ops::lambda$lambda$0",
+  "method": "lambda$lambda$0"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "lambda$lambda$",
+  "description": "replaced boolean return with true for fixture/Ops::lambda$lambda$1",
+  "method": "lambda$lambda$1"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "lambda$lambda$1"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "lambda$lambda$2"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lambda$lambda$1"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "PrimitiveReturns",
+  "key": "lambda",
+  "description": "replaced int return with 0 for fixture/Ops::lambda",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 163,
+  "mutator": "PrimitiveReturns",
+  "key": "lambda$lambda$",
+  "description": "replaced int return with 0 for fixture/Ops::lambda$lambda$2",
+  "method": "lambda$lambda$2"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 168,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 168,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 169,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 169,
+  "mutator": "PrimitiveReturns",
+  "key": "tryFinally",
+  "description": "replaced int return with 0 for fixture/Ops::tryFinally",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 171,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 171,
+  "mutator": "PrimitiveReturns",
+  "key": "tryFinally",
+  "description": "replaced int return with 0 for fixture/Ops::tryFinally",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 173,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "tryFinally"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 179,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "multiLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 179,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "multiLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 179,
+  "mutator": "PrimitiveReturns",
+  "key": "multiLine",
+  "description": "replaced int return with 0 for fixture/Ops::multiLine",
+  "method": "multiLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 185,
+  "mutator": "PrimitiveReturns",
+  "key": "ternaryChain",
+  "description": "replaced int return with 0 for fixture/Ops::ternaryChain",
+  "method": "ternaryChain"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 188,
+  "mutator": "PrimitiveReturns",
+  "key": "sameLine",
+  "description": "replaced int return with 0 for fixture/Ops::sameLine",
+  "method": "sameLine"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 191,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 191,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 192,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 193,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 194,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "cond",
+  "description": "replaced boolean return with false for fixture/Ops::cond",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 194,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "cond",
+  "description": "replaced boolean return with true for fixture/Ops::cond",
+  "method": "cond"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 197,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "ternaryMixed"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 197,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ternaryMixed"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 197,
+  "mutator": "PrimitiveReturns",
+  "key": "ternaryMixed",
+  "description": "replaced long return with 0 for fixture/Ops::ternaryMixed",
+  "method": "ternaryMixed"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 198,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "chars",
+  "description": "replaced boolean return with true for fixture/Ops::chars",
+  "method": "chars"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 198,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "chars"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 198,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "chars"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 198,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "chars"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 198,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "chars"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 199,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "nan",
+  "description": "replaced boolean return with true for fixture/Ops::nan",
+  "method": "nan"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 199,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "nan"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 200,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "compareObj"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 200,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "compareObj"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 200,
+  "mutator": "PrimitiveReturns",
+  "key": "compareObj",
+  "description": "replaced int return with 0 for fixture/Ops::compareObj",
+  "method": "compareObj"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 205,
+  "mutator": "PrimitiveReturns",
+  "key": "esw",
+  "description": "replaced int return with 0 for fixture/Ops::esw",
+  "method": "esw"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 206,
+  "mutator": "PrimitiveReturns",
+  "key": "esw",
+  "description": "replaced int return with 0 for fixture/Ops::esw",
+  "method": "esw"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 211,
+  "mutator": "PrimitiveReturns",
+  "key": "newSwitch",
+  "description": "replaced int return with 0 for fixture/Ops::newSwitch",
+  "method": "newSwitch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 214,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "newSwitch"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 219,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "throwing"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 219,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "throwing"
+ },
+ {
+  "file": "fixture/Ops.java",
+  "line": 226,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "<init>"
+ }
+]

@@ -341,10 +341,7 @@ fn pit_mutator(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Statu
                     verdict_of(
                         Status::NotInfected,
                         "returned-replacement",
-                        format!(
-                            "every evaluation returned {} already",
-                            mutant.replacement.trim_matches('"').replace("\"\"", "\"\"")
-                        ),
+                        format!("every evaluation returned {} already", mutant.replacement),
                     )
                 } else {
                     verdict_of(INFECTED, "returned-other", "it returned another value")
