@@ -70,6 +70,9 @@ class Rules
     super
   end
 
+  def self.empty_singleton(a = 1)
+  end
+
   def imaginary
     [0i, 1i, -2i, -1.5r, -3]
   end

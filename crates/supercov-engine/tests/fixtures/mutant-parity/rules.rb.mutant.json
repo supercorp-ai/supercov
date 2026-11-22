@@ -5996,16 +5996,118 @@
       ]
     },
     {
-      "subject": "imaginary:73",
+      "subject": "empty_singleton:73",
+      "sexp": "(defs (self) :empty_singleton (args (optarg :a (int 1))) nil)",
+      "mutants": [
+        {
+          "start": [
+            73,
+            28
+          ],
+          "end": [
+            73,
+            33
+          ],
+          "node": "optarg",
+          "replacement": "(arg :a)"
+        },
+        {
+          "start": [
+            73,
+            32
+          ],
+          "end": [
+            73,
+            33
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            73,
+            32
+          ],
+          "end": [
+            73,
+            33
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            73,
+            32
+          ],
+          "end": [
+            73,
+            33
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            73,
+            32
+          ],
+          "end": [
+            73,
+            33
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            73,
+            3
+          ],
+          "end": [
+            74,
+            6
+          ],
+          "node": "defs",
+          "replacement": "(defs (self) :empty_singleton (args (optarg :a (int 1))) (lvasgn :a (int 1)))"
+        },
+        {
+          "start": [
+            73,
+            3
+          ],
+          "end": [
+            74,
+            6
+          ],
+          "node": "defs",
+          "replacement": "(defs (self) :empty_singleton (args (optarg :a (int 1))) (send nil :raise))"
+        },
+        {
+          "start": [
+            73,
+            3
+          ],
+          "end": [
+            74,
+            6
+          ],
+          "node": "defs",
+          "replacement": "(defs (self) :empty_singleton (args (optarg :a (int 1))) (zsuper))"
+        }
+      ]
+    },
+    {
+      "subject": "imaginary:76",
       "sexp": "(def :imaginary (args) (array (complex (0+0i)) (complex (0+1i)) (complex (0-2i)) (rational (-3/2)) (int -3)))",
       "mutants": [
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6013,11 +6115,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6025,11 +6127,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6037,11 +6139,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6049,11 +6151,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6061,11 +6163,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6073,11 +6175,11 @@
         },
         {
           "start": [
-            74,
+            77,
             6
           ],
           "end": [
-            74,
+            77,
             8
           ],
           "node": "complex",
@@ -6085,11 +6187,11 @@
         },
         {
           "start": [
-            74,
+            77,
             6
           ],
           "end": [
-            74,
+            77,
             8
           ],
           "node": "complex",
@@ -6097,11 +6199,11 @@
         },
         {
           "start": [
-            74,
+            77,
             6
           ],
           "end": [
-            74,
+            77,
             8
           ],
           "node": "complex",
@@ -6109,11 +6211,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6121,11 +6223,11 @@
         },
         {
           "start": [
-            74,
+            77,
             10
           ],
           "end": [
-            74,
+            77,
             12
           ],
           "node": "complex",
@@ -6133,11 +6235,11 @@
         },
         {
           "start": [
-            74,
+            77,
             10
           ],
           "end": [
-            74,
+            77,
             12
           ],
           "node": "complex",
@@ -6145,11 +6247,11 @@
         },
         {
           "start": [
-            74,
+            77,
             10
           ],
           "end": [
-            74,
+            77,
             12
           ],
           "node": "complex",
@@ -6157,11 +6259,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6169,11 +6271,11 @@
         },
         {
           "start": [
-            74,
+            77,
             14
           ],
           "end": [
-            74,
+            77,
             17
           ],
           "node": "complex",
@@ -6181,11 +6283,11 @@
         },
         {
           "start": [
-            74,
+            77,
             14
           ],
           "end": [
-            74,
+            77,
             17
           ],
           "node": "complex",
@@ -6193,11 +6295,11 @@
         },
         {
           "start": [
-            74,
+            77,
             14
           ],
           "end": [
-            74,
+            77,
             17
           ],
           "node": "complex",
@@ -6205,11 +6307,11 @@
         },
         {
           "start": [
-            74,
+            77,
             14
           ],
           "end": [
-            74,
+            77,
             17
           ],
           "node": "complex",
@@ -6217,11 +6319,11 @@
         },
         {
           "start": [
-            74,
+            77,
             14
           ],
           "end": [
-            74,
+            77,
             17
           ],
           "node": "complex",
@@ -6229,11 +6331,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6241,11 +6343,11 @@
         },
         {
           "start": [
-            74,
+            77,
             19
           ],
           "end": [
-            74,
+            77,
             24
           ],
           "node": "rational",
@@ -6253,11 +6355,11 @@
         },
         {
           "start": [
-            74,
+            77,
             19
           ],
           "end": [
-            74,
+            77,
             24
           ],
           "node": "rational",
@@ -6265,11 +6367,11 @@
         },
         {
           "start": [
-            74,
+            77,
             19
           ],
           "end": [
-            74,
+            77,
             24
           ],
           "node": "rational",
@@ -6277,11 +6379,11 @@
         },
         {
           "start": [
-            74,
+            77,
             19
           ],
           "end": [
-            74,
+            77,
             24
           ],
           "node": "rational",
@@ -6289,11 +6391,11 @@
         },
         {
           "start": [
-            74,
+            77,
             19
           ],
           "end": [
-            74,
+            77,
             24
           ],
           "node": "rational",
@@ -6301,11 +6403,11 @@
         },
         {
           "start": [
-            74,
+            77,
             5
           ],
           "end": [
-            74,
+            77,
             29
           ],
           "node": "array",
@@ -6313,11 +6415,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",
@@ -6325,11 +6427,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",
@@ -6337,11 +6439,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",
@@ -6349,11 +6451,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",
@@ -6361,11 +6463,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",
@@ -6373,11 +6475,11 @@
         },
         {
           "start": [
-            74,
+            77,
             26
           ],
           "end": [
-            74,
+            77,
             28
           ],
           "node": "int",

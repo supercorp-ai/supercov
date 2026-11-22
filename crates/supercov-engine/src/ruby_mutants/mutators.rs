@@ -1327,14 +1327,10 @@ fn kwargs(out: &mut Out<'_>) {
         let Some(child) = child.node() else {
             continue;
         };
+        // (A pair's key never becomes `nil`, and nothing makes it `self`:
+        // mutant's check for those keys has nothing to refuse.)
         for mutation in mutate(child, None) {
-            let forbidden = mutation.ty == "pair"
-                && mutation
-                    .node(0)
-                    .is_some_and(|key| matches!(key.ty, "nil" | "self"));
-            if !forbidden {
-                out.update(index, node(mutation));
-            }
+            out.update(index, node(mutation));
         }
     }
 }
@@ -1569,11 +1565,10 @@ fn rescue(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
         }
     }
     if standalone {
-        for index in &rescues {
-            if let Some(handler) = input.node(*index).and_then(|resbody| resbody.node(2)) {
-                out.emit(handler.clone());
-            }
-        }
+        rescues
+            .iter()
+            .filter_map(|index| input.node(*index).and_then(|resbody| resbody.node(2)))
+            .for_each(|handler| out.emit(handler.clone()));
     }
     if let Some(else_body) = input.node(length.saturating_sub(1)).cloned() {
         mutate_child(out, length.saturating_sub(1), parent, |_| true);
@@ -1585,17 +1580,12 @@ fn rescue(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
 }
 
 fn enclosing_method_has_arguments(parent: Option<&Parent<'_>>) -> bool {
-    let mut current = parent;
-    while let Some(each) = current {
-        let arguments = match each.node.ty {
-            "def" => each.node.node(1),
-            "defs" => each.node.node(2),
-            _ => {
-                current = each.up;
-                continue;
-            }
-        };
-        return arguments.is_some_and(|arguments| !arguments.children.is_empty());
-    }
-    false
+    std::iter::successors(parent, |each| each.up)
+        .find_map(|each| match each.node.ty {
+            "def" => Some(each.node.node(1)),
+            "defs" => Some(each.node.node(2)),
+            _ => None,
+        })
+        .flatten()
+        .is_some_and(|arguments| !arguments.children.is_empty())
 }

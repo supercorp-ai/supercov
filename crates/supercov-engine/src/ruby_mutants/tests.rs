@@ -965,12 +965,14 @@ fn ruby_switches_go_to_the_mutants_wanted_and_name_those_with_none() {
     let one = schemata::switches(source, 1, Some(&wanted));
     assert!(!one.edits.is_empty() && one.edits.len() < all.edits.len());
     assert!(one.edits.iter().all(|(_, text)| !text.contains("1000001")));
-    let flattened = b"def m((a, b))\n  a\nend\n";
-    let switches = schemata::switches(flattened, 1, None);
-    assert_eq!(
-        switches.unplaceable.values().collect::<Vec<_>>(),
-        ["arguments"]
-    );
+    for flattened in [&b"def m((a, b))\n  a\nend\n"[..], b"def m((a, b)); end\n"] {
+        let switches = schemata::switches(flattened, 1, None);
+        assert_eq!(
+            switches.unplaceable.values().collect::<Vec<_>>(),
+            ["arguments"]
+        );
+    }
+    assert_eq!(schemata::apply(b"a", &[]), b"a");
 }
 
 /// A mutant's id names mutant's mutator class for the node it changes,

@@ -59,8 +59,8 @@ enum Shape {
     Empty,
 }
 
+/// How a switch goes around `node` (a node of the method, with its span).
 fn placeable(node: &N) -> Option<Shape> {
-    node.span?;
     if node.has(syntax::SYNTHETIC) {
         return match node.ty {
             "begin" => Some(Shape::Statements),
@@ -82,9 +82,9 @@ fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, Str
             (original.ty, mutated.ty),
             ("optarg", "arg") | ("kwoptarg", "kwarg")
         )
-        && let Some(default) = original.node(1)
-        && let Some((start, end)) = default.span
     {
+        let default = original.node(1).expect("an optional parameter's default");
+        let (start, end) = default.span.expect("a node of the method has its span");
         let error = if original.ty == "optarg" {
             "wrong number of arguments".to_owned()
         } else {
@@ -149,8 +149,8 @@ fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, Str
         if index == 0 {
             // The method itself: an empty body takes its switch before `end`.
             let body = if original.ty == "def" { 2 } else { 3 };
+            // (An endless method always has a body.)
             if original.child(body).is_nil()
-                && !original.has(syntax::ENDLESS)
                 && let Some(body) = mutated.node(body)
                 && let Some(copy) = print::one_line(source, &mutant.method, body)
             {
@@ -206,14 +206,14 @@ pub(crate) fn switches(
     let mut edits: Vec<(usize, u8, usize, String)> = Vec::new();
     for placement in &placements {
         let mut opener = String::from("(if ");
-        for (position, (key, copy)) in placement.arms.iter().enumerate() {
-            if position > 0 {
-                opener.push_str(" elsif ");
-            }
-            opener.push_str(&format!(
-                "$__supercov_mutant == {key} then $__supercov_strong.h; ({copy})"
-            ));
-        }
+        let arms: Vec<String> = placement
+            .arms
+            .iter()
+            .map(|(key, copy)| {
+                format!("$__supercov_mutant == {key} then $__supercov_strong.h; ({copy})")
+            })
+            .collect();
+        opener.push_str(&arms.join(" elsif "));
         let (open_tail, closer) = match placement.shape {
             Shape::Expression => (" else (", ") end)"),
             Shape::Statements => (" else ", " end)"),
