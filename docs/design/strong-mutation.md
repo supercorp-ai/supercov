@@ -90,6 +90,54 @@ And a mutant in module-level code (no function around it) takes every test
 of each file that ran it, whole: a module loaded lazily by one test keeps the
 mutated value for the file's later tests, which never run that code again.
 
+## The continuous pass (Vitest 4 and later)
+
+Where Supercov's spawner forks Vitest's workers (Vitest 4 and later, files
+isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
+
+- **Baselines once per file.** Before any mutant, one run holds every test
+  file's baseline: the union of its mutants' candidates, and the file whole
+  where a mutant runs it whole (a mutant of module-level code). A union that
+  fails, or does not finish, without a mutant means a candidate leans on a
+  test the union left out: the file's copies run whole from then on, and its
+  whole baseline runs. That and a mutant whose kill a confirmation overturned
+  (it runs the file whole, below) are the only reasons a file has a second
+  baseline; no baseline is repeated for a copy.
+- **One run for the mutants.** It lists more worker slots than the pass can
+  use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
+  "run", for work that is ready: a baseline a mutant now needs, a
+  confirmation, or the next file of a mutant whose copy before ended with
+  every test passing. The worker is then told to run that work's test file
+  in place of the slot's (slots are files of the work's project and
+  environment, learned from Vitest's "start" for each file's baseline).
+  Vitest's own limit on workers running at once holds.
+- **A mutant's files one after another**, the likeliest killer first (a
+  file's kills over its runs so far, over its cost), and its chain stops at
+  its first kill, as StrykerJS runs a mutant's covering files with `bail`.
+  Parallelism comes from many mutants at once; of the mutants ready, the one
+  with the most work left goes first, so long chains do not end the pass.
+- **Confirmations only for left-out tests.** A kill is certain where the
+  copy ran every test its file's baseline ran before the failing one (a
+  copy of the whole file always does, against the whole baseline). Any
+  other kill came from a copy that left out earlier tests: those tests, up
+  to the failing one, run again with no mutant (one run for every mutant
+  with the same tests), and where they fail that way too the mutant runs
+  the file whole. This is the only trigger.
+- **No worker idles while a mutant has files left.** Where no mutant is
+  waiting for its next file, a slot takes the next file of a mutant whose
+  copy is still running (the most work left first). Its verdict is the
+  same; a copy that a kill of its mutant makes moot is stopped.
+- **A failure before the mutant ran is run again.** Each test's record says
+  how often the copy's mutant had been evaluated by its end. Up to the first
+  evaluation a copy runs exactly as its file does without the mutant, so a
+  test that failed before it failed for another reason (on tRPC, timing
+  tests such as `lazy connection where the first connection fails` failed
+  once in a run that way, and stood as kills the ground truth does not
+  have). Such a copy runs again, once; a failure that repeats counts, since
+  the mutant may have run in a process the copy started.
+- When every mutant is decided the run is cancelled; its slots left never
+  start a process.
+
 ## Order and early exit
 
 A mutant's candidates are grouped by test file, cheapest file first. It runs

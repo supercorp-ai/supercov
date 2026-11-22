@@ -22944,9 +22944,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
             .all(|mutant| mutant["strong"]["status"] != "survived"),
         "{listed}"
     );
-    assert_eq!(
-        passes[0]["profile"]["mutantCopies"],
-        ran + killed,
+    // One more copy for each kill a confirmation overturned (the mutant
+    // runs its file whole).
+    assert!(
+        passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
+            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
