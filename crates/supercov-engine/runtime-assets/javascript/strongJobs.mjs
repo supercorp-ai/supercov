@@ -27,9 +27,10 @@ import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Tests that took at most this long together run beside a mutant's own
-// candidates rather than be confirmed apart (strongJobs's `tryFile`).
-const UNION_MS = 1_000;
+// A file whose baseline job took at most this long, the start of the command
+// included, runs all its baseline's tests beside a mutant's own candidates
+// rather than confirm a kill apart (`tryFile`).
+const UNION_MS = 1_500;
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
 
 function parallelism() {
@@ -123,8 +124,13 @@ export function outcomes(directory) {
 // The command for one job: Bun's runner takes the file as an argument, as it
 // loads every test file into one process; the other runners' adapters keep
 // their runner from loading another file.
-export function commandFor(command, file, root = process.cwd()) {
+export function commandFor(command, file, root = process.cwd(), runner = undefined) {
     const [program, first] = command;
+    // A tap test file is a program of its own, as tap's runner runs it (and
+    // StrykerJS's tap runner): run by itself, beside other jobs, it shares
+    // none of the working files tap's command keeps in the project.
+    if (runner === "tap" && /\.[cm]?js$/.test(file))
+        return [process.execPath, file];
     if (program && /^bun(?:\.exe)?$/.test(basename(program)) && first === "test")
         return [...command, `./${file}`];
     return withoutNpx(command, root);
@@ -192,6 +198,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // none of their tests but the job's.
     const known = [...new Set(tests.filter(handled).map((test) => test.file).filter(Boolean))].sort();
     const testsOf = new Map();
+    const runnerOf = new Map(tests.filter(handled).map((test) => [test.file, test.runner]));
     for (const test of tests) {
         if (!handled(test) || !test.file)
             continue;
@@ -232,12 +239,14 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail }));
             const results = join(directory, "results.jsonl");
             const log = join(directory, "output.log");
-            const [program, ...args] = commandFor(command, file, root);
+            const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
             const begun = Date.now();
             let output;
             try {
                 output = [];
                 const overrides = {
+                    // What tap's runner gives each test file it starts.
+                    ...(runnerOf.get(file) === "tap" ? { TAP_CHILD_ID: String(number) } : {}),
                     SUPERCOV_EVIDENCE_DIR: evidence,
                     SUPERCOV_STRONG_JOB: spec,
                     SUPERCOV_ACTIVE_MUTANT: mutant ? `${mutant.file}#${mutant.index}` : "-",
@@ -379,7 +388,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             // Where the baseline's tests take little time beside a start of
             // the command, the job runs them all: a kill is then judged by a
             // baseline that ran the same tests, and needs no confirmation.
-            const cheap = !whole && baseline.chosen && cost(group.file, baseline.chosen) <= UNION_MS;
+            const cheap = !whole && baseline.chosen && baseline.durationMs <= UNION_MS;
             const chosen = whole ? null : new Set(cheap ? [...baseline.chosen, ...group.tests] : group.tests);
             const excluded = whole ? (testId) => !baseline.passing.has(testId) : () => false;
             const limitMs = 3 * baseline.durationMs + graceMs;
