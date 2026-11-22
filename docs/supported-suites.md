@@ -234,8 +234,9 @@ files a Rust run measured, with what the run's tests tell of each, and
 them, for `cargo test` (libtest and doctests) and `cargo nextest run`: every
 mutant of a pass in one build, each test by its exact name in its own
 process. A mutant that does not compile is `unviable`, as cargo-mutants
-reports it. Tests a command runs for wasm are not run against mutants yet.
-See `docs/design/rust-mutation.md`.
+reports it. Tests built for wasm run against mutants in Node, under WASI
+and in Chrome; tests run in Firefox, Safari or Edge, which are not measured,
+have their mutants recorded as `error`. See `docs/design/rust-mutation.md`.
 
 ### Rust compiled to wasm in JavaScript tests
 

@@ -41,6 +41,15 @@ use crate::rust_mutants::{arithmetic_code, binary_replacements, value_site};
 /// `core` works in every edition.
 const STATE: &str = "{ static STATE: {runtime}::State = {runtime}::State::new(0); &STATE }";
 
+/// An operator's probe, `{call}` given the site's state as `__supercov_site`:
+/// its operands are read only while the site is open, so a decided site
+/// costs one load.
+fn guarded(runtime: &str, state: &str, call: &str) -> String {
+    format!(
+        "({{ let __supercov_site = {state}; if {runtime}::open(__supercov_site) {{ {call} }} }}, "
+    )
+}
+
 /// Code a probe adds around a range, or at an offset.
 pub(crate) enum ValueEdit {
     Wrap {
@@ -77,10 +86,7 @@ pub(crate) fn place(
             .map(|outcome| ordinal(&format!("{site}#{outcome}")).to_string())
             .collect::<Vec<_>>()
     };
-    for node in tree.syntax().descendants() {
-        if skip(&node) {
-            continue;
-        }
+    for node in tree.syntax().descendants().filter(|node| !skip(node)) {
         if let Some(binary) = ast::BinExpr::cast(node.clone()) {
             let (Some(left), Some(right), Some((_, operator))) =
                 (binary.lhs(), binary.rhs(), binary.op_details())
@@ -93,14 +99,18 @@ pub(crate) fn place(
             };
             let range = node.text_range();
             match operator {
-                BinaryOp::CmpOp(CmpOp::Ord { .. }) => {
+                BinaryOp::CmpOp(CmpOp::Ord { strict, .. }) => {
                     let site = value_site(file, range, "compare");
                     let outcomes = ids(&site, &["lt", "eq", "gt", "unordered", "unknown"]);
                     edits.push(ValueEdit::Wrap {
                         range,
-                        prefix: format!(
-                            "({runtime}::compare({left}, {right}, &[{}], {state}), ",
-                            outcomes.join(", ")
+                        prefix: guarded(
+                            runtime,
+                            &state,
+                            &format!(
+                                "{runtime}::compare({left}, {right}, &[{}], {strict}, __supercov_site)",
+                                outcomes.join(", ")
+                            ),
                         ),
                         suffix: ").1".into(),
                         outer: false,
@@ -123,10 +133,14 @@ pub(crate) fn place(
                         .collect::<Vec<_>>();
                     edits.push(ValueEdit::Wrap {
                         range,
-                        prefix: format!(
-                            "({runtime}::arithmetic({left}, {right}, b'{}', &[{}], {state}), ",
-                            op_code(op),
-                            mutants.join(", ")
+                        prefix: guarded(
+                            runtime,
+                            &state,
+                            &format!(
+                                "{runtime}::arithmetic({left}, {right}, b'{}', &[{}], __supercov_site)",
+                                op_code(op),
+                                mutants.join(", ")
+                            ),
                         ),
                         suffix: ").1".into(),
                         outer: false,
@@ -138,17 +152,20 @@ pub(crate) fn place(
         }
         if let Some(prefix) = ast::PrefixExpr::cast(node.clone())
             && prefix.op_kind() == Some(UnaryOp::Neg)
-            && let Some(inner) = prefix.expr()
-            && let Some(read) = operand(runtime, &inner)
+            && let Some(read) = operand(runtime, &prefix.expr().expect("a file that parses"))
         {
             let range = node.text_range();
             let site = value_site(file, range, "negate");
             let outcomes = ids(&site, &["zero", "nonzero", "unknown"]);
             edits.push(ValueEdit::Wrap {
                 range,
-                prefix: format!(
-                    "({runtime}::negated({read}, &[{}], {state}), ",
-                    outcomes.join(", ")
+                prefix: guarded(
+                    runtime,
+                    &state,
+                    &format!(
+                        "{runtime}::negated({read}, &[{}], __supercov_site)",
+                        outcomes.join(", ")
+                    ),
                 ),
                 suffix: ").1".into(),
                 outer: false,
@@ -177,7 +194,11 @@ fn operand(runtime: &str, expression: &ast::Expr) -> Option<String> {
             ]
             .iter()
             .any(|suffix| text.ends_with(suffix));
-            match literal.syntax().first_token()?.kind() {
+            let token = literal
+                .syntax()
+                .first_token()
+                .expect("a literal is a token");
+            match token.kind() {
                 SyntaxKind::INT_NUMBER if !suffixed => {
                     Some(format!("{runtime}::Num::LitInt({text})"))
                 }
@@ -194,7 +215,7 @@ fn operand(runtime: &str, expression: &ast::Expr) -> Option<String> {
             if prefix.op_kind() == Some(UnaryOp::Neg)
                 && matches!(prefix.expr(), Some(ast::Expr::Literal(_))) =>
         {
-            let inner = operand(runtime, &prefix.expr()?)?;
+            let inner = operand(runtime, &prefix.expr().expect("a literal, as matched"))?;
             // `LitInt(5)` to `LitInt(-5)`; a typed literal stays typed.
             Some(
                 inner
@@ -284,12 +305,11 @@ fn returns(
     if function.const_token().is_some() || function.async_token().is_some() {
         return Vec::new();
     }
+    // A function with a body has a statement list.
     let Some(body) = function.body() else {
         return Vec::new();
     };
-    let Some(list) = body.stmt_list() else {
-        return Vec::new();
-    };
+    let list = body.stmt_list().expect("a block has statements");
     let state = STATE.replace("{runtime}", runtime);
     let site = value_site(file, function.syntax().text_range(), "return");
     let outcomes = ids(&site, &["0", "1", "-1", "other", "unknown", "unwound"]);
@@ -368,7 +388,9 @@ mod tests {
         );
         let all = edits.join("\n");
         assert!(
-            all.contains("rt::compare(rt::num(&(a)), rt::Num::LitInt(3), &[7, 8, 9, 10, 11], {"),
+            all.contains(
+                "if rt::open(__supercov_site) { rt::compare(rt::num(&(a)), rt::Num::LitInt(3), &[7, 8, 9, 10, 11], true, __supercov_site) }"
+            ),
             "{all}"
         );
         assert!(
@@ -390,12 +412,43 @@ mod tests {
         assert!(!all.contains("returned::<String>"), "{all}");
         assert!(!all.contains("returned::<u8>"), "{all}");
         assert!(
-            all.contains("b'*', &[(b'+', 26, 27, 28), (b'/', 29, 30, 31)], {"),
+            all.contains("b'*', &[(b'+', 26, 27, 28), (b'/', 29, 30, 31)], __supercov_site)"),
             "{all}"
         );
         let negative = placed("fn n(a: i8) -> i8 { a * -2 }\n").join("\n");
         assert!(negative.contains("rt::Num::LitInt(-2)"), "{negative}");
         assert!(placed("fn broken( {").is_empty());
+    }
+
+    /// Operands that are not pure, and literals of every kind, beside pure
+    /// ones: only the pure ones are read.
+    #[test]
+    fn only_pure_operands_are_read() {
+        let all = placed(concat!(
+            "fn a(v: &[u8], i: usize, y: u8, x: f64) {\n",
+            "    let _ = (v[g()] < 1, g()[0] < 1, v[i] < 1, *g() < 1, (g() + y) < y, (y + g()) < y, (1 + y) < y, (y + 1) < y, y - 1, x < 1.5f64, -true < y);\n",
+            "}\n",
+        ))
+        .join("\n");
+        for absent in [
+            "num(&(v[g()]))",
+            "num(&(g()[0]))",
+            "num(&(*g()))",
+            "num(&((g() + y)))",
+            "num(&((y + g())))",
+            "-true",
+        ] {
+            assert!(!all.contains(absent), "{absent}: {all}");
+        }
+        for present in [
+            "num(&(v[i]))",
+            "num(&((1 + y)))",
+            "num(&((y + 1)))",
+            "b'-'",
+            "num(&(1.5f64))",
+        ] {
+            assert!(all.contains(present), "{present}: {all}");
+        }
     }
 
     /// Every operand and operator kind, and every function kind.

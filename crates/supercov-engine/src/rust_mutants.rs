@@ -349,9 +349,7 @@ impl Walker<'_> {
     }
 
     fn function(&mut self, node: &SyntaxNode) {
-        let Some(function) = ast::Fn::cast(node.clone()) else {
-            return;
-        };
+        let function = ast::Fn::cast(node.clone()).expect("a function node");
         // A function with no body (in a trait or an `extern` block) has
         // nothing to mutate, and `syn` visits nothing inside it.
         let Some(body) = function.body() else {
@@ -365,9 +363,7 @@ impl Walker<'_> {
         if function.unsafe_token().is_some() || excluded(node) || (in_impl && named_new) {
             return;
         }
-        let Some(list) = body.stmt_list() else {
-            return;
-        };
+        let list = body.stmt_list().expect("a block has statements");
         let statements = statements(&list);
         if statements.is_empty() {
             return;
@@ -406,19 +402,19 @@ impl Walker<'_> {
         if excluded(node) {
             return;
         }
-        if let Some((token, operator)) =
-            ast::BinExpr::cast(node.clone()).and_then(|binary| binary.op_details())
-        {
-            for replacement in binary_replacements(operator) {
-                self.push(
-                    "BinaryOperator",
-                    token.text_range(),
-                    (*replacement).to_owned(),
-                    Site::Operator {
-                        expression: node.text_range(),
-                    },
-                );
-            }
+        // A file that parses has every operator's operands and token.
+        let (token, operator) = ast::BinExpr::cast(node.clone())
+            .and_then(|binary| binary.op_details())
+            .expect("a binary expression has its operator");
+        for replacement in binary_replacements(operator) {
+            self.push(
+                "BinaryOperator",
+                token.text_range(),
+                (*replacement).to_owned(),
+                Site::Operator {
+                    expression: node.text_range(),
+                },
+            );
         }
         self.children(node);
     }
@@ -427,13 +423,11 @@ impl Walker<'_> {
         if excluded(node) {
             return;
         }
-        if let Some(prefix) = ast::PrefixExpr::cast(node.clone())
-            && matches!(prefix.op_kind(), Some(UnaryOp::Not | UnaryOp::Neg))
-            && let Some(token) = prefix.op_token()
-        {
+        let prefix = ast::PrefixExpr::cast(node.clone()).expect("a prefix expression");
+        if matches!(prefix.op_kind(), Some(UnaryOp::Not | UnaryOp::Neg)) {
             self.push(
                 "UnaryOperator",
-                token.text_range(),
+                prefix.op_token().expect("an operator").text_range(),
                 String::new(),
                 Site::Operator {
                     expression: node.text_range(),
@@ -453,11 +447,12 @@ impl Walker<'_> {
             .unwrap_or_default();
         let wildcard = |arm: &ast::MatchArm| matches!(arm.pat(), Some(ast::Pat::WildcardPat(_)));
         if arms.iter().any(wildcard) {
-            for arm in &arms {
-                if wildcard(arm) || arm.guard().is_some() {
-                    continue;
-                }
-                let Some(pattern) = arm.pat() else { continue };
+            // An arm that parsed has its pattern.
+            for (arm, pattern) in arms
+                .iter()
+                .filter(|arm| !wildcard(arm) && arm.guard().is_none())
+                .filter_map(|arm| Some((arm, arm.pat()?)))
+            {
                 let range =
                     TextRange::new(visible_start(arm.syntax()), arm.syntax().text_range().end());
                 self.push(
@@ -490,17 +485,16 @@ impl Walker<'_> {
         if excluded(node) {
             return;
         }
-        if let Some(list) =
-            ast::RecordExpr::cast(node.clone()).and_then(|record| record.record_expr_field_list())
-            && list.spread().is_some()
-        {
+        let list = ast::RecordExpr::cast(node.clone())
+            .and_then(|record| record.record_expr_field_list())
+            .expect("a struct literal has its fields");
+        if list.spread().is_some() {
             for field in list.fields() {
                 // `0: x` names a tuple struct's field by position, which
-                // cargo-mutants leaves alone.
+                // cargo-mutants leaves alone; `a` alone is named.
                 let named = field
                     .name_ref()
-                    .is_some_and(|name| !name.text().starts_with(|c: char| c.is_ascii_digit()))
-                    || field.name_ref().is_none() && field.expr().is_some();
+                    .is_none_or(|name| !name.text().starts_with(|c: char| c.is_ascii_digit()));
                 if !named {
                     continue;
                 }
@@ -661,9 +655,9 @@ fn attribute_excludes(attribute: &SyntaxNode) -> bool {
     } else {
         2
     };
-    let Some(inner) = tokens.get(start..tokens.len().saturating_sub(1)) else {
-        return false;
-    };
+    let inner = tokens
+        .get(start..tokens.len().saturating_sub(1))
+        .unwrap_or_default();
     let (path, rest) = read_path(inner);
     if path.last().map(String::as_str) == Some("test") || path == ["mutants", "skip"] {
         return true;
@@ -695,6 +689,7 @@ fn is_name(token: &str) -> bool {
 fn read_path(tokens: &[String]) -> (Vec<String>, &[String]) {
     let mut path = Vec::new();
     let mut at = 0;
+    // `a::` ends at the stream's end.
     while let Some(token) = tokens.get(at) {
         if !is_name(token) {
             break;
@@ -805,20 +800,18 @@ fn push_token(token: &SyntaxToken, tokens: &mut Vec<Token>) {
 }
 
 fn node_tokens(node: &SyntaxNode, tokens: &mut Vec<Token>) {
-    for element in node.descendants_with_tokens() {
-        if let NodeOrToken::Token(token) = element {
-            push_token(&token, tokens);
-        }
-    }
+    node.descendants_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .for_each(|token| push_token(&token, tokens));
 }
 
 /// A function body's tokens as `syn` prints its block: braces around its
 /// statements, without its inner attributes.
 fn block_tokens(list: &ast::StmtList) -> Vec<Token> {
     let mut tokens = vec![Token::Open('{')];
-    for statement in statements(list) {
-        node_tokens(&statement, &mut tokens);
-    }
+    statements(list)
+        .iter()
+        .for_each(|statement| node_tokens(statement, &mut tokens));
     tokens.push(Token::Close('}'));
     tokens
 }
@@ -839,8 +832,11 @@ fn tokens_of_code(code: &str) -> Vec<Token> {
 /// A token stream printed as cargo-mutants' `ToPrettyString` prints it.
 fn pretty(tokens: &[Token]) -> String {
     fn group(tokens: &[Token], at: &mut usize, out: &mut String) {
-        while *at < tokens.len() {
-            let token = tokens[*at].clone();
+        // A group ends at its `}` or `)`, and the whole at the stream's end.
+        loop {
+            let Some(token) = tokens.get(*at).cloned() else {
+                return;
+            };
             *at += 1;
             let next = tokens.get(*at);
             let more = next.is_some_and(|next| !matches!(next, Token::Close(_)));
@@ -906,16 +902,10 @@ fn path_of(ty: &ast::Type) -> Option<ast::Path> {
 }
 
 /// A path that is one bare name: `syn::Path::is_ident`.
+/// With no qualifier, leading `::`, arguments or anchor, a path's text is
+/// its name.
 fn is_ident(path: &ast::Path, name: &str) -> bool {
-    path.qualifier().is_none()
-        && path.coloncolon_token().is_none()
-        && path.segment().is_some_and(|segment| {
-            segment.generic_arg_list().is_none()
-                && segment.parenthesized_arg_list().is_none()
-                && segment.type_anchor().is_none()
-                && segment.coloncolon_token().is_none()
-                && segment.name_ref().is_some_and(|ident| ident.text() == name)
-        })
+    path.syntax().text() == name
 }
 
 fn last_ident_is(path: &ast::Path, names: &[&str]) -> bool {
@@ -923,8 +913,8 @@ fn last_ident_is(path: &ast::Path, names: &[&str]) -> bool {
 }
 
 fn generic_arguments(path: &ast::Path) -> Option<Vec<ast::GenericArg>> {
-    path.segment()?
-        .generic_arg_list()
+    path.segment()
+        .and_then(|segment| segment.generic_arg_list())
         .map(|list| list.generic_args().collect())
 }
 
@@ -945,26 +935,23 @@ fn first_type_argument(path: &ast::Path, name: &str) -> Option<ast::Type> {
 
 /// `Box<T>` and the like: one argument, a type.
 fn only_type_argument(path: &ast::Path, names: &[&str]) -> Option<(String, ast::Type)> {
-    if !last_ident_is(path, names) {
-        return None;
-    }
-    let arguments = generic_arguments(path)?;
-    match arguments.as_slice() {
-        [ast::GenericArg::TypeArg(argument)] => Some((last_name(path)?, argument.ty()?)),
+    let name = last_name(path).filter(|name| names.contains(&name.as_str()))?;
+    match generic_arguments(path)?.as_slice() {
+        [ast::GenericArg::TypeArg(argument)] => argument.ty().map(|ty| (name, ty)),
         _ => None,
     }
 }
 
 fn known_map(path: &ast::Path) -> Option<(String, ast::Type, ast::Type)> {
-    if !last_ident_is(path, &["BTreeMap", "HashMap"]) {
-        return None;
-    }
-    let arguments = generic_arguments(path)?;
-    match arguments.as_slice() {
+    let name = last_name(path).filter(|name| ["BTreeMap", "HashMap"].contains(&name.as_str()))?;
+    match generic_arguments(path)?.as_slice() {
         [
             ast::GenericArg::TypeArg(key),
             ast::GenericArg::TypeArg(value),
-        ] => Some((last_name(path)?, key.ty()?, value.ty()?)),
+        ] => key
+            .ty()
+            .zip(value.ty())
+            .map(|(key, value)| (name, key, value)),
         _ => None,
     }
 }
@@ -980,28 +967,32 @@ fn maybe_collection_or_container(path: &ast::Path) -> Option<(String, ast::Type)
         })
         .collect::<Vec<_>>();
     match types.as_slice() {
-        [only] => Some((last_name(path)?, only.ty()?)),
+        [only] => last_name(path).zip(only.ty()),
         _ => None,
     }
 }
 
 fn impl_iterator_item(ty: &ast::ImplTraitType) -> Option<ast::Type> {
-    for bound in ty.type_bound_list()?.bounds() {
-        let Some(ast::Type::PathType(path)) = bound.ty() else {
-            continue;
-        };
-        let Some(path) = path.path() else { continue };
-        if last_name(&path).as_deref() != Some("Iterator") {
-            continue;
-        }
-        if let Some(ast::GenericArg::AssocTypeArg(item)) =
-            generic_arguments(&path).and_then(|arguments| arguments.into_iter().next())
-            && item.name_ref().is_some_and(|name| name.text() == "Item")
-        {
-            return item.ty();
-        }
-    }
-    None
+    // The first `Iterator<Item = T>` among its bounds (a lifetime bound has
+    // no type).
+    ty.type_bound_list()
+        .into_iter()
+        .flat_map(|list| list.bounds())
+        .filter_map(|bound| match bound.ty()? {
+            ast::Type::PathType(path) => path.path(),
+            _ => None,
+        })
+        .filter(|path| last_name(path).as_deref() == Some("Iterator"))
+        .find_map(|path| {
+            match generic_arguments(&path).and_then(|arguments| arguments.into_iter().next()) {
+                Some(ast::GenericArg::AssocTypeArg(item))
+                    if item.name_ref().is_some_and(|name| name.text() == "Item") =>
+                {
+                    item.ty()
+                }
+                _ => None,
+            }
+        })
 }
 
 const UNSIGNED: &[&str] = &["u8", "u16", "u32", "u64", "u128", "usize"];
@@ -1043,15 +1034,10 @@ fn slice_values(element: &ast::Type) -> Vec<String> {
 fn type_replacements(ty: &ast::Type) -> Vec<String> {
     match ty {
         ast::Type::PathType(_) => {
-            let Some(path) = path_of(ty) else {
-                return vec!["Default::default()".to_owned()];
-            };
-            path_replacements(&path)
+            path_replacements(&path_of(ty).expect("a path type has its path"))
         }
         ast::Type::ArrayType(array) => {
-            let Some(element) = array.ty() else {
-                return Vec::new();
-            };
+            let element = array.ty().expect("an array type has its element type");
             let length = array
                 .const_arg()
                 .map(|length| pretty_code(length.syntax()))
@@ -1064,9 +1050,7 @@ fn type_replacements(ty: &ast::Type) -> Vec<String> {
             .ty()
             .map_or_else(Vec::new, |element| slice_values(&element)),
         ast::Type::RefType(reference) => {
-            let Some(inner) = reference.ty() else {
-                return Vec::new();
-            };
+            let inner = reference.ty().expect("a reference type has its type");
             match &inner {
                 ast::Type::PathType(_)
                     if reference.mut_token().is_none()

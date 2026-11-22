@@ -226,6 +226,18 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### Mutation testing
+
+`supercov runs latest mutants` lists cargo-mutants' mutants (27.1.0) of the
+files a Rust run measured, with what the run's tests tell of each, and
+`supercov runs latest mutants test` runs them against the tests that reach
+them, for `cargo test` (libtest and doctests) and `cargo nextest run`: every
+mutant of a pass in one build, each test by its exact name in its own
+process. A mutant that does not compile is `unviable`, as cargo-mutants
+reports it. Tests built for wasm run against mutants in Node, under WASI
+and in Chrome; tests run in Firefox, Safari or Edge, which are not measured,
+have their mutants recorded as `error`. See `docs/design/rust-mutation.md`.
+
 ### Rust compiled to wasm in JavaScript tests
 
 A crate wasm-bindgen exposes to JavaScript (a `cdylib` that depends on
