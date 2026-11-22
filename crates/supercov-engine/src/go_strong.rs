@@ -155,7 +155,12 @@ pub fn go_flags(command: &[String]) -> GoFlags {
                     flags.build.push(format!("-{name}={value}"));
                 }
             }
-            "race" | "trimpath" => flags.build.push(argument.clone()),
+            "gcflags" | "asmflags" => {
+                if let Some(value) = value_of(value) {
+                    flags.build.push(format!("-{name}={value}"));
+                }
+            }
+            "race" | "trimpath" | "asan" | "msan" => flags.build.push(argument.clone()),
             "short" => flags.test.push("-test.short".into()),
             "cpu" | "parallel" => {
                 if let Some(value) = value_of(value) {
@@ -163,6 +168,37 @@ pub fn go_flags(command: &[String]) -> GoFlags {
                 }
             }
             _ => {}
+        }
+    }
+    flags
+}
+
+/// `flags` with those of each `go test` the command started, as its last
+/// run with mutants recorded them (`make test`, a script, gotestsum): each
+/// flag once, the first `-tags` kept.
+pub fn recorded_flags(mut flags: GoFlags, invocations: &[Vec<String>]) -> GoFlags {
+    for invocation in invocations {
+        let command = std::iter::once("go".to_owned())
+            .chain(invocation.iter().cloned())
+            .collect::<Vec<_>>();
+        let seen = go_flags(&command);
+        for flag in seen.build {
+            let named = flag.split('=').next().unwrap_or_default().to_owned();
+            if !flags
+                .build
+                .iter()
+                .any(|kept| kept.split('=').next() == Some(named.as_str()))
+            {
+                flags.build.push(flag);
+            }
+        }
+        for flag in seen.test {
+            if !flags.test.contains(&flag) {
+                flags.test.push(flag);
+            }
+        }
+        if flags.tags.is_empty() {
+            flags.tags = seen.tags;
         }
     }
     flags
@@ -634,7 +670,10 @@ pub fn run_go_strong(
         .map_err(|e| format!("{}: {e}", request.results.display()))?;
     let pass = Pass {
         request,
-        flags: go_flags(request.command),
+        flags: recorded_flags(
+            go_flags(request.command),
+            &crate::go_run::recorded_go_invocations(request.root, request.command),
+        ),
         workspace: work.join("workspace"),
         bins: work.join("bin"),
         scratch: work.join("scratch"),
@@ -930,7 +969,11 @@ pub fn run_go_strong(
     // side by side.
     let retried = retries.into_inner().expect("retries");
     pass.profile.lock().expect("profile").retries = retried.len();
-    let queue = Mutex::new(retried.into_iter().collect::<std::collections::VecDeque<_>>());
+    let queue = Mutex::new(
+        retried
+            .into_iter()
+            .collect::<std::collections::VecDeque<_>>(),
+    );
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {

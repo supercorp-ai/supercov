@@ -612,6 +612,84 @@ fn go_flags(
     (flags, fresh, serial)
 }
 
+/// The directory of the recording `go` and the file it appends to, where
+/// a `go` is on PATH to stand in front of.
+#[cfg(unix)]
+fn go_recorder(work: &Path) -> Option<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+    let real = which::which("go").ok()?;
+    let directory = work.join("go-recorder");
+    let log = work.join("go-invocations.log");
+    fs::create_dir_all(&directory).ok()?;
+    let real = real.to_string_lossy().replace('\'', "'\\''");
+    let log_text = log.to_string_lossy().replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = test ]; then\n  {{ for argument in \"$@\"; do printf '%s\\037' \"$argument\"; done; printf '\\n'; }} >> '{log_text}'\nfi\nexec '{real}' \"$@\"\n"
+    );
+    let shim = directory.join("go");
+    fs::write(&shim, script).ok()?;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).ok()?;
+    Some((directory, log))
+}
+
+#[cfg(not(unix))]
+fn go_recorder(_work: &Path) -> Option<(PathBuf, PathBuf)> {
+    None
+}
+
+/// `environment` with the recording `go` first on PATH.
+fn with_go_recorder(
+    mut environment: Vec<(OsString, OsString)>,
+    recorder: Option<&(PathBuf, PathBuf)>,
+) -> Vec<(OsString, OsString)> {
+    let Some((directory, _)) = recorder else {
+        return environment;
+    };
+    let mut path = directory.as_os_str().to_owned();
+    if let Some((_, existing)) = environment.iter().find(|(name, _)| name == "PATH") {
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(existing);
+    }
+    environment.retain(|(name, _)| name != "PATH");
+    environment.push(("PATH".into(), path));
+    environment
+}
+
+/// Where the `go test` invocations of a command, as its last run with
+/// mutants recorded them, are kept: `.supercov/go-invocations/<digest>.json`.
+pub(crate) fn go_invocations_path(root: &Path, command: &[String]) -> PathBuf {
+    let digest = crate::stable_ids::digest(&[&command.join("\0")]);
+    root.join(".supercov/go-invocations")
+        .join(format!("{}.json", &digest[..16]))
+}
+
+fn save_go_invocations(root: &Path, command: &[String], log: &Path) {
+    let text = fs::read_to_string(log).unwrap_or_default();
+    let invocations = text
+        .lines()
+        .map(|line| {
+            line.split('\u{1f}')
+                .filter(|argument| !argument.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|arguments| !arguments.is_empty())
+        .collect::<Vec<_>>();
+    let path = go_invocations_path(root, command);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, serde_json::to_vec(&invocations).expect("plain data"));
+}
+
+/// The `go test` invocations a command's last run with mutants recorded.
+pub fn recorded_go_invocations(root: &Path, command: &[String]) -> Vec<Vec<String>> {
+    fs::read(go_invocations_path(root, command))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// Whether the run lists its mutants: `SUPERCOV_MUTANTS` is `1` or `true`.
 pub(crate) fn mutants_requested() -> bool {
     std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
@@ -801,6 +879,13 @@ pub fn run_direct_go(
                 "[supercov] added -count=1: `go test` caches passing packages, and a cached package does not run, so it would record no coverage"
             );
         }
+        // A run that lists its mutants records each `go test` the command
+        // starts, through a `go` of its own on PATH: a strong pass builds
+        // its test binaries with their flags, from `make test` or a script
+        // as much as from `go test` itself.
+        let recorder = mutants_requested()
+            .then(|| go_recorder(&work_directory))
+            .flatten();
         let test_started = Instant::now();
         let plan = ExecutionPlan {
             preparation: Vec::new(),
@@ -813,10 +898,13 @@ pub fn run_direct_go(
                     cwd: workspace.clone(),
                     // The run's id, for a test that wants to know it is
                     // measured; and Go's flags where Supercov added any.
-                    environment: Some(crate::rust_runtime::measured_environment(
-                        std::env::vars_os(),
-                        go_flags.map(|value| ("GOFLAGS", value)),
-                        &request.run_id,
+                    environment: Some(with_go_recorder(
+                        crate::rust_runtime::measured_environment(
+                            std::env::vars_os(),
+                            go_flags.map(|value| ("GOFLAGS", value)),
+                            &request.run_id,
+                        ),
+                        recorder.as_ref(),
                     )),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
@@ -861,6 +949,9 @@ pub fn run_direct_go(
             ));
         }
         let exit_code = execution.exit_code;
+        if let Some((_, log)) = &recorder {
+            save_go_invocations(&root, &request.command, log);
+        }
 
         let publication_started = Instant::now();
         let mut parts = Vec::new();

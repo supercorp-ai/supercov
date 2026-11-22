@@ -623,7 +623,10 @@ mod tests {
 
     #[test]
     fn unary_operators_without_a_listed_mutator_are_left() {
-        assert!(listed("package p\n\nfunc f(a *int, b bool, c chan int) { _ = *a; _ = !b; _ = <-c }\n").is_empty());
+        assert!(
+            listed("package p\n\nfunc f(a *int, b bool, c chan int) { _ = *a; _ = !b; _ = <-c }\n")
+                .is_empty()
+        );
         assert_eq!(
             listed("package p\n\nfunc f(a int) int { return +a }\n"),
             [(3, 28, "ARITHMETIC_BASE".to_owned(), "-".to_owned())]

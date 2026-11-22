@@ -24534,3 +24534,48 @@ fn go_mutants_are_killed_kept_or_found_not_to_compile() {
         "no-coverage"
     );
 }
+
+/// A Go suite behind `make test`: the strong pass builds its test binaries
+/// with the flags the Makefile gives `go test`, as the measured run recorded
+/// them. Without the tag, the file behind it would not be built at all, and
+/// its mutant could not be killed.
+#[cfg(unix)]
+#[test]
+fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-make");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    let directory = std::path::Path::new(go)
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    project.write(
+        "Makefile",
+        &format!("test:\n\tPATH=\"$$PATH:{directory}\" go test -tags tagged ./...\n"),
+    );
+    project
+        .supercov(&["mutants", "--json", "--", "make", "test"])
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "double.go:5:35-5:36:ArithmeticOperator:/")
+        .unwrap_or_else(|| panic!("{listed}"))
+        .clone();
+    assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
