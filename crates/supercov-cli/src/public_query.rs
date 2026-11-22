@@ -1093,6 +1093,41 @@ pub fn parse_public_query(
 
 #[cfg(test)]
 mod tests {
+    /// `--stryker` reads the mutant gem's session results beside StrykerJS
+    /// reports, and says which session it could not read.
+    #[test]
+    fn mutant_sessions_are_read_beside_stryker_reports() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-mutant-sessions-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = serde_json::json!({
+            "subject_results": [{
+                "source_path": "lib/none.rb",
+                "identification": "A#b:lib/none.rb:1",
+                "coverage_results": [{
+                    "mutation_result": {
+                        "mutation_type": "evil",
+                        "mutation_source": "def b\n  nil\nend",
+                        "mutation_identification": "evil:A#b:x",
+                    },
+                    "criteria_result": { "test_result": true },
+                }],
+            }],
+        });
+        let good = directory.join("session.json");
+        std::fs::write(&good, session.to_string()).unwrap();
+        let read = read_stryker_reports(&[good.display().to_string()], None).unwrap();
+        assert_eq!(read.reports, [good.display().to_string()]);
+        let bad = directory.join("broken.json.gz");
+        std::fs::write(&bad, [0x1f, 0x8b, 0, 0]).unwrap();
+        let refused = read_stryker_reports(&[bad.display().to_string()], None).unwrap_err();
+        assert!(refused.contains("as mutant's session results"), "{refused}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// Each query's help names its own usage; an unknown one, the list.
     #[test]
     fn each_query_s_help_is_its_own_usage() {

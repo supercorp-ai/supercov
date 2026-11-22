@@ -1358,6 +1358,18 @@ mod tests {
         };
         let originals =
             HashMap::from([(("src/a.js", (1, 5), (1, 10), "EqualityOperator"), "a < b")]);
+        // A report matched by what each mutant makes names Supercov's id:
+        // the higher rank of its reports is kept.
+        let by_id = |status: &str| StrykerReportMutant {
+            id: Some("lib/a.rb:1:1-1:2:Send:nil".into()),
+            status: status.into(),
+            ..mutant(1)
+        };
+        let ranked = stryker_by_id(
+            &[by_id("Survived"), by_id("Killed"), by_id("Survived")],
+            &originals,
+        );
+        assert_eq!(ranked["lib/a.rb:1:1-1:2:Send:nil"].1, "Killed");
         let merged = stryker_by_id(&[mutant(1), mutant(2)], &originals);
         assert_eq!(
             merged.keys().collect::<Vec<_>>(),
