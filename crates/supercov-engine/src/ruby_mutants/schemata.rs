@@ -141,7 +141,7 @@ fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, Str
                 .is_some_and(|receiver| Rc::ptr_eq(receiver, original));
         if !private_receiver
             && let Some(shape) = placeable(original)
-            && let Some(copy) = print::one_line(source, mutated)
+            && let Some(copy) = print::one_line(source, &mutant.method, mutated)
         {
             let (start, end) = original.span.expect("placeable");
             return Ok((start, end, shape, copy));
@@ -152,7 +152,7 @@ fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, Str
             if original.child(body).is_nil()
                 && !original.has(syntax::ENDLESS)
                 && let Some(body) = mutated.node(body)
-                && let Some(copy) = print::one_line(source, body)
+                && let Some(copy) = print::one_line(source, &mutant.method, body)
             {
                 let (_, end) = original.span.expect("a method");
                 return Ok((end - 3, end - 3, Shape::Empty, copy));

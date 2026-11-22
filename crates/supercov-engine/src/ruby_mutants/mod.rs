@@ -207,7 +207,8 @@ fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
                 descriptor(&edit.text)
             }
             (Some(replacement), _) => descriptor(
-                &print::one_line(source, replacement).unwrap_or_else(|| tree::sexp(replacement)),
+                &print::one_line(source, tree, replacement)
+                    .unwrap_or_else(|| tree::sexp(replacement)),
             ),
         };
         if edit.is_none() {
@@ -322,7 +323,7 @@ pub(crate) fn edit(source: &[u8], tree: &Rc<N>, mutated: &Rc<N>) -> Option<Edit>
                     "nil".to_owned()
                 }
             }
-            Some(mutated) => match print::replacement(source, &original, mutated) {
+            Some(mutated) => match print::replacement(source, tree, &original, mutated) {
                 Some(text) => text,
                 None => continue,
             },
@@ -418,7 +419,73 @@ pub(crate) fn localize(original: &Rc<N>, mutated: &Rc<N>) -> (Rc<N>, Option<Rc<N
 /// a method call.
 pub(crate) fn validates(method: &N) -> bool {
     let mut scope = Scope::default();
-    scope.walk(method)
+    scope.walk(method) && !misplaced(method, None)
+}
+
+/// Statement lists and bodies: where `a || b and c` reads as written.
+const STATEMENT_PARENTS: &[&str] = &[
+    "begin",
+    "kwbegin",
+    "def",
+    "defs",
+    "block",
+    "numblock",
+    "itblock",
+    "if",
+    "while",
+    "until",
+    "while_post",
+    "until_post",
+    "when",
+    "in_pattern",
+    "resbody",
+    "rescue",
+    "ensure",
+    "case",
+    "case_match",
+    "for",
+];
+
+/// Whether a node parses back as another where Unparser puts it: a regexp
+/// literal as a condition is a match against `$_`, and `(a || b) && c`
+/// prints with `and`, which only a statement holds.
+fn misplaced(node: &N, parent: Option<&N>) -> bool {
+    fn holds_regexp(condition: &N) -> bool {
+        match condition.ty {
+            "regexp" => true,
+            "and" | "or" => condition
+                .children
+                .iter()
+                .filter_map(Child::node)
+                .any(|operand| holds_regexp(operand)),
+            "begin" if condition.children.len() == 1 => {
+                condition.node(0).is_some_and(|inner| holds_regexp(inner))
+            }
+            "send" if condition.child(1).sym() == Some("!") && condition.children.len() == 2 => {
+                condition.node(0).is_some_and(|inner| holds_regexp(inner))
+            }
+            _ => false,
+        }
+    }
+    if matches!(
+        node.ty,
+        "if" | "while" | "until" | "while_post" | "until_post"
+    ) && node
+        .node(0)
+        .is_some_and(|condition| holds_regexp(condition))
+    {
+        return true;
+    }
+    if node.ty == "and"
+        && node.node(0).is_some_and(|left| left.ty == "or")
+        && parent.is_some_and(|parent| !STATEMENT_PARENTS.contains(&parent.ty))
+    {
+        return true;
+    }
+    node.children
+        .iter()
+        .filter_map(Child::node)
+        .any(|child| misplaced(child, Some(node)))
 }
 
 /// Binary operators by how tightly they bind, loosest first. Unparser
@@ -577,16 +644,6 @@ impl Scope {
                 value.node(1).is_none_or(|assigned| self.walk(assigned))
             }
             "lvar" => value.child(0).sym().is_some_and(|name| self.known(name)),
-            "send" => {
-                // A bare call by a local variable's name reads the variable.
-                if value.children.len() == 2
-                    && value.child(0).is_nil()
-                    && value.child(1).sym().is_some_and(|name| self.known(name))
-                {
-                    return false;
-                }
-                self.walk_children(value)
-            }
             "match_with_lvasgn" => {
                 let valid = self.walk_children(value);
                 if let Some(regexp) = value.node(0)

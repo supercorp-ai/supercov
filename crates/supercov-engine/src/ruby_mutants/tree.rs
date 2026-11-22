@@ -56,39 +56,41 @@ impl Child {
 /// How a node was written, where printing it again needs to know.
 pub(crate) mod syntax {
     /// A statement of a statement list (or a body of one statement).
-    pub const STATEMENT: u16 = 1;
+    pub const STATEMENT: u32 = 1;
     /// `c ? a : b`.
-    pub const TERNARY: u16 = 1 << 1;
+    pub const TERNARY: u32 = 1 << 1;
     /// `a if c`, `a while c`.
-    pub const MODIFIER: u16 = 1 << 2;
+    pub const MODIFIER: u32 = 1 << 2;
     /// A hash pair written `key: value`.
-    pub const LABEL: u16 = 1 << 3;
+    pub const LABEL: u32 = 1 << 3;
     /// Parameters written in `|...|`.
-    pub const BLOCK_PARAMETERS: u16 = 1 << 4;
+    pub const BLOCK_PARAMETERS: u32 = 1 << 4;
     /// `def m = value`.
-    pub const ENDLESS: u16 = 1 << 5;
+    pub const ENDLESS: u32 = 1 << 5;
     /// A `{ }` block, rather than `do end`.
-    pub const BRACES: u16 = 1 << 6;
+    pub const BRACES: u32 = 1 << 6;
     /// An `unless`, whose branches parser stores swapped.
-    pub const UNLESS: u16 = 1 << 7;
+    pub const UNLESS: u32 = 1 << 7;
     /// `begin ... end while c`.
-    pub const POST: u16 = 1 << 8;
+    pub const POST: u32 = 1 << 8;
     /// A node made up from others (a statement list, a block's parameters):
     /// its span's text is not one node's own syntax.
-    pub const SYNTHETIC: u16 = 1 << 9;
+    pub const SYNTHETIC: u32 = 1 << 9;
     /// A string part of a regexp: its text is the pattern as written.
-    pub const REGEXP_CONTENT: u16 = 1 << 10;
+    pub const REGEXP_CONTENT: u32 = 1 << 10;
     /// A string part of an interpolated string or symbol.
-    pub const STRING_CONTENT: u16 = 1 << 11;
+    pub const STRING_CONTENT: u32 = 1 << 11;
     /// A word of `%w[]` or `%i[]`: no code can stand in its place.
-    pub const WORD: u16 = 1 << 12;
+    pub const WORD: u32 = 1 << 12;
     /// An `elsif`: written as its `if`'s else branch.
-    pub const ELSIF: u16 = 1 << 13;
+    pub const ELSIF: u32 = 1 << 13;
     /// An expression in a slot that holds any expression in parentheses: a
     /// switch can go around it.
-    pub const EXPRESSION: u16 = 1 << 14;
+    pub const EXPRESSION: u32 = 1 << 14;
     /// A heredoc: its span is its opening, and its body follows its line.
-    pub const HEREDOC: u16 = 1 << 15;
+    pub const HEREDOC: u32 = 1 << 15;
+    /// A part of a regexp written `%r{...}`: a `/` in it is not escaped.
+    pub const PERCENT_REGEXP: u32 = 1 << 16;
 }
 
 /// A parser AST node.
@@ -98,7 +100,7 @@ pub(crate) struct N {
     pub children: Vec<Child>,
     /// Byte offsets in the file, for a node converted from it.
     pub span: Option<(usize, usize)>,
-    pub syntax: u16,
+    pub syntax: u32,
 }
 
 impl PartialEq for N {
@@ -126,7 +128,7 @@ impl N {
         })
     }
 
-    pub(crate) fn has(&self, syntax: u16) -> bool {
+    pub(crate) fn has(&self, syntax: u32) -> bool {
         self.syntax & syntax != 0
     }
 
@@ -241,7 +243,7 @@ fn made(ty: &'static str, children: Vec<Child>, at: (usize, usize)) -> Rc<N> {
     })
 }
 
-fn made_with(ty: &'static str, children: Vec<Child>, at: (usize, usize), syntax: u16) -> Rc<N> {
+fn made_with(ty: &'static str, children: Vec<Child>, at: (usize, usize), syntax: u32) -> Rc<N> {
     Rc::new(N {
         ty,
         children,
@@ -250,7 +252,7 @@ fn made_with(ty: &'static str, children: Vec<Child>, at: (usize, usize), syntax:
     })
 }
 
-fn marked(value: Rc<N>, syntax: u16) -> Rc<N> {
+fn marked(value: Rc<N>, syntax: u32) -> Rc<N> {
     let mut copy = (*value).clone();
     copy.syntax |= syntax;
     Rc::new(copy)
@@ -681,6 +683,18 @@ impl<'s> Converter<'s> {
                     };
                     let not = made("send", vec![receiver, sym("!")], call_at);
                     return self.with_block(not, block, at);
+                }
+                // parser's `match_op`: a literal regexp's `=~` is a match
+                // that may assign its named captures.
+                "=~" if receiver
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.as_regular_expression_node().is_some())
+                    && arguments.len() == 1 =>
+                {
+                    let regexp = self.convert(&receiver.expect("receiver"))?;
+                    let mut children = vec![node(regexp)];
+                    children.extend(arguments);
+                    return Ok(made("match_with_lvasgn", children, call_at));
                 }
                 "[]" if receiver.is_some() => {
                     let receiver = self.convert(&receiver.expect("receiver"))?;
@@ -1177,11 +1191,16 @@ impl<'s> Converter<'s> {
                     } else if self.text(&regexp.content_loc()).contains(&b'\n') {
                         return self.unsupported("a regexp over several lines", &location);
                     } else {
+                        let percent = if self.text(&regexp.opening_loc()).starts_with(b"%") {
+                            syntax::PERCENT_REGEXP
+                        } else {
+                            0
+                        };
                         vec![node(made_with(
                             "str",
                             vec![Child::Str(regexp.unescaped().to_vec())],
                             span(&regexp.content_loc()),
-                            syntax::REGEXP_CONTENT,
+                            syntax::REGEXP_CONTENT | percent,
                         ))]
                     };
                 self.regexp(parts, &regexp.closing_loc(), at)
@@ -1190,13 +1209,18 @@ impl<'s> Converter<'s> {
                 let regexp = value
                     .as_interpolated_regular_expression_node()
                     .expect("regexp");
+                let percent = if self.text(&regexp.opening_loc()).starts_with(b"%") {
+                    syntax::PERCENT_REGEXP
+                } else {
+                    0
+                };
+                // Every part is in the pattern's text: a string standing in
+                // for an interpolation is written raw too.
                 let parts = self
                     .string_parts(regexp.parts())?
                     .into_iter()
                     .map(|part| match part {
-                        Child::Node(part) if part.ty == "str" => {
-                            node(marked(part, syntax::REGEXP_CONTENT))
-                        }
+                        Child::Node(part) => node(marked(part, syntax::REGEXP_CONTENT | percent)),
                         other => other,
                     })
                     .collect();

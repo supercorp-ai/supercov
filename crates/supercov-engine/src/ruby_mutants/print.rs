@@ -11,17 +11,61 @@ use super::tree::{Child, N, syntax};
 
 pub(crate) struct Printer<'s> {
     source: &'s [u8],
+    /// The local variables of the method printed in: a call by one of
+    /// their names takes parentheses, or it would read the variable.
+    locals: std::collections::HashSet<String>,
 }
 
-/// The code that replaces `located`'s span with `replacement`.
-pub(crate) fn replacement(source: &[u8], located: &N, replacement: &N) -> Option<String> {
-    let printer = Printer { source };
+/// The local variable names `method` declares: its parameters and what it
+/// assigns.
+pub(crate) fn locals(method: &N) -> std::collections::HashSet<String> {
+    fn walk(node: &N, into: &mut std::collections::HashSet<String>) {
+        if matches!(
+            node.ty,
+            "arg"
+                | "optarg"
+                | "restarg"
+                | "kwarg"
+                | "kwoptarg"
+                | "kwrestarg"
+                | "blockarg"
+                | "shadowarg"
+                | "lvasgn"
+                | "match_var"
+        ) && let Some(name) = node.child(0).sym()
+        {
+            into.insert(name.to_owned());
+        }
+        for child in node.children.iter().filter_map(Child::node) {
+            walk(child, into);
+        }
+    }
+    let mut found = std::collections::HashSet::new();
+    walk(method, &mut found);
+    found
+}
+
+/// The code that replaces `located`'s span with `replacement`, in `method`.
+pub(crate) fn replacement(
+    source: &[u8],
+    method: &N,
+    located: &N,
+    replacement: &N,
+) -> Option<String> {
+    let printer = Printer {
+        source,
+        locals: locals(method),
+    };
     printer.in_place_of(located, replacement)
 }
 
-/// One line of code for `node`.
-pub(crate) fn one_line(source: &[u8], node: &N) -> Option<String> {
-    Printer { source }.expression(node)
+/// One line of code for `node`, in `method`.
+pub(crate) fn one_line(source: &[u8], method: &N, node: &N) -> Option<String> {
+    Printer {
+        source,
+        locals: locals(method),
+    }
+    .expression(node)
 }
 
 /// Node types that are never an expression on their own: they are printed
@@ -229,7 +273,12 @@ impl Printer<'_> {
             let Child::Str(bytes) = replacement.child(0) else {
                 return None;
             };
-            return Some(String::from_utf8_lossy(bytes).replace('/', "\\/"));
+            let text = String::from_utf8_lossy(bytes);
+            return Some(if located.has(syntax::PERCENT_REGEXP) {
+                text.into_owned()
+            } else {
+                text.replace('/', "\\/")
+            });
         }
         if located.has(syntax::STRING_CONTENT) && replacement.ty == "str" {
             let Child::Str(bytes) = replacement.child(0) else {
@@ -281,6 +330,10 @@ impl Printer<'_> {
             return self.slot(replacement);
         }
         let text = self.expression(replacement)?;
+        // `{` after a command's name opens a block.
+        if text.starts_with('{') && !located.has(syntax::STATEMENT) {
+            return Some(format!("({text})"));
+        }
         if located.has(syntax::STATEMENT) || self.atomic(replacement) {
             Some(text)
         } else {
@@ -774,9 +827,10 @@ impl Printer<'_> {
             return None;
         }
         if arguments.is_empty() {
-            // `Integer` alone would be the constant.
-            let constant_like =
-                receiver.is_none() && selector.starts_with(|first: char| first.is_uppercase());
+            // `Integer` alone would be the constant, `x` alone a local.
+            let constant_like = receiver.is_none()
+                && (selector.starts_with(|first: char| first.is_uppercase())
+                    || self.locals.contains(selector));
             return Some(if constant_like {
                 format!("{head}()")
             } else {

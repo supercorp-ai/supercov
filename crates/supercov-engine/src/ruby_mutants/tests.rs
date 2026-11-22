@@ -203,6 +203,15 @@ fn normalized(node: &N) -> Rc<N> {
     {
         return only.clone();
     }
+    // A body with its clauses, written `begin ... end` where its own syntax
+    // held it bare (a block's), is the same program.
+    if node.ty == "kwbegin"
+        && children.len() == 1
+        && let Child::Node(only) = &children[0]
+        && matches!(only.ty, "rescue" | "ensure")
+    {
+        return only.clone();
+    }
     N::new(node.ty, children)
 }
 

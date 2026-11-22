@@ -35,3 +35,13 @@ class Literals
     x
   end
 end
+
+class Patterns
+  def words(text)
+    text.gsub(/(\w+)\s*-\s*(?<rest>\d+)?/, '\1') =~ /^a|b$|[^\d_a-z]+/
+  end
+
+  def anchored(text)
+    text.match?(/\Aa*/) || text =~ /(?:x|y)+?\z/ || text.scan(/(?i)[[:alpha:]]{2,3}\./)
+  end
+end
