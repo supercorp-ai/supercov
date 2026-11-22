@@ -181,7 +181,53 @@ every mutant timed out. `scripts/go-mutation-corpus.sh` clones each module
 at its tag and runs either tool; `scripts/gremlins-compare.mjs` joins the
 verdicts by file, line, column and Gremlins mutator.
 
-RESULTS
+Five modules, at their tags, on SoroCI (16 CPUs each tool, Go stable):
+
+| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | Gremlins s | Supercov s |
+| --- | --- | --- | --- | --- | --- |
+| dustin/go-humanize v1.0.1 | 301 | 224 / 214 | 50 | 15.2 | 15.4 |
+| google/btree v1.1.3 | 343 | 134 / 134 | 3 | 11.0 | 8.0 |
+| hashicorp/golang-lru v2.0.7 | 154 | 111 / 106 | 0 | 31.1 | 16.5 |
+| google/uuid v1.6.0 | 146 | 88 / 88 | 0 | 13.5 | 15.9 |
+| spf13/cast v1.7.1 | 184 | 123 / 122 | 1 | 8.9 | 6.3 |
+
+Supercov's time is the whole of `supercov mutants -- go test ./...`: the
+measured run, the type check, the copy, the builds and the strong pass.
+Gremlins' killed counts include the mutants that do not compile, which it
+calls killed. On these small modules both tools take seconds, and
+Supercov's pass is bounded by its time limits' ten-second floor: uuid's
+strong pass is 12.4 s, of which six timeouts take ten seconds each, side by
+side.
+
+Every disagreement, with the mutant applied by hand and the suite run whole
+ten times (`scripts/go-mutant-by-hand.mjs`):
+
+- **Unviable** (54): Supercov's type check refuses the mutant (`-` of
+  strings, a negative array length, a duplicate map key after a constant
+  changed, a variable left unused). Gremlins calls each KILLED: `go test`
+  exits 1 on a build failure.
+- **Not covered by Gremlins, killed by Supercov** (go-humanize 16, uuid 13):
+  constant declarations (`KByte = Byte * 1000`). Gremlins' coverage profile
+  has no block there and it never runs them; Supercov builds each alone, and
+  the tests kill them.
+- **Only Gremlins** (golang-lru 44, btree 7): `golang-lru/arc` is a module
+  of its own that `go test ./...` does not run, and `btree_mem.go` is
+  `//go:build ignore`.
+- **Time-dependent kills** (uuid): `version7.go:96` and `time.go:58` make
+  the suite as written fail 3-4 times in 10; each tool's single run lands
+  either way. Neither is a soundness violation of the selection: the
+  mutant's only killers are its candidates.
+- **A flaky test** (golang-lru): `expirable`'s `ExampleLRU` waits 100 ms on
+  entries that expire in 10 ms, and with 16 copies of the suite running at
+  once, as Gremlins runs them, fails 4 times in 64 with no mutant at all.
+  Every golang-lru disagreement is a kill by it or a test like it, on one
+  side or the other, where the mutant applied by hand fails 0 or 1 times in
+  10; the set changes from run to run. One Gremlins run of the module
+  stopped at its coverage step on that failure.
+
+No other disagreement remains: 0 soundness violations outside time-dependent
+and flaky tests, each checked by hand. Four were real and are fixed (below,
+and btree's Example-only kills).
 
 ## Fixed in the Go frontend on the way
 
@@ -190,6 +236,13 @@ RESULTS
   package's code read as run by no test, and six mutants Gremlins kills
   were `no-coverage`. Evidence is now keyed by package and name.
 - An Example ran `unknown`, and so was never a strong candidate.
+- The run-wide record (what no test could claim: Examples, parallel tests)
+  took a probe's slot only where no test had touched it: a comparison an
+  Example alone saw with equal operands read as never equal, and btree's
+  `len(n.children) > 0` to `>=` as not infected, though `ExampleBTreeG`
+  kills it. It now takes every bit no test claimed.
+- A test the plan takes only because its evidence is not its own runs for a
+  mutant only where its binary links the mutant's package.
 
 ## Not yet
 
