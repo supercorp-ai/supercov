@@ -59,7 +59,9 @@ shard_files=()
 if [ -n "${SHARD:-}" ]; then
   k="${SHARD%/*}"
   n="${SHARD#*/}"
-  mapfile -t all < <(cd "$source" && find . -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
+  # A module's own sources only: the tests run are the module's, and PIT
+  # mutates only the module's classes.
+  mapfile -t all < <(cd "$source" && find "${module:-.}" -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
   for i in "${!all[@]}"; do
     if [ $((i % n)) -eq $((k - 1)) ]; then shard_files+=("${all[$i]}"); fi
   done
