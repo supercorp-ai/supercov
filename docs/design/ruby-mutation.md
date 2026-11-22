@@ -275,25 +275,25 @@ every subject and `process_abort` counted as a kill:
 
 | Project (suite) | mutant's mutants | joined | Supercov only | strong disagreements | weak violations | mutant | Supercov (measured + strong) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| dry-rb/dry-inflector 1.3.1 (RSpec, 1,138 examples) | 2,061 | 2,061 | 0 | 0 | 0 | 32.5 s | 1.6 + 18.9 s |
-| bkeepers/dotenv 3.2.0 (RSpec, 195 examples) | 1,345 | 1,345 | 985 | 0 | 0 | 21.7 s | 1.0 + 18.1 s |
-| jeremyevans/erubi 1.13.1 (Minitest, 100 tests) | 1,571 | 1,571 | 84 | 0 | 0 | 14.5 s | 0.4 + 1.5 s |
+| dry-rb/dry-inflector 1.3.1 (RSpec, 1,138 examples) | 2,061 | 2,061 | 0 | 0 | 0 | 30.6 s | 1.6 + 17.8 s |
+| bkeepers/dotenv 3.2.0 (RSpec, 195 examples) | 1,345 | 1,345 | 985 | 0 | 0 | 21.0 s | 1.0 + 18.2 s |
+| jeremyevans/erubi 1.13.1 (Minitest, 100 tests) | 1,571 | 1,571 | 84 | 0 | 0 | 14.2 s | 0.4 + 1.5 s |
 
 Every mutation mutant made was matched to one of Supercov's, and every one
 of Supercov's that mutant did not make is in a method mutant did not load
 as a subject: dotenv's Rails integration and CLI, which `require "dotenv"`
 does not load, and erubi's methods with no test or defined only on Ruby
-before 2.3. Per mutant, the strong pass took 9.2 ms on dry-inflector
-against mutant's 15.8 (25 ms before it forked from a pool of workers), 8.1
-ms on dotenv (2,226 mutants run) against 16.1, and 0.9 ms on erubi against
-9.2.
+before 2.3. Per mutant, the strong pass took 8.6 ms on dry-inflector
+against mutant's 14.9 (25 ms before it forked from a pool of workers), 8.2
+ms on dotenv (2,226 mutants run) against 15.6, and 0.9 ms on erubi against
+9.1.
 
 mutant has no test-unit or Cucumber integration; those suites are checked
 by hand (above), every mutant the pass ran:
 
 | Project (suite) | mutants run | killed by hand | survived by hand | disagreements | weak violations | strong pass | by hand |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| ruby/ostruct 0.6.3 (test-unit, 37 tests) | 824 | 682 | 142 | 0 | 0 | 13.2 s | 33.5 s |
+| ruby/ostruct 0.6.3 (test-unit, 37 tests) | 824 | 682 | 142 | 0 | 0 | 13.3 s | 33.2 s |
 | oscaralanpierce/json_test_data 1.2.0 (Cucumber, scenarios seeded) | 1,313 | 1,038 | 275 | 0 | 0 | 34.6 s | 288 s |
 
 json_test_data's 89 timeouts are kills by hand: its suite fails or hangs
@@ -304,10 +304,10 @@ time as Supercov reports it and the whole run's:
 
 | Project | without probes | with probes | tests' time | whole run |
 | --- | --- | --- | --- | --- |
-| dry-inflector | 987 ms / 1.40 s | 1,128 ms / 1.60 s | 1.14× | 1.15× |
-| dotenv | 826 ms / 0.91 s | 907 ms / 1.02 s | 1.10× | 1.11× |
-| erubi | 262 ms / 0.33 s | 292 ms / 0.38 s | 1.12× | 1.16× |
-| ostruct | 283 ms / 0.33 s | 299 ms / 0.33 s | 1.06× | 1.02× |
+| dry-inflector | 988 ms / 1.37 s | 1,098 ms / 1.56 s | 1.11× | 1.13× |
+| dotenv | 826 ms / 0.90 s | 916 ms / 1.00 s | 1.11× | 1.11× |
+| erubi | 262 ms / 0.33 s | 292 ms / 0.38 s | 1.12× | 1.15× |
+| ostruct | 296 ms / 0.33 s | 302 ms / 0.34 s | 1.02× | 1.03× |
 | json_test_data | 312 ms / 0.35 s | 312 ms / 0.35 s | 1.00× | 1.02× |
 
 Before the changes in "What the probes cost", dry-inflector's tests took
@@ -351,7 +351,7 @@ Disagreements found on the way, each applied by hand and fixed:
 - The test-unit and Cucumber drivers have run under test-unit 3.7 and
   Cucumber 12 only. The Cucumber one uses cucumber-core's filters and event
   bus, which releases before 3 do not have.
-- The value probes cost dry-inflector's tests 1.14 times their time without
-  them, past the 1.1 aimed for: each test's first evaluations of each probe
+- The value probes cost erubi's tests 1.12 times their time without them
+  and dry-inflector's 1.11, past the 1.1 aimed for: each test's first evaluations of each probe
   still compare, and each record is framed with a checksum computed in Ruby
   byte by byte.
