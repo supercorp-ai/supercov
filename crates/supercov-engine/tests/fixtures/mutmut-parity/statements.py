@@ -80,3 +80,21 @@ class OneLine: value = 1 + 2
 if LEVEL:
     def conditional():
         return 1 + 2
+
+
+def singletons(flag):
+    match flag:
+        case False:
+            x = 1
+
+        # a comment at the case's indentation
+        case None:
+            x = 2
+            # a comment deeper than the next case
+        case _:
+            x = 3
+    try:
+        x += 1
+    finally:
+        x -= 1
+    return x

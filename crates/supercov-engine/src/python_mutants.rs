@@ -42,12 +42,12 @@
 use std::collections::BTreeSet;
 
 use ruff_python_ast::{
-    self as ast, BoolOp, CmpOp, Expr, Operator, Stmt, UnaryOp,
+    self as ast, BoolOp, CmpOp, Expr, ModModule, Operator, Stmt, UnaryOp,
     token::TokenKind,
     visitor::source_order::{SourceOrderVisitor, walk_expr, walk_pattern, walk_stmt},
 };
-use ruff_python_parser::parse_module;
-use ruff_text_size::{Ranged, TextRange};
+use ruff_python_parser::{Parsed, parse_module};
+use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::python_instrumenter::PythonInstrumenterError;
 
@@ -148,6 +148,11 @@ pub fn enumerate(source: &str) -> Result<Enumeration, PythonInstrumenterError> {
     crate::python_instrumenter::within_text_size(source.len())?;
     let parsed =
         parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    Ok(enumerate_parsed(source, &parsed))
+}
+
+/// mutmut's mutants of `source`, parsed as `parsed`.
+fn enumerate_parsed(source: &str, parsed: &Parsed<ModModule>) -> Enumeration {
     let comments = parsed
         .tokens()
         .iter()
@@ -161,23 +166,27 @@ pub fn enumerate(source: &str) -> Result<Enumeration, PythonInstrumenterError> {
         pragmas: &pragmas,
         units: Vec::new(),
         mutants: Vec::new(),
-        unit: None,
         bounds: Vec::new(),
         enum_hooks: BTreeSet::new(),
     };
     for statement in parsed.suite() {
         match statement {
-            Stmt::FunctionDef(_) => walker.unit_of(statement, None),
+            Stmt::FunctionDef(function) => walker.unit_of(statement, function, None),
             Stmt::ClassDef(class) => {
                 walker.note_enum_hooks(class);
                 if walker.skips_class(class) || !walker.text.indented_body(&class.body) {
                     continue;
                 }
-                for method in &class.body {
-                    if matches!(method, Stmt::FunctionDef(_)) {
-                        walker.unit_of(method, Some(&class.name));
-                    }
-                }
+                class
+                    .body
+                    .iter()
+                    .filter_map(|method| match method {
+                        Stmt::FunctionDef(function) => Some((method, function)),
+                        _ => None,
+                    })
+                    .for_each(|(method, function)| {
+                        walker.unit_of(method, function, Some(&class.name));
+                    });
             }
             _ => {}
         }
@@ -203,12 +212,15 @@ pub fn enumerate(source: &str) -> Result<Enumeration, PythonInstrumenterError> {
         mutant.default_of = unit
             .defaults
             .iter()
-            .find(|(range, _, _)| {
-                range.start().to_usize() <= mutant.span.0 && mutant.span.1 <= range.end().to_usize()
-            })
+            .find(|(range, _, _)| range.contains_range(text_range(mutant.span)))
             .map(|(_, name, keyword)| (name.clone(), *keyword));
     }
-    Ok(Enumeration { units, mutants })
+    Enumeration { units, mutants }
+}
+
+/// A span of byte offsets as ruff's range: a source ruff parsed fits `u32`.
+fn text_range((start, end): (usize, usize)) -> TextRange {
+    TextRange::new(TextSize::new(start as u32), TextSize::new(end as u32))
 }
 
 /// The source with its line starts and comments, for positions and trivia.
@@ -279,8 +291,7 @@ impl<'a> Text<'a> {
         let bytes = self.source.as_bytes();
         while at < limit {
             match bytes[at] {
-                b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => at += 1,
-                b'\\' => at += 1,
+                b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'\\' => at += 1,
                 b'#' => at = self.comment_starting(at).unwrap_or(at + 1),
                 _ => break,
             }
@@ -308,15 +319,12 @@ impl<'a> Text<'a> {
     /// An expression's range with the parentheses that are its own, within
     /// `bounds`: as many as open before it and close after it.
     fn own_parens(&self, range: TextRange, bounds: (usize, usize)) -> (usize, usize) {
-        let bytes = self.source.as_bytes();
         let (mut start, mut end) = (range.start().to_usize(), range.end().to_usize());
         loop {
             let before = self.skip_backward(start, bounds.0);
             let after = self.skip_forward(end, bounds.1);
-            if before > bounds.0
-                && after < bounds.1
-                && bytes[before - 1] == b'('
-                && bytes[after] == b')'
+            if self.source[bounds.0..before].ends_with('(')
+                && self.source[after..bounds.1].starts_with(')')
             {
                 start = before - 1;
                 end = after + 1;
@@ -346,12 +354,11 @@ impl<'a> Text<'a> {
     /// Back past the opening parentheses before an operand, down to the
     /// operator before it: where the operand's own text starts.
     fn opens_before(&self, start: usize, limit: usize) -> usize {
-        let bytes = self.source.as_bytes();
         let mut kept = start;
         let mut at = start;
         loop {
             at = self.skip_backward(at, limit);
-            if at > limit && bytes[at - 1] == b'(' {
+            if self.source[limit..at].ends_with('(') {
                 at -= 1;
                 kept = at;
             } else {
@@ -380,10 +387,10 @@ impl<'a> Text<'a> {
 /// Lines a `# pragma: no mutate` comment keeps mutmut from mutating.
 #[derive(Debug, Default)]
 struct Pragmas {
-    /// Nodes that start here are not mutated.
+    /// Nodes that start here are not mutated: every line of `ignore_node`
+    /// too.
     no_mutate: BTreeSet<usize>,
-    /// Functions and classes that start here are skipped whole, and other
-    /// nodes are not mutated.
+    /// Functions and classes that start here are skipped whole.
     ignore_node: BTreeSet<usize>,
 }
 
@@ -422,9 +429,6 @@ impl Pragmas {
                 pragma_token(&text.source[start..end]).map(|token| (start, token))
             })
             .collect::<Vec<_>>();
-        if tokens.is_empty() {
-            return pragmas;
-        }
         let mut headers = Vec::new();
         let mut simple = Vec::new();
         let mut bodies = Vec::new();
@@ -442,27 +446,32 @@ impl Pragmas {
                         pragmas.no_mutate.insert(line);
                         opened = Some(line);
                     }
-                    "end" => {
-                        if let Some(start) = opened.take() {
-                            pragmas.no_mutate.extend(start..=line);
-                        }
-                    }
+                    // mutmut refuses an `end` without a `start`.
+                    "end" => pragmas
+                        .no_mutate
+                        .extend(opened.take().unwrap_or(line)..=line),
                     "block" => {
                         pragmas.no_mutate.insert(line);
                         let indent = at - line_start;
                         // The body whose next statement this comment leads:
                         // that statement and every one after it in the body.
+                        // A comment after an indented block, indented further
+                        // than the statement after it, is that block's
+                        // footer (libcst's `IndentedBlock.footer`).
                         let led = bodies.iter().find_map(|body| {
-                            let next = body.iter().position(|(start, _)| *start > at)?;
-                            let previous_end = match next {
-                                0 => 0,
-                                _ => body[next - 1].1,
+                            let next = body.iter().position(|(start, _, _)| *start > at)?;
+                            // Before a body's first statement, its header
+                            // ends where trivia back from it does.
+                            let (previous_end, after_block) = match next {
+                                0 => (text.skip_backward(body[0].0, 0), false),
+                                _ => (body[next - 1].1, body[next - 1].2),
                             };
                             let start = body[next].0;
                             let column = start - text.line_start(text.line(start));
-                            (previous_end <= at && indent <= column).then(|| &body[next..])
+                            (previous_end <= at && (!after_block || indent <= column))
+                                .then(|| &body[next..])
                         });
-                        for &(start, end) in led.into_iter().flatten() {
+                        for &(start, end, _) in led.into_iter().flatten() {
                             pragmas.no_mutate.extend(text.line(start)..=text.line(end));
                         }
                     }
@@ -481,15 +490,14 @@ impl Pragmas {
                 pragmas.no_mutate.insert(text.line(start));
             } else if let Some(&(node_line, colon, last)) = headers
                 .iter()
-                .find(|(_, colon, _)| text.line(*colon) == line && *colon <= at)
+                .find(|(_, colon, _)| text.line(*colon) == line)
             {
+                pragmas.no_mutate.insert(node_line);
                 if token == "block" {
-                    pragmas.ignore_node.insert(node_line);
-                    pragmas
-                        .ignore_node
-                        .extend(text.line(colon)..=text.line(last));
-                } else {
-                    pragmas.no_mutate.insert(node_line);
+                    let lines =
+                        std::iter::once(node_line).chain(text.line(colon)..=text.line(last));
+                    pragmas.no_mutate.extend(lines.clone());
+                    pragmas.ignore_node.extend(lines);
                 }
             } else if token == "bare" {
                 pragmas.no_mutate.insert(line);
@@ -500,29 +508,20 @@ impl Pragmas {
 }
 
 /// Every compound header's line, colon and body end; every simple
-/// statement's range; and every body's statements' ranges.
+/// statement's range; and every body's statements' ranges, each with
+/// whether it ends in an indented block.
 fn collect_bodies(
     text: &Text<'_>,
     suite: &[Stmt],
     headers: &mut Vec<(usize, usize, usize)>,
     simple: &mut Vec<(usize, usize)>,
-    bodies: &mut Vec<Vec<(usize, usize)>>,
+    bodies: &mut Vec<Vec<(usize, usize, bool)>>,
 ) {
-    bodies.push(
-        suite
-            .iter()
-            .map(|statement| {
-                (
-                    statement.range().start().to_usize(),
-                    statement.range().end().to_usize(),
-                )
-            })
-            .collect(),
-    );
+    let mut entries = Vec::new();
+    // A compound statement's body is never empty; an absent `else` is not
+    // passed here.
     let mut header = |node: usize, body: &[Stmt]| {
-        let (Some(first), Some(last)) = (body.first(), body.last()) else {
-            return;
-        };
+        let (first, last) = (&body[0], &body[body.len() - 1]);
         let colon = text.skip_backward(first.range().start().to_usize(), node);
         if text.indented_body(body) {
             headers.push((text.line(node), colon, last.range().end().to_usize()));
@@ -531,6 +530,7 @@ fn collect_bodies(
     let mut nested: Vec<&[Stmt]> = Vec::new();
     for statement in suite {
         let start = statement.range().start().to_usize();
+        let opened = nested.len();
         match statement {
             Stmt::FunctionDef(node) => {
                 header(start, &node.body);
@@ -578,14 +578,23 @@ fn collect_bodies(
                 nested.push(&node.finalbody);
             }
             Stmt::Match(node) => {
-                for case in &node.cases {
+                // A `match` has at least one case.
+                node.cases.iter().for_each(|case| {
                     header(case.range.start().to_usize(), &case.body);
                     nested.push(&case.body);
-                }
+                });
             }
             _ => simple.push((start, statement.range().end().to_usize())),
         }
+        // Its last clause with a body: an absent `else` has none.
+        let ends_in_block = nested[opened..]
+            .iter()
+            .rev()
+            .find(|body| !body.is_empty())
+            .is_some_and(|body| text.indented_body(body));
+        entries.push((start, statement.range().end().to_usize(), ends_in_block));
     }
+    bodies.push(entries);
     for body in nested {
         collect_bodies(text, body, headers, simple, bodies);
     }
@@ -610,8 +619,6 @@ struct Walker<'t, 'a> {
     pragmas: &'t Pragmas,
     units: Vec<Unit>,
     mutants: Vec<PythonMutant>,
-    /// The function whose mutants are being listed.
-    unit: Option<usize>,
     /// The innermost brackets an expression's own parentheses can reach:
     /// its statement, or the call whose argument it is.
     bounds: Vec<(usize, usize)>,
@@ -656,27 +663,24 @@ impl<'t, 'a> Walker<'t, 'a> {
 
     /// Whether mutmut mutates a node that starts at `start`.
     fn mutable_at(&self, start: usize) -> bool {
-        let line = self.line(start);
-        !self.pragmas.no_mutate.contains(&line) && !self.pragmas.ignore_node.contains(&line)
+        !self.pragmas.no_mutate.contains(&self.line(start))
     }
 
     /// Whether a mutation would delete code a pragma keeps: a node that
     /// starts on such a line among `dropped`, the ranges the mutated node no
     /// longer holds, where the original spans such a line.
     fn removes_ignored(&self, node: (usize, usize), dropped: &[(usize, usize)]) -> bool {
-        let ignored = |line: &usize| {
-            self.pragmas.no_mutate.contains(line) || self.pragmas.ignore_node.contains(line)
-        };
+        let ignored = |line: &usize| self.pragmas.no_mutate.contains(line);
         if (self.line(node.0)..=self.line(node.1.max(node.0))).all(|line| !ignored(&line)) {
             return false;
         }
         dropped.iter().any(|&(start, end)| {
             // Every line a token of the dropped code starts on.
             let mut at = start;
-            while at < end {
+            loop {
                 let next = self.text.skip_forward(at, end);
                 if next >= end {
-                    break;
+                    return false;
                 }
                 if ignored(&self.line(next)) {
                     return true;
@@ -685,7 +689,6 @@ impl<'t, 'a> Walker<'t, 'a> {
                     .find(['\n', ' ', '\t'])
                     .map_or(end, |offset| next + offset);
             }
-            false
         })
     }
 
@@ -706,9 +709,8 @@ impl<'t, 'a> Walker<'t, 'a> {
         replacement: impl Into<String>,
         dropped: &[(usize, usize)],
     ) {
-        let Some(unit) = self.unit else {
-            return;
-        };
+        // Mutants are listed only inside a function, the last one begun.
+        let unit = self.units.len() - 1;
         if !self.mutable_at(span.0) || self.removes_ignored(span, dropped) {
             return;
         }
@@ -743,10 +745,12 @@ impl<'t, 'a> Walker<'t, 'a> {
         }
     }
 
-    fn unit_of(&mut self, statement: &Stmt, class: Option<&ast::Identifier>) {
-        let Stmt::FunctionDef(function) = statement else {
-            return;
-        };
+    fn unit_of(
+        &mut self,
+        statement: &Stmt,
+        function: &ast::StmtFunctionDef,
+        class: Option<&ast::Identifier>,
+    ) {
         let key = match class {
             Some(class) => format!("xǁ{}ǁ{}", class.as_str(), function.name.as_str()),
             None => format!("x_{}", function.name.as_str()),
@@ -780,9 +784,7 @@ impl<'t, 'a> Walker<'t, 'a> {
             end: function.range.end().to_usize(),
             defaults,
         });
-        self.unit = Some(self.units.len() - 1);
         self.visit_stmt(statement);
-        self.unit = None;
     }
 
     fn note_enum_hooks(&mut self, class: &ast::StmtClassDef) {
@@ -799,13 +801,15 @@ impl<'t, 'a> Walker<'t, 'a> {
         if !is_enum {
             return;
         }
-        for statement in &class.body {
-            if let Stmt::FunctionDef(function) = statement
-                && NEVER_MUTATE_ENUM_FUNCTION_NAMES.contains(&function.name.as_str())
+        let hooks = class.body.iter().filter_map(|statement| match statement {
+            Stmt::FunctionDef(function)
+                if NEVER_MUTATE_ENUM_FUNCTION_NAMES.contains(&function.name.as_str()) =>
             {
-                self.enum_hooks.insert(function.range.start().to_usize());
+                Some(function.range.start().to_usize())
             }
-        }
+            _ => None,
+        });
+        self.enum_hooks.extend(hooks);
     }
 
     fn skips_class(&self, class: &ast::StmtClassDef) -> bool {
@@ -881,17 +885,19 @@ impl<'t, 'a> Walker<'t, 'a> {
                 self.push("LoopControl", "break", range, range, "break", &[range]);
             }
             Stmt::Match(statement) if statement.cases.len() > 1 => {
-                let regions = self.case_regions(statement);
-                for (index, region) in regions.iter().enumerate() {
-                    self.push(
-                        "MatchCase",
-                        format!("removed@{}", index + 1),
-                        range,
-                        *region,
-                        "",
-                        &[*region],
-                    );
-                }
+                self.case_regions(statement)
+                    .into_iter()
+                    .enumerate()
+                    .for_each(|(index, region)| {
+                        self.push(
+                            "MatchCase",
+                            format!("removed@{}", index + 1),
+                            range,
+                            region,
+                            "",
+                            &[region],
+                        );
+                    });
             }
             _ => {}
         }
@@ -939,7 +945,9 @@ impl<'t, 'a> Walker<'t, 'a> {
                     let trimmed = content.trim_start_matches([' ', '\t', '\x0c']);
                     let leading = content.len() - trimmed.len();
                     let blank = trimmed.trim().is_empty();
-                    if blank || (trimmed.starts_with('#') && leading <= indent) {
+                    // Only blank lines and comments come before a case, after
+                    // the case or `match` before it.
+                    if blank || leading <= indent {
                         line -= 1;
                     } else {
                         break;
@@ -975,8 +983,8 @@ impl<'t, 'a> Walker<'t, 'a> {
                         replacement,
                         &[range],
                     );
-                    if same && self.mutants.len() > before {
-                        self.mutants.last_mut().expect("pushed").same_value = true;
+                    if self.mutants.len() > before {
+                        self.mutants.last_mut().expect("pushed").same_value = same;
                     }
                 }
             }
@@ -1081,7 +1089,8 @@ impl<'t, 'a> Walker<'t, 'a> {
                 };
                 // libcst nests `a and b and c` to the left: the outermost
                 // operation, then the one inside it, each up to its operand.
-                for index in (1..operation.values.len()).rev() {
+                // `and` and `or` join two operands or more.
+                (1..operation.values.len()).rev().for_each(|index| {
                     let right = &operation.values[index];
                     let left = &operation.values[index - 1];
                     let end = if index + 1 == operation.values.len() {
@@ -1109,7 +1118,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                         &[(operator_start, operator_start + 1)],
                     );
                     self.note_operator(before, operator_start, old);
-                }
+                });
             }
             Expr::Lambda(lambda) => {
                 let body = self.text.own_parens(lambda.body.range(), range);
@@ -1229,7 +1238,7 @@ impl<'t, 'a> Walker<'t, 'a> {
             self.note_probe(before, target);
         }
         if ordered.len() > 1 {
-            for index in 0..ordered.len() {
+            (0..ordered.len()).for_each(|index| {
                 let region = (
                     starts[index],
                     starts.get(index + 1).copied().unwrap_or(interior.1),
@@ -1242,7 +1251,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                     "",
                     &[region],
                 );
-            }
+            });
         }
         if let Expr::Attribute(attribute) = &*call.func {
             let method = attribute.attr.as_str();
@@ -1280,109 +1289,114 @@ impl<'t, 'a> Walker<'t, 'a> {
         let range = range_of(compare.range);
         self.visit_expr(&compare.left);
         let mut previous = &*compare.left;
-        for (operator, comparator) in compare.ops.iter().zip(&compare.comparators) {
-            let previous_end = self.text.closes_after(
-                previous.range().end().to_usize(),
-                comparator.range().start().to_usize(),
-            );
-            let comparator_start = self
-                .text
-                .opens_before(comparator.range().start().to_usize(), previous_end);
-            let operator_start = self.text.skip_forward(previous_end, comparator_start);
-            let operator_end = match operator {
-                CmpOp::IsNot | CmpOp::NotIn => {
-                    let first = operator_start + 3.min(comparator_start - operator_start);
-                    let second = self.text.skip_forward(
-                        if *operator == CmpOp::IsNot {
-                            operator_start + 2
-                        } else {
-                            first
-                        },
-                        comparator_start,
-                    );
-                    second + if *operator == CmpOp::IsNot { 3 } else { 2 }
-                }
-                other => operator_start + other.as_str().len(),
-            };
-            let comparator_end = self
-                .text
-                .closes_after(comparator.range().end().to_usize(), range.1);
-            let splice = (previous_end, comparator_start);
-            let swap = match operator {
-                CmpOp::Lt => Some(CmpOp::LtE),
-                CmpOp::LtE => Some(CmpOp::Lt),
-                CmpOp::Gt => Some(CmpOp::GtE),
-                CmpOp::GtE => Some(CmpOp::Gt),
-                CmpOp::Eq => Some(CmpOp::NotEq),
-                CmpOp::NotEq => Some(CmpOp::Eq),
-                _ => None,
-            };
-            if let Some(new) = swap {
-                let before = self.mutants.len();
-                self.push(
-                    "EqualityOperator",
-                    new.as_str(),
-                    (operator_start, comparator_end),
-                    splice,
-                    format!(" {} ", new.as_str()),
-                    &[(operator_start, operator_end)],
+        // A comparison has one operator or more.
+        compare
+            .ops
+            .iter()
+            .zip(&compare.comparators)
+            .for_each(|(operator, comparator)| {
+                let previous_end = self.text.closes_after(
+                    previous.range().end().to_usize(),
+                    comparator.range().start().to_usize(),
                 );
-                self.note_operator(before, operator_start, operator.as_str());
-                let relation = match operator {
-                    CmpOp::Lt => Some("lt"),
-                    CmpOp::LtE => Some("le"),
-                    CmpOp::Gt => Some("gt"),
-                    CmpOp::GtE => Some("ge"),
+                let comparator_start = self
+                    .text
+                    .opens_before(comparator.range().start().to_usize(), previous_end);
+                let operator_start = self.text.skip_forward(previous_end, comparator_start);
+                let operator_end = match operator {
+                    CmpOp::IsNot | CmpOp::NotIn => {
+                        let first = operator_start + 3.min(comparator_start - operator_start);
+                        let second = self.text.skip_forward(
+                            if *operator == CmpOp::IsNot {
+                                operator_start + 2
+                            } else {
+                                first
+                            },
+                            comparator_start,
+                        );
+                        second + if *operator == CmpOp::IsNot { 3 } else { 2 }
+                    }
+                    other => operator_start + other.as_str().len(),
+                };
+                let comparator_end = self
+                    .text
+                    .closes_after(comparator.range().end().to_usize(), range.1);
+                let splice = (previous_end, comparator_start);
+                let swap = match operator {
+                    CmpOp::Lt => Some(CmpOp::LtE),
+                    CmpOp::LtE => Some(CmpOp::Lt),
+                    CmpOp::Gt => Some(CmpOp::GtE),
+                    CmpOp::GtE => Some(CmpOp::Gt),
+                    CmpOp::Eq => Some(CmpOp::NotEq),
+                    CmpOp::NotEq => Some(CmpOp::Eq),
                     _ => None,
                 };
-                // One comparison, not a chain: its operands are the two
-                // the probe sees.
-                if let Some(relation) = relation
-                    && compare.ops.len() == 1
-                {
-                    self.note_probe(
-                        before,
-                        ProbeTarget {
-                            kind: "compare",
-                            range,
-                            original: relation,
-                            mutated: "",
-                        },
+                if let Some(new) = swap {
+                    let before = self.mutants.len();
+                    self.push(
+                        "EqualityOperator",
+                        new.as_str(),
+                        (operator_start, comparator_end),
+                        splice,
+                        format!(" {} ", new.as_str()),
+                        &[(operator_start, operator_end)],
                     );
+                    self.note_operator(before, operator_start, operator.as_str());
+                    let relation = match operator {
+                        CmpOp::Lt => Some("lt"),
+                        CmpOp::LtE => Some("le"),
+                        CmpOp::Gt => Some("gt"),
+                        CmpOp::GtE => Some("ge"),
+                        _ => None,
+                    };
+                    // One comparison, not a chain: its operands are the two
+                    // the probe sees.
+                    if let Some(relation) = relation
+                        && compare.ops.len() == 1
+                    {
+                        self.note_probe(
+                            before,
+                            ProbeTarget {
+                                kind: "compare",
+                                range,
+                                original: relation,
+                                mutated: "",
+                            },
+                        );
+                    }
                 }
-            }
-            let keyword = match operator {
-                CmpOp::Is => Some(CmpOp::IsNot),
-                CmpOp::IsNot => Some(CmpOp::Is),
-                CmpOp::In => Some(CmpOp::NotIn),
-                CmpOp::NotIn => Some(CmpOp::In),
-                _ => None,
-            };
-            if let Some(new) = keyword {
-                let before = self.mutants.len();
-                self.push(
-                    "EqualityOperator",
-                    new.as_str(),
-                    (operator_start, operator_end),
-                    splice,
-                    format!(" {} ", new.as_str()),
-                    &[(operator_start, operator_end)],
-                );
-                self.note_operator(before, operator_start, operator.as_str());
-            }
-            self.visit_expr(comparator);
-            previous = comparator;
-        }
+                let keyword = match operator {
+                    CmpOp::Is => Some(CmpOp::IsNot),
+                    CmpOp::IsNot => Some(CmpOp::Is),
+                    CmpOp::In => Some(CmpOp::NotIn),
+                    CmpOp::NotIn => Some(CmpOp::In),
+                    _ => None,
+                };
+                if let Some(new) = keyword {
+                    let before = self.mutants.len();
+                    self.push(
+                        "EqualityOperator",
+                        new.as_str(),
+                        (operator_start, operator_end),
+                        splice,
+                        format!(" {} ", new.as_str()),
+                        &[(operator_start, operator_end)],
+                    );
+                    self.note_operator(before, operator_start, operator.as_str());
+                }
+                self.visit_expr(comparator);
+                previous = comparator;
+            });
     }
 
     fn string_part(&mut self, range: TextRange) {
         let at = range_of(range);
         let value = self.text.slice(range);
-        let Some(quote_at) = value.find(['"', '\'']) else {
-            return;
-        };
+        let quote_at = value
+            .find(['"', '\''])
+            .expect("a string literal has its quotes");
         let (prefix, rest) = value.split_at(quote_at);
-        if rest.starts_with("\"\"\"") || rest.starts_with("'''") || rest.len() < 2 {
+        if rest.starts_with("\"\"\"") || rest.starts_with("'''") {
             return;
         }
         let quote = &rest[..1];
@@ -1446,9 +1460,7 @@ fn cased(body: &str, raw: bool, upper: bool) -> String {
             }
             let end = at + escape;
             out.push_str(&body[at..end.min(body.len())]);
-            while index < characters.len() && characters[index].0 < end {
-                index += 1;
-            }
+            index += characters[index..].partition_point(|(offset, _)| *offset < end);
             if raw {
                 // The character after a raw backslash is never the start of
                 // a run: a run may not follow a backslash.
@@ -1476,7 +1488,9 @@ fn cased(body: &str, raw: bool, upper: bool) -> String {
 fn escape_length(text: &str) -> usize {
     let bytes = text.as_bytes();
     let hex = |count: usize| {
-        bytes.len() > count + 1 && bytes[2..2 + count].iter().all(u8::is_ascii_hexdigit)
+        bytes
+            .get(2..2 + count)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
     };
     match bytes.get(1) {
         Some(b'x') if hex(2) => 4,
@@ -1511,18 +1525,17 @@ pub(crate) fn number_mutant(literal: &str) -> Option<(String, bool)> {
         return Some((format!("{shown}j"), mutated == value));
     }
     let lower = clean.to_ascii_lowercase();
-    let integer = |digits: &str, radix: u32| integer_plus_one(digits, radix);
-    if let Some(digits) = lower.strip_prefix("0x") {
-        return Some((integer(digits, 16)?, false));
-    }
-    if let Some(digits) = lower.strip_prefix("0o") {
-        return Some((integer(digits, 8)?, false));
-    }
-    if let Some(digits) = lower.strip_prefix("0b") {
-        return Some((integer(digits, 2)?, false));
-    }
-    if lower.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Some((integer(&lower, 10)?, false));
+    let integer = [("0x", 16), ("0o", 8), ("0b", 2)]
+        .into_iter()
+        .find_map(|(prefix, radix)| Some((lower.strip_prefix(prefix)?, radix)))
+        .or_else(|| {
+            lower
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+                .then_some((lower.as_str(), 10))
+        });
+    if let Some((digits, radix)) = integer {
+        return Some((integer_plus_one(digits, radix)?, false));
     }
     let value = lower.parse::<f64>().ok()?;
     let mutated = value + 1.0;
@@ -1535,38 +1548,36 @@ pub(crate) fn number_mutant(literal: &str) -> Option<(String, bool)> {
 /// `digits` in `radix`, plus one, in decimal: Python's integers have no
 /// bound.
 fn integer_plus_one(digits: &str, radix: u32) -> Option<String> {
-    // Little-endian limbs of 10^9.
+    // Little-endian limbs of 10^9. Each digit multiplies by the radix and
+    // adds itself; a last step multiplies by 1 and adds the one.
     const BASE: u64 = 1_000_000_000;
     let mut limbs: Vec<u64> = vec![0];
-    for character in digits.chars() {
-        let digit = u64::from(character.to_digit(radix)?);
-        let mut carry = digit;
-        for limb in &mut limbs {
-            let value = *limb * u64::from(radix) + carry;
-            *limb = value % BASE;
-            carry = value / BASE;
-        }
-        while carry > 0 {
-            limbs.push(carry % BASE);
-            carry /= BASE;
-        }
-    }
-    let mut carry = 1;
-    for limb in &mut limbs {
-        let value = *limb + carry;
-        *limb = value % BASE;
-        carry = value / BASE;
-        if carry == 0 {
-            break;
-        }
-    }
-    if carry > 0 {
-        limbs.push(carry);
-    }
-    let mut text = limbs.last().copied().unwrap_or(0).to_string();
-    for limb in limbs.iter().rev().skip(1) {
-        text.push_str(&format!("{limb:09}"));
-    }
+    digits
+        .chars()
+        .map(|character| {
+            character
+                .to_digit(radix)
+                .map(|digit| (u64::from(radix), u64::from(digit)))
+        })
+        .chain(std::iter::once(Some((1, 1))))
+        .try_for_each(|step| {
+            let (factor, mut carry) = step?;
+            limbs.iter_mut().for_each(|limb| {
+                let value = *limb * factor + carry;
+                *limb = value % BASE;
+                carry = value / BASE;
+            });
+            while carry > 0 {
+                limbs.push(carry % BASE);
+                carry /= BASE;
+            }
+            Some(())
+        })?;
+    let (last, rest) = limbs.split_last().expect("a limb");
+    let mut text = last.to_string();
+    rest.iter()
+        .rev()
+        .for_each(|limb| text.push_str(&format!("{limb:09}")));
     Some(text)
 }
 
@@ -1832,10 +1843,10 @@ fn listed_with(
         .iter()
         .map(|point| point.id.clone())
         .collect::<BTreeSet<_>>();
-    let parsed =
-        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    // The obligations parsed the source already.
+    let parsed = parse_module(source).expect("a source the obligations parsed");
     let points = Points::of(file, parsed.suite());
-    let enumeration = enumerate(source)?;
+    let enumeration = enumerate_parsed(source, &parsed);
     let text = Text::new(source, &[]);
     let known = |id: Option<String>| id.filter(|id| recorded.contains(id));
     let mutants = enumeration
@@ -2117,7 +2128,9 @@ mod tests {
     #[test]
     #[ignore = "needs goldens written from a corpus"]
     fn a_corpus_s_mutants_are_mutmuts() {
-        let directory = std::env::var("SUPERCOV_MUTMUT_PARITY").expect("a directory");
+        let Some(directory) = std::env::var_os("SUPERCOV_MUTMUT_PARITY") else {
+            return;
+        };
         assert!(compare_directory(std::path::Path::new(&directory)) > 0);
     }
 
@@ -2403,7 +2416,9 @@ mod tests {
     #[test]
     #[ignore = "needs a directory of Python files"]
     fn a_directory_s_probes_are_printed() {
-        let directory = std::env::var("SUPERCOV_PROBE_SPANS").expect("a directory");
+        let Some(directory) = std::env::var_os("SUPERCOV_PROBE_SPANS") else {
+            return;
+        };
         for entry in std::fs::read_dir(&directory).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|e| e.to_str()) != Some("py") {
@@ -2437,6 +2452,17 @@ mod tests {
         );
     }
 
+    /// A function whose only statement is its docstring has no first
+    /// statement to stand for its defaults.
+    #[test]
+    fn a_default_of_a_docstring_only_function_has_no_statement() {
+        let (mutants, _) = listed("m.py", "def f(a=1):\n    \"\"\"Doc.\"\"\"\n").unwrap();
+        assert_eq!(mutants.len(), 1);
+        assert_eq!(mutants[0].id, "m.py:1:9-1:10:NumberLiteral:2");
+        assert_eq!(mutants[0].statement, None);
+        assert!(mutants[0].function.is_some());
+    }
+
     /// A chain of comparisons gets no comparison probe: its operands are
     /// not the two a probe of one comparison sees.
     #[test]
@@ -2462,6 +2488,7 @@ mod tests {
         std::fs::write(root.join("a.py"), "def f(x):\n    return x + 1\n").unwrap();
         std::fs::write(root.join("b.py"), "def g():\n    pass\n").unwrap();
         std::fs::write(root.join("c.py"), "def h(x):\n    return x - 1\n").unwrap();
+        std::fs::write(root.join("d.py"), "def broken(:\n").unwrap();
         let points = |file: &str| {
             listed(file, &std::fs::read_to_string(root.join(file)).unwrap())
                 .unwrap()
@@ -2474,13 +2501,16 @@ mod tests {
                 "c.py".to_owned(),
                 BTreeSet::from(["py:statement:other".to_owned()]),
             ),
+            ("d.py".to_owned(), BTreeSet::new()),
             ("gone.py".to_owned(), BTreeSet::new()),
         ]);
         let listed = list_mutants(&root, &recorded);
-        assert_eq!(listed.changed, ["c.py", "gone.py"]);
+        assert_eq!(listed.changed, ["c.py", "d.py", "gone.py"]);
         assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.py"]);
         assert_eq!(listed.mutants.language_of("a.py"), PYTHON);
         assert_eq!(listed.mutants.mutant_set.as_deref(), Some(MUTANT_SET));
+        let none = list_mutants(&root, &std::collections::BTreeMap::new());
+        assert!(none.changed.is_empty() && none.mutants.files.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

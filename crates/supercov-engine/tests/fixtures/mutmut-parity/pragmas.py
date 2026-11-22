@@ -101,3 +101,60 @@ class Open:
 def dropped(a, b):
     return call(a,
                 b)  # pragma: no mutate
+
+
+
+def leading(a):
+    # pragma: no mutate block
+    first = a + 1
+    second = a + 2
+    return first, second
+
+
+def deeper(a):
+    first = a + 1
+        # pragma: no mutate block
+    second = a + 2
+    return first, second
+
+
+def bracketed_block(a):
+    listed = [
+        # pragma: no mutate block
+        a + 4,
+    ]
+    trailing = [
+        a + 5,  # pragma: no mutate block
+        a + 6,
+    ]
+    return listed, trailing
+
+
+def after_block(a):
+    if a:
+        a += 1
+    # pragma: no mutate block
+    b = a + 2
+    return b
+
+
+def nested(a):
+    class Inner:  # pragma: no mutate block
+        def method(self):
+            return 1 + 2
+
+    return Inner, a + 1
+
+# A block footer opens a context mutmut never closes: no pragma may
+# follow it.
+
+def footer(a):
+    while a:
+        a -= 1
+        # pragma: no mutate block
+    b = a + 3
+    try:
+        b += 1
+    except ValueError:
+        b -= 1
+    return b

@@ -127,6 +127,15 @@
   {"file": "operators.py", "mutator": "UnaryOperator", "start": [56, 33], "end": [56, 38], "replacement": "+", "mutmut": "xǁNumbersǁunary__mutmut_3", "edit": {"start": [56, 33], "end": [56, 34], "text": "+"}},
   {"file": "operators.py", "mutator": "UnaryOperator", "start": [56, 40], "end": [56, 45], "replacement": "-", "mutmut": "xǁNumbersǁunary__mutmut_4", "edit": {"start": [56, 40], "end": [56, 41], "text": "-"}},
   {"file": "operators.py", "mutator": "UnaryOperator", "start": [56, 47], "end": [56, 51], "replacement": "+", "mutmut": "xǁNumbersǁunary__mutmut_5", "edit": {"start": [56, 47], "end": [56, 48], "text": "+"}},
-  {"file": "operators.py", "mutator": "NumberLiteral", "start": [56, 49], "end": [56, 50], "replacement": "2", "mutmut": "xǁNumbersǁunary__mutmut_6", "edit": {"start": [56, 49], "end": [56, 50], "text": "2"}}
+  {"file": "operators.py", "mutator": "NumberLiteral", "start": [56, 49], "end": [56, 50], "replacement": "2", "mutmut": "xǁNumbersǁunary__mutmut_6", "edit": {"start": [56, 49], "end": [56, 50], "text": "2"}},
+  {"file": "operators.py", "mutator": "AugmentedAssignment", "start": [60, 5], "end": [60, 11], "replacement": "=", "mutmut": "x_matrices__mutmut_1", "edit": {"start": [60, 7], "end": [60, 8], "text": ""}},
+  {"file": "operators.py", "mutator": "AssignmentValue", "start": [61, 5], "end": [61, 20], "replacement": "None", "mutmut": "x_matrices__mutmut_2", "edit": {"start": [61, 15], "end": [61, 20], "text": "None"}},
+  {"file": "operators.py", "mutator": "AssignmentValue", "start": [62, 5], "end": [62, 32], "replacement": "None", "mutmut": "x_matrices__mutmut_3", "edit": {"start": [62, 14], "end": [62, 32], "text": "None"}},
+  {"file": "operators.py", "mutator": "IfExpression", "start": [62, 14], "end": [62, 32], "replacement": "false", "mutmut": "x_matrices__mutmut_4", "edit": {"start": [62, 26], "end": [62, 26], "text": "and False "}},
+  {"file": "operators.py", "mutator": "IfExpression", "start": [62, 14], "end": [62, 32], "replacement": "true", "mutmut": "x_matrices__mutmut_5", "edit": {"start": [62, 26], "end": [62, 26], "text": "or True "}},
+  {"file": "operators.py", "mutator": "NumberLiteral", "start": [62, 14], "end": [62, 15], "replacement": "2", "mutmut": "x_matrices__mutmut_6", "edit": {"start": [62, 14], "end": [62, 15], "text": "2"}},
+  {"file": "operators.py", "mutator": "NumberLiteral", "start": [62, 31], "end": [62, 32], "replacement": "3", "mutmut": "x_matrices__mutmut_7", "edit": {"start": [62, 31], "end": [62, 32], "text": "3"}},
+  {"file": "operators.py", "mutator": "AssignmentValue", "start": [63, 5], "end": [64, 10], "replacement": "None", "mutmut": "x_matrices__mutmut_8", "edit": {"start": [63, 13], "end": [64, 10], "text": "None"}},
+  {"file": "operators.py", "mutator": "ArithmeticOperator", "start": [63, 13], "end": [64, 10], "replacement": "-", "mutmut": "x_matrices__mutmut_9", "edit": {"start": [63, 15], "end": [64, 8], "text": "-"}}
 ]
 }

@@ -22,6 +22,12 @@
   {"file": "skips.py", "mutator": "NumberLiteral", "start": [71, 28], "end": [71, 29], "replacement": "2", "mutmut": "x_pragmas__mutmut_6", "edit": {"start": [71, 28], "end": [71, 29], "text": "2"}},
   {"file": "skips.py", "mutator": "AssignmentValue", "start": [75, 5], "end": [75, 18], "replacement": "None", "mutmut": "x_block_pragma__mutmut_1", "edit": {"start": [75, 13], "end": [75, 18], "text": "None"}},
   {"file": "skips.py", "mutator": "ArithmeticOperator", "start": [75, 13], "end": [75, 18], "replacement": "-", "mutmut": "x_block_pragma__mutmut_2", "edit": {"start": [75, 15], "end": [75, 16], "text": "-"}},
-  {"file": "skips.py", "mutator": "NumberLiteral", "start": [75, 17], "end": [75, 18], "replacement": "2", "mutmut": "x_block_pragma__mutmut_3", "edit": {"start": [75, 17], "end": [75, 18], "text": "2"}}
+  {"file": "skips.py", "mutator": "NumberLiteral", "start": [75, 17], "end": [75, 18], "replacement": "2", "mutmut": "x_block_pragma__mutmut_3", "edit": {"start": [75, 17], "end": [75, 18], "text": "2"}},
+  {"file": "skips.py", "mutator": "ArithmeticOperator", "start": [90, 16], "end": [90, 21], "replacement": "-", "mutmut": "xǁGenericǁmethod__mutmut_1", "edit": {"start": [90, 18], "end": [90, 19], "text": "-"}},
+  {"file": "skips.py", "mutator": "NumberLiteral", "start": [90, 16], "end": [90, 17], "replacement": "2", "mutmut": "xǁGenericǁmethod__mutmut_2", "edit": {"start": [90, 16], "end": [90, 17], "text": "2"}},
+  {"file": "skips.py", "mutator": "NumberLiteral", "start": [90, 20], "end": [90, 21], "replacement": "3", "mutmut": "xǁGenericǁmethod__mutmut_3", "edit": {"start": [90, 20], "end": [90, 21], "text": "3"}},
+  {"file": "skips.py", "mutator": "ArithmeticOperator", "start": [95, 16], "end": [95, 21], "replacement": "-", "mutmut": "xǁPlainǁmethod__mutmut_1", "edit": {"start": [95, 18], "end": [95, 19], "text": "-"}},
+  {"file": "skips.py", "mutator": "NumberLiteral", "start": [95, 16], "end": [95, 17], "replacement": "4", "mutmut": "xǁPlainǁmethod__mutmut_2", "edit": {"start": [95, 16], "end": [95, 17], "text": "4"}},
+  {"file": "skips.py", "mutator": "NumberLiteral", "start": [95, 20], "end": [95, 21], "replacement": "5", "mutmut": "xǁPlainǁmethod__mutmut_3", "edit": {"start": [95, 20], "end": [95, 21], "text": "5"}}
 ]
 }

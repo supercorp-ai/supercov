@@ -15,3 +15,7 @@ def calls(text, items, mapping):
     )
     generator = sum(x for x in items)
     return first, left, just, fixes, parts, split, created, sized, called, nested, trailing, generator
+
+
+def splits(text):
+    return text.split(maxsplit=1), text.rsplit(maxsplit=1), text.rsplit(",")

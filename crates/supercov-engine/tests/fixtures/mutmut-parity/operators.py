@@ -54,3 +54,12 @@ class Numbers:
     @classmethod
     def unary(cls, flag):
         return not flag, ~flag, -flag, +flag, -(1)
+
+
+def matrices(a, b, flag):
+    a @= b
+    product = a @ b
+    picked = 1 if (a, b) else 2
+    total = a + \
+        b
+    return product, picked, total

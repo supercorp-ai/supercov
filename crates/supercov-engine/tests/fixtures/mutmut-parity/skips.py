@@ -77,3 +77,19 @@ def block_pragma(a):
     second = a + 2
     third = a + 3
     return first, second, third
+
+
+@functools.cache
+@functools.wraps(len)
+def twice_decorated():
+    return 1 + 2
+
+
+class Generic(dict[str, int]):
+    def method(self):
+        return 1 + 2
+
+
+class Plain(Exception):
+    def method(self):
+        return 3 + 4

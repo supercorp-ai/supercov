@@ -88,6 +88,22 @@
   {"file": "statements.py", "mutator": "BooleanLiteral", "start": [58, 76], "end": [58, 81], "replacement": "True", "mutmut": "x_defaults__mutmut_7", "edit": {"start": [58, 76], "end": [58, 80], "text": "Tru"}},
   {"file": "statements.py", "mutator": "NumberLiteral", "start": [69, 24], "end": [69, 25], "replacement": "1", "mutmut": "xǁPlainǁmethod__mutmut_1", "edit": {"start": [69, 24], "end": [69, 25], "text": "1"}},
   {"file": "statements.py", "mutator": "ArithmeticOperator", "start": [70, 16], "end": [70, 21], "replacement": "-", "mutmut": "xǁPlainǁmethod__mutmut_2", "edit": {"start": [70, 18], "end": [70, 19], "text": "-"}},
-  {"file": "statements.py", "mutator": "NumberLiteral", "start": [70, 20], "end": [70, 21], "replacement": "2", "mutmut": "xǁPlainǁmethod__mutmut_3", "edit": {"start": [70, 20], "end": [70, 21], "text": "2"}}
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [70, 20], "end": [70, 21], "replacement": "2", "mutmut": "xǁPlainǁmethod__mutmut_3", "edit": {"start": [70, 20], "end": [70, 21], "text": "2"}},
+  {"file": "statements.py", "mutator": "MatchCase", "start": [86, 5], "end": [95, 18], "replacement": "removed@1", "mutmut": "x_singletons__mutmut_1", "edit": {"start": [87, 1], "end": [89, 1], "text": ""}},
+  {"file": "statements.py", "mutator": "MatchCase", "start": [86, 5], "end": [95, 18], "replacement": "removed@2", "mutmut": "x_singletons__mutmut_2", "edit": {"start": [89, 1], "end": [94, 1], "text": ""}},
+  {"file": "statements.py", "mutator": "MatchCase", "start": [86, 5], "end": [95, 18], "replacement": "removed@3", "mutmut": "x_singletons__mutmut_3", "edit": {"start": [94, 5], "end": [96, 5], "text": ""}},
+  {"file": "statements.py", "mutator": "BooleanLiteral", "start": [87, 14], "end": [87, 19], "replacement": "True", "mutmut": "x_singletons__mutmut_4", "edit": {"start": [87, 14], "end": [87, 18], "text": "Tru"}},
+  {"file": "statements.py", "mutator": "AssignmentValue", "start": [88, 13], "end": [88, 18], "replacement": "None", "mutmut": "x_singletons__mutmut_5", "edit": {"start": [88, 17], "end": [88, 18], "text": "None"}},
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [88, 17], "end": [88, 18], "replacement": "2", "mutmut": "x_singletons__mutmut_6", "edit": {"start": [88, 17], "end": [88, 18], "text": "2"}},
+  {"file": "statements.py", "mutator": "AssignmentValue", "start": [92, 13], "end": [92, 18], "replacement": "None", "mutmut": "x_singletons__mutmut_7", "edit": {"start": [92, 17], "end": [92, 18], "text": "None"}},
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [92, 17], "end": [92, 18], "replacement": "3", "mutmut": "x_singletons__mutmut_8", "edit": {"start": [92, 17], "end": [92, 18], "text": "3"}},
+  {"file": "statements.py", "mutator": "AssignmentValue", "start": [95, 13], "end": [95, 18], "replacement": "None", "mutmut": "x_singletons__mutmut_9", "edit": {"start": [95, 17], "end": [95, 18], "text": "None"}},
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [95, 17], "end": [95, 18], "replacement": "4", "mutmut": "x_singletons__mutmut_10", "edit": {"start": [95, 17], "end": [95, 18], "text": "4"}},
+  {"file": "statements.py", "mutator": "AugmentedAssignment", "start": [97, 9], "end": [97, 15], "replacement": "=", "mutmut": "x_singletons__mutmut_11", "edit": {"start": [97, 11], "end": [97, 12], "text": ""}},
+  {"file": "statements.py", "mutator": "AssignmentOperator", "start": [97, 9], "end": [97, 15], "replacement": "-=", "mutmut": "x_singletons__mutmut_12", "edit": {"start": [97, 11], "end": [97, 12], "text": "-"}},
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [97, 14], "end": [97, 15], "replacement": "2", "mutmut": "x_singletons__mutmut_13", "edit": {"start": [97, 14], "end": [97, 15], "text": "2"}},
+  {"file": "statements.py", "mutator": "AugmentedAssignment", "start": [99, 9], "end": [99, 15], "replacement": "=", "mutmut": "x_singletons__mutmut_14", "edit": {"start": [99, 11], "end": [99, 12], "text": ""}},
+  {"file": "statements.py", "mutator": "AssignmentOperator", "start": [99, 9], "end": [99, 15], "replacement": "+=", "mutmut": "x_singletons__mutmut_15", "edit": {"start": [99, 11], "end": [99, 12], "text": "+"}},
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [99, 14], "end": [99, 15], "replacement": "2", "mutmut": "x_singletons__mutmut_16", "edit": {"start": [99, 14], "end": [99, 15], "text": "2"}}
 ]
 }

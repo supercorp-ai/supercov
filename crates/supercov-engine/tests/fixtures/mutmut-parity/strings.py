@@ -19,3 +19,9 @@ def strings(name):
 def docstring_only():
     "A one-line docstring in single quotes."
     return "Value"
+
+
+def raw_escapes():
+    short = r"Short\x4", r"Bad\xZZ", r"Bad\uZZZZ", r"Bad\UZZ", r"Name\Nx"
+    ending = r"Ends\x41", "Tail\x41"
+    return short, ending
