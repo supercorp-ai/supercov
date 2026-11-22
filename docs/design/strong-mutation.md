@@ -672,7 +672,7 @@ the ones explained here, each applied by hand:
   a function body emptied: no switch could be placed
   (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
   An error is no verdict either way.
-- Verdicts StrykerJS and Supercov both detect differ in kind 39 times
+- Verdicts StrykerJS and Supercov both detect differ in kind 48 times
   (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
   wrong is whichever the runner sees first.
 
