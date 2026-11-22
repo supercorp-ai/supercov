@@ -2327,8 +2327,10 @@ mod strong_tests {
         );
         let shift = source.find("<<").unwrap();
         facts.insert(shift, integer("x.T\0"));
-        // A site the type checker said nothing of gets none.
+        // A site the type checker said nothing of gets none, nor one whose
+        // type it could not name (an untyped one).
         facts.remove(&source.find(" % ").map(|at| at + 1).unwrap());
+        facts.insert(source.find("-= 1").unwrap(), integer(""));
         let obligations = build_go_obligations_valued(
             "p.go",
             source,

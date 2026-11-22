@@ -1973,6 +1973,14 @@ mod tests {
         std::fs::write(root.join("bad.go"), "package p\n\nfunc (").unwrap();
         let facts = site_facts(&root, &root, &["gone.go".into(), "bad.go".into()]).unwrap();
         assert!(facts.is_empty());
+        // No file, or a file with no mutant, asks nothing.
+        std::fs::write(root.join("empty.go"), "package p\n").unwrap();
+        assert!(site_facts(&root, &root, &[]).unwrap().is_empty());
+        assert!(
+            site_facts(&root, &root, &["empty.go".into()])
+                .unwrap()
+                .is_empty()
+        );
         // Comparisons alone ask nothing: their probes need no type.
         std::fs::write(root.join("c.go"), "package p\n\nvar x = 1 < 2\n").unwrap();
         assert!(
