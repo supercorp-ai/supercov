@@ -267,21 +267,38 @@ strong pass) against Gremlins' whole run.
 
 | Module | Mutants | Killed (Gremlins / Supercov) | Unviable | 16 CPUs: Gremlins s / Supercov s | 4 CPUs: Gremlins s / Supercov s |
 | --- | --- | --- | --- | --- | --- |
-| dustin/go-humanize v1.0.1 | 332 | 234 / 211 | 84 | 14.6 / 19.1 | 61.2 / 24.7 |
-| google/btree v1.1.3 | 367 | 140 / 134 | 21 | 11.1 / 10.2 | 41.1 / 29.0 |
-| hashicorp/golang-lru v2.0.7 | 165 | 119 / 107 | 11 | 31.9 / 21.2 | 165.3 / 59.3 |
-| google/uuid v1.6.0 | 205 | 127 / 143 | 1 | 15.0 / 21.0 | 90.0 / 43.7 |
-| spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.0 / 8.4 | 59.4 / 22.9 |
+| dustin/go-humanize v1.0.1 | 332 | 234 / 211 | 84 | 15.5 / 12.3 | 61.2 / 24.7 |
+| google/btree v1.1.3 | 367 | 140 / 134 | 21 | 11.3 / 11.4 | 41.1 / 29.0 |
+| hashicorp/golang-lru v2.0.7 | 165 | 120 / 104 | 11 | 31.7 / 17.9 | 165.3 / 59.3 |
+| google/uuid v1.6.0 | 205 | 130 / 145 | 1 | 15.3 / 13.6 | 90.0 / 43.7 |
+| spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.4 / 8.8 | 59.4 / 22.9 |
 
-16 CPUs: one c8a.4xlarge machine per tool. 4 CPUs: GitHub's `ubuntu-latest`
-(`.github/workflows/mutation-go.yml`). Counts are the 16-CPU run's; the
-4-CPU run's differ only in golang-lru (117 / 105) and uuid (130 / 143), by
-the flaky and time-dependent mutants below. Gremlins runs one `go test` per
+16 CPUs: one c8a.4xlarge machine per tool, with the retries and vetting
+of this note (counts of that run; golang-lru's and uuid's move by their
+flaky and time-dependent mutants, below). 4 CPUs: GitHub's
+`ubuntu-latest` (`.github/workflows/mutation-go.yml`), measured before
+them, when a mutant past its first limit waited for a round of its own with
+ten seconds; they would take less now. Gremlins runs one `go test` per
 mutant, as many at once as there are CPUs, and pays for each on four;
-Supercov builds each package's binary once and runs the candidates its
-weak verdicts leave. On sixteen CPUs both take seconds and Supercov's
-fixed costs (the measured run, the type check, the builds) are most of its
-time.
+Supercov builds each package's binary once and runs the candidates its weak
+verdicts leave.
+
+Where Supercov's time goes, on 16 CPUs (`[supercov] Go pass timings`):
+
+| Module | Measured run | Type check | Vet | Binaries | Mutants |
+| --- | --- | --- | --- | --- | --- |
+| go-humanize | 6.6 | 0.6 | 0.6 | 0.3 | 4.1 |
+| btree | 8.2 | 0.5 | 0.6 | 0.6 | 1.3 |
+| golang-lru | 8.8 | 0.4 | 0.1 | 0.9 | 7.5 |
+| uuid | 7.6 | 0.4 | 0.6 | 0.3 | 4.6 |
+| cast | 7.4 | 0.3 | 0.6 | 0.3 | 0.05 |
+
+Seconds. The measured run is most of it, and most of that is Go compiling
+the module and the standard library's packages it needs on a machine that
+never had (a second run of go-humanize takes 0.3 s), which Gremlins'
+coverage run pays as well. Before, go-humanize took 19.1 s and uuid 21.0:
+the round of retries with ten seconds was 8.4 and 11 s of their passes, and
+21 `go vet` runs on go-humanize found the 3 that 3 now find.
 
 Value probes, by the median of two runs of `supercov run -- go test ./...`
 on 16 CPUs after a first, without probes, with them, with them after a
