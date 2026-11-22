@@ -249,43 +249,68 @@ every mutant timed out. `benchmarks/mutation-go/corpus.sh` clones each module
 at its tag and runs either tool; `benchmarks/mutation-go/gremlins-compare.mjs` joins the
 verdicts by file, line, column and Gremlins mutator.
 
-Five modules, at their tags, on SoroCI (16 CPUs each tool, Go stable):
+Five modules, at their tags, each tool on its own machine of the same
+type. Mutants are those both tools list in the packages `go test ./...`
+runs; Gremlins' killed count includes the mutants that do not compile,
+which it calls killed. Seconds are the whole of `supercov mutants -- go test
+./...` (the measured run, the type check, the copy, the builds and the
+strong pass) against Gremlins' whole run.
 
-| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | Gremlins s | Supercov s |
+| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | 16 CPUs: Gremlins s / Supercov s | 4 CPUs: Gremlins s / Supercov s |
 | --- | --- | --- | --- | --- | --- |
-| dustin/go-humanize v1.0.1 | 301 | 224 / 214 | 50 | 15.2 | 15.4 |
-| google/btree v1.1.3 | 343 | 134 / 134 | 3 | 11.0 | 8.0 |
-| hashicorp/golang-lru v2.0.7 | 154 | 111 / 107 | 0 | 31.1 | 16.5 |
-| google/uuid v1.6.0 | 146 | 88 / 101 | 0 | 13.5 | 15.9 |
-| spf13/cast v1.7.1 | 184 | 123 / 122 | 1 | 8.9 | 6.3 |
+| dustin/go-humanize v1.0.1 | 332 | 234 / 211 | 84 | 14.6 / 19.1 | 61.2 / 24.7 |
+| google/btree v1.1.3 | 367 | 140 / 134 | 21 | 11.1 / 10.2 | 41.1 / 29.0 |
+| hashicorp/golang-lru v2.0.7 | 165 | 119 / 107 | 11 | 31.9 / 21.2 | 165.3 / 59.3 |
+| google/uuid v1.6.0 | 205 | 127 / 143 | 1 | 15.0 / 21.0 | 90.0 / 43.7 |
+| spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.0 / 8.4 | 59.4 / 22.9 |
 
-Counts are of the fourth of five runs, times of the fifth (golang-lru's of the
-fourth: in the fifth Gremlins stopped). Supercov kills more where Gremlins
-leaves constants uncovered. Supercov's time is the whole of `supercov mutants -- go test ./...`: the
-measured run, the type check, the copy, the builds and the strong pass.
-Gremlins' killed counts include the mutants that do not compile, which it
-calls killed. On these small modules both tools take seconds, and
-Supercov's pass is bounded by its time limits' ten-second floor: uuid's
-strong pass is 12.4 s, of which six timeouts take ten seconds each, side by
-side.
+16 CPUs: SoroCI (c8a.4xlarge). 4 CPUs: GitHub's `ubuntu-latest`
+(`.github/workflows/mutation-go.yml`). Counts are the 16-CPU run's; the
+4-CPU run's differ only in golang-lru (117 / 105) and uuid (130 / 143), by
+the flaky and time-dependent mutants below. Gremlins runs one `go test` per
+mutant, as many at once as there are CPUs, and pays for each on four;
+Supercov builds each package's binary once and runs the candidates its
+weak verdicts leave. On sixteen CPUs both take seconds and Supercov's
+fixed costs (the measured run, the type check, the builds) are most of its
+time.
+
+Value probes, by the median of two warm runs of `supercov run -- go test
+./...` on 16 CPUs, without probes, with them, and the suite alone:
+
+| Module | Without / with probes / `go test` s | Unknown mutants | Candidate runs | Untestable |
+| --- | --- | --- | --- | --- |
+| go-humanize | 0.29 / 0.55 / 0.13 | 249 to 145 | 2636 to 2557 | 0 |
+| btree | 1.44 / 1.67 / 0.42 | 115 to 37 | 2629 to 2228 | 0 |
+| golang-lru | 0.87 / 1.12 / 0.62 | 82 to 38 | 1393 to 1252 | 1 |
+| uuid | 0.34 / 0.62 / 0.16 | 129 to 29 | 1551 to 1449 | 1 |
+| cast | 0.37 / 0.64 / 0.15 | 67 to 16 | 477 to 420 | 0 |
+
+The probes' cost is a quarter of a second, about the same on every
+module: most of it is the type checker's facts, which the probes need to
+write an operation's type, not the probes themselves (btree, with the
+most to probe and the longest suite, pays 0.23 s). On the first run the
+type checker's own build adds 4-5 s, once per machine. No weak verdict a
+probe gave is contradicted by a mutant run by hand.
 
 Every disagreement, with the mutant applied by hand and the suite run whole
 ten times (`benchmarks/mutation-go/by-hand.mjs`):
 
-- **Unviable** (54): Supercov's type check refuses the mutant (`-` of
+- **Unviable** (124): Supercov's type check refuses the mutant (`-` of
   strings, a negative array length, a duplicate map key after a constant
-  changed, a variable left unused). Gremlins calls each KILLED: `go test`
+  changed, a variable left unused, `x != 1 || x != 2`, which `go vet`
+  refuses). Gremlins calls each KILLED: `go test`
   exits 1 on a build failure.
-- **Not covered by Gremlins, killed by Supercov** (go-humanize 16, uuid 13):
+- **Not covered by Gremlins, killed by Supercov** (go-humanize 16, uuid 16):
   constant declarations (`KByte = Byte * 1000`). Gremlins' coverage profile
   has no block there and it never runs them; Supercov builds each alone, and
   the tests kill them.
-- **Only Gremlins** (golang-lru 44, btree 7): `golang-lru/arc` is a module
+- **Only Gremlins** (golang-lru 45, btree 10): `golang-lru/arc` is a module
   of its own that `go test ./...` does not run, and `btree_mem.go` is
   `//go:build ignore`.
-- **Time-dependent kills** (uuid): `version7.go:96` and `time.go:58` make
-  the suite as written fail 3-4 times in 10; each tool's single run lands
-  either way. Neither is a soundness violation of the selection: the
+- **Time-dependent kills** (uuid): mutants of clock arithmetic
+  (`version7.go:96`, `version6.go:45`, `time.go:58`, `time.go:63`) make the
+  suite as written fail 4 to 9 times in 10; each tool's single run lands
+  either way, and which ones disagree changes from run to run. Neither is a soundness violation of the selection: the
   mutant's only killers are its candidates.
 - **A flaky test** (golang-lru): `expirable`'s `ExampleLRU` waits 100 ms on
   entries that expire in 10 ms, and with 16 copies of the suite running at
@@ -294,6 +319,12 @@ ten times (`benchmarks/mutation-go/by-hand.mjs`):
   side or the other, where the mutant applied by hand fails 0 or 1 times in
   10; the set changes from run to run. One Gremlins run of the module
   stopped at its coverage step on that failure.
+
+`version7.go:97`'s `now <= lastV7time` to `<` was a fifth: weak mutation
+called it survived because the measured run never saw the operands equal,
+and the suite fails 10 times in 10 with it. Its operands are worked out from
+the clock, so it is now `untestable` (`clock`) and runs; both runs above
+agree with Gremlins on it.
 
 No other disagreement remains: 0 soundness violations outside time-dependent
 and flaky tests, each checked by hand. Four were real and are fixed (below,
