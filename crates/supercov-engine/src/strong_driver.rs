@@ -127,9 +127,10 @@ pub const JAVASCRIPT_JOB_RUNNERS: &[&str] = &[
     "vitest-browser",
 ];
 
-/// The JavaScript runners whose tests run in Node, where the runtime hands
-/// a wasm instance its mutant. A browser page's wasm gets none yet.
-const NODE_JAVASCRIPT_RUNNERS: &[&str] = &[
+/// The JavaScript runners whose tests the runtime hands a wasm instance its
+/// mutant under: in Node, and in Playwright's pages.
+const WASM_JAVASCRIPT_RUNNERS: &[&str] = &[
+    "playwright",
     "vitest",
     "jest",
     "mocha",
@@ -140,10 +141,10 @@ const NODE_JAVASCRIPT_RUNNERS: &[&str] = &[
 ];
 
 /// The driver that runs `mutant`: its language's, but for a Rust mutant
-/// whose candidates are all JavaScript tests run in Node (Rust compiled to
-/// wasm that they load), which the JavaScript driver runs, switching the
-/// mutant on through the wasm's exports. One a browser test loads stays
-/// Rust's, which records it `error`.
+/// whose candidates are all JavaScript tests (Rust compiled to wasm that
+/// they load), which the JavaScript driver runs, switching the mutant on
+/// through the wasm's exports. One a runner the runtime cannot hand the
+/// mutant under stays Rust's, which records it `error`.
 pub fn driver_of<'a>(
     mutant: &'a crate::strong_plan::PlannedMutant,
     tests: &[crate::strong_plan::PlannedTest],
@@ -152,7 +153,7 @@ pub fn driver_of<'a>(
         && mutant.candidates.iter().all(|candidate| {
             tests
                 .get(candidate.test)
-                .is_some_and(|test| NODE_JAVASCRIPT_RUNNERS.contains(&test.runner.as_str()))
+                .is_some_and(|test| WASM_JAVASCRIPT_RUNNERS.contains(&test.runner.as_str()))
         });
     if mutant.language == crate::mutant_list::RUST && javascript_only {
         crate::mutant_list::JAVASCRIPT
@@ -220,18 +221,25 @@ mod tests {
     #[test]
     fn rust_mutants_under_javascript_tests_are_the_javascript_driver_s() {
         use crate::strong_plan::{Candidate, CandidateReason, PlannedMutant, PlannedTest};
-        let tests = ["vitest", "jest", "rust-libtest", "pytest", "playwright"]
-            .map(|runner| PlannedTest {
-                id: runner.into(),
-                file: None,
-                name: runner.into(),
-                title: None,
-                runner: runner.into(),
-                duration_ms: None,
-                span: None,
-                runnable: true,
-            })
-            .to_vec();
+        let tests = [
+            "vitest",
+            "jest",
+            "rust-libtest",
+            "pytest",
+            "vitest-browser",
+            "playwright",
+        ]
+        .map(|runner| PlannedTest {
+            id: runner.into(),
+            file: None,
+            name: runner.into(),
+            title: None,
+            runner: runner.into(),
+            duration_ms: None,
+            span: None,
+            runnable: true,
+        })
+        .to_vec();
         let mutant = |language: &str, candidates: &[usize]| PlannedMutant {
             id: "m".into(),
             file: "src/lib.rs".into(),
@@ -261,7 +269,8 @@ mod tests {
         assert_eq!(driver_of(&mutant(rust, &[0, 2]), &tests), rust);
         // A runner no driver runs, a test the plan does not have, or none.
         assert_eq!(driver_of(&mutant(rust, &[0, 3]), &tests), rust);
-        // A browser page's wasm gets no mutant yet.
+        // Playwright's pages get the mutant; Browser Mode's do not yet.
+        assert_eq!(driver_of(&mutant(rust, &[0, 5]), &tests), javascript);
         assert_eq!(driver_of(&mutant(rust, &[0, 4]), &tests), rust);
         assert_eq!(driver_of(&mutant(rust, &[0, 9]), &tests), rust);
         assert_eq!(driver_of(&mutant(rust, &[]), &tests), rust);

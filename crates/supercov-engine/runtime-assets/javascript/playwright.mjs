@@ -1215,6 +1215,10 @@ function prepareContext(context) {
         // their wasm instances, so each test's work can be taken from them.
         if (process.env.SUPERCOV_WASM_REGIONS === "1")
             parts.push("globalThis.__SUPERCOV_WASM_REGIONS__ = true;");
+        // A strong pass over such a crate: pages hand each wasm instance the
+        // attempt's mutant, by its file in the crate's Cargo workspace.
+        if (process.env.SUPERCOV_WASM_STRONG)
+            parts.push(`Object.defineProperty(globalThis, "__SUPERCOV_WASM_STRONG__", { value: ${JSON.stringify(JSON.parse(process.env.SUPERCOV_WASM_STRONG))}, writable: true, configurable: true });`);
         parts.push(browserRuntimePrelude);
         prepared = Promise.resolve(internally(context, () => Promise.all([
             context.addInitScript({ content: separately(parts) }).catch(() => undefined),
