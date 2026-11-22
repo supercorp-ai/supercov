@@ -22392,7 +22392,7 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
 /// given into one process, so each job names its file.
 #[cfg(unix)]
 #[test]
-fn mutants_test_runs_bun_test_mutants_one_job_at_a_time() {
+fn mutants_test_runs_mutants_one_job_at_a_time_under_bun() {
     if std::process::Command::new("bun")
         .arg("--version")
         .output()
