@@ -4637,6 +4637,9 @@ impl Enumerator<'_> {
                 if context == Context::Condition || self.kotlin_negated_chain(node) {
                     self.negate(node);
                 }
+                if let Some(condition) = self.kotlin_checked_compound(node) {
+                    self.negate(condition);
+                }
                 for child in named_children(node) {
                     self.kotlin_node(child, Context::Value);
                 }
@@ -4733,6 +4736,26 @@ impl Enumerator<'_> {
                 });
             self.logging_lines.insert(line);
         }
+    }
+
+    /// `require(a && b)`, `check(a || b)`: the inlined `if (!value) throw`
+    /// is a jump of its own on the whole condition, besides its operands'.
+    /// A single comparison's is the same mutant as the comparison's own.
+    fn kotlin_checked_compound<'t>(&self, call: Node<'t>) -> Option<Node<'t>> {
+        let callee = named_children(call).next()?;
+        if !matches!(text(callee, self.source), "require" | "check") {
+            return None;
+        }
+        let arguments = named_children(call).find(|child| child.kind() == "value_arguments")?;
+        let mut values = named_children(arguments);
+        let argument = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        let value = strip_parens(named_children(argument).last()?);
+        (value.kind() == "binary_expression"
+            && matches!(binary_operator(value, self.source).as_str(), "&&" | "||"))
+        .then_some(value)
     }
 
     fn kotlin_binary(&mut self, node: Node, context: Context) {
