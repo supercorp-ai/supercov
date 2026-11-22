@@ -1098,6 +1098,11 @@ mod __SUPERCOV_MODULE__ {
     /// `bool`.
     pub fn num<T: ?Sized>(v: &T) -> Num {
         let name = std::any::type_name::<T>();
+        // Every type read is named in at most five characters: anything
+        // longer is not one, decided without comparing names.
+        if name.len() > 5 {
+            return Num::None;
+        }
         let at = v as *const T;
         macro_rules! read {
             ($t:ty) => {

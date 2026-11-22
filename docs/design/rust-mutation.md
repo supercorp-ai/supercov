@@ -11,7 +11,7 @@ tool is cargo-mutants, pinned at 27.1.0 (`mutantSet: "cargo-mutants@27.1.0"`).
 | schemata | `rust_schemata.rs`, written into a copy by `rust_project::prepare_rust_strong_project` |
 | runtime switch | `runtime-assets/rust-strong-runtime.rs` (`on(file, index)`) |
 | driver | `rust_strong.rs` (`run_strong_rust`), dispatched by `strong_driver` for `rust` |
-| value probes | none yet: weak verdicts read reach, decisions and arm selections |
+| value probes | `rust_value_probes.rs`, read by `js_weak_mutation::rust_valued` |
 
 ## Which mutants
 
@@ -58,21 +58,52 @@ its source no longer has changed since the run, and is left out.
 
 `js_weak_mutation::verdict` has a rule per genre (`rust_operator`):
 
-- `FnValue` with `()` is infected by proxy where its function ran; any other
-  value is `unknown` there: no probe records what the function returned.
 - `MatchArm` is infected by proxy where its arm was selected.
 - `MatchArmGuard` reads the guard's decision: infected where it had the other
   outcome, not infected where every evaluation had the forced one, not
   reached where it never ran.
-- `BinaryOperator` `==` to `!=` and back is infected wherever it ran; every
-  other operator is `unknown` where it ran.
-- `UnaryOperator`: deleting `!` is infected where it ran; deleting `-` is
-  `unknown` (it changes nothing where the operand is 0).
-- `StructField` is `unknown` where it ran.
+- `BinaryOperator` `==` to `!=` and back, and deleting `!`, are infected
+  wherever they ran.
+- `FnValue` with `()` is infected by proxy where its function ran.
 
-So a Rust run's weak report says mostly what no test reached, and the strong
-pass runs every reaching test for an `unknown` mutant. That is always sound;
-comparison and return-value probes would take tests away (see What is left).
+A run measured with `SUPERCOV_MUTANTS=1` also places value probes
+(`rust_value_probes`), and lists its mutants as it ends, linked to them
+(`mutant_list::list_rust_run`, `mutants.json` in its evidence). A probe
+records one outcome per evaluation, as a hit of `<site>#<outcome>` that the
+snapshot turns into a comparison record, never a covered point:
+
+- **Comparisons** (`<`, `<=`, `>`, `>=`): the operands' relation (`lt`,
+  `eq`, `gt`, `unordered`). Each replacement's value follows from it, so the
+  mutant is infected where some relation gives the two operators different
+  values, and not infected where none does (`a < b` to `a <= b`, where the
+  operands were never equal).
+- **Arithmetic, bitwise and shift operators**, plain and compound: for each
+  of the operator's mutants, whether it gives the original's value
+  (`same`, `differs`). An operation that panics in a test build (overflow,
+  division by zero, a shift past the width) is a value of its own, so `+`
+  that overflows and `*` that does not differ.
+- **`-x`**: whether `x` is zero (an integer's `0`; any float counts as
+  differing, as `-0.0` is not `0.0` to every operation).
+- **Functions returning `bool` or a built-in number**: what they returned
+  (`0`, `1`, `-1`, other) and whether they ended by a panic. A value other
+  than the replacement's infects. One that matches proves nothing: the
+  replacement also skips everything the body does, so it stays `unknown`.
+
+The runtime reads an operand by its type's name (`std::any::type_name`):
+a built-in integer, float, `bool` or `char`; anything else records
+`unknown`. No probe has a trait bound, so it compiles wherever the operands
+can be borrowed. An operator's probe evaluates its operands a second time,
+so it goes only where they are pure: paths, fields, indexes, literals,
+casts, dereferences, parentheses and arithmetic of those, never a call. A
+literal takes the other operand's type, as the operator gives it. Probes go
+only where the instrumenter places probes at all: not in macros, test code,
+const contexts or an allocator. A returned value's wrapper goes around every
+wrapper the instrumenter placed at its range, and inside every one around it
+(`outer_scope`); where no nesting is possible it is left out.
+
+A plain run has no probes and lists its mutants when asked, linked to
+nothing but its points: its weak verdicts are those above, and every other
+mutant that ran is `unknown`.
 
 ## Schemata
 
@@ -190,23 +221,45 @@ v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
 
 ## Measured
 
-On SoroCI (16-CPU machines, one per job), 2026-11-22: cargo-mutants 27.1.0
-with `-j 8`, in shards of a crate's mutants; Supercov built from this tree,
-one job per crate, the strong pass with its default 8 workers. Every mutant
-of the three crates, 832 in all:
+On SoroCI (16-CPU machines, one per job), 2026-11-22, run 8665618628123379:
+cargo-mutants 27.1.0 with `-j 8`, in shards of a crate's mutants; Supercov
+built from this tree, one job per crate, the strong pass with its default 8
+workers, from a run measured with `SUPERCOV_MUTANTS=1`. Every mutant of the
+three crates, 832 in all:
 
-| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (s, shards summed) | Supercov measured run + strong pass (s) |
+| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (s, shards summed) | Supercov strong pass (s) |
 | --- | --- | --- | --- | --- | --- | --- |
-| strsim-rs v0.11.1 | 363 | 363 | 0 | 0 | 59.4 (4 shards) | 0.8 + 16.2 |
-| rust-hex v0.4.3 | 104 | 102 | 0 | 2 | 73.8 (2 shards) | 6.6 + 22.9 |
-| semver 1.0.27 | 365 | 362 | 0 | 3 | 44.1 (4 shards) | 1.4 + 16.2 |
+| strsim-rs v0.11.1 | 363 | 363 | 0 | 0 | 60.3 (4 shards) | 15.7 |
+| rust-hex v0.4.3 | 104 | 102 | 0 | 2 | 74.2 (2 shards) | 22.5 |
+| semver 1.0.27 | 365 | 362 | 0 | 3 | 43.0 (4 shards) | 15.8 |
 
-Each shard of cargo-mutants builds its own baseline, so the summed figures
-hold one baseline build per shard; the strong pass's figure holds its whole
-work: the switched build (1-3 builds as unviable mutants leave it), the
-baselines, every mutant's tests and the mutants built on their own (2, 5 and
-14). The strong verdicts were killed 277/76/270, timeout 3/1/5, survived
-63/16/30, no coverage 17/8/31, unviable 3/3/29.
+Weak statuses, without and with the value probes (no mutant the probed run
+calls not-infected or not-reached is one cargo-mutants catches: 0 weak
+soundness violations on all three):
+
+| Crate | Plain run: infected / not-infected / not-reached / unknown | Probed run: infected / not-infected / not-reached / unknown |
+| --- | --- | --- |
+| strsim | 35 / 0 / 17 / 311 | 279 / 2 / 17 / 65 |
+| hex | 7 / 0 / 8 / 89 | 36 / 0 / 8 / 60 |
+| semver | 65 / 0 / 31 / 269 | 182 / 13 / 31 / 139 |
+
+The measured run's cost, each from a cold build of its own copy (seconds):
+
+| Crate | `cargo test` | Supercov | Supercov with value probes |
+| --- | --- | --- | --- |
+| strsim | 0.44 | 0.72 (1.66×) | 0.78 (1.80×) |
+| hex | 6.37 | 6.13 (0.96×) | 6.47 (1.02×) |
+| semver | 0.63 | 1.15 (1.84×) | 3.41 (5.44×) |
+
+On the two small crates the fixed cost of a measured run (the copy, the
+instrumentation, a process per test) is most of it; on hex, whose build
+dominates, Supercov costs what `cargo test` does. The probes cost 6-9% on
+strsim and hex and nearly triple semver's measured run, whose tests call
+the probed comparisons and returns in hot loops: each probe reads its
+operands' type names. That figure was measured before probes decided an
+operand's type by its name's length first, which skips the comparisons
+for every type longer than five characters; it has not been measured
+again. A plain run places no probe.
 
 The five viability disagreements, each applied by hand:
 
@@ -223,22 +276,43 @@ The five viability disagreements, each applied by hand:
   (a null `NonNull`); the plan records it no coverage without building it.
 
 None is a mutant one tool kills and the other calls survived.
-`cargo mutants --cap-lints=true` would build the four lint cases as the pass
-does.
+
+## nextest
+
+Under `cargo nextest run`, each test runs through nextest, one test per
+invocation (`-E 'binary_id(=..) & test(=..)'`), with the switched build
+reused (`--binaries-metadata` and `--cargo-metadata` from a
+`cargo nextest list` of it): the project's nextest configuration applies,
+its profile, setup scripts and the environment they export, timeouts and
+retries. A test nextest ends at its own timeout is a `timeout`.
+
+## wasm
+
+A `cargo test` for `wasm32-unknown-unknown` through
+`wasm-bindgen-test-runner`, and `wasm-pack test --node` (learned once as
+that `cargo test`), run each test module in Node. A wasm module reads no
+environment, so each switched crate's runtime exports a buffer for the
+active mutant's file and a function that switches it on
+(`__supercov_strong_buffer_<crate>`, `__supercov_strong_activate_<crate>`).
+The Node hook the launcher gives every wasm test process
+(`rust-wasm-node.mjs`, which also reads coverage regions) calls them as the
+module is instantiated, before any test runs. Under WASI (`wasmtime`) the
+runtime is given `SUPERCOV_ACTIVE_MUTANT` by name (`--env`). Tests run in a
+browser (`wasm-pack test --chrome`) are not run against mutants yet; their
+mutants are `error`.
+
+A strong pass records `error`, never `survived`, for a mutant whose tests
+passed in the measured run and do not pass without a mutant in the pass's
+build: such a pass cannot tell anything of it.
 
 ## What is left
 
-- Value probes. Comparison probes on relational operators (recording each
-  evaluation's `lt`, `eq`, `gt` as hit points) and return-value probes on
-  functions returning `bool` and integers would make most `BinaryOperator`
-  and `FnValue` mutants infected or not infected, and take tests away from
-  the strong pass. They are not built.
-- Rust compiled to wasm and loaded by JavaScript tests, and `wasm-pack test`:
-  `wasm32-unknown-unknown` has no environment, so the switch cannot read the
-  active mutant. Their mutants are listed and weak-judged; a strong pass over
-  a command that builds for wasm records them `error` ("a strong pass cannot
-  switch mutants in wasm tests yet") rather than run tests that would pass
-  with every mutant.
-- nextest's own configuration (per-test environment, setup scripts, its
-  timeouts) is not applied: the pass runs nextest's tests through their
-  binaries as libtest would.
+- Tests run in a browser (`wasm-pack test --chrome`): their mutants are
+  `error`. The page would need the mutant before its module loads, through
+  the WebDriver proxy that reads its coverage.
+- Rust compiled to wasm and loaded by JavaScript tests (a Vitest or
+  Playwright suite over `wasm-pack build` output): its mutants are not run.
+  They would need the JavaScript drivers to switch them on through the
+  module's exports, as the Node hook does.
+- The value probes on `&&` and `||`, struct fields and non-number returns:
+  those mutants stay `unknown` where they ran.

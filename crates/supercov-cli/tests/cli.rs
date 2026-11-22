@@ -16149,8 +16149,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // The copy's own path, resolved to read its module tree.
             "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
-            "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
+            "spawn#rust_test_runner.rs:1569 => rust_test_runner.rs:1569",
+            "spawn#rust_test_runner.rs:1569@2 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
             "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
             "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
