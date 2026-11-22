@@ -306,7 +306,14 @@ tests are JavaScript tests.
    runtime's active file can change in one instance, as a Vitest worker
    keeps its modules from one mutant to the next.
 
+In a Playwright page the context's init script gives the page the same list
+(`globalThis.__SUPERCOV_WASM_STRONG__`), and the attempt's own init script
+switches its mutant on before the page's scripts run, so each wasm instance
+the page makes runs the attempt's mutant. A Rust wasm run names its tests by
+their file too (`<file>::<id>`); the Vitest and Playwright drivers read the
+id after it.
+
 A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
-job's time limit. Not yet: wasm loaded in a browser page (Playwright, Vitest
-Browser Mode) gets no mutant, and a mutant a switch cannot hold is not built
-on its own.
+time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
+measures yet, so none of its mutants are planned; and a mutant a switch
+cannot hold is not built on its own.

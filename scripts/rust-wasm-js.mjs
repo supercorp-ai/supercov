@@ -170,14 +170,7 @@ try {
     // A strong pass runs the crate's mutants under the JavaScript tests
     // that load its wasm: the wasm is built from the switched crate, and
     // each instance is handed the active mutant through its exports.
-    // A page's wasm gets no mutant yet: its mutants are errors, never
-    // survivors.
-    if (entry.suite === 'Playwright') {
-      const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
-      const { summary } = JSON.parse(tested.stdout);
-      assert.ok(summary, `${entry.suite}\n${tested.stdout}\n${tested.stderr}`);
-      assert.ok(summary.ran > 0 && summary.error === summary.ran, `${entry.suite}\n${JSON.stringify(summary)}\n${tested.stderr}`);
-    } else {
+    {
       const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
       assert.equal(tested.status, 0, `${entry.suite}\n${tested.stdout}${tested.stderr}`);
       const { summary } = JSON.parse(tested.stdout);

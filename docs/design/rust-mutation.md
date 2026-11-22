@@ -321,9 +321,8 @@ build: such a pass cannot tell anything of it.
 - Tests run in a browser (`wasm-pack test --chrome`): their mutants are
   `error`. The page would need the mutant before its module loads, through
   the WebDriver proxy that reads its coverage.
-- Rust compiled to wasm and loaded by JavaScript tests in a browser page
-  (Playwright, Vitest Browser Mode): its mutants are `error`. Under Node
-  (node:test, Vitest, Jest, Mocha and the other job runners) the JavaScript
-  strong pass runs them (`mutation-drivers.md`).
+- Rust compiled to wasm and loaded in Vitest Browser Mode's pages: not
+  measured, so its mutants are not planned. Under Node and in Playwright's
+  pages the JavaScript strong pass runs them (`mutation-drivers.md`).
 - The value probes on `&&` and `||`, struct fields and non-number returns:
   those mutants stay `unknown` where they ran.

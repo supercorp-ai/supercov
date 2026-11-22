@@ -802,8 +802,8 @@ tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
-- Rust compiled to wasm that a browser page loads (Playwright, Vitest
-  Browser Mode): its mutants are `error`. Under Node they run
+- Rust compiled to wasm that Vitest Browser Mode's pages load: not measured,
+  so not planned. Under Node and in Playwright's pages its mutants run
   (`mutation-drivers.md`).
 - A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
   command builds the wasm once.
