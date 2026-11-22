@@ -3036,10 +3036,12 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         );
     }
     // A command still running is reported at each interval, in ms then s.
+    // The interval is short enough that a busy machine still reports once
+    // before the first second.
     let slow = project
         .supercov_with(
             &["__supervise", "--", "sleep", "2.5"],
-            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "400")],
+            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "100")],
         )
         .exits(0);
     let reports = slow
@@ -16151,8 +16153,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // The copy's own path, resolved to read its module tree.
             "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
-            "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
+            "spawn#rust_test_runner.rs:1569 => rust_test_runner.rs:1569",
+            "spawn#rust_test_runner.rs:1569@2 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
             "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
             "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
@@ -21959,12 +21961,12 @@ fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Proj
         "package.json",
         &format!(r#"{{ "name": "cart", "type": "{module}" }}"#),
     );
+    // The repository's packages, where it has them: Bun's tests need none
+    // and run where they were never installed (the Bun bootstrap job).
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    std::os::unix::fs::symlink(
-        modules.canonicalize().unwrap(),
-        project.root.join("node_modules"),
-    )
-    .unwrap();
+    if let Ok(modules) = modules.canonicalize() {
+        std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
+    }
     project.write(".gitignore", "node_modules\n.supercov\n");
     let exports = if module == "module" {
         ("export function", "")
@@ -23657,12 +23659,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:826",
+            "fs.write#mutants_test_command.rs:830",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:830"),
         "{}",
         unwritten.stderr()
     );

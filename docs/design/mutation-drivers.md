@@ -256,3 +256,42 @@ values only take tests away.
 | runtime switch | `runtime/javascript/runtime.mjs` (`strongSlot`, `setActiveMutant`) |
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
+
+Rust implements the contract with cargo-mutants 27.1.0 as its reference:
+`docs/design/rust-mutation.md`.
+
+## Rust compiled to wasm under a JavaScript host
+
+A Rust crate's mutants can only be told apart by the tests that load its
+wasm: a Vitest or Playwright suite over `wasm-pack build` output, or
+`wasm-bindgen-test-runner` in Node or Chrome. A wasm module reads no
+environment, so a crate switched for a strong pass (`rust_schemata`) exports,
+per crate (`<key>` is the crate's):
+
+| Export | Meaning |
+| --- | --- |
+| `__supercov_strong_buffer_<key>() -> u32` | where in the module's memory to write the active mutant's file (UTF-8, at most 4096 bytes) |
+| `__supercov_strong_activate_<key>(length: u32, index: u64)` | switches mutant `index` of the file just written on; the hit limit is off |
+
+A host that knows the active mutant (`<file>#<index>`) calls, for every
+instance it sees created, each `_activate_` export after writing the file
+into the matching `_buffer_` (`rust-wasm-node.mjs` and the Chrome proxy's
+page script do so for Rust's own runners). It must do so before any test
+code of the instance runs: right after `WebAssembly.Instance` or
+`instantiate` returns.
+
+For Rust wasm loaded by JavaScript tests, the JavaScript strong pass owns
+the run: the mutants are listed by the Rust run beside it, and its candidate
+tests are JavaScript tests. What the JavaScript side needs, and does not do
+yet:
+
+1. Build the wasm from switched sources: in strong mode, the copy's crate is
+   switched (`rust_project::prepare_rust_strong_project`) instead of
+   instrumented, before the command's `wasm-pack build` runs.
+2. Hand the active mutant to every wasm instance the runtime remembers
+   (`globalThis.__supercovWasm`), with the exports above, wherever it switches
+   a JavaScript mutant on (`setActiveMutant`, `SUPERCOV_ACTIVE_MUTANT`, a
+   page's attempt scope).
+3. Accept Rust mutants (`language: "rust"`) in its share of the plan for
+   candidates under its runners; the Rust driver records such a mutant
+   `error` until then.

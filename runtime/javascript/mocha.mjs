@@ -63,12 +63,6 @@ export async function adaptMocha(entrypoint) {
     // run the tests, each with a Runner of its own.
     Runner.prototype.run = function supercovMochaRun(...args) {
         const job = strongJob();
-        // --check-leaks fails a test that adds a global, and Supercov's
-        // runtime keeps its state on globals it may first set during a test
-        // (the test's id, an async scope). They are Supercov's, not the
-        // suite's: they are allowed, as a project's own `--global` would be.
-        if (typeof this.globals === "function")
-            this.globals(["__SUPERCOV_*"]);
         observe(this, runtime, write);
         if (job) {
             keepJobTests(this.suite, job);

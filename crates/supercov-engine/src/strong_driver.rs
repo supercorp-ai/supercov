@@ -104,6 +104,11 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "tap",
     "bun:test",
     "vitest-browser",
+    // Rust's (`rust_strong`): libtest and nextest tests by name through
+    // their binaries, doctests through `cargo test --doc`.
+    "rust-libtest",
+    "nextest",
+    "rustdoc",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
@@ -121,7 +126,10 @@ pub const JAVASCRIPT_JOB_RUNNERS: &[&str] = &[
 
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
-    matches!(language, crate::mutant_list::JAVASCRIPT)
+    matches!(
+        language,
+        crate::mutant_list::JAVASCRIPT | crate::mutant_list::RUST
+    )
 }
 
 /// Runs `language`'s share of a plan through that language's driver, and
@@ -144,6 +152,15 @@ pub fn run_strong_pass(
             crate::javascript_run::run_strong_javascript(&request, diagnostics)
                 .map_err(|error| error.to_string())
         }
+        crate::mutant_list::RUST => crate::rust_strong::run_strong_rust(
+            &crate::rust_strong::StrongRustRequest {
+                root: pass.root.clone(),
+                command: pass.command.clone(),
+                plan: pass.strong.plan.clone(),
+                results: pass.strong.results.clone(),
+            },
+            diagnostics,
+        ),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }

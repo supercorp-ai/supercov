@@ -451,7 +451,7 @@ fn plan_text(data: &Value) -> String {
             .as_f64()
             .map_or("-".to_owned(), |score| format!("{:.1}%", score * 100.0));
         return format!(
-            "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n  ran {} mutant(s) in {} ms\n",
+            "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
             data["run"].as_str().unwrap_or(""),
             summary["killed"],
             summary["timeout"],
@@ -459,6 +459,10 @@ fn plan_text(data: &Value) -> String {
             summary["noCoverage"],
             summary["equivalent"],
             summary["error"],
+            match summary["unviable"].as_u64() {
+                Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
+                _ => String::new(),
+            },
             summary["ran"],
             summary["durationMs"],
         );
@@ -899,6 +903,9 @@ fn execute(
             "noCoverage": count("no-coverage"),
             "equivalent": count("equivalent"),
             "error": count("error"),
+            // A mutant that does not compile (cargo-mutants' `unviable`):
+            // counted apart, and left out of the score.
+            "unviable": count("unviable"),
             "mutationScore": score(&saved),
             "durationMs": started.elapsed().as_millis() as u64,
             "commandExitCode": command_exit,
