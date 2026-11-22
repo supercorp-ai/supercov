@@ -36,7 +36,7 @@
     "targets": "com.squareup.kotlinpoet.*",
     "junit5": false,
     "jdk": "17",
-    "shards": 6
+    "shards": 12
   },
   "picnic": {
     "repository": "https://github.com/JakeWharton/picnic.git",
