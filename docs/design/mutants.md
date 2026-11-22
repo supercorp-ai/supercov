@@ -212,11 +212,9 @@ over Survived over NoCoverage; Ignored, CompileError, RuntimeError and Pending
 are no result and are dropped. The join is of the mutants asked about (a file,
 a line, a mutator).
 
-The HTML report shows the same: the scores and counts beside coverage, each
-file's not-infected and not-reached mutants as a sortable column, and in a
-file's source a mark on each line such a mutant is on, with each mutant's
-changed part, status and reason, as `mutants` lists it. It holds nothing of
-mutants for a run that listed none.
+The HTML report shows the same, with the strong verdicts once a pass ran, for
+every language: see `mutation-reports.md`. It holds nothing of mutants for a
+run that listed none.
 
 Reserved for strong mutation, not built now:
 

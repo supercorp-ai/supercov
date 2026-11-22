@@ -84,7 +84,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     Some(format!("Usage: {usage}\n"))
 }
 
-const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown|stryker|pit [--output <file>]]
 
 Weak mutation: for each mutant StrykerJS would make, whether a test ran the
 mutated code (reach) and whether its value differed there (infection), read
@@ -113,7 +113,11 @@ Options:
   --json                    the coverage.mutants reply, a page at a time
   --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
   --format markdown         the not-infected and not-reached mutants (or --status's) as a table for a pull
-                            request's comment, the first 25 and the command for the rest
+                            request's comment, the first 25 and the command for the rest; once
+                            mutants test ran, the survivors with their verdicts and the mutation score
+  --format stryker          StrykerJS's mutation.json (the mutation testing report schema), for
+                            mutation-testing-elements, the Stryker Dashboard and CI integrations
+  --format pit              PIT's mutations.xml, for PIT's report aggregator and Sonar's PIT plugin
   --output <file>           with --format, write them there instead of to standard output
 
 Exit codes:

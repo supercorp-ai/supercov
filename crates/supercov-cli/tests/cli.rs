@@ -4075,8 +4075,9 @@ fn the_html_report_says_what_it_could_not_embed() {
         "{run}"
     );
     assert_eq!(run["stale"], false);
-    // The run's mutants: its counts, each file's, and the mutants no test
-    // infects or reaches, each with its change, status and reason.
+    // The run's mutants: its counts, each file's, and every mutant with its
+    // change, status and reason; those no test infects or reaches are the
+    // ones left alive.
     let mutants = &run["mutants"];
     assert_eq!(mutants["mutantSet"], "stryker-js@10.1.1", "{mutants}");
     assert!(
@@ -4085,7 +4086,8 @@ fn the_html_report_says_what_it_could_not_embed() {
     );
     assert!(mutants["files"]["src/cart.js"].is_object(), "{mutants}");
     for mutant in mutants["mutants"].as_array().unwrap() {
-        assert!(
+        assert_eq!(
+            mutant["alive"],
             ["not-infected", "not-reached"].contains(&mutant["status"].as_str().unwrap()),
             "{mutant}"
         );
@@ -24591,6 +24593,235 @@ fn mutants_export_as_lines_or_a_table_and_says_what_it_cannot_write() {
             "{stderr}"
         );
     }
+}
+
+/// Every mutation report of one run, as its levels and languages grow: weak
+/// mutation alone, then a change's mutants (`--diff`), then a second
+/// language's mutants and a partial strong pass, in the HTML report's data,
+/// the markdown table, StrykerJS's `mutation.json` and PIT's
+/// `mutations.xml`.
+#[cfg(unix)]
+#[test]
+fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
+    let (repository, project) = mutant_views_project("mutation-reports");
+    let report = |name: &str, extra: &[&str]| {
+        let mut command = vec!["report", "--no-open", "--output", name];
+        command.extend(extra);
+        project.supercov(&command).succeeds();
+        report_data(&project.read(name))["runs"][0]["mutants"].clone()
+    };
+    let export = |arguments: &[&str]| {
+        let mut command = vec!["runs", "latest", "mutants"];
+        command.extend(arguments);
+        project.supercov(&command)
+    };
+    // A plain run: its mutants are listed the first time they are asked for.
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    let run = project.latest();
+    export(&["--limit", "1"]).succeeds();
+
+    // Weak mutation alone: every mutant pending, the survivors those no test
+    // infects or reaches, one language.
+    let weak = report("weak.html", &[]);
+    assert_eq!(weak["strong"], false, "{weak}");
+    assert_eq!(
+        weak["languages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["javascript"]
+    );
+    assert_eq!(weak["tally"]["mutants"], weak["summary"]["mutants"]);
+    assert!(weak.get("diff").is_none());
+    let alive = weak["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["alive"] == true)
+        .count();
+    assert!(alive > 0);
+    assert_eq!(weak["tally"]["survivors"], alive);
+    assert!(
+        weak["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["outcome"] == "pending")
+    );
+    let stryker = export(&["--format", "stryker"]).succeeds();
+    let stryker: serde_json::Value = serde_json::from_str(&stryker).unwrap();
+    assert_eq!(stryker["schemaVersion"], "2");
+    assert_eq!(stryker["framework"]["name"], "Supercov");
+    assert_eq!(
+        stryker["files"]["src/cart.js"]["source"],
+        project.read("src/cart.js")
+    );
+    for mutant in stryker["files"]["src/cart.js"]["mutants"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(
+            ["NoCoverage", "Survived", "Pending", "Ignored"]
+                .contains(&mutant["status"].as_str().unwrap()),
+            "{mutant}"
+        );
+    }
+
+    // A change: only its lines' mutants, and what it was narrowed to.
+    let change = report("change.html", &["--diff", "base"]);
+    assert_eq!(change["diff"]["base"], "base", "{change}");
+    let lines = change["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| {
+            (
+                mutant["file"].as_str().unwrap().to_owned(),
+                mutant["line"].as_u64().unwrap()..=mutant["endLine"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(!lines.is_empty(), "{change}");
+    for (file, span) in &lines {
+        assert_eq!(file, "src/cart.js");
+        assert!(span.contains(&5) || span.contains(&13), "{span:?}");
+    }
+    assert!(change["tally"]["mutants"].as_u64() < weak["tally"]["mutants"].as_u64());
+    let refused = project.supercov(&[
+        "report",
+        "--no-open",
+        "--output",
+        "x.html",
+        "--diff",
+        "nowhere",
+    ]);
+    assert_ne!(refused.code(), 0);
+    let missing = project.supercov(&["report", "--diff"]);
+    assert_ne!(missing.code(), 0);
+    assert!(
+        missing.stderr().contains("--diff requires a base"),
+        "{}",
+        missing.stderr()
+    );
+
+    // A second language, listed beside the run, and a partial strong pass,
+    // saved the way `mutants test` saves one.
+    project.write("src/tax.py", "def tax(total):\n    return total * 2\n");
+    let listed_path = format!(".supercov/runs/{run}/mutants-listed.json");
+    let mut listed: serde_json::Value = serde_json::from_str(&project.read(&listed_path)).unwrap();
+    listed["mutantSets"] =
+        serde_json::json!({"javascript": listed["mutantSet"], "python": "mutmut@3.8.1"});
+    listed["languages"] = serde_json::json!({"src/cart.js": "javascript", "src/tax.py": "python"});
+    listed["files"]["src/tax.py"] = serde_json::json!([{"mutator": "ArithmeticOperator",
+        "replacement": "total / 2", "start": [2, 12], "end": [2, 21], "original": "total * 2"}]);
+    project.write(&listed_path, &listed.to_string());
+    let ids = weak["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["file"] == "src/cart.js")
+        .map(|mutant| mutant["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let python = "src/tax.py:2:12-2:21:ArithmeticOperator:total / 2";
+    project.write(
+        &format!(".supercov/runs/{run}/strong-mutation.json"),
+        &serde_json::json!({"schemaVersion": 1, "run": run, "mutantSet": "stryker-js@10.1.1", "mutants": {
+            &ids[0]: {"status": "killed", "killedBy": "cart ships big orders free", "tests": 1, "durationMs": 5},
+            &ids[1]: {"status": "survived", "tests": 2, "durationMs": 9},
+            &ids[2]: {"status": "timeout", "tests": 1, "durationMs": 2000},
+            python: {"status": "error", "tests": 0, "durationMs": 0, "reason": "no strong mutation driver for python yet"},
+        }})
+        .to_string(),
+    );
+    let strong = report("strong.html", &[]);
+    assert_eq!(strong["strong"], true, "{strong}");
+    assert_eq!(
+        strong["languages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["javascript", "python"]
+    );
+    assert_eq!(strong["tally"]["strong"]["killed"], 1);
+    assert_eq!(strong["tally"]["strong"]["survived"], 1);
+    assert_eq!(strong["tally"]["strong"]["timeout"], 1);
+    assert_eq!(strong["tally"]["strong"]["notRun"], 1);
+    assert!(strong["tally"]["strong"]["pending"].as_u64() > Some(0));
+    assert_eq!(strong["tally"]["mutationScore"], 0.6667);
+    assert_eq!(strong["languages"]["python"]["mutants"], 1);
+    let by_id = |id: &str| {
+        strong["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_id(&ids[0])["killedBy"], "cart ships big orders free");
+    assert_eq!(by_id(&ids[1])["alive"], true);
+    assert_eq!(by_id(python)["outcome"], "not-run");
+    assert_eq!(by_id(python)["why"], "not run: no driver for python yet");
+
+    let markdown = export(&["--format", "markdown"]).succeeds();
+    contains_all(
+        &markdown,
+        &[
+            "Mutation score **66.7%** · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
+            "| Where | Mutant | Weak | Strong | Why |",
+            " | survived | every test that reached it passed with it in place (2 tests ran) |",
+        ],
+    );
+    let stryker: serde_json::Value =
+        serde_json::from_str(&export(&["--format", "stryker"]).succeeds()).unwrap();
+    assert_eq!(stryker["files"]["src/tax.py"]["language"], "python");
+    let statuses = stryker["files"]["src/cart.js"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| mutant["status"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for status in ["Killed", "Survived", "Timeout"] {
+        assert!(statuses.contains(status), "{statuses:?}");
+    }
+    let pit = export(&["--format", "pit", "--output", "mutations.xml"]);
+    assert!(
+        pit.stderr().contains("as a pit report to mutations.xml"),
+        "{}",
+        pit.stderr()
+    );
+    contains_all(
+        &project.read("mutations.xml"),
+        &[
+            "<mutations partial=\"false\">",
+            "status=\"KILLED\"",
+            "status=\"TIMED_OUT\"",
+            "<killingTest>cart ships big orders free</killingTest>",
+            "<sourceFile>tax.py</sourceFile><mutatedClass>src.tax</mutatedClass>",
+        ],
+    );
+    // A file the checkout no longer holds: left out of StrykerJS's report,
+    // which needs every file's source, and said so.
+    std::fs::remove_file(project.root.join("src/tax.py")).unwrap();
+    let written = export(&["--format", "stryker", "--output", "mutation.json"]);
+    assert!(
+        written
+            .stderr()
+            .contains("src/tax.py could not be read: its mutants are left out of the report"),
+        "{}",
+        written.stderr()
+    );
+    let kept: serde_json::Value = serde_json::from_str(&project.read("mutation.json")).unwrap();
+    assert!(kept["files"].get("src/tax.py").is_none());
+    let bogus = export(&["--format", "bogus"]).exits(2);
+    assert!(bogus.contains("jsonl, markdown, stryker or pit"), "{bogus}");
+    // A change with no mutant on its lines still says what it was narrowed to.
+    repository.commit("everything");
+    let unchanged = report("unchanged.html", &["--diff", "HEAD"]);
+    assert_eq!(unchanged["tally"]["mutants"], 0, "{unchanged}");
+    assert_eq!(unchanged["diff"]["base"], "HEAD", "{unchanged}");
 }
 
 /// `--stryker` and the other mutants options each name what they need, and

@@ -401,6 +401,180 @@ mod tests {
         }
     }
 
+    fn request() -> supercov_engine::indexed_query::IndexedQueryRequest {
+        supercov_engine::indexed_query::IndexedQueryRequest {
+            run_id: "run_1".into(),
+            filter: "all".into(),
+            command: "coverage.mutants".into(),
+            metric: supercov_engine::coverage_query::MinimizeMetric::All,
+            kind: None,
+            runner: None,
+            file: None,
+            line: None,
+            more_lines: Vec::new(),
+            selector: None,
+            sort: None,
+            valid: None,
+            test_exit_code: None,
+            stale: None,
+            stale_reasons: None,
+            offset: 0,
+            limit: 20,
+            target: None,
+            max_states: None,
+            group: None,
+            depth: None,
+            gained_only: false,
+            tags: Vec::new(),
+            titles: Vec::new(),
+            test_files: Vec::new(),
+            mutants: Default::default(),
+        }
+    }
+
+    fn data(
+        mutants: Vec<supercov_engine::mutants_query::MutantEntry>,
+    ) -> supercov_engine::mutants_query::CoverageMutantsData {
+        use supercov_engine::coverage_index::MutantCounts;
+        use supercov_engine::mutants_query::{CoverageMutantsData, MutantLevels, MutantsSummary};
+        let mut counts = MutantCounts::default();
+        mutants.iter().for_each(|mutant| counts.add(mutant.status));
+        CoverageMutantsData {
+            run: "run_1".into(),
+            mutant_set: Some("stryker-js@10.1.1".into()),
+            levels: MutantLevels {
+                weak: true,
+                strong: true,
+            },
+            file: None,
+            line: None,
+            summary: MutantsSummary::of(counts, 0),
+            note: None,
+            mutants,
+            stryker: None,
+            files: Vec::new(),
+            diff: None,
+            fail_on: None,
+        }
+    }
+
+    fn mutant(
+        line: u32,
+        status: supercov_engine::coverage_index::MutantStatus,
+        strong: Option<serde_json::Value>,
+    ) -> supercov_engine::mutants_query::MutantEntry {
+        use supercov_engine::mutants_query::{MutantEntry, MutantSpan, WeakResult};
+        MutantEntry {
+            id: format!("src/a.py:{line}:3-{line}:9:ArithmeticOperator:-"),
+            file: "src/a.py".into(),
+            span: MutantSpan {
+                start: [line, 3],
+                end: [line, 9],
+            },
+            mutator: "ArithmeticOperator".into(),
+            original: "a + b".into(),
+            replacement: "a - b".into(),
+            changed: None,
+            status,
+            weak: WeakResult {
+                reach: "reached",
+                infection: Some(status.name()),
+                code: "c".into(),
+                reason: "weak reason".into(),
+                proxy: false,
+                rule: None,
+                untestable: None,
+                untestable_reason: None,
+            },
+            strong,
+            stryker: None,
+        }
+    }
+
+    /// Once a strong pass ran, the table is of the survivors, with both
+    /// levels, the mutation score and each verdict counted.
+    #[test]
+    fn a_strong_pass_s_survivors_are_the_table_with_their_verdicts() {
+        use serde_json::json;
+        use supercov_engine::coverage_index::MutantStatus::*;
+        let mut mutants = (1..=28)
+            .map(|line| {
+                mutant(
+                    line,
+                    Infected,
+                    Some(json!({"status": "survived", "tests": 2})),
+                )
+            })
+            .collect::<Vec<_>>();
+        mutants.push(mutant(
+            29,
+            NotReached,
+            Some(json!({"status": "no-coverage"})),
+        ));
+        mutants.push(mutant(30, NotInfected, None));
+        mutants.push(mutant(
+            31,
+            Infected,
+            Some(json!({"status": "killed", "killedBy": "t"})),
+        ));
+        mutants.push(mutant(32, Infected, Some(json!({"status": "timeout"}))));
+        mutants.push(mutant(33, Infected, Some(json!({"status": "unviable"}))));
+        mutants.push(mutant(34, Infected, Some(json!({"status": "error"}))));
+        mutants.push(mutant(
+            35,
+            Infected,
+            Some(json!({"status": "error", "reason": "no strong mutation driver for python yet"})),
+        ));
+        mutants.push(mutant(36, Infected, None));
+        let text = markdown(&request(), &data(mutants.clone()));
+        assert!(
+            text.contains("\n\nMutation score **6.5%** · 1 killed · 1 timed out · 28 survived · 1 no coverage · 1 unviable · 1 error · 1 not run (no driver) · 2 no strong verdict\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| Where | Mutant | Weak | Strong | Why |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| `src/a.py:1:3` | `a + b → a - b` | infected | survived | every test that reached it passed with it in place (2 tests ran) |"),
+            "{text}"
+        );
+        assert_eq!(text.matches("| `src/a.py:").count(), 25, "{text}");
+        // The rest of the survivors: two survived, the uncovered and the not infected.
+        assert!(
+            text.contains("_…and 5 more: `supercov runs 'run_1' mutants`_"),
+            "{text}"
+        );
+        // Asked by weak status: those, with their verdicts.
+        let mut asked = request();
+        asked.mutants.statuses = vec![NotInfected];
+        let text = markdown(&asked, &data(mutants));
+        assert!(
+            text.contains("| `src/a.py:30:3` | `a + b → a - b` | not infected | — | weak reason |"),
+            "{text}"
+        );
+        assert_eq!(text.matches("| `src/a.py:").count(), 1, "{text}");
+        // Nothing left alive.
+        let text = markdown(
+            &request(),
+            &data(vec![mutant(1, Infected, Some(json!({"status": "killed"})))]),
+        );
+        assert!(
+            text.contains("Mutation score **100.0%** · 1 killed\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\nNo mutant is left alive by the tests.\n"),
+            "{text}"
+        );
+        // Verdicts and none counted: no score.
+        let text = markdown(
+            &request(),
+            &data(vec![mutant(1, Infected, Some(json!({"status": "error"})))]),
+        );
+        assert!(text.contains("Mutation score **—** · 1 error\n"), "{text}");
+    }
+
     #[test]
     fn mutants_that_cannot_be_printed_end_the_export_with_two() {
         // A reader that stopped early, and a standard output that failed.
