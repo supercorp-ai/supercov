@@ -130,6 +130,19 @@ enum Record {
         v: String,
         o: u8,
     },
+    /// One outcome a mutant's value probe saw in a context, once per site
+    /// and outcome: an operand relation (`lt`, `eq`, `gt`, `unordered`), or
+    /// whether the mutant's value was the original's (`same`, `differs`).
+    Cmp {
+        ctx: u64,
+        id: String,
+        o: String,
+    },
+    /// Many such outcomes of one context, written as it ends: (id, outcome).
+    Cmps {
+        ctx: u64,
+        v: Vec<(String, String)>,
+    },
     /// Many decision vectors of one context: (id, digits, outcome).
     Decs {
         ctx: u64,
@@ -302,6 +315,8 @@ struct Observations {
     /// hit was most of reading its evidence.
     slot_hits: Vec<u32>,
     vectors: BTreeMap<String, ObservedVectors>,
+    /// Each mutant probe site's outcomes (`docs/design/python-mutants.md`).
+    comparisons: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1308,6 +1323,34 @@ fn apply_transport(
                     Ok::<_, PythonEvidenceError>(())
                 })?;
             }
+            Record::Cmp { ctx, id, o } => {
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .comparisons
+                .entry(id)
+                .or_default()
+                .insert(o);
+            }
+            Record::Cmps { ctx, v } => {
+                let comparisons = &mut observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .comparisons;
+                for (id, outcome) in v {
+                    comparisons.entry(id).or_default().insert(outcome);
+                }
+            }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
@@ -1543,7 +1586,16 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events: Vec::new(),
         logicals: Vec::new(),
-        comparisons: Vec::new(),
+        comparisons: observations
+            .comparisons
+            .iter()
+            .map(
+                |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                    id: id.clone(),
+                    outcomes: outcomes.iter().cloned().collect(),
+                },
+            )
+            .collect(),
         phase_id: Some(phase.into()),
     })
 }
@@ -1602,6 +1654,9 @@ pub struct PythonFrontendRun {
     pub tests: usize,
     pub interpreters: usize,
     pub python_versions: Vec<String>,
+    /// The run's mutants, where it listed them as it measured
+    /// (`SUPERCOV_MUTANTS=1`): archived as `mutants.json`.
+    pub mutants: Option<crate::mutant_list::MutantsFile>,
 }
 
 impl PythonFrontendRun {
@@ -1638,6 +1693,12 @@ impl PythonFrontendRun {
                     contents: serde_json::to_vec(result).expect("plain data serializes"),
                 }),
         );
+        if let Some(mutants) = &self.mutants {
+            entries.push(EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(mutants).expect("plain data serializes"),
+            });
+        }
         entries
     }
 }
@@ -1804,6 +1865,9 @@ fn credit_requests_by_time(
         into.slot_hits.extend(observations.slot_hits);
         for (id, vectors) in observations.vectors {
             into.vectors.entry(id).or_default().extend(vectors);
+        }
+        for (id, outcomes) in observations.comparisons {
+            into.comparisons.entry(id).or_default().extend(outcomes);
         }
     }
     credited
@@ -2339,6 +2403,7 @@ fn build_from_evidence(
         tests,
         interpreters,
         python_versions: python_versions.into_iter().collect(),
+        mutants: None,
     })
 }
 
@@ -2395,8 +2460,11 @@ pub(crate) mod tests {
             retry: 0,
             phase: "call".into(),
         };
+        // Each request also saw a value probe's outcome, which goes where its
+        // hits go.
         let observed = |hit: &str| Observations {
             hits: BTreeSet::from([hit.to_owned()]),
+            comparisons: BTreeMap::from([(hit.to_owned(), BTreeSet::from(["differs".to_owned()]))]),
             ..Observations::default()
         };
         let served = |worker: &str, test: &str, window: (i64, i64)| ServedTest {
@@ -2464,6 +2532,11 @@ pub(crate) mod tests {
         assert_eq!(
             hits("playwright:w0", "one"),
             BTreeSet::from(["first".to_owned()])
+        );
+        assert!(
+            evidence.per_identity[&identity("playwright:w0", "one")]
+                .comparisons
+                .contains_key("first")
         );
         assert_eq!(
             hits("playwright:w1", "three"),
@@ -2962,6 +3035,7 @@ pub(crate) mod tests {
                     .collect(),
                 slot_hits: Vec::new(),
                 vectors: observations.vectors.clone(),
+                comparisons: observations.comparisons.clone(),
             })
             .unwrap_or_default()
     }
@@ -3232,18 +3306,18 @@ pub(crate) mod tests {
     fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
         let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
         // Listed: layout.json, the slot, the transport.
-        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:382@2", || {
+        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:397@2", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(read.is_ok(), "{:?}", read.err());
         // Gone by the time it is opened: harvested by a process that closed.
-        let opened = crate::fault::during("fs.open:2#python_evidence.rs:437", || {
+        let opened = crate::fault::during("fs.open:2#python_evidence.rs:452", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(opened.is_ok(), "{:?}", opened.err());
         // Opened but no longer readable is refused.
         assert!(
-            crate::fault::during("fs.open:13#python_evidence.rs:437", || {
+            crate::fault::during("fs.open:13#python_evidence.rs:452", || {
                 read_evidence_directory(&directory, "run-1")
             })
             .is_err()
@@ -3354,6 +3428,91 @@ pub(crate) mod tests {
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         fs::remove_dir_all(directory).unwrap();
         run
+    }
+
+    /// A mutant's value probe writes each outcome once per site and
+    /// context: the phase's snapshot holds them, and a run that listed its
+    /// mutants archives them as `mutants.json`.
+    #[test]
+    fn a_mutant_probe_s_outcomes_are_the_phase_s_and_the_list_is_archived() {
+        let source = "def f(a, b):\n    return a < b\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statements = &obligations.plan.statements;
+        let test = "tests/test_m.py::test_a";
+        let lines = [
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+            json!({"t":"phase","ctx":1,"at":6,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            json!({"t":"hit","ctx":1,"id":statements[1].id}),
+            json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"lt"}),
+            json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"eq"}),
+            json!({"t":"cmps","ctx":1,"v":[["m.py:2:12","gt"],["m.py:3:5","same"]]}),
+            json!({"t":"cmps","ctx":1,"v":[]}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            json!({"t":"exit","at":9}),
+        ];
+        let directory = temporary("mutant-probes");
+        write_transport(&directory.join("main.1.mmap"), &lines, 0);
+        let mut run = build_python_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        let comparisons = run
+            .request
+            .raw_results
+            .iter()
+            .flat_map(|raw| raw.runtime.iter())
+            .flat_map(|snapshot| snapshot.comparisons.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(comparisons.len(), 2);
+        assert_eq!(comparisons[0].id, "m.py:2:12");
+        assert_eq!(comparisons[0].outcomes, ["eq", "gt", "lt"]);
+        assert_eq!(comparisons[1].outcomes, ["same"]);
+        assert!(
+            !run.archive_entries()
+                .iter()
+                .any(|entry| entry.path == "mutants.json")
+        );
+        run.mutants = Some(crate::mutant_list::MutantsFile::listed(
+            "python",
+            "mutmut@3.8.1",
+            BTreeMap::new(),
+        ));
+        let entries = run.archive_entries();
+        let listed = entries
+            .iter()
+            .find(|entry| entry.path == "mutants.json")
+            .unwrap();
+        let read: crate::mutant_list::MutantsFile =
+            serde_json::from_slice(&listed.contents).unwrap();
+        assert_eq!(read.mutant_set.as_deref(), Some("mutmut@3.8.1"));
+        // An outcome of a context no phase declared is refused, alone or
+        // with others.
+        for record in [
+            json!({"t":"cmp","ctx":7,"id":"m.py:2:12","o":"lt"}),
+            json!({"t":"cmps","ctx":7,"v":[["m.py:2:12","lt"]]}),
+        ] {
+            let directory = temporary("mutant-probes-unknown");
+            write_transport(
+                &directory.join("main.1.mmap"),
+                &[lines[0].clone(), record, json!({"t":"exit","at":9})],
+                0,
+            );
+            let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
+            assert!(
+                matches!(
+                    unknown,
+                    PythonEvidenceError::UnknownContext { context: 7, .. }
+                ),
+                "{unknown:?}"
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     /// A server that left no interpreter's evidence, or evidence that is no

@@ -15988,7 +15988,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
             "fs.write@2",
-            "fs.write@8",
+            "fs.write@10 => python_run.rs:449",
             "fs.rename@2",
             "fs.rename@9",
             "fs.open@7",
@@ -16006,7 +16006,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.read@10",
             "fs.read@6 => source_capture.rs:54",
             "fs.read_dir entry#1 => python_project.rs:125",
-            "fs.read_dir entry#2 => python_evidence.rs:359",
+            "fs.read_dir entry#2 => python_evidence.rs:374",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16055,7 +16055,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2623 => main.rs:2623",
+            "fs.canonicalize#main.rs:2624 => main.rs:2624",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
         ],
@@ -16465,13 +16465,13 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:530",
-        "fs.read_dir@6 => python_run.rs:104",
-        "fs.read_dir@7 => python_run.rs:104",
-        "fs.file_type@9 => python_run.rs:107",
-        "fs.create_dir_all@7 => python_run.rs:111",
-        "fs.copy@1 => python_run.rs:114",
-        "fs.read_dir entry#3 => python_run.rs:104",
+        "fs.create_dir_all@6 => python_run.rs:569",
+        "fs.read_dir@6 => python_run.rs:112",
+        "fs.read_dir@7 => python_run.rs:112",
+        "fs.file_type@9 => python_run.rs:115",
+        "fs.create_dir_all@7 => python_run.rs:119",
+        "fs.copy@1 => python_run.rs:122",
+        "fs.read_dir entry#3 => python_run.rs:112",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
@@ -18020,8 +18020,8 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:671", "python_run.rs:671"),
-        ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
+        ("fs.create_dir_all#python_run.rs:710", "python_run.rs:710"),
+        ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
@@ -18210,8 +18210,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:678@1",
-            "python_run.rs:678",
+            "fs.write#python_run.rs:717@1",
+            "python_run.rs:717",
             "plan.json",
         ),
     ] {
@@ -19354,7 +19354,7 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
         std::fs::remove_file(project.root.join("linked")).unwrap();
     }
     for (fault, place) in [
-        ("fs.canonicalize#python_run.rs:205", "python_run.rs:205"),
+        ("fs.canonicalize#python_run.rs:213", "python_run.rs:213"),
         ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
     ] {
         let read = project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
@@ -21867,6 +21867,45 @@ fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
     );
 }
 
+/// A run whose tests ran under no runner a strong driver drives (Ruby's
+/// minitest here): a pass with mutants to run is refused, saying which
+/// runners it drives, and saves nothing.
+#[cfg(unix)]
+#[test]
+fn a_pass_over_tests_no_driver_runs_is_refused() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("strong-refused-ruby");
+    project.write("lib/w.rb", "module W\n  def self.double(n) = n * 2\nend\n");
+    project.write("test/w_test.rb", "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_double\n    assert_equal 4, W.double(2)\n  end\nend\n");
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", &ruby, "-Ilib", "test/w_test.rb"])
+        .succeeds();
+    let run = project.latest();
+    project.write(
+        &format!(".supercov/runs/{run}/mutants-listed.json"),
+        r#"{"schemaVersion": 1, "mutantSet": "ruby-mutants@1",
+            "mutantSets": {"ruby": "ruby-mutants@1"},
+            "languages": {"lib/w.rb": "ruby"},
+            "files": {"lib/w.rb": [{"mutator": "ArithmeticOperator", "replacement": "/",
+                "start": [2, 29], "end": [2, 34], "original": "n * 2"}]}}"#,
+    );
+    let refused = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .exits(1);
+    assert!(refused.contains("cannot run their mutants"), "{refused}");
+    assert!(refused.contains("pytest, unittest"), "{refused}");
+    assert!(
+        !project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json"))
+            .exists()
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -22207,6 +22246,96 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&ava, &["npx", "ava"], "ava");
+}
+
+/// `mutants test` on a Python project under unittest: the run lists mutmut's
+/// mutants and records their values (`SUPERCOV_MUTANTS=1`), and the strong
+/// pass forks each mutant's tests after collection: a default's mutant, a
+/// loop the mutant makes endless, code no test runs, a boundary no test
+/// meets, and code a test module's import runs, which a fresh interpreter
+/// runs with the mutant on.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_python_mutants_under_unittest() {
+    let project = Project::empty("strong-python-unittest");
+    project.write(".gitignore", ".supercov\n__pycache__\n");
+    project.write("shop/__init__.py", "");
+    project.write(
+        "shop/cart.py",
+        "def shipping(total, express=False):\n    if total >= 50:\n        return 0\n    fee = 5\n    if express:\n        fee += 10\n    return fee\n\n\ndef label(name):\n    return name.strip().upper()\n\n\ndef countdown(n):\n    while n > 0:\n        n -= 1\n    return n\n\n\ndef refund(total):\n    return total * 0.9 if total > 100 else total\n\n\ndef rate():\n    return 3\n",
+    );
+    project.write("tests/__init__.py", "");
+    project.write(
+        "tests/test_cart.py",
+        "import unittest\nfrom shop.cart import shipping, label, countdown, rate\n\nRATE = rate()\n\n\nclass Cart(unittest.TestCase):\n    def test_free(self):\n        self.assertEqual(shipping(80), 0)\n\n    def test_paid(self):\n        self.assertEqual(shipping(10), 5)\n\n    def test_label(self):\n        self.assertEqual(label(' a '), 'A')\n\n    def test_countdown(self):\n        self.assertEqual(countdown(3), 0)\n\n    def test_rate(self):\n        self.assertEqual(RATE, 3)\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("cart");
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    // `SUPERCOV_MUTANTS=0` is a plain run: no value probe, no list.
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "0")])
+        .succeeds();
+    let plain = project.latest();
+    assert!(
+        !project
+            .root
+            .join(format!(".supercov/runs/{plain}/mutants-listed.json"))
+            .exists()
+    );
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let weak = project
+        .supercov(&["runs", "latest", "mutants", "shop/cart.py:2", "--json"])
+        .json();
+    let boundary = weak["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "shop/cart.py:2:14-2:19:EqualityOperator:>")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(boundary["status"], "not-infected", "{weak}");
+    // A command timeout that is no number stops the pass before it runs, and
+    // leaves no verdict.
+    let refused = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "soon")],
+    );
+    let said = refused.stderr();
+    assert_ne!(refused.code(), 0, "{said}");
+    assert!(said.contains("SUPERCOV_COMMAND_TIMEOUT_MS"), "{said}");
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[("SUPERCOV_STRONG_WORKERS", "2")],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    assert_eq!(reply["passes"][0]["runner"], "unittest", "{reply}");
+    let statuses = strong_statuses(&project);
+    for (id, status) in [
+        // `express=True`: the default a call that names no `express` gets.
+        ("shop/cart.py:1:29-1:34:BooleanLiteral:True", "killed"),
+        ("shop/cart.py:2:14-2:19:EqualityOperator:>", "survived"),
+        ("shop/cart.py:6:9-6:18:AugmentedAssignment:=", "no-coverage"),
+        ("shop/cart.py:2:17-2:19:NumberLiteral:51", "survived"),
+        ("shop/cart.py:11:12-11:32:MethodExpression:lower", "killed"),
+        ("shop/cart.py:16:9-16:15:AssignmentOperator:+=", "timeout"),
+        ("shop/cart.py:21:12-21:49:IfExpression:true", "no-coverage"),
+        // Called while the test module loads: run with the mutant on from
+        // the interpreter's start.
+        ("shop/cart.py:25:12-25:13:NumberLiteral:4", "killed"),
+    ] {
+        assert_eq!(
+            statuses.get(id).map(String::as_str),
+            Some(status),
+            "{id}: {statuses:?}\n{said}"
+        );
+    }
 }
 
 /// `mutants test` under bun:test: Bun's runner loads every test file it is
@@ -24911,8 +25040,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:942",
-        "fs.read_dir entry#public_query.rs:942",
+        "fs.read_dir#public_query.rs:946",
+        "fs.read_dir entry#public_query.rs:946",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24925,7 +25054,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:942"),
+            fired_at(&unlisted, "public_query.rs:943"),
             "{fault}: {unlisted}"
         );
     }

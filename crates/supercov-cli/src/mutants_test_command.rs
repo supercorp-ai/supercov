@@ -131,9 +131,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
 pub(crate) const MUTANTS_HELP: &str = "\
 Usage: supercov mutants [options] [-- <test command>]
 
-Mutation-tests the project: lists the mutants of every JavaScript and
-TypeScript source the tests ran, runs each against only the tests that run
-its code, and saves the verdicts (killed, survived, timeout) into the run.
+Mutation-tests the project: lists the mutants of every JavaScript,
+TypeScript and Python source the tests ran, runs each against only the tests
+that run its code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,
 or it is a plain run (supercov -- <tests>), which does nothing for mutants
@@ -1073,7 +1073,7 @@ mod tests {
         use supercov_engine::strong_plan::{
             Candidate, CandidateReason, PlannedMutant, PlannedTest,
         };
-        let tests = ["jest", "pytest", "vitest-browser"]
+        let tests = ["jest", "phpunit", "vitest-browser"]
             .map(|runner| PlannedTest {
                 id: runner.into(),
                 file: None,
@@ -1112,13 +1112,13 @@ mod tests {
             mutant_set: "set".into(),
             tests,
             mutants: vec![
-                mutant("py-1", "python", &[1]),
-                mutant("py-2", "python", &[1]),
+                mutant("php-1", "php", &[1]),
+                mutant("php-2", "php", &[1]),
                 mutant("wasm", "rust", &[2]),
                 // An error of a mutant a driver runs, one with no test, and
                 // a kill: none is a mutant no driver runs.
                 mutant("js-error", "javascript", &[0]),
-                mutant("no-test", "python", &[]),
+                mutant("no-test", "php", &[]),
                 mutant("killed", "javascript", &[0]),
             ],
         };
@@ -1129,7 +1129,7 @@ mod tests {
             duration_ms: 0,
             reason: None,
         };
-        let verdicts = ["py-1", "py-2", "wasm", "js-error", "no-test"]
+        let verdicts = ["php-1", "php-2", "wasm", "js-error", "no-test"]
             .map(|id| (id.to_owned(), verdict("error")))
             .into_iter()
             .chain([("killed".to_owned(), verdict("killed"))])
@@ -1138,7 +1138,7 @@ mod tests {
         assert_eq!(
             counted,
             std::collections::BTreeMap::from([
-                ("pytest".to_owned(), 2),
+                ("phpunit".to_owned(), 2),
                 ("vitest-browser".to_owned(), 1)
             ])
         );
@@ -1151,7 +1151,7 @@ mod tests {
                 "notRun": counted},
         }));
         assert!(
-            text.contains("  2 mutant(s) not run: no strong driver for pytest\n")
+            text.contains("  2 mutant(s) not run: no strong driver for phpunit\n")
                 && text.contains("  1 mutant(s) not run: no strong driver for vitest-browser\n"),
             "{text}"
         );

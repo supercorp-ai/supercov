@@ -178,7 +178,7 @@ npx supercov runs <run-id> [query] [options]
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
-| `mutants [path[:line]]` | See, for each JavaScript mutant StrykerJS would make, whether a test reached it and changed its value |
+| `mutants [path[:line]]` | See, for each JavaScript mutant StrykerJS would make and each Python mutant mutmut would make, whether a test reached it and changed its value |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -308,10 +308,10 @@ npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
-would make, whether a test ran the mutated code and whether the mutant's value
-would have differed there. Nothing runs again. A plain run does nothing for
-mutants and costs nothing more for them: a JavaScript or TypeScript run lists
-its mutants from its sources the first time they are asked for (by `mutants`,
+(JavaScript, TypeScript) or mutmut 3.8.1 (Python) would make, whether a test
+ran the mutated code and whether the mutant's value would have differed there.
+Nothing runs again. A plain run does nothing for mutants and costs nothing
+more for them: a run lists its mutants from its sources the first time they are asked for (by `mutants`,
 `mutants test` or `supercov mutants`), and keeps them beside the run. A source
 changed since the run is left out until the run is measured again.
 `supercov mutants` does all of it: it measures a run of the checkout with the
@@ -472,10 +472,16 @@ command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
 the first failure; Jest and Mocha keep resident runners for it. Rust mutants
 run through cargo's tests, or through the JavaScript tests that load the
-crate compiled to wasm. A mutant no driver runs the tests of is an `error`,
-which the score leaves out as every error, and the summary says how many in a
-line per runner (`12 mutant(s) not run: no strong driver for pytest`). See
-`docs/design/strong-mutation.md` and `docs/design/mutation-drivers.md`.
+crate compiled to wasm. Python suites under pytest or unittest (`python -m
+unittest`) collect their tests once; each mutant then runs in a fork of that
+process, its function switched to mutmut's copy of it, against its candidate
+tests in collection order, stopping at the first failure. A mutant whose code
+ran while the test modules loaded runs in a fresh interpreter of the command
+with the mutant on from its start. A mutant no driver runs the tests of is an
+`error`, which the score leaves out as every error, and the summary says how
+many in a line per runner (`12 mutant(s) not run: no strong driver for
+phpunit`). See `docs/design/strong-mutation.md`,
+`docs/design/python-mutants.md` and `docs/design/mutation-drivers.md`.
 
 - `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
@@ -1187,7 +1193,8 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
-| `SUPERCOV_MUTANTS` | Set to `1` to measure a JavaScript or TypeScript run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
+| `SUPERCOV_MUTANTS` | Set to `1` to measure a JavaScript, TypeScript or Python run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
+| `SUPERCOV_STRONG_WORKERS` | How many forks a Python strong pass runs at once (default: one per CPU) |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

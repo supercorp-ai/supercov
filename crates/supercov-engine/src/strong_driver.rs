@@ -111,6 +111,9 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "rustdoc",
     // Go's: `go_strong.rs` builds each package's test binary once.
     "go-test",
+    // Python's (`python_strong`): pytest's and unittest's tests.
+    "pytest",
+    "unittest",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
@@ -178,7 +181,10 @@ pub fn drives(language: &str, runner: &str) -> bool {
 pub fn has_driver(language: &str) -> bool {
     matches!(
         language,
-        crate::mutant_list::JAVASCRIPT | crate::mutant_list::RUST | crate::go_mutants::GO
+        crate::mutant_list::JAVASCRIPT
+            | crate::mutant_list::RUST
+            | crate::go_mutants::GO
+            | crate::python_mutants::PYTHON
     )
 }
 
@@ -222,6 +228,7 @@ pub fn run_strong_pass(
             };
             crate::go_strong::run_go_strong(&request, diagnostics).map(|_| 0)
         }
+        crate::python_mutants::PYTHON => crate::python_strong::run_strong_python(pass, diagnostics),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }
@@ -343,6 +350,7 @@ mod tests {
     fn only_a_language_with_a_driver_runs() {
         assert!(has_driver("javascript"));
         assert!(has_driver("go"));
+        assert!(has_driver("python"));
         assert!(!has_driver("cobol"));
         let pass = StrongPass {
             root: PathBuf::from("."),
