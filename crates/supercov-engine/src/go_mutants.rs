@@ -349,6 +349,43 @@ pub fn comparison_probe(node: Node, source: &str) -> bool {
     in_function && !shifted && !(literal("left") && literal("right"))
 }
 
+/// Whether a mutant of the token at `token` can change what `go vet`
+/// reports among the checks `go test` runs. Of them (atomic, bools,
+/// buildtag, directive, errorsas, ifaceassert, nilfunc, printf, stdversion,
+/// stringintconv, tests), only two read what a token mutation changes:
+/// `bools`, of the operands of a chain of `&&` or `||` (`x != a || x != b`),
+/// and `atomic`, of an assignment of an `atomic.Add` call to its own
+/// operand (`x += atomic.AddInt64(&x, 1)` to `x = ...`). The rest read
+/// types, formats and names a mutation leaves as they were.
+pub fn vet_candidate(source: &str, token: (usize, usize)) -> bool {
+    let Ok(tree) = parse(source) else {
+        return false;
+    };
+    let Some(node) = tree.root_node().descendant_for_byte_range(token.0, token.1) else {
+        return false;
+    };
+    let mut at = node.parent();
+    while let Some(ancestor) = at {
+        match ancestor.kind() {
+            "binary_expression" => {
+                let logical = ancestor
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| matches!(&source[op.byte_range()], "&&" | "||"));
+                if logical {
+                    return true;
+                }
+            }
+            "parenthesized_expression" | "unary_expression" => {}
+            "assignment_statement" => {
+                return source[ancestor.byte_range()].contains("atomic.");
+            }
+            _ => return false,
+        }
+        at = ancestor.parent();
+    }
+    false
+}
+
 /// The site a comparison probe at `operator` records under.
 pub fn comparison_site(file: &str, source: &str, operator: usize) -> String {
     let (line, column) = position(source, operator);

@@ -114,6 +114,8 @@ pub struct GoFlags {
     pub build: Vec<String>,
     pub test: Vec<String>,
     pub tags: String,
+    /// The command turns `go test`'s vet off (`-vet=off`).
+    pub vet_off: bool,
 }
 
 /// The flags `command` gives `go test` that change what is built or how
@@ -155,6 +157,7 @@ pub fn go_flags(command: &[String]) -> GoFlags {
                     flags.build.push(format!("-{name}={value}"));
                 }
             }
+            "vet" => flags.vet_off |= value_of(value).as_deref() == Some("off"),
             "gcflags" | "asmflags" => {
                 if let Some(value) = value_of(value) {
                     flags.build.push(format!("-{name}={value}"));
@@ -200,8 +203,116 @@ pub fn recorded_flags(mut flags: GoFlags, invocations: &[Vec<String>]) -> GoFlag
         if flags.tags.is_empty() {
             flags.tags = seen.tags;
         }
+        flags.vet_off |= seen.vet_off;
     }
     flags
+}
+
+/// The mutants `go vet` rejects with the checks `go test` runs, of those
+/// whose token can change what vet sees (`go_mutants::vet_candidate`), by
+/// file and index, with vet's finding. Each is vetted alone: the package
+/// with its file replaced by one with only that mutant (`-overlay`). None
+/// where the command turns vet off for `go test` (`-vet=off`).
+fn vet_rejections(
+    pass: &Pass,
+    files: &BTreeMap<String, FileMutants>,
+    runnable: &[&PlanMutant],
+    checked: &HashMap<(String, usize), Checked>,
+) -> HashMap<(String, usize), String> {
+    if pass.flags.vet_off {
+        return HashMap::new();
+    }
+    let candidates = runnable
+        .iter()
+        .filter(|mutant| {
+            let viable = checked
+                .get(&(mutant.file.clone(), mutant.index))
+                .is_none_or(|answer| answer.status != "unviable");
+            let listed = &files[&mutant.file];
+            viable
+                && crate::go_mutants::vet_candidate(&listed.source, listed.tokens[mutant.index].0)
+        })
+        .collect::<Vec<_>>();
+    let found = Mutex::new(HashMap::new());
+    let queue = Mutex::new(candidates);
+    std::thread::scope(|scope| {
+        for _ in 0..pass.request.workers.max(1) {
+            scope.spawn(|| {
+                loop {
+                    let Some(mutant) = queue.lock().expect("queue").pop() else {
+                        break;
+                    };
+                    if let Some(finding) = vet_one(pass, files, mutant) {
+                        found
+                            .lock()
+                            .expect("found")
+                            .insert((mutant.file.clone(), mutant.index), finding);
+                    }
+                }
+            });
+        }
+    });
+    pass.profile.lock().expect("profile").vetted = found.lock().expect("found").len();
+    found.into_inner().expect("found")
+}
+
+/// `go vet -atomic -bools` of a mutant's package with only that mutant in
+/// place: its first finding, or none.
+fn vet_one(
+    pass: &Pass,
+    files: &BTreeMap<String, FileMutants>,
+    mutant: &PlanMutant,
+) -> Option<String> {
+    let listed = &files[&mutant.file];
+    let (token, _, replacement) = listed.tokens[mutant.index];
+    let directory = pass
+        .scratch
+        .join(format!("vet-{}", crate::stable_ids::digest(&[&mutant.id])));
+    std::fs::create_dir_all(&directory).ok()?;
+    let mutated = directory.join("mutated.go");
+    let overlay = directory.join("overlay.json");
+    std::fs::write(
+        &mutated,
+        format!(
+            "{}{replacement}{}",
+            &listed.source[..token.0],
+            &listed.source[token.1..]
+        ),
+    )
+    .ok()?;
+    std::fs::write(
+        &overlay,
+        serde_json::to_vec(&json!({
+            "Replace": { pass.request.root.join(&mutant.file).to_string_lossy(): mutated }
+        }))
+        .expect("plain data serializes"),
+    )
+    .ok()?;
+    let output = Command::new(&pass.flags.program)
+        .args(["vet", "-atomic", "-bools"])
+        .args(&pass.flags.build)
+        .arg(format!("-overlay={}", overlay.display()))
+        .arg(pattern(&directory_of(&mutant.file)))
+        .current_dir(pass.request.root)
+        .launch_output()
+        .ok()?;
+    let _ = std::fs::remove_dir_all(&directory);
+    if output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    compile_errors(&text)
+        .into_iter()
+        .next()
+        .map(|(file, line, column, message)| {
+            // The overlay's file is reported by its own path: the mutant's.
+            let file = if file.ends_with("mutated.go") {
+                mutant.file.clone()
+            } else {
+                file.trim_start_matches("./").to_owned()
+            };
+            format!("{file}:{line}:{column}: {message}")
+        })
 }
 
 /// The type checker's helper, built from the embedded source into the
@@ -280,6 +391,7 @@ struct Profile {
     overturned: usize,
     runs: usize,
     retries: usize,
+    vetted: usize,
 }
 
 /// One package's test binary and what its baseline said.
@@ -762,6 +874,9 @@ pub fn run_go_strong(
         checked.insert((file, index), answer);
     }
 
+    // `go test` runs a subset of `go vet` before it runs a test, and a
+    // mutant vet rejects fails `go test` as a compile error does.
+    let vetted = vet_rejections(&pass, &files, &runnable, &checked);
     // The copy, with the runtime in each module.
     let _ = writeln!(
         diagnostics,
@@ -782,6 +897,17 @@ pub fn run_go_strong(
             .get(&(mutant.file.clone(), mutant.index))
             .cloned()
             .unwrap_or_default();
+        if let Some(finding) = vetted.get(&(mutant.file.clone(), mutant.index)) {
+            pass.profile.lock().expect("profile").unviable += 1;
+            pass.record(
+                &mutant.id,
+                &Verdict::of(
+                    "unviable",
+                    format!("go vet, which go test runs, rejects it: {finding}"),
+                ),
+            );
+            continue;
+        }
         if answer.status == "unviable" {
             pass.profile.lock().expect("profile").unviable += 1;
             pass.record(
@@ -1013,6 +1139,7 @@ fn summary(pass: &Pass, started: Instant) -> Value {
         "confirmations": profile.confirmations,
         "overturned": profile.overturned,
         "retries": profile.retries,
+        "vetRejected": profile.vetted,
         "runs": profile.runs,
     });
     drop(profile);

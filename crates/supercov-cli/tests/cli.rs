@@ -24579,3 +24579,43 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         .clone();
     assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
 }
+
+/// A mutant `go vet` rejects fails `go test` before any test runs, as one
+/// that does not compile does: the strong pass calls it unviable, with
+/// vet's finding.
+#[cfg(unix)]
+#[test]
+fn a_go_mutant_vet_rejects_is_unviable() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-vet");
+    project.write("go.mod", "module example.com/vet\n\ngo 1.22\n");
+    project.write(
+        "odd.go",
+        "package vet\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n",
+    );
+    project.write(
+        "odd_test.go",
+        "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
+    );
+    project
+        .supercov(&["mutants", "--json", "--", go, "test", "./..."])
+        .succeeds();
+    let saved = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read(entry.unwrap().path().join("strong-mutation.json")).ok())
+        .next()
+        .expect("verdicts saved");
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    let verdict = &saved["mutants"]["odd.go:3:41-3:43:LogicalOperator:||"];
+    assert_eq!(verdict["status"], "unviable", "{saved}");
+    assert!(
+        verdict["reason"]
+            .as_str()
+            .unwrap()
+            .ends_with("odd.go:3:34: suspect or: x != 1 || x != 2"),
+        "{verdict}"
+    );
+}
