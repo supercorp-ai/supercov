@@ -16057,7 +16057,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2623 => main.rs:2623",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2053 => javascript_frontend.rs:2053",
+            "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
         ],
     );
 }
@@ -18130,12 +18130,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:361",
-            "javascript_frontend.rs:361",
+            "fs.read#javascript_frontend.rs:363",
+            "javascript_frontend.rs:363",
         ),
         (
-            "fs.read#javascript_frontend.rs:373",
-            "javascript_frontend.rs:373",
+            "fs.read#javascript_frontend.rs:375",
+            "javascript_frontend.rs:375",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -18165,12 +18165,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1835@2",
+            "fs.read_to_string#javascript_frontend.rs:1837@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1835"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1837"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -22304,6 +22304,88 @@ fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&mixed, &["npx", "vitest", "run"], "vitest node and browser");
+}
+
+/// Rust compiled to wasm that node:test loads: the Rust run beside the
+/// JavaScript one lists the crate's mutants, and `mutants test` runs them
+/// under the JavaScript tests, the copy's crate built with them switched in
+/// and each wasm instance handed the active mutant. Needs wasm-bindgen and
+/// the wasm32 target; a job that installed them sets
+/// `SUPERCOV_REQUIRE_RUST_WASM=1`.
+#[cfg(unix)]
+#[test]
+fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
+    let tools = std::process::Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+        && std::process::Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("wasm32-unknown-unknown")
+            });
+    if !tools {
+        assert!(
+            std::env::var("SUPERCOV_REQUIRE_RUST_WASM").as_deref() != Ok("1"),
+            "wasm-bindgen or the wasm32 target is missing where the job installed them"
+        );
+        eprintln!("skipping: needs wasm-bindgen and the wasm32-unknown-unknown target");
+        return;
+    }
+    let project = Project::empty("wasm-node-mutants");
+    project.write(
+        "rust/Cargo.toml",
+        "[workspace]\n\n[package]\nname = \"grades\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwasm-bindgen = \"=0.2.129\"\n",
+    );
+    project.write(
+        "rust/src/lib.rs",
+        "use wasm_bindgen::prelude::*;\n\n#[wasm_bindgen]\npub fn grade(score: u32, curved: bool) -> String {\n    if score >= 90 || (curved && score >= 85) {\n        \"A\".into()\n    } else if score >= 50 {\n        \"pass\".into()\n    } else {\n        \"fail\".into()\n    }\n}\n",
+    );
+    project.write(
+        "build.sh",
+        "set -e\ncd rust\ncargo build -q --target wasm32-unknown-unknown --release\nwasm-bindgen --target nodejs --out-dir ../pkg target/wasm32-unknown-unknown/release/grades.wasm\n",
+    );
+    project.write(
+        "package.json",
+        r#"{ "name": "grades", "private": true, "scripts": { "test": "sh build.sh && node --test" } }"#,
+    );
+    project.write(
+        "test/grades.test.mjs",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { createRequire } from \"node:module\";\nconst { grade } = createRequire(import.meta.url)(\"../pkg/grades.js\");\n\ntest(\"a curved score is an A\", () => {\n  assert.equal(grade(87, true), \"A\");\n});\n\ntest(\"a low score fails\", () => {\n  assert.equal(grade(10, false), \"fail\");\n});\n",
+    );
+    project.write(".gitignore", "pkg\nrust/target\n.supercov\n");
+    let locked = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "-q"])
+        .current_dir(project.root.join("rust"))
+        .status()
+        .unwrap();
+    assert!(locked.success());
+    project.git(&["init", "-q"]);
+    project.commit("grades");
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let runs = project.supercov(&["runs", "--json"]).json();
+    let rust = runs["data"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|run| run["id"].as_str())
+        .find(|id| {
+            project
+                .supercov(&["runs", id, "decision", "rust/src/lib.rs:5"])
+                .code()
+                == 0
+        })
+        .expect("a Rust run beside the JavaScript one")
+        .to_owned();
+    let reply = project
+        .supercov(&["runs", &rust, "mutants", "test", "--json"])
+        .json();
+    // `&&` to `||` in `(curved && score >= 85)` changes neither test's
+    // outcome; every other mutant fails one.
+    assert_eq!(reply["summary"]["killed"], 6, "{reply}");
+    assert_eq!(reply["summary"]["survived"], 1, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
 }
 
 /// Two inline snapshots in one file, and a test that fakes the clock: the

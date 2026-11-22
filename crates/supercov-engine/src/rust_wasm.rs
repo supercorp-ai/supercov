@@ -350,6 +350,10 @@ pub fn switch_for_strong_pass(
     if cargo_roots.is_empty() {
         return Ok(None);
     }
+    let cargo = crate::rust_strong::WasmCargo {
+        program: std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()),
+        rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
+    };
     let mut prefixes = Vec::new();
     for cargo_root in cargo_roots {
         let Ok(relative) = cargo_root.strip_prefix(workspace) else {
@@ -362,6 +366,7 @@ pub fn switch_for_strong_pass(
             &cargo_root,
             &strong.plan,
             &strong.results,
+            &cargo,
             diagnostics,
         )?;
         prefixes.push(if prefix.is_empty() {

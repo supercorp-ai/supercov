@@ -703,8 +703,31 @@ time per mutant and its files cheapest first:
   that throws as it loads, a process that exits) killed the mutant: the test
   file did not finish.
 - A mutant whose candidates ran under a runner this pass does not run (a
-  plan mixing Vitest's node tests and its browser tests) is an `error`, never
-  `survived`.
+  Playwright test beside them) is an `error`, never `survived`. A Vitest run
+  of node and browser tests runs both here: a node test's job runs Vitest
+  with the job's file, its other tests skipped (`context.skip()`), as a
+  browser test's does.
+
+**Resident runners.** Jest and CommonJS Mocha suites run their jobs in
+resident processes, one per worker, as StrykerJS's runners do, instead of
+starting the runner for each job:
+
+- `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
+  (`runCLI` with `runTestsByPath`), in the fresh module registry and
+  environment Jest gives every test file; the job's mutant is switched on
+  before the file's modules load.
+- `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
+  project's CommonJS modules out of `require.cache` before each job and
+  loads the job's file with `require`, so it and the code it tests load
+  afresh with the mutant on. A suite of ES modules, which cannot be loaded
+  again, runs a process per job.
+
+The adapters write each job's evidence into the job's own directory, read
+when each record is written (a journal kept per directory: a resident
+process that kept the first job's wrote every later job's there, and their
+mutants read as survivors). A host that cannot start leaves its jobs to a
+process each; a job past its limit stops its host, and the next job starts
+another.
 
 The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
 confirmations, overturned kills, stopped jobs and their time.
@@ -778,6 +801,8 @@ against 7.5 s.
 
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
-- A Vitest run whose tests run both in node and in the browser: the browser's
-  mutants are run by the jobs pass, and those with candidates in node too are
-  `error`.
+- Rust compiled to wasm that a browser page loads (Playwright, Vitest
+  Browser Mode): its mutants are `error`. Under Node they run
+  (`mutation-drivers.md`).
+- A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
+  command builds the wasm once.

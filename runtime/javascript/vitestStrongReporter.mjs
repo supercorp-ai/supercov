@@ -650,7 +650,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (!byFile.has(test.file))
                 byFile.set(test.file, { file: test.file, tests: [], cost: 0, whole: false });
             const group = byFile.get(test.file);
-            group.tests.push(test.id);
+            // A Rust wasm run names a test by its file too (`<file>::vitest:<id>`).
+            group.tests.push(test.id.startsWith(`${test.file}::`) ? test.id.slice(test.file.length + 2) : test.id);
             group.cost += test.durationMs ?? 1_000;
         }
         for (const file of mutant.wholeFiles ?? []) {
