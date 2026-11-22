@@ -104,20 +104,20 @@ fn references_resolve(root: &Expr) -> bool {
     let ends = ends(root);
     references.into_iter().all(|reference| {
         let number = |text: &str| text.parse::<usize>().ok();
-        let (call, target) = match reference.as_bytes().first() {
-            Some(b'k' | b'g') if reference.len() > 2 => (true, &reference[2..reference.len() - 1]),
+        let target = match reference.as_bytes().first() {
+            Some(b'k' | b'g') if reference.len() > 2 => &reference[2..reference.len() - 1],
             // `\1`-`\9` refer back; `\0` and longer digits past the groups are
             // octal escapes.
             Some(b'1'..=b'9')
                 if reference.len() == 1 || number(reference).is_some_and(|n| n <= captures) =>
             {
-                (false, reference)
+                reference
             }
             _ => return true,
         };
         match number(target) {
-            // `\g<0>` calls the whole regexp.
-            Some(0) if call => ends,
+            // `\g<0>` calls the whole regexp (`\1`-`\9` are never 0).
+            Some(0) => ends,
             // A number names a capture, where the regexp has no named ones.
             Some(group) => names.is_empty() && group <= captures,
             None => names.contains(&target),
@@ -248,6 +248,14 @@ impl Parser<'_> {
         self.chars.get(self.at + offset).copied()
     }
 
+    /// Past the first `close` from the cursor, or the end.
+    fn through(&self, close: char) -> usize {
+        self.chars[self.at..]
+            .iter()
+            .position(|character| *character == close)
+            .map_or(self.chars.len(), |found| self.at + found + 1)
+    }
+
     /// A group's or the root's contents, with `|` making an alternation.
     fn sequence(&mut self) -> Option<Vec<Expr>> {
         let mut alternatives = vec![Vec::new()];
@@ -332,8 +340,10 @@ impl Parser<'_> {
         Some(text)
     }
 
+    /// The atom at the cursor (a sequence reads one only where a character
+    /// is left).
     fn atom(&mut self, into: &mut Vec<Expr>) -> Option<()> {
-        let character = self.peek()?;
+        let character = self.peek().expect("a character");
         let mut expression = match character {
             '(' => self.group()?,
             '[' => self.set()?,
@@ -445,13 +455,8 @@ impl Parser<'_> {
         let (kind, opening) = if self.peek() == Some('?') {
             match self.peek_at(1)? {
                 '#' => {
-                    // A comment: kept whole.
-                    while let Some(character) = self.peek() {
-                        self.at += 1;
-                        if character == ')' {
-                            break;
-                        }
-                    }
+                    // A comment: kept whole, through its `)`.
+                    self.at = self.through(')');
                     return Some(Expr::leaf(
                         Kind::Other,
                         self.chars[start..self.at].iter().collect::<String>(),
@@ -539,12 +544,7 @@ impl Parser<'_> {
             let member = match character {
                 '[' if self.peek_at(1) == Some(':') => {
                     let start = self.at;
-                    while let Some(next) = self.peek() {
-                        self.at += 1;
-                        if next == ']' {
-                            break;
-                        }
-                    }
+                    self.at = self.through(']');
                     Expr::leaf(
                         Kind::Other,
                         self.chars[start..self.at].iter().collect::<String>(),
@@ -563,7 +563,7 @@ impl Parser<'_> {
                 && matches!(member.kind, Kind::Literal | Kind::Other)
             {
                 self.at += 1;
-                let upper = match self.peek()? {
+                let upper = match self.peek().expect("the range's end") {
                     '\\' => self.escape(true)?,
                     other => {
                         self.at += 1;
@@ -612,7 +612,7 @@ fn replacement(expression: &Expr) -> Option<(Kind, &'static str)> {
 fn quantifiers(quantifier: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut rest = quantifier;
-    while !rest.is_empty() {
+    loop {
         let length = match rest.find('}') {
             Some(close) if rest.starts_with('{') => {
                 let reluctant = rest[..close].contains(',') && rest[close + 1..].starts_with('?');
@@ -623,8 +623,10 @@ fn quantifiers(quantifier: &str) -> Vec<&str> {
         };
         parts.push(&rest[..length]);
         rest = &rest[length..];
+        if rest.is_empty() {
+            return parts;
+        }
     }
-    parts
 }
 
 /// An expression's mutations: its class's mutators, in the order mutant
@@ -699,20 +701,23 @@ fn mutate(expression: &Expr) -> Vec<Expr> {
     // as Ruby reads it, each is removed apart.
     if let Some(quantifier) = &expression.quantifier {
         let parts = quantifiers(quantifier);
-        if parts.len() == 1 {
+        // Each quantifier removed apart: one alone leaves none.
+        let kept: Vec<Option<String>> = if parts.len() == 1 {
+            vec![None]
+        } else {
+            (0..parts.len())
+                .map(|index| {
+                    let mut kept = parts.clone();
+                    kept.remove(index);
+                    Some(kept.concat())
+                })
+                .collect()
+        };
+        kept.into_iter().for_each(|quantifier| {
             let mut removed = expression.clone();
-            removed.quantifier = None;
+            removed.quantifier = quantifier;
             emit(removed, &mut out);
-        }
-        for index in 0..parts.len() {
-            if parts.len() > 1 {
-                let mut kept = parts.clone();
-                kept.remove(index);
-                let mut removed = expression.clone();
-                removed.quantifier = Some(kept.concat());
-                emit(removed, &mut out);
-            }
-        }
+        });
         let replaced = match quantifier.as_str() {
             "*" => Some("+"),
             "*+" => Some("++"),
@@ -748,6 +753,10 @@ mod tests {
             "[\\",
             "[a-",
             "a|(",
+            "(*a)",
+            "[a[b",
+            "[a-\\",
+            "[]a",
         ] {
             assert!(mutations(unread).is_empty(), "{unread}");
         }
@@ -764,16 +773,31 @@ mod tests {
             "\\cx\\C-x\\M-x\\x4",
             "[a-\\d]",
             "(?i)(?i-m:a)",
+            "a*\\k",
+            "a*(?<a>x)\\1",
+            "a*(?<a>x)\\g<1>",
+            "a*(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10",
+            "{2}",
+            "\\p{Alpha",
+            "(?<>x)",
+            "[]a]",
+            "[a&b]",
+            "[\\d-z]",
+            "a+{2}",
+            "()",
+            "(?<_a>x)(?<b>)",
         ] {
             let _ = mutations(read);
         }
         assert_eq!(mutations("a{2}{3}"), ["a{3}", "a{2}"]);
+        // Two alternatives alike leave one mutant.
+        assert_eq!(mutations("a|a"), ["a"]);
         assert_eq!(quantifiers("{1,2}?"), ["{1,2}?"]);
         assert_eq!(quantifiers("{2}?"), ["{2}", "?"]);
         assert_eq!(quantifiers("*+"), ["*+"]);
         assert!(matches!(anchored_literal("\\Afoo"), Some(Anchored::Start(text)) if text == "foo"));
         assert!(matches!(anchored_literal("foo\\z"), Some(Anchored::End(text)) if text == "foo"));
-        for neither in ["^foo", "foo$", "\\Afoo\\z", "(a", "\\Gfoo", "foo\\b"] {
+        for neither in ["^foo", "foo$", "\\Afoo\\z", "(a", "\\Gfoo", "foo\\b", "ab."] {
             assert!(anchored_literal(neither).is_none(), "{neither}");
         }
     }

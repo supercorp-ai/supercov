@@ -1208,5 +1208,8 @@ fn ruby_blocks_and_odd_source_print_from_their_parts() {
         span: Some((0, 1)),
         syntax: 0,
     });
-    assert_eq!(print::one_line(odd, &literal, &literal).as_deref(), Some("1"));
+    assert_eq!(
+        print::one_line(odd, &literal, &literal).as_deref(),
+        Some("1")
+    );
 }
