@@ -22023,6 +22023,24 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         "{summary}"
     );
 
+    // Runs between that one and the next, none of which can lend their
+    // verdicts: one of another command, one with none, one of another
+    // mutant set.
+    let measure = |command: &[&str]| {
+        let mut words = vec!["--"];
+        words.extend(command);
+        project
+            .supercov_with(&words, &[("SUPERCOV_MUTANTS", "1")])
+            .succeeds();
+        project.latest()
+    };
+    measure(&["npx", "vitest", "run", "test/cart.test.js"]);
+    measure(&["npx", "vitest", "run"]);
+    let other = measure(&["npx", "vitest", "run"]);
+    project.write(
+        &format!(".supercov/runs/{other}/strong-mutation.json"),
+        r#"{"schemaVersion": 1, "run": "x", "mutantSet": "other@1", "mutants": {}}"#,
+    );
     // An edit of tax.js's code: `supercov mutants` measures again, and runs
     // tax.js's mutants alone; cart.js's keep their verdicts, as no cart test
     // ran tax.js. (`runs <id> mutants test` tests the run it names whole.)
@@ -22055,11 +22073,42 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         kept.contains(&format!("  ran {to_run} mutant(s)")),
         "{to_run}: {kept}"
     );
-    // As a pull request's comment.
+    // An edit of both sources keeps nothing; where the earlier run's
+    // record of what each test ran is gone, nothing is kept either.
+    project.edit("src/tax.js", "sum / 5", "sum / 5.0");
+    project.edit("src/cart.js", "return 5;", "return 5.0;");
+    let none_kept = project.supercov(&["mutants"]).succeeds();
+    assert!(!none_kept.contains("kept from run"), "{none_kept}");
+    let previous = project.latest();
+    std::fs::remove_file(
+        project
+            .root
+            .join(format!(".supercov/runs/{previous}/test-executions.json")),
+    )
+    .unwrap();
+    project.edit("src/tax.js", "sum / 5.0", "sum / 5");
+    let unrecorded = project.supercov(&["mutants"]).succeeds();
+    assert!(!unrecorded.contains("kept from run"), "{unrecorded}");
+    // `--plan` keeps nothing and runs nothing.
+    project.supercov(&["mutants", "--plan"]).succeeds();
+    // As a pull request's comment, the change's, to a file or one that
+    // cannot be written.
     let markdown = project
         .supercov(&["mutants", "--format", "markdown"])
         .succeeds();
     assert!(markdown.starts_with("### Mutants"), "{markdown}");
+    let change = project
+        .supercov(&["mutants", "--diff", "HEAD", "--format", "markdown"])
+        .succeeds();
+    assert!(change.starts_with("### Mutants on this change"), "{change}");
+    let unwritable = project.supercov(&[
+        "mutants",
+        "--format",
+        "markdown",
+        "--output",
+        "missing/dir/mutants.md",
+    ]);
+    assert_eq!(unwritable.code(), 2, "{}", unwritable.stderr());
 
     // A failing test: the pass answers, and cannot gate.
     project.write(
@@ -24121,12 +24170,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1395",
+            "fs.write#mutants_test_command.rs:1402",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1395"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1402"),
         "{}",
         unwritten.stderr()
     );
