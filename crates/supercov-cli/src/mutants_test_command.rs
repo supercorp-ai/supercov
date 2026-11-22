@@ -995,15 +995,15 @@ mod tests {
             mutants: vec![planned_mutant(decided)],
         };
         let refused =
-            refuse_without_a_driver("r1", &plan(&["pytest", "background"], None)).unwrap_err();
+            refuse_without_a_driver("r1", &plan(&["phpunit", "background"], None)).unwrap_err();
         assert!(
-            refused.contains("run r1's tests ran under pytest: it cannot run their mutants. `supercov runs r1 mutants`"),
+            refused.contains("run r1's tests ran under phpunit: it cannot run their mutants. `supercov runs r1 mutants`"),
             "{refused}"
         );
         // A test a driver runs, or nothing left to run: no refusal.
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest", "jest"], None)).is_ok());
+        assert!(refuse_without_a_driver("r1", &plan(&["phpunit", "jest"], None)).is_ok());
         let decided = Some(supercov_engine::strong_plan::Decided::Survived);
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest"], decided)).is_ok());
+        assert!(refuse_without_a_driver("r1", &plan(&["phpunit"], decided)).is_ok());
     }
 
     #[test]
