@@ -40,6 +40,9 @@ pub(crate) enum ValueEdit {
         range: TextRange,
         prefix: String,
         suffix: String,
+        /// Around every other wrapper of the same range (a returned value),
+        /// rather than inside them (an operator's operands).
+        outer: bool,
     },
     At {
         offset: usize,
@@ -92,6 +95,7 @@ pub(crate) fn place(
                             outcomes.join(", ")
                         ),
                         suffix: ").1".into(),
+                        outer: false,
                     });
                 }
                 BinaryOp::ArithOp(op) | BinaryOp::Assignment { op: Some(op) } => {
@@ -117,6 +121,7 @@ pub(crate) fn place(
                             mutants.join(", ")
                         ),
                         suffix: ").1".into(),
+                        outer: false,
                     });
                 }
                 _ => {}
@@ -135,6 +140,7 @@ pub(crate) fn place(
                 range,
                 prefix: format!("({runtime}::negated({read}, &[{}]), ", outcomes.join(", ")),
                 suffix: ").1".into(),
+                outer: false,
             });
             continue;
         }
@@ -207,6 +213,17 @@ fn pure(expression: &ast::Expr) -> bool {
                 && prefix.expr().is_some_and(|inner| pure(&inner))
         }
         ast::Expr::CastExpr(cast) => cast.expr().is_some_and(|inner| pure(&inner)),
+        // Arithmetic of pure operands: evaluated again, it gives the same,
+        // and panics, if at all, where the original would.
+        ast::Expr::BinExpr(binary) => {
+            matches!(binary.op_kind(), Some(BinaryOp::ArithOp(_)))
+                && binary
+                    .lhs()
+                    .is_some_and(|inner| pure(&inner) || matches!(inner, ast::Expr::Literal(_)))
+                && binary
+                    .rhs()
+                    .is_some_and(|inner| pure(&inner) || matches!(inner, ast::Expr::Literal(_)))
+        }
         _ => false,
     }
 }
@@ -282,6 +299,7 @@ fn returns(
         range: expression.syntax().text_range(),
         prefix: format!("{runtime}::returned::<{ty}>("),
         suffix: format!(", {table})"),
+        outer: true,
     };
     if let Some(tail) = list.tail_expr() {
         edits.push(wrap(&tail));

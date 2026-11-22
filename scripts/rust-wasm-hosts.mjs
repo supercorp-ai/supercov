@@ -112,6 +112,23 @@ try {
     const decision = run(cwd, binary, ['runs', 'latest', 'decision', 'src/lib.rs:2']).stdout;
     assert.match(decision, /FF- -> F +tests=1/u, `${entry.host}\n${decision}`);
     assert.match(decision, /FTT -> T +tests=1/u, `${entry.host}\n${decision}`);
+    // The strong pass runs the wasm module's mutants: in Node the hook
+    // switches the module's mutant on as it is instantiated, under WASI the
+    // runtime is handed it by name. In a browser it cannot yet.
+    const strong = run(cwd, binary, ['runs', 'latest', 'mutants', 'test', '--json']);
+    const reply = JSON.parse(strong.stdout);
+    if (entry.command) {
+      assert.ok(reply.summary.error > 0, `${entry.host}\n${strong.stdout}${strong.stderr}`);
+    } else {
+      assert.equal(reply.summary.error, 0, `${entry.host}\n${strong.stdout}${strong.stderr}`);
+      const listed = JSON.parse(run(cwd, binary, ['runs', 'latest', 'mutants', '--json', '--limit', '0']).stdout);
+      const verdict = (id) => listed.data.mutants.find((mutant) => mutant.id === id)?.strong;
+      // `grade` returning "" fails both tests; `score >= 50` to `<` fails the
+      // low one; no test gives 85, so `>= 85` to `<` lives.
+      assert.equal(verdict('src/lib.rs:2:5-8:6:FnValue:""')?.status, 'killed', `${entry.host}\n${JSON.stringify(listed.data.mutants.map((m) => [m.id, m.strong]))}`);
+      assert.equal(verdict('src/lib.rs:4:21-4:23:BinaryOperator:<')?.status, 'killed', entry.host);
+      assert.ok(reply.summary.survived > 0, `${entry.host}\n${strong.stdout}`);
+    }
     for (const fault of entry.faults ?? []) {
       const failed = run(cwd, binary, ['--', 'cargo', 'test', '--target', entry.target], { SUPERCOV_TEST_FAULT: fault });
       const place = fault.slice(fault.indexOf('#') + 1).replace('.', '\\.');

@@ -2725,6 +2725,35 @@ pub fn run_prepared_rust_tests(
     })
 }
 
+impl ArtifactLauncher {
+    /// `command`, with variables for the test itself: a WASI runtime gives
+    /// its module only the variables named to it (`--env`), any other
+    /// launch passes the process's on.
+    pub(crate) fn command_with_guest_environment(
+        &self,
+        executable: &Path,
+        variables: &[(&str, String)],
+    ) -> Command {
+        match &self.runner {
+            Some(runner) if is_wasi_runtime(&runner.program) => {
+                let mut command = Command::new(&runner.program);
+                command.args(&runner.arguments);
+                for (name, value) in variables {
+                    command.arg(format!("--env={name}={value}"));
+                }
+                command.arg(executable);
+                command.envs(self.environment.iter().map(|(name, value)| (name, value)));
+                command
+            }
+            _ => {
+                let mut command = self.command(executable, None);
+                command.envs(variables.iter().map(|(name, value)| (*name, value)));
+                command
+            }
+        }
+    }
+}
+
 /// Whether a `cargo test` option takes a value (`Some(true)`), takes none
 /// (`Some(false)`), or is no `cargo test` option.
 pub(crate) fn cargo_option_value(argument: &str) -> Option<bool> {

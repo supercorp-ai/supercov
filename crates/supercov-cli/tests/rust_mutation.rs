@@ -137,3 +137,43 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
         .json();
     assert_eq!(again["summary"]["ran"], 0, "{again}");
 }
+
+/// Under `cargo nextest run` each test runs through nextest with the
+/// project's configuration: a test that needs what a setup script exports
+/// passes its baseline and kills the mutants it tells apart.
+#[test]
+fn a_nextest_rust_run_s_mutants_run_with_its_setup_scripts() {
+    let project = Project::empty("strong-rust-nextest");
+    project.write(
+        "Cargo.toml",
+        "[package]\nname = \"flagged\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    project.write(
+        "src/lib.rs",
+        "pub fn scaled(value: u32) -> u32 {\n    value * 3\n}\n",
+    );
+    project.write(
+        "tests/flag.rs",
+        "#[test]\nfn scales_with_the_flag() {\n    assert_eq!(std::env::var(\"FLAG\").as_deref(), Ok(\"1\"));\n    assert_eq!(flagged::scaled(2), 6);\n}\n",
+    );
+    project.write(
+        ".config/nextest.toml",
+        "experimental = [\"setup-scripts\"]\n\n[scripts.setup.flag]\ncommand = \"sh -c 'echo FLAG=1 >> $NEXTEST_ENV'\"\n\n[[profile.default.scripts]]\nfilter = 'all()'\nsetup = 'flag'\n",
+    );
+    project.write(".gitignore", "target\n.supercov\n");
+    project.git(&["init", "-q"]);
+    project
+        .supercov(&["--", "cargo", "nextest", "run"])
+        .succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let added = strong_of(&listed, "src/lib.rs:2:11-2:12:BinaryOperator:+");
+    assert_eq!(added["status"], "killed", "{added}\n{said}");
+    assert_eq!(added["killedBy"], "tests/flag.rs::scales_with_the_flag");
+    assert_eq!(reply["summary"]["killed"], 4, "{reply}");
+}

@@ -308,19 +308,36 @@ pub fn run_strong_rust(
         return Ok(0);
     }
 
-    let invocation = crate::rust_test_runner::cargo_invocation(&root, &request.command)
+    // `wasm-pack test` runs as the `cargo test` it stands for, through
+    // wasm-bindgen's runner, which the Node hook of the launcher switches a
+    // wasm module's mutant on in.
+    let learned = if crate::rust_wasm_pack::is_wasm_pack_test(&request.command) {
+        Some(crate::rust_wasm_pack::learn(
+            &root,
+            &request.command,
+            &root.join(".supercov/strong/rust/wasm-pack"),
+        )?)
+    } else {
+        None
+    };
+    let command = learned
+        .as_ref()
+        .map_or(&request.command, |learned| &learned.command);
+    let runner_environment = learned
+        .as_ref()
+        .map(|learned| learned.runner_environment.clone())
+        .unwrap_or_default();
+    let invocation = crate::rust_test_runner::cargo_invocation(&root, command)
         .map_err(|error| error.to_string())?;
     let build_invocation = build_invocation(&invocation);
-    // A wasm module has no environment to read the active mutant from: its
-    // tests would pass with every mutant, and read as survivors.
-    let wasm =
-        crate::rust_cargo_configuration::resolve_cargo_runner_plan(&root, &root, &invocation)
-            .is_ok_and(|plan| {
-                plan.targets
-                    .iter()
-                    .any(|target| target.target.starts_with("wasm"))
-            });
-    if wasm {
+    // Tests that run in a browser take their mutant from no environment and
+    // no Node process: not yet.
+    if runner_environment.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "CHROMEDRIVER" | "GECKODRIVER" | "SAFARIDRIVER"
+        )
+    }) {
         for job in &jobs {
             results.verdict(
                 &job.id,
@@ -328,10 +345,12 @@ pub fn run_strong_rust(
                 None,
                 0,
                 started,
-                Some("a strong pass cannot switch mutants in wasm tests yet".into()),
+                Some(
+                    "a strong pass cannot switch mutants in wasm tests run in a browser yet".into(),
+                ),
             );
         }
-        results.write(&json!({"summary": true, "mutants": jobs.len(), "wasm": true}));
+        results.write(&json!({"summary": true, "mutants": jobs.len(), "browser": true}));
         return Ok(0);
     }
 
@@ -360,6 +379,7 @@ pub fn run_strong_rust(
         &mut alone,
         &mut unviable,
         &build_invocation,
+        &runner_environment,
         diagnostics,
     )?;
     for (at, error) in &unviable {
@@ -392,6 +412,14 @@ pub fn run_strong_rust(
         target_libdir: &built.target_libdir,
         by_source: by_id,
         doctest: DoctestCommand::new(&invocation, &built.project, &places.switched_target),
+        nextest: match invocation.kind {
+            RustCargoCommandKind::NextestRun => Some(Nextest::prepare(
+                &invocation,
+                &built.project,
+                &places.switched_target,
+            )?),
+            RustCargoCommandKind::CargoTest => None,
+        },
     };
 
     // Baselines: every test a mutant runs against, with no mutant.
@@ -456,7 +484,14 @@ pub fn run_strong_rust(
         let job = &jobs[*at];
         let mutant_started = Instant::now();
         let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
-        match build_alone(&root, &places, &build_invocation, job, source) {
+        match build_alone(
+            &root,
+            &places,
+            &build_invocation,
+            &runner_environment,
+            job,
+            source,
+        ) {
             Err(error) => {
                 results.verdict(
                     &job.id,
@@ -498,6 +533,14 @@ pub fn run_strong_rust(
                         &alone_build.project,
                         &places.plain_target,
                     ),
+                    nextest: match invocation.kind {
+                        RustCargoCommandKind::NextestRun => Some(Nextest::prepare(
+                            &invocation,
+                            &alone_build.project,
+                            &places.plain_target,
+                        )?),
+                        RustCargoCommandKind::CargoTest => None,
+                    },
                 };
                 let status = run_job(
                     job,
@@ -798,6 +841,7 @@ fn build_switched(
     alone: &mut Vec<(usize, &'static str)>,
     unviable: &mut BTreeMap<usize, String>,
     invocation: &CargoTestInvocation,
+    runner_environment: &[(String, String)],
     diagnostics: &mut dyn Write,
 ) -> Result<Built, String> {
     let mut builds = 0usize;
@@ -831,7 +875,8 @@ fn build_switched(
                     invocation,
                     &places.switched_target.join("supercov-hooks"),
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .with_environment(runner_environment);
                 let target_libdir =
                     crate::rust_test_runner::rustc_target_libdir(&prepared.project, invocation)
                         .map_err(|error| error.to_string())?;
@@ -985,6 +1030,7 @@ fn build_alone(
     root: &Path,
     places: &Places,
     invocation: &CargoTestInvocation,
+    runner_environment: &[(String, String)],
     job: &Job,
     source: &str,
 ) -> Result<Result<Built, String>, String> {
@@ -1013,7 +1059,8 @@ fn build_alone(
                 invocation,
                 &places.plain_target.join("supercov-hooks"),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .with_environment(runner_environment);
             let target_libdir = crate::rust_test_runner::rustc_target_libdir(&project, invocation)
                 .map_err(|error| error.to_string())?;
             Ok(Ok(Built {
@@ -1035,6 +1082,153 @@ struct TestRunner<'b> {
     target_libdir: &'b Path,
     by_source: BTreeMap<String, &'b Artifact>,
     doctest: DoctestCommand,
+    /// For a `cargo nextest run` command, how nextest runs a test of this
+    /// build, with its configuration.
+    nextest: Option<Nextest>,
+}
+
+/// `cargo nextest run` of one test of a build already made: nextest's
+/// profile and configuration (its setup scripts, per-test environment,
+/// timeouts and retries) apply, and nothing is built again
+/// (`--binaries-metadata`, `--cargo-metadata`).
+struct Nextest {
+    program: String,
+    /// Everything before the filter.
+    arguments: Vec<String>,
+    workspace: PathBuf,
+    /// Each test binary's nextest id, by its executable.
+    binary_ids: BTreeMap<PathBuf, String>,
+}
+
+impl Nextest {
+    /// Lists the build's binaries with nextest, from `workspace`.
+    fn prepare(
+        invocation: &CargoTestInvocation,
+        project: &crate::rust_project::PreparedRustProject,
+        target: &Path,
+    ) -> Result<Self, String> {
+        let position = invocation.command_position();
+        let prefix = invocation.arguments[..position].to_vec();
+        let environment = [
+            ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
+            (
+                "RUSTFLAGS".to_owned(),
+                crate::rust_test_runner::capped_rustflags(project, invocation),
+            ),
+        ];
+        // The command's own nextest options that say how tests run.
+        let mut kept = Vec::new();
+        let mut build = Vec::new();
+        let mut rest = invocation.arguments[position + 2..].iter();
+        while let Some(argument) = rest.next() {
+            if argument == "--" {
+                break;
+            }
+            let name = argument
+                .split_once('=')
+                .map_or(argument.as_str(), |(n, _)| n);
+            let value = |rest: &mut std::slice::Iter<'_, String>| {
+                (!argument.contains('='))
+                    .then(|| rest.next().cloned())
+                    .flatten()
+            };
+            match name {
+                "--profile" | "-P" | "--config-file" | "--tool-config-file" | "--retries"
+                | "--test-threads" | "-j" => {
+                    let value = value(&mut rest);
+                    kept.push(argument.clone());
+                    kept.extend(value);
+                }
+                _ if crate::rust_test_runner::cargo_option_value(name).is_some() => {
+                    let takes = crate::rust_test_runner::cargo_option_value(name) == Some(true);
+                    build.push(argument.clone());
+                    if takes && let Some(value) = value(&mut rest) {
+                        build.push(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let metadata = target.join("supercov-nextest");
+        std::fs::create_dir_all(&metadata).map_err(|e| format!("{}: {e}", metadata.display()))?;
+        let binaries = metadata.join("binaries.json");
+        let cargo = metadata.join("cargo.json");
+        let listed = crate::child_signal_guard::output(
+            Command::new(&invocation.program)
+                .args(&prefix)
+                .args([
+                    "nextest",
+                    "list",
+                    "--list-type",
+                    "binaries-only",
+                    "--message-format",
+                    "json",
+                ])
+                .args(&build)
+                .current_dir(&project.workspace_root)
+                .envs(environment.clone()),
+        )
+        .map_err(|error| format!("cargo nextest list: {error}"))?;
+        if !listed.status.success() {
+            return Err(format!(
+                "cargo nextest list failed: {}",
+                String::from_utf8_lossy(&listed.stderr).trim()
+            ));
+        }
+        std::fs::write(&binaries, &listed.stdout)
+            .map_err(|e| format!("{}: {e}", binaries.display()))?;
+        let described = crate::child_signal_guard::output(
+            Command::new(&invocation.program)
+                .args(&prefix)
+                .args([
+                    "metadata",
+                    "--format-version=1",
+                    "--all-features",
+                    "--no-deps",
+                ])
+                .current_dir(&project.workspace_root),
+        )
+        .map_err(|error| format!("cargo metadata: {error}"))?;
+        std::fs::write(&cargo, &described.stdout)
+            .map_err(|e| format!("{}: {e}", cargo.display()))?;
+        let parsed: Value = serde_json::from_slice(&listed.stdout)
+            .map_err(|error| format!("cargo nextest list: {error}"))?;
+        let binary_ids = parsed["rust-binaries"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, binary)| {
+                let path = std::fs::canonicalize(binary["binary-path"].as_str()?).ok()?;
+                Some((path, id.clone()))
+            })
+            .collect();
+        let mut arguments = prefix;
+        arguments.extend(["nextest".into(), "run".into(), "--no-fail-fast".into()]);
+        arguments.extend(kept);
+        arguments.push(format!("--binaries-metadata={}", binaries.display()));
+        arguments.push(format!("--cargo-metadata={}", cargo.display()));
+        arguments.push("--color=never".into());
+        Ok(Self {
+            program: invocation.program.clone(),
+            arguments,
+            workspace: project.workspace_root.clone(),
+            binary_ids,
+        })
+    }
+
+    /// The command that runs exactly `name` of the binary at `executable`.
+    fn command(&self, executable: &Path, name: &str) -> Option<Command> {
+        let id = self
+            .binary_ids
+            .get(&std::fs::canonicalize(executable).ok()?)?;
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.arguments)
+            .arg("-E")
+            .arg(format!("binary_id(={id}) & test(={name})"))
+            .current_dir(&self.workspace);
+        Some(command)
+    }
 }
 
 /// `cargo test --doc` for named doctests of a package, in a build's copy.
@@ -1125,20 +1319,42 @@ impl TestRunner<'_> {
     ) -> Option<Ran> {
         let (source, name) = test.id.split_once("::")?;
         let artifact = self.by_source.get(source)?;
-        let mut command = self.launcher.command(&artifact.executable, None);
+        if let Some(nextest) = &self.nextest {
+            let mut command = nextest.command(&artifact.executable, name)?;
+            command.env(HIT_LIMIT_ENV, hit_limit.to_string());
+            match mutant {
+                Some(named) => command.env(ACTIVE_MUTANT_ENV, named),
+                None => command.env_remove(ACTIVE_MUTANT_ENV),
+            };
+            command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
+            let (mut ran, _, stderr) = timed_with_streams(&mut command, limit);
+            // nextest's own timeout ends the test as a timeout, and a filter
+            // that matched nothing ran nothing.
+            if stderr.contains("TIMEOUT") {
+                ran.outcome = Outcome::TimedOut;
+            } else if stderr.contains("Starting 0 tests") {
+                return None;
+            }
+            return Some(ran);
+        }
+        // The mutant and the limit are the test's own: a WASI module is
+        // given them by name.
+        let mut variables = vec![(HIT_LIMIT_ENV, hit_limit.to_string())];
+        variables.extend(mutant.map(|named| (ACTIVE_MUTANT_ENV, named.to_owned())));
+        let mut command = self
+            .launcher
+            .command_with_guest_environment(&artifact.executable, &variables);
+        if mutant.is_none() {
+            command.env_remove(ACTIVE_MUTANT_ENV);
+        }
         command
-            .args(["--exact", name, "--test-threads=1"])
+            .args(["--exact", name])
             .current_dir(&artifact.package_directory)
             .envs(crate::rust_test_runner::instrumented_stack_environment())
             .envs(crate::rust_test_runner::dynamic_library_environment(
                 self.target_libdir,
                 &artifact.executable,
-            ))
-            .env(HIT_LIMIT_ENV, hit_limit.to_string());
-        match mutant {
-            Some(named) => command.env(ACTIVE_MUTANT_ENV, named),
-            None => command.env_remove(ACTIVE_MUTANT_ENV),
-        };
+            ));
         command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
         Some(timed(&mut command, limit))
     }
@@ -1172,9 +1388,14 @@ fn timed(command: &mut Command, limit: Duration) -> Ran {
     timed_with_output(command, limit).0
 }
 
-/// Runs `command` for at most `limit`, and how it ended, with its standard
-/// output.
 fn timed_with_output(command: &mut Command, limit: Duration) -> (Ran, String) {
+    let (ran, stdout, _) = timed_with_streams(command, limit);
+    (ran, stdout)
+}
+
+/// Runs `command` for at most `limit`, and how it ended, with its standard
+/// output and error.
+fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, String) {
     let started = Instant::now();
     let child = command
         .stdin(std::process::Stdio::null())
@@ -1187,6 +1408,7 @@ fn timed_with_output(command: &mut Command, limit: Duration) -> (Ran, String) {
                 outcome: Outcome::Failed,
                 duration: started.elapsed(),
             },
+            String::new(),
             String::new(),
         );
     };
@@ -1226,7 +1448,7 @@ fn timed_with_output(command: &mut Command, limit: Duration) -> (Ran, String) {
         Some(status) if status.success() && !libtest_ran_nothing(&stdout) => Outcome::Passed,
         Some(_) => Outcome::Failed,
     };
-    (Ran { outcome, duration }, stdout)
+    (Ran { outcome, duration }, stdout, stderr)
 }
 
 /// A libtest run that matched no test: `running 0 tests`.
@@ -1299,10 +1521,24 @@ fn run_job(
         .filter(|test| usable(*test))
         .collect::<Vec<_>>();
     if candidates.is_empty() {
+        // Tests the measured run saw fail cannot tell a mutant apart: it
+        // lives, as StrykerJS's rule has it. Tests that passed there and
+        // cannot run here say nothing of it: an error.
+        if job.candidates.iter().any(|test| tests[*test].runnable) {
+            results.verdict(
+                &job.id,
+                "error",
+                None,
+                0,
+                started,
+                Some("its tests did not pass without a mutant in the pass's build".into()),
+            );
+            return "error";
+        }
         let reason = if job.candidates.is_empty() {
             "no test can kill it"
         } else {
-            "every test that reaches it failed or could not run without a mutant"
+            "every test that reaches it failed in the measured run"
         };
         results.verdict(&job.id, "survived", None, 0, started, Some(reason.into()));
         return "survived";

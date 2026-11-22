@@ -7,6 +7,7 @@ mod __SUPERCOV_MODULE__ {
     use std::option::Option::{self, None, Some};
     use std::result::Result::Ok;
     use std::string::String;
+    use std::borrow::ToOwned;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,6 +72,28 @@ mod __SUPERCOV_MODULE__ {
         }
         let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\nSUPERCOV_MUTANT_TIMEOUT\n");
         std::process::abort()
+    }
+
+    // A wasm module has no environment: the host that instantiates it (the
+    // Node hook of `rust-wasm-node.mjs`) writes the active mutant's file
+    // into this buffer and names its index, before any test runs.
+    #[cfg(target_arch = "wasm32")]
+    static mut BUFFER: [u8; 4096] = [0; 4096];
+
+    #[cfg(target_arch = "wasm32")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __SUPERCOV_BUFFER_EXPORT__() -> u32 {
+        unsafe { (&raw mut BUFFER) as usize as u32 }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __SUPERCOV_ACTIVATE_EXPORT__(length: u32, index: u64) {
+        let length = (length as usize).min(4096);
+        let bytes = unsafe { &(*(&raw const BUFFER))[..length] };
+        let _ = FILE.set(String::from_utf8_lossy(bytes).into_owned());
+        LIMIT.store(0, Ordering::Relaxed);
+        ACTIVE.store(if index < NONE { index } else { NONE }, Ordering::Relaxed);
     }
 
     /// Whether mutant `index` of `file` is the process's active one. Counts

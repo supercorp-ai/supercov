@@ -290,9 +290,20 @@ fn body_entry(source: &str, list: TextRange) -> usize {
 
 /// The strong runtime a crate root gets, named `module`: `on`, the active
 /// mutant (`SUPERCOV_ACTIVE_MUTANT`) and the hit limit
-/// (`SUPERCOV_MUTANT_HIT_LIMIT`, none where unset or 0).
-pub(crate) fn runtime(module: &str) -> String {
-    STRONG_RUNTIME.replace("__SUPERCOV_MODULE__", module)
+/// (`SUPERCOV_MUTANT_HIT_LIMIT`, none where unset or 0). In wasm, where the
+/// host names the active mutant, its exports carry `key`, unique to the
+/// crate.
+pub(crate) fn runtime(module: &str, key: &str) -> String {
+    STRONG_RUNTIME
+        .replace("__SUPERCOV_MODULE__", module)
+        .replace(
+            "__SUPERCOV_BUFFER_EXPORT__",
+            &format!("__supercov_strong_buffer_{key}"),
+        )
+        .replace(
+            "__SUPERCOV_ACTIVATE_EXPORT__",
+            &format!("__supercov_strong_activate_{key}"),
+        )
 }
 
 const STRONG_RUNTIME: &str = include_str!("../runtime-assets/rust-strong-runtime.rs");
@@ -380,6 +391,7 @@ mod tests {
         assert!(reasons.contains(&Some("opaque-return")));
         assert!(reasons.contains(&Some("let-chain")));
         assert!(reasons.contains(&None));
-        assert!(runtime("rt").contains("mod rt"));
+        assert!(runtime("rt", "k").contains("mod rt"));
+        assert!(runtime("rt", "k").contains("__supercov_strong_activate_k"));
     }
 }

@@ -1270,7 +1270,11 @@ pub(crate) fn prepare_rust_strong_project(
             reason: error.to_string(),
         })?;
         source.push('\n');
-        source.push_str(&crate::rust_schemata::runtime(&runtime_module));
+        let relative = confined_relative(&workspace, &root).expect(INSIDE);
+        source.push_str(&crate::rust_schemata::runtime(
+            &runtime_module,
+            &crate_key("strong", &relative),
+        ));
         fs::write(&root, source).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),

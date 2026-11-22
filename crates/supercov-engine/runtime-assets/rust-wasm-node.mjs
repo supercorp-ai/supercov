@@ -12,9 +12,35 @@ import { join } from "node:path";
 
 const instances = (globalThis.__supercovWasm ??= []);
 const Instance = WebAssembly.Instance;
+
+// A strong pass names the active mutant (`<file>#<index>`) in the
+// environment, which wasm cannot read: each switched crate's runtime exports
+// a buffer for the file and a function that switches the mutant on, called
+// here as the module is instantiated, before any test runs.
+function activate(instance) {
+  const named = process.env.SUPERCOV_ACTIVE_MUTANT;
+  const at = named ? named.lastIndexOf("#") : -1;
+  if (at < 0) return;
+  const file = new TextEncoder().encode(named.slice(0, at));
+  const index = BigInt(named.slice(at + 1));
+  const exports = instance.exports;
+  for (const name of Object.keys(exports)) {
+    if (!name.startsWith("__supercov_strong_activate_") || !exports.memory) continue;
+    const buffer = exports[name.replace("_activate_", "_buffer_")];
+    if (typeof buffer !== "function") continue;
+    try {
+      new Uint8Array(exports.memory.buffer, Number(buffer()), file.length).set(file);
+      exports[name](file.length, index);
+    } catch {
+      // A module that cannot take the mutant runs without it.
+    }
+  }
+}
+
 function Recorded(module, imports) {
   const instance = new Instance(module, imports);
   instances.push(instance);
+  activate(instance);
   return instance;
 }
 Recorded.prototype = Instance.prototype;
@@ -24,7 +50,9 @@ for (const name of ["instantiate", "instantiateStreaming"]) {
   if (typeof original !== "function") continue;
   WebAssembly[name] = async function (...args) {
     const result = await original.apply(WebAssembly, args);
-    instances.push(result instanceof Instance ? result : result.instance);
+    const instance = result instanceof Instance ? result : result.instance;
+    instances.push(instance);
+    activate(instance);
     return result;
   };
 }

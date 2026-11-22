@@ -513,6 +513,34 @@ fn push_wrapper(
 
 /// Spaces in place of `bytes`, their line breaks kept so every line stays
 /// where it was.
+/// The scope a wrapper of `range` needs to go around every wrapper inside
+/// it that starts or ends where it does, and inside every wrapper around it
+/// that does: `None` where no scope can (a wrapper's pair of insertions is
+/// pushed together, its start then its end).
+fn outer_scope(insertions: &[Insertion], range: TextRange) -> Option<usize> {
+    let (start, end) = range_offsets(range);
+    let mut lowest = 1usize;
+    let mut highest = usize::MAX;
+    for pair in insertions.windows(2) {
+        let [opening, closing] = pair else { continue };
+        if opening.kind != InsertionKind::Start || closing.kind != InsertionKind::End {
+            continue;
+        }
+        let (from, to) = (opening.offset, closing.offset);
+        let inside = from >= start && to <= end && (from == start || to == end);
+        let around = from <= start
+            && to >= end
+            && (from == start || to == end)
+            && (from, to) != (start, end);
+        if inside {
+            lowest = lowest.max(opening.scope_len.saturating_add(1));
+        } else if around {
+            highest = highest.min(opening.scope_len.saturating_sub(1));
+        }
+    }
+    (lowest <= highest).then_some(lowest)
+}
+
 fn blank(bytes: &mut [u8]) {
     bytes
         .iter_mut()
@@ -3233,14 +3261,50 @@ fn numbered_file(
                 || cannot_carry_probe(node)
         };
         let mut ordinal = |id: &str| hit_ordinal(id);
-        for edit in crate::rust_value_probes::place(file, source, runtime_path, &skip, &mut ordinal)
-        {
+        let mut edits =
+            crate::rust_value_probes::place(file, source, runtime_path, &skip, &mut ordinal);
+        // A returned value goes around what is placed inside it, its own
+        // operators' probes among them: placed last, it sees them all.
+        edits.sort_by_key(|edit| {
+            matches!(
+                edit,
+                crate::rust_value_probes::ValueEdit::Wrap { outer: true, .. }
+            )
+        });
+        for edit in edits {
             match edit {
+                // An operator's probe goes inside every wrapper of its
+                // range, a returned value's around all of them.
                 crate::rust_value_probes::ValueEdit::Wrap {
                     range,
                     prefix,
                     suffix,
+                    outer: false,
                 } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
+                crate::rust_value_probes::ValueEdit::Wrap {
+                    range,
+                    prefix,
+                    suffix,
+                    outer: true,
+                } => {
+                    if let Some(scope_len) = outer_scope(&insertions, range) {
+                        let (start, end) = range_offsets(range);
+                        insertions.push(Insertion {
+                            offset: start,
+                            kind: InsertionKind::Start,
+                            scope_len,
+                            rank: 0,
+                            text: prefix,
+                        });
+                        insertions.push(Insertion {
+                            offset: end,
+                            kind: InsertionKind::End,
+                            scope_len,
+                            rank: 0,
+                            text: suffix,
+                        });
+                    }
+                }
                 crate::rust_value_probes::ValueEdit::At { offset, text } => {
                     push_direct(&mut insertions, offset, text);
                 }
