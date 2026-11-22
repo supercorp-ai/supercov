@@ -5651,3 +5651,230 @@ fn kotlin_declared_nullable(node: Node, source: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ids of a file's mutants, enumerated as the run lists them.
+    fn ids(file: &str, source: &str) -> Vec<String> {
+        let index = ProjectIndex::of([(file, source)]);
+        crate::jvm_strong::file_mutants(file, source, &index)
+            .expect("parses")
+            .mutants
+            .iter()
+            .map(|mutant| crate::jvm_strong::mutant_id(file, mutant))
+            .collect()
+    }
+
+    /// An override of `Any`'s `hashCode`, `equals` or `toString` returns
+    /// what `Any` declares, whatever its expression body's type reads as
+    /// here: PIT mutates its return by that type.
+    #[test]
+    fn an_override_of_any_s_members_returns_any_s_type() {
+        let file = "a/B.kt";
+        let source = "class B(val a: Int) {\n    override fun hashCode() = hash(a)\n    override fun equals(other: Any?) = same(other)\n    override fun toString() = describe(a)\n    fun hashCode(x: Int) = hash(x)\n    fun other() = hash(a)\n}\n";
+        let listed = ids(file, source);
+        let on = |line: u32| {
+            listed
+                .iter()
+                .filter(|id| id.starts_with(&format!("{file}:{line}:")))
+                .map(|id| {
+                    id.rsplit_once(':')
+                        .map_or("", |(rest, _)| rest)
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or("")
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(on(2), ["PrimitiveReturns"], "{listed:?}");
+        assert_eq!(
+            on(3),
+            ["BooleanFalseReturnVals", "BooleanTrueReturnVals"],
+            "{listed:?}"
+        );
+        assert_eq!(on(4), ["EmptyObjectReturnVals"], "{listed:?}");
+        // Not `Any`'s: of a type the source does not say.
+        assert!(on(5).is_empty() && on(6).is_empty(), "{listed:?}");
+    }
+
+    /// The ids on `line`, each as `Mutator:descriptor`.
+    fn on_line(listed: &[String], file: &str, line: u32) -> Vec<String> {
+        listed
+            .iter()
+            .filter(|id| id.starts_with(&format!("{file}:{line}:")))
+            .map(|id| {
+                let parts = id.rsplitn(3, ':').collect::<Vec<_>>();
+                format!("{}:{}", parts[1], parts[0])
+            })
+            .collect()
+    }
+
+    /// Java's forms past the parity fixtures': a `var`, a bounded type
+    /// variable, varargs, a block lambda, a C-style array, a catch and a
+    /// try-with-resources, conditions that are calls, patterns, fields
+    /// and array elements, and constants javac folds.
+    #[test]
+    fn java_forms_list_the_mutants_pit_makes_of_them() {
+        let file = "a/J.java";
+        let source = r#"package a;
+
+import java.util.List;
+import java.util.Map;
+
+public class J {
+    static final int H = 0x1F;
+    static final int B = 0b101;
+    static final int O = 017;
+    static final long SHIFTED = H >>> 2;
+    static final int NOT = ~H;
+    static final boolean PICK = true ? false : true;
+    static final int CAST = (int) 2.7;
+    static final double HALF = 0.5;
+    boolean ready;
+    boolean[] flags = new boolean[2];
+
+    static <T extends Comparable<T>> T max(T a, T b) {
+        return a.compareTo(b) > 0 ? a : b;
+    }
+
+    static int sum(int... xs) {
+        int s = 0;
+        for (int x : xs) {
+            s += x;
+        }
+        return s;
+    }
+
+    int run(List<String> names, Object o, Map.Entry<String, Integer> e) throws Exception {
+        var count = names.size();
+        int seen[] = new int[3];
+        Runnable r = () -> {
+            seen[0]++;
+        };
+        r.run();
+        if (names.isEmpty()) {
+            return 0;
+        }
+        if (o instanceof String) {
+            count++;
+        }
+        if (this.ready && flags[0]) {
+            count--;
+        }
+        try (java.io.StringReader reader = new java.io.StringReader("x")) {
+            return reader.read() + count + H * 2 + e.getKey().length();
+        } catch (RuntimeException failed) {
+            throw failed;
+        }
+    }
+}
+"#;
+        let listed = ids(file, source);
+        let mut sorted = |line: u32| {
+            let mut found = on_line(&listed, file, line);
+            found.sort();
+            found
+        };
+        // Constants javac folds: nothing to mutate.
+        for line in 7..=15 {
+            assert!(sorted(line).is_empty(), "{line}: {listed:?}");
+        }
+        assert_eq!(
+            sorted(19),
+            [
+                "ConditionalsBoundary:>=",
+                "NegateConditionals:negated",
+                "NullReturnVals:null"
+            ]
+        );
+        assert_eq!(sorted(25), ["Math:-="]);
+        assert_eq!(sorted(27), ["PrimitiveReturns:0"]);
+        assert_eq!(sorted(34), ["Math:--"]);
+        assert_eq!(sorted(36), ["VoidMethodCall:removed"]);
+        for line in [37, 40] {
+            assert_eq!(sorted(line), ["NegateConditionals:negated"], "{line}");
+        }
+        assert_eq!(sorted(41), ["Increments:--"]);
+        assert_eq!(
+            sorted(43),
+            ["NegateConditionals:negated", "NegateConditionals:negated"]
+        );
+        // The try-with-resources body's return is the compiler's, and
+        // `H * 2` is folded: the three additions alone.
+        assert_eq!(sorted(47), ["Math:-", "Math:-", "Math:-"]);
+    }
+
+    /// Kotlin's forms past the parity fixture's: an `init` block, a
+    /// secondary constructor, an object expression, a lambda that
+    /// destructures, a Boolean property set, a logger's line, a float, a
+    /// `when` and an `if` as values, ranges, infix shifts, collections a
+    /// call makes and a `this.` member.
+    #[test]
+    fn kotlin_forms_list_the_mutants_pit_makes_of_them() {
+        let file = "a/K.kt";
+        let source = r#"package a
+
+import org.slf4j.LoggerFactory
+
+class K(var count: Int) {
+    private val logger = LoggerFactory.getLogger(K::class.java)
+    var isOpen = false
+    val ratio = 1.5f
+
+    init {
+        count = count + 1
+    }
+
+    constructor(text: String) : this(text.length * 2) {
+        count = count - 1
+    }
+
+    fun pairs(map: Map<String, Int>): Int {
+        logger.info("pairs " + (count + 1))
+        isOpen = true
+        val run = object : Runnable {
+            override fun run() {
+                count = count * 3
+            }
+        }
+        run.run()
+        val sizes = map.entries.map { (key, value) -> key.length + value }
+        val small = if (count > 2) 1 else 0
+        val kind = when (count) {
+            1 -> 10
+            else -> 20
+        }
+        val shifted = count shl 2
+        val inside = count in 1..small
+        val names = setOf("a") + mapOf("b" to 1).keys
+        return sizes.size + small + kind + shifted + this.count + names.size + (if (inside) 1 else 0)
+    }
+}
+"#;
+        let listed = ids(file, source);
+        let mut sorted = |line: u32| {
+            let mut found = on_line(&listed, file, line);
+            found.sort();
+            found
+        };
+        assert_eq!(sorted(11), ["Math:-"]);
+        assert_eq!(sorted(15), ["Math:+"]);
+        // A logging line: nothing.
+        assert!(sorted(19).is_empty(), "{listed:?}");
+        assert_eq!(sorted(23), ["Math:/"]);
+        assert_eq!(sorted(14), ["Math:/"]);
+        // A call on an object whose type the source does not name: not
+        // known to return nothing, so not listed.
+        assert!(sorted(26).is_empty(), "{listed:?}");
+        assert_eq!(sorted(27), ["Math:-"]);
+        assert_eq!(
+            sorted(28),
+            ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+        );
+        assert_eq!(sorted(33), ["Math:shr"]);
+        assert_eq!(sorted(36).len(), 8, "{listed:?}");
+    }
+}
