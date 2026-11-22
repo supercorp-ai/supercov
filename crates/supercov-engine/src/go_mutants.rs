@@ -533,6 +533,7 @@ pub(crate) fn candidates_of(
                     at: site.token.0 - site.node.0,
                 }),
                 value_used: false,
+                effects: false,
                 statement: statement.clone(),
                 function: function.clone(),
                 decision: None,
