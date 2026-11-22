@@ -793,6 +793,9 @@ both list, Regex mutants included.
 | mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
 | pathval | Mocha (ES modules) | mocha | 123 | 13 | 1.6 | 0.9 + 1.3 |
 | deep-eql | Mocha (ES modules) | mocha | (StrykerJS cannot run it) | | | 1.1 + 5.9 |
+| uuid 9.0.1 | Jest 28 | jest | 682 | 1 (error) | 12.6 | 1.8 + 30.8 |
+| yup 1.4.0 | Jest 27 | jest | (StrykerJS cannot run it) | | | 2.8 + 124 |
+| luxon 3.4.4, `src/duration.js` | Jest 29 | jest | (StrykerJS cannot run it) | | | 3.8 + 344 |
 
 No mutant StrykerJS detected (killed or timed out) is `survived` or
 `no-coverage` in Supercov, and none it let live is detected by Supercov but
@@ -819,6 +822,14 @@ the ones explained here, each applied by hand:
   hand (`index.js:84` without `^`, `index.js:174` `===` to `!==`), each
   survives `npx mocha`. StrykerJS's Mocha runner cannot run deep-eql at all:
   it needs Mocha's `lib/cli/run-helpers`, which Mocha 12 no longer has.
+- uuid `v35.js:19` and the like, a function body emptied: `no-placeable-ancestor`,
+  as for cron-parser. yup: StrykerJS's Jest runner reads no Jest 27
+  configuration from `package.json`, and given it, still finds a file "must
+  contain at least one test". luxon: StrykerJS 10.1.1's Babel 8 cannot load
+  luxon's Babel 7 configuration ("Requires Babel ^7.0.0-0"). (uuid needs its
+  Babel environment named to StrykerJS's transform, as StrykerJS's Jest runner
+  sets `BABEL_ENV=test`; luxon's seven test files whose locale-week and
+  calendar tests fail on Node 24's ICU are left out of both.)
 - Verdicts StrykerJS and Supercov both detect differ in kind 52 times
   (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
   wrong is whichever the runner sees first.
@@ -829,6 +840,21 @@ assertions at a tap or node:test file's top level belonged to no test (ini:
 calls something was decided `survived` from its value alone (dot-prop
 `index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
 no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Jest suites after release QA.** QA's uuid pass read 114 errors and luxon's
+estimated hours. The errors were mutants a capped pass never reached, each
+recorded `error` when the pass ended; an interrupted pass now leaves them
+without a verdict for the next. The time had three causes, each fixed: no Jest
+test recorded its duration, so every file cost the same and a mutant's
+cheapest file was a guess; a mutant's files ran one after another, so a
+survivor of module-level code waited on 58 files in turn; and the resident
+Jest loaded the project's configuration and reporters for every job. uuid's
+pass went from 72 s to 31 s and yup's from 250 s to 124 s on the same
+machines; luxon's `src/duration.js` (615 mutants) takes 344 s, most of it
+module-level survivors' files. uuid is still 2.4 times StrykerJS's 12.6 s: its
+tests take 26 ms in all, and a job (a Jest `runCLI` of one test file) costs
+650 ms against StrykerJS's 290 ms a mutant, which runs a mutant's covering
+tests of every file in one `runCLI`.
 
 **Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
 runs the whole command per mutant, and Supercov's jobs of one file and its
