@@ -198,12 +198,13 @@ fn site(node: Node, source: &str) -> Option<GoSite> {
     })
 }
 
+/// A listed mutant's token bytes, mutator and replacement.
+pub type ListedToken = ((usize, usize), &'static str, &'static str);
+
 /// Each mutant of `source` in its list's order (the order
 /// `candidate_mutants` lists them, the index a switch carries): its token's
 /// bytes, its mutator and what the token becomes.
-pub fn listed_tokens(
-    source: &str,
-) -> Result<Vec<((usize, usize), &'static str, &'static str)>, GoInstrumenterError> {
+pub fn listed_tokens(source: &str) -> Result<Vec<ListedToken>, GoInstrumenterError> {
     let tree = parse(source)?;
     Ok(sites(&tree, source)
         .into_iter()

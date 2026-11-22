@@ -44,7 +44,9 @@ type request struct {
 	// is in.
 	Patterns []string `json:"patterns"`
 	// Build tags, as `-tags` takes them.
-	Tags    string   `json:"tags"`
+	Tags string `json:"tags"`
+	// The go command to list with: the one the project's tests run.
+	Go      string   `json:"go"`
 	Mutants []mutant `json:"mutants"`
 }
 
@@ -208,7 +210,11 @@ func list(req request) ([]listed, error) {
 		args = append(args, "-tags", req.Tags)
 	}
 	args = append(args, req.Patterns...)
-	command := exec.Command("go", args...)
+	program := req.Go
+	if program == "" {
+		program = "go"
+	}
+	command := exec.Command(program, args...)
 	command.Dir = req.Dir
 	var stderr bytes.Buffer
 	command.Stderr = &stderr

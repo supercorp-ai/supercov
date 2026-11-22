@@ -35,10 +35,8 @@ var (
 	strongIndex int32 = -1
 	// How many times the active mutant's switch may choose it before the
 	// mutant counts as a timeout: a loop the mutant made endless ends in
-	// the test binary rather than hanging it. Its tests' time limit is the
-	// other bound; this one is reached first only by a loop that runs a
-	// mutated operator a billion times.
-	strongHitLimit int64 = 1_000_000_000
+	// the test binary rather than hanging it.
+	strongHitLimit int64 = 1_000_000
 	strongHits     atomic.Int64
 	strongTimedOut sync.Once
 )
@@ -49,10 +47,11 @@ const ActiveMutantEnv = "SUPERCOV_ACTIVE_MUTANT"
 // MutantHitLimitEnv overrides the hit limit.
 const MutantHitLimitEnv = "SUPERCOV_MUTANT_HIT_LIMIT"
 
-// MutantTimeoutFileEnv names a file written when the hit limit is reached,
+// StrongResultsEnv names the pass's results: a process whose mutant passes
+// the hit limit appends a line to the file beside it (`.timeouts.jsonl`),
 // so a timeout is told apart from a failure even where the code under test
 // recovers the panic that reports it.
-const MutantTimeoutFileEnv = "SUPERCOV_MUTANT_TIMEOUT_FILE"
+const StrongResultsEnv = "SUPERCOV_STRONG_RESULTS"
 
 // MutantTimeout is what the switch panics with past the hit limit.
 type MutantTimeout struct{}
@@ -107,9 +106,17 @@ func strongHit() {
 		return
 	}
 	strongTimedOut.Do(func() {
-		if path := os.Getenv(MutantTimeoutFileEnv); path != "" {
-			_ = os.WriteFile(path, []byte(strongFile+"#"+strconv.Itoa(int(strongIndex))+"\n"), 0o644)
+		results := os.Getenv(StrongResultsEnv)
+		if results == "" {
+			return
 		}
+		file, err := os.OpenFile(results+".timeouts.jsonl", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return
+		}
+		mutant := strconv.Quote(strongFile + "#" + strconv.Itoa(int(strongIndex)))
+		_, _ = file.WriteString(`{"mutant":` + mutant + `,"attemptId":null,"pass":"main"}` + "\n")
+		_ = file.Close()
 	})
 	panic(MutantTimeout{})
 }

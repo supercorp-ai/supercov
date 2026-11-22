@@ -1354,7 +1354,6 @@ struct Schemata<'a> {
     source: &'a str,
     alias: &'a str,
     slot: String,
-    generics: bool,
     /// Each switched site's token offset, and its mutants as
     /// `(index, replacement)`.
     by_token: std::collections::HashMap<usize, Vec<(usize, String)>>,
@@ -1518,10 +1517,6 @@ impl Schemata<'_> {
                 return true;
             }
             "<" | "<=" | ">" | ">=" => {
-                if !self.generics {
-                    self.refuse(site.token.0, "no-generics");
-                    return false;
-                }
                 let (name, boundary, negation) = match operator {
                     "<" => ("Lss", "<=", ">="),
                     "<=" => ("Leq", "<", ">"),
@@ -1541,10 +1536,6 @@ impl Schemata<'_> {
                 )
             }
             "+" | "-" | "*" | "/" | "%" => {
-                if !self.generics {
-                    self.refuse(site.token.0, "no-generics");
-                    return false;
-                }
                 let (name, indices) = match operator {
                     "+" => ("Add", Self::index_of(mutants, "-", 0)),
                     "-" => (
@@ -1581,10 +1572,6 @@ impl Schemata<'_> {
         let Some(operand) = node.child_by_field_name("operand") else {
             return false;
         };
-        if !self.generics {
-            self.refuse(site.token.0, "no-generics");
-            return false;
-        }
         let slot = self.slot.clone();
         let (name, indices) = match site.operator.as_str() {
             "-" => (
@@ -1731,15 +1718,18 @@ fn site_kind_name(kind: crate::go_mutants::SiteKind, actual: &str) -> &'static s
 /// `source` (the file mutants.json keys `key`) with a switch for each of
 /// `mutants` that can have one. `refused` are token offsets whose sites a
 /// build refused: they are left as written, their mutants unplaceable.
-/// `generics` says whether the file's language has them (Go 1.21 and
-/// later: the switches lean on its inference of untyped arguments).
+/// `language` is the minor version of Go the file is compiled as: below
+/// 1.21 (the switches lean on that version's inference of untyped
+/// arguments) the file's `//go:build` line gains `go1.21`, which compiles
+/// that one file as Go 1.21 -- and no later, so a loop variable keeps the
+/// meaning it had before 1.22.
 pub fn strong_rewrite(
     key: &str,
     source: &str,
     mutants: &[StrongMutant],
     facts: &std::collections::HashMap<usize, SiteFacts>,
     refused: &std::collections::HashSet<usize>,
-    generics: bool,
+    language: u32,
 ) -> Result<StrongFile, GoInstrumenterError> {
     let tree = parse(source)?;
     let sites = crate::go_mutants::sites(&tree, source)
@@ -1772,8 +1762,6 @@ pub fn strong_rewrite(
         };
         let reason = if site_facts.constant_context {
             Some("constant-context")
-        } else if !generics {
-            Some("no-generics")
         } else if site_facts.root.is_none() {
             Some("constant-without-root")
         } else {
@@ -1808,7 +1796,6 @@ pub fn strong_rewrite(
         roots,
         by_node,
         slot: strong_slot_name(key),
-        generics,
         by_token,
         facts,
         sites,
@@ -1853,6 +1840,25 @@ pub fn strong_rewrite(
         .expect("a parsed file has a package clause");
     let shift = import.text.len();
     text.insert_str(import.at, &import.text);
+    // The language version the switches need, for this file alone.
+    let mut lead = 0;
+    if language < 21 {
+        let header = text.split("\npackage ").next().unwrap_or_default().len();
+        match text[..header].find("//go:build ") {
+            Some(at) => {
+                let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+                let expression = text[at + "//go:build ".len()..end].trim().to_owned();
+                let line = format!("//go:build ({expression}) && go1.21");
+                lead = line.len() as isize - (end - at) as isize;
+                text.replace_range(at..end, &line);
+            }
+            None => {
+                let line = "//go:build go1.21\n\n";
+                lead = line.len() as isize;
+                text.insert_str(0, line);
+            }
+        }
+    }
     let key_literal = serde_json::to_string(key).expect("a string serializes");
     text.push_str(&format!(
         "\nvar {slot} = {RUNTIME_ALIAS}.StrongSlot({key_literal})\n"
@@ -1860,7 +1866,10 @@ pub fn strong_rewrite(
     let sites = placed
         .into_iter()
         .map(|(start, end, indices)| {
-            let moved = |at: usize| if at >= import.at { at + shift } else { at };
+            let moved = |at: usize| {
+                let at = if at >= import.at { at + shift } else { at };
+                at.saturating_add_signed(lead)
+            };
             (moved(start), moved(end), indices)
         })
         .collect();

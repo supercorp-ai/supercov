@@ -609,6 +609,34 @@ fn go_flags(
     (flags, fresh, serial)
 }
 
+/// Whether the run lists its mutants: `SUPERCOV_MUTANTS` is `1` or `true`.
+fn mutants_requested() -> bool {
+    std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
+}
+
+/// The Go mutants of every source the run measured, read from the project.
+fn list_measured_mutants(
+    root: &Path,
+    project: &PreparedGoProject,
+) -> crate::mutant_list::MutantsFile {
+    let mut files = BTreeMap::new();
+    for (relative, _) in &project.instrumented {
+        let Ok(source) = fs::read_to_string(root.join(relative)) else {
+            continue;
+        };
+        if let Ok(mutants) = crate::go_mutants::candidate_mutants(relative, &source)
+            && !mutants.is_empty()
+        {
+            files.insert(relative.clone(), mutants);
+        }
+    }
+    crate::mutant_list::MutantsFile::listed(
+        crate::go_mutants::GO,
+        crate::go_mutants::MUTANT_SET,
+        files,
+    )
+}
+
 /// The fingerprint a later query compares against the stored run.
 pub fn current_go_integrity(
     root: &Path,
@@ -836,15 +864,25 @@ pub fn run_direct_go(
                     silent.push(package.directory.clone());
                     return Ok(());
                 };
-                let evidence = read_evidence(&bytes)
+                let mut evidence = read_evidence(&bytes)
                     .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
+                for test in &mut evidence.tests {
+                    test.package = package.directory.clone();
+                }
                 for test in &evidence.tests {
                     outcomes.push(OwnedTestOutcome {
                         name: test.name.clone(),
                         runner: test.runner.clone(),
                         package: package.directory.clone(),
                         file: package.declared_in.get(&test.name).cloned(),
-                        status: test.status.clone(),
+                        // An Example's outcome is checked after it returns,
+                        // where no record of it reaches: it ran `unknown`.
+                        // A command that passed passed every one of them.
+                        status: if test.status == "unknown" && exit_code == 0 {
+                            "passed".to_owned()
+                        } else {
+                            test.status.clone()
+                        },
                         attributed: !test.unattributed,
                     });
                 }
@@ -903,8 +941,18 @@ pub fn run_direct_go(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
+        let mut entries = run.archive_entries();
+        // `SUPERCOV_MUTANTS=1` (as `supercov mutants` measures): the
+        // mutants of every file measured, listed with the run.
+        if mutants_requested() {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&list_measured_mutants(&root, &instrumented.project))
+                    .expect("plain data serializes"),
+            });
+        }
         let raw = write_archive(
-            crate::source_capture::append(run.archive_entries(), &source_inputs),
+            crate::source_capture::append(entries, &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

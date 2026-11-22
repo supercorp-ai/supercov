@@ -61,6 +61,10 @@ pub struct PackedVector {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnedTestEvidence {
     pub name: String,
+    /// The package whose binary recorded it, where a run merges several
+    /// (Go): two packages may each have a `TestLRU`, and each is its own
+    /// test. Empty where the evidence is one process's.
+    pub package: String,
     /// How the test ended, as the framework saw it: `passed`, `failed` or
     /// `skipped`.
     pub status: String,
@@ -176,6 +180,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             });
         }
         tests.push(OwnedTestEvidence {
+            package: String::new(),
             name,
             status,
             runner,
@@ -652,13 +657,19 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
     let recorded = evidence
         .tests
         .iter()
-        .map(|test| (test.name.clone(), test))
+        .map(|test| ((test.package.clone(), test.name.clone()), test))
         .collect::<BTreeMap<_, _>>();
     let empty = OwnedTestEvidence::default();
     let mut raw_results = outcomes
         .iter()
         .map(|outcome| {
-            let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
+            // By its package where the evidence names one: a test of the
+            // same name in another package is another test.
+            let test = recorded
+                .get(&(outcome.package.clone(), outcome.name.clone()))
+                .or_else(|| recorded.get(&(String::new(), outcome.name.clone())))
+                .copied()
+                .unwrap_or(&empty);
             // A test nothing could be credited to takes no hits at all, and
             // says so. Handing it the record's probes would be worse than
             // wrong: the runtime gives an unattributed record none, so the
@@ -780,6 +791,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
         let test_id = format!("{}::background", declaration.language);
         let phase = test_phase(&test_id);
         let background = OwnedTestEvidence {
+            package: String::new(),
             name: "background".into(),
             status: "unknown".into(),
             runner: String::new(),
@@ -1208,6 +1220,7 @@ mod tests {
             global: vec![1, 1],
             tests: vec![
                 OwnedTestEvidence {
+                    package: String::new(),
                     name: "TestSerial".into(),
                     status: "passed".into(),
                     runner: String::new(),
@@ -1217,6 +1230,7 @@ mod tests {
                     vectors: Vec::new(),
                 },
                 OwnedTestEvidence {
+                    package: String::new(),
                     name: "TestParallel".into(),
                     status: "passed".into(),
                     runner: String::new(),

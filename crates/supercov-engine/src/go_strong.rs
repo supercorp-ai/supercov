@@ -105,6 +105,8 @@ impl Verdict {
 /// test -c` and test flags for the binary.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GoFlags {
+    /// The `go` the command runs (`go`, or the path it names).
+    pub program: String,
     pub build: Vec<String>,
     pub test: Vec<String>,
     pub tags: String,
@@ -115,13 +117,17 @@ pub struct GoFlags {
 /// `-short`, `-cpu`, `-parallel` for the binary. The rest (`-run`, `-v`,
 /// `-count`, `-cover`, `-timeout`) the pass sets itself, or does not need.
 pub fn go_flags(command: &[String]) -> GoFlags {
-    let mut flags = GoFlags::default();
+    let mut flags = GoFlags {
+        program: "go".into(),
+        ..GoFlags::default()
+    };
     let Some(test) = command
         .windows(2)
         .position(|pair| pair[1] == "test" && pair[0].rsplit('/').next() == Some("go"))
     else {
         return flags;
     };
+    flags.program = command[test].clone();
     let mut arguments = command[test + 2..].iter().peekable();
     while let Some(argument) = arguments.next() {
         let Some(flag) = argument.strip_prefix('-') else {
@@ -163,7 +169,7 @@ pub fn go_flags(command: &[String]) -> GoFlags {
 const HELPER_SOURCE: &str = include_str!("../runtime-assets/go/mutants/main.go");
 const HELPER_MODULE: &str = include_str!("../runtime-assets/go/mutants/go.mod");
 
-fn helper(root: &Path) -> Result<PathBuf, String> {
+fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
     let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
     let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
     let binary = directory.join(if cfg!(windows) {
@@ -178,7 +184,7 @@ fn helper(root: &Path) -> Result<PathBuf, String> {
     crate::fault_fs::create_dir_all(&source).map_err(|error| error.to_string())?;
     crate::fault_fs::write(source.join("main.go"), HELPER_SOURCE).map_err(|e| e.to_string())?;
     crate::fault_fs::write(source.join("go.mod"), HELPER_MODULE).map_err(|e| e.to_string())?;
-    let output = Command::new("go")
+    let output = Command::new(go)
         .args(["build", "-o"])
         .arg(&binary)
         .arg(".")
@@ -217,7 +223,7 @@ struct CheckAnswer {
 /// token and replacement) and the indices the plan runs.
 struct FileMutants {
     source: String,
-    tokens: Vec<((usize, usize), &'static str, &'static str)>,
+    tokens: Vec<crate::go_mutants::ListedToken>,
 }
 
 /// The pass's own record of what it did, written as the summary line.
@@ -317,6 +323,21 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
+    /// Whether a process of `mutant` passed its hit limit: the runtime's
+    /// line beside the results names it.
+    fn timed_out(&self, mutant: &str) -> bool {
+        let path = crate::strong_driver::StrongRun {
+            plan: self.request.plan.to_owned(),
+            results: self.request.results.to_owned(),
+        }
+        .timeouts_path();
+        std::fs::read_to_string(path).is_ok_and(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|record| record["mutant"] == mutant)
+        })
+    }
+
     fn record(&self, id: &str, verdict: &Verdict) {
         let line = json!({
             "id": id,
@@ -343,11 +364,6 @@ impl Pass<'_> {
         limit: Duration,
     ) -> RunOutcome {
         let started = Instant::now();
-        let marker = self.scratch.join(format!(
-            "timeout-{}-{}",
-            std::process::id(),
-            crate::stable_ids::digest(&[&format!("{started:?}"), mutant.unwrap_or("-"), directory])
-        ));
         let mut command = Command::new(binary);
         command
             .current_dir(self.workspace.join(directory))
@@ -359,7 +375,8 @@ impl Pass<'_> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env(crate::go_strong::TIMEOUT_FILE_ENV, &marker)
+            .env(crate::strong_driver::STRONG_RESULTS, self.request.results)
+            .env(crate::strong_driver::MUTANT_HIT_LIMIT, hit_limit())
             .env_remove(ACTIVE_MUTANT_ENV);
         if mutant.is_some() {
             command.arg("-test.failfast");
@@ -412,8 +429,7 @@ impl Pass<'_> {
             .map(|reader| reader.join().unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n");
-        let hit_limit = marker.exists();
-        let _ = std::fs::remove_file(&marker);
+        let hit_limit = mutant.is_some_and(|mutant| self.timed_out(mutant));
         let (failed, started_tests, durations) = read_output(&text);
         self.profile.lock().expect("profile").runs += 1;
         RunOutcome {
@@ -438,10 +454,24 @@ pub fn workers() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get))
 }
 
+/// The hit limit a Go mutant's process runs with: `SUPERCOV_MUTANT_HIT_LIMIT`
+/// where it is set, else a billion. The contract's million is too few for
+/// Go: btree's `TestBTree` evaluates one comparison more than a million
+/// times in a test that passes in a quarter of a second, and Gremlins, with
+/// no hit limit, calls the mutant there survived. A billion evaluations
+/// take seconds, about as long as a run's own time limit.
+fn hit_limit() -> String {
+    std::env::var(crate::strong_driver::MUTANT_HIT_LIMIT)
+        .ok()
+        .filter(|limit| limit.parse::<u64>().is_ok_and(|limit| limit > 0))
+        .unwrap_or_else(|| GO_HIT_LIMIT.to_string())
+}
+
+/// The Go driver's default hit limit.
+pub const GO_HIT_LIMIT: u64 = 1_000_000_000;
+
 /// The variable the runtime reads its active mutant from.
-pub const ACTIVE_MUTANT_ENV: &str = "SUPERCOV_ACTIVE_MUTANT";
-/// The file the runtime writes when the active mutant passes its hit limit.
-pub const TIMEOUT_FILE_ENV: &str = "SUPERCOV_MUTANT_TIMEOUT_FILE";
+const ACTIVE_MUTANT_ENV: &str = crate::strong_driver::ACTIVE_MUTANT;
 
 fn read_all<R: std::io::Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
@@ -651,7 +681,7 @@ pub fn run_go_strong(
     // Which mutants compile, and what the type checker says of their sites:
     // every listed mutant of each file, since a constant's switch has to
     // hold the largest constant around it whether or not that one runs.
-    let helper = helper(request.root)?;
+    let helper = helper(request.root, &pass.flags.program)?;
     let mut asked = Vec::new();
     for (file, listed) in &files {
         for (index, (token, _, replacement)) in listed.tokens.iter().enumerate() {
@@ -666,6 +696,7 @@ pub fn run_go_strong(
         "dir": request.root,
         "patterns": patterns,
         "tags": pass.flags.tags,
+        "go": pass.flags.program,
         "mutants": asked.iter().map(|(file, _, offset, replacement)| json!({
             "file": file, "offset": offset, "new": replacement,
         })).collect::<Vec<_>>(),
@@ -753,7 +784,7 @@ pub fn run_go_strong(
                 mutants,
                 &facts_of(file),
                 refused.get(file).unwrap_or(&HashSet::new()),
-                crate::go_project::language_minor(request.root, file, source) >= 21,
+                crate::go_project::language_minor(request.root, file, source),
             )
             .map_err(|e| e.to_string())?;
             let text = strong
@@ -766,7 +797,7 @@ pub fn run_go_strong(
             .keys()
             .map(|file| pattern(&directory_of(file)))
             .collect::<BTreeSet<_>>();
-        let output = Command::new("go")
+        let output = Command::new(&pass.flags.program)
             .arg("build")
             .arg("-gcflags=-e")
             .args(&pass.flags.build)
@@ -980,10 +1011,12 @@ fn build_package(
         Some((_, bins)) => bins.join(&file_name),
         None => pass.bins.join(&file_name),
     };
-    let mut command = Command::new("go");
+    let mut command = Command::new(&pass.flags.program);
     command
         .arg("test")
         .arg("-c")
+        // `go vet` would read the switches, not the program.
+        .arg("-vet=off")
         .args(&pass.flags.build)
         .arg("-o")
         .arg(&binary);
@@ -1352,6 +1385,7 @@ mod tests {
         );
         assert_eq!(flags.build, ["-tags=a,b", "-mod=vendor"]);
         assert_eq!(flags.test, ["-test.cpu=2"]);
+        assert_eq!(flags.program, "/usr/bin/go");
     }
 
     #[test]

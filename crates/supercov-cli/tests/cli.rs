@@ -24157,3 +24157,67 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         );
     }
 }
+
+/// Go's strong pass: every Gremlins mutant of a module, run in test
+/// binaries built once, each mutant against the tests that ran its code.
+/// A mutant that does not compile is `unviable`; a constant Go needs as a
+/// constant is built alone; a loop made endless is a `timeout`; code no
+/// test runs is `no-coverage`.
+#[cfg(unix)]
+#[test]
+fn go_mutants_are_killed_kept_or_found_not_to_compile() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong");
+    project.write("go.mod", "module example.com/calc\n\ngo 1.22\n");
+    project.write(
+        "calc.go",
+        "package calc\n\nconst Limit = 2 + 3\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Sum(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Half(n int) int { return n / 2 }\n\nfunc Unused(n int) int { return n - 1 }\n",
+    );
+    project.write(
+        "calc_test.go",
+        "package calc\n\nimport \"testing\"\n\nfunc TestClamp(t *testing.T) {\n\tif Clamp(5) != 5 || Clamp(6) != 5 || Clamp(1) != 1 {\n\t\tt.Fatal(\"clamp\")\n\t}\n}\n\nfunc TestSum(t *testing.T) {\n\tif Sum(4) != 6 {\n\t\tt.Fatal(\"sum\")\n\t}\n}\n\nfunc TestJoinAndHalf(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || Half(0) != 0 {\n\t\tt.Fatal(\"join\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["mutants", "--json", "--", go, "test", "./..."],
+            &[("SUPERCOV_MUTANT_HIT_LIMIT", "100000")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]["status"]
+            .clone()
+    };
+    assert_eq!(listed["data"]["mutantSet"], "gremlins@0.6.0", "{listed}");
+    // Built alone: a constant declaration has no place for a switch.
+    assert_eq!(status("calc.go:3:17-3:18:ArithmeticOperator:-"), "killed");
+    // At 5, `n > 5` and `n >= 5` both return 5: no test can tell them.
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:>="), "survived");
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:<="), "killed");
+    // `i--` never ends the loop.
+    assert_eq!(status("calc.go:14:22-14:24:UpdateOperator:--"), "timeout");
+    // Strings have no `-`.
+    assert_eq!(
+        status("calc.go:20:42-20:43:ArithmeticOperator:-"),
+        "unviable"
+    );
+    // `0 * 2` is `0 / 2`: no test tells them apart.
+    assert_eq!(
+        status("calc.go:22:33-22:34:ArithmeticOperator:*"),
+        "survived"
+    );
+    assert_eq!(
+        status("calc.go:24:35-24:36:ArithmeticOperator:+"),
+        "no-coverage"
+    );
+}
