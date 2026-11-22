@@ -36,6 +36,8 @@ module="$(field module)"
 junit5="$(field junit5)"
 testng="$(field testng)"
 jdk="$(field jdk)"
+gradle_plugin="$(field gradlePlugin)"
+export PIT_GRADLE_PLUGIN="${gradle_plugin:-1.15.0}"
 # The JDK the project builds with: setup-java leaves each one it installed
 # in JAVA_HOME_<version>_X64.
 jdk_home="JAVA_HOME_${jdk}_X64"
@@ -50,10 +52,45 @@ if [ ! -d "$source" ]; then
   git clone -q --depth 1 --branch "$tag" "$repository" "$source"
 fi
 
+# A shard (SHARD=k/n) is the k-th of n shares of the project's source files:
+# PIT mutates their classes and the strong pass runs their mutants.
+shard_files=()
+if [ -n "${SHARD:-}" ]; then
+  k="${SHARD%/*}"
+  n="${SHARD#*/}"
+  mapfile -t all < <(cd "$source" && find . -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
+  for i in "${!all[@]}"; do
+    if [ $((i % n)) -eq $((k - 1)) ]; then shard_files+=("${all[$i]}"); fi
+  done
+  targets="$(for f in "${shard_files[@]}"; do
+    rel="${f#*/src/main/java/}"; rel="${rel#*/src/main/kotlin/}"; rel="${rel#src/main/java/}"; rel="${rel#src/main/kotlin/}"
+    class="$(echo "${rel%.*}" | tr / .)"
+    echo "$class,$class\$*,${class}Kt,${class}Kt\$*"
+  done | paste -sd, -)"
+fi
+
 copy="$work/$project-$scenario"
 rm -rf "$copy"
 cp -r "$source" "$copy"
 cd "$copy"
+
+# A surefire the project's old TestNG runs under, where the default refuses
+# it: the same for PIT and Supercov.
+surefire="$(field surefire)"
+if [ -n "$surefire" ]; then
+  python3 - pom.xml "$surefire" <<'PY'
+import re, sys
+p, version = sys.argv[1], sys.argv[2]
+s = open(p).read()
+plugin = f"<plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>{version}</version></plugin>"
+m = re.search(r"<build>(.*?)</build>", s, re.S)
+body = re.sub(r"<pluginManagement>.*?</pluginManagement>", lambda x: " " * len(x.group(0)), m.group(1), flags=re.S)
+i = body.find("<plugins>")
+at = m.start(1) + i + len("<plugins>")
+s = s[:at] + plugin + s[at:]
+open(p, "w").write(s)
+PY
+fi
 
 now() { date +%s.%N; }
 elapsed() { node -e "process.stdout.write(String(Math.round(($2-$1)*1000)))"; }
@@ -73,7 +110,17 @@ tests_command() {
 run_pit() {
   local matrix="$1"
   if [ "$build" = maven ]; then
-    python3 "$here/pit-maven.py" pom.xml "$targets"
+    python3 "$here/pit-maven.py" pom.xml "${targets%%,*}"
+    # Every target class pattern, where a shard names several.
+    python3 - pom.xml "$targets" <<'PY'
+import sys
+p, targets = sys.argv[1], sys.argv[2]
+s = open(p).read()
+params = "".join(f"<param>{t}</param>" for t in targets.split(",") if t)
+import re
+s = re.sub(r"<targetClasses>.*?</targetClasses>", f"<targetClasses>{params}</targetClasses>", s, count=1, flags=re.S)
+open(p, "w").write(s)
+PY
     if [ "$matrix" = 0 ]; then
       sed -i 's|<fullMutationMatrix>true</fullMutationMatrix>|<fullMutationMatrix>false</fullMutationMatrix>|' pom.xml
     fi
@@ -110,7 +157,7 @@ case "$scenario" in
     report="$(run_pit "$matrix")"
     ended="$(now)"
     cp "$report" "$results/$scenario.xml"
-    echo "{\"project\":\"$project\",\"scenario\":\"$scenario\",\"ms\":$(elapsed "$started" "$ended"),\"threads\":$threads}" > "$results/$scenario.json"
+    echo "{\"project\":\"$project\",\"scenario\":\"$scenario\",\"shard\":\"${SHARD:-}\",\"ms\":$(elapsed "$started" "$ended"),\"threads\":$threads}" > "$results/$scenario.json"
     ;;
   supercov)
     command="$(tests_command)"
@@ -121,17 +168,42 @@ case "$scenario" in
     SUPERCOV_MUTANTS=1 "$supercov" -- $command > "$results/supercov-run.log" 2>&1 || true
     measured="$(now)"
     # shellcheck disable=SC2086
-    SUPERCOV_STRONG_JVMS="$threads" "$supercov" runs latest mutants test --json -- $command \
+    file_options=()
+    for f in "${shard_files[@]}"; do file_options+=(--file "$f"); done
+    SUPERCOV_STRONG_JVMS="$threads" "$supercov" runs latest mutants test --json "${file_options[@]}" -- $command \
       > "$results/supercov-strong.json" 2> "$results/supercov-strong.log" || true
     ended="$(now)"
     cp .supercov/runs/*/strong-mutation.json "$results/" 2>/dev/null || true
     mkdir -p "$results/strong"
     cp -r .supercov/strong/* "$results/strong/" 2>/dev/null || true
     if [ -f "$results/pit-matrix.xml" ]; then
-      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" --json > "$results/supercov-pit.json" || true
-      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" > "$results/supercov-pit.txt" || true
+      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" --json "${file_options[@]}" > "$results/supercov-pit.json" || true
+      "$supercov" runs latest mutants pit "$results/pit-matrix.xml" "${file_options[@]}" > "$results/supercov-pit.txt" || true
     fi
     echo "{\"project\":\"$project\",\"scenario\":\"supercov\",\"measureMs\":$(elapsed "$started" "$measured"),\"strongMs\":$(elapsed "$measured" "$ended"),\"threads\":$threads}" > "$results/supercov.json"
+    ;;
+  handcheck)
+    # A disagreement checked by hand: the mutant applied to the source
+    # (HANDCHECK: file:line:from:to, the line's text replaced), then the test
+    # PIT or Supercov named run alone, and the whole suite.
+    IFS=: read -r file line from to <<< "$HANDCHECK"
+    python3 - "$file" "$line" "$from" "$to" <<'PY'
+import sys
+path, line, old, new = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+lines = open(path).read().split("\n")
+assert old in lines[line - 1], lines[line - 1]
+lines[line - 1] = lines[line - 1].replace(old, new, 1)
+open(path, "w").write("\n".join(lines))
+PY
+    {
+      echo "== $HANDCHECK"
+      echo "== alone: $HANDCHECK_TEST"
+      # shellcheck disable=SC2086
+      mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test && echo "PASSED alone" || echo "FAILED alone"
+      echo "== whole suite"
+      # shellcheck disable=SC2086
+      mvn -B -q $flags test && echo "PASSED whole" || echo "FAILED whole"
+    } > "$results/handcheck-$(echo "$HANDCHECK" | tr '/:' '__').log" 2>&1
     ;;
   *)
     echo "unknown scenario $scenario" >&2

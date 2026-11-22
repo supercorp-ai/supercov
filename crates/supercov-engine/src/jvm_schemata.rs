@@ -244,7 +244,9 @@ impl Writer<'_> {
                 Form::Invert => format!("{RUNTIME}.inv({f}, {k}, {})", h(0)),
                 Form::RemoveCall { lambda: false } => format!("{{ if (!{on}) {} }}", h(0)),
                 Form::RemoveCall { lambda: true } => format!("{{ if (!{on}) {}; }}", h(0)),
-                Form::Return(value) => java_return(*value, f, k, &h(0)),
+                Form::Return(value, witness) => {
+                    java_return(*value, f, k, &h(0), witness.as_deref())
+                }
             },
             JvmLanguage::Kotlin => match form {
                 Form::Negate => format!("{KOTLIN_NEGATE}({f}, {k}, {})", h(0)),
@@ -295,7 +297,9 @@ impl Writer<'_> {
                     h(0)
                 ),
                 Form::RemoveCall { .. } => format!("if (!{on}) {} else Unit", h(0)),
-                Form::Return(value) => kotlin_return(*value, f, k, &h(0)),
+                Form::Return(value, witness) => {
+                    kotlin_return(*value, f, k, &h(0), witness.as_deref())
+                }
             },
         }
     }
@@ -311,34 +315,57 @@ fn statement_or_value(choice: &str, statement: bool) -> String {
     }
 }
 
-fn java_return(value: ReturnValue, f: usize, k: usize, hole: &str) -> String {
+fn java_return(
+    value: ReturnValue,
+    f: usize,
+    k: usize,
+    hole: &str,
+    witness: Option<&str>,
+) -> String {
+    let generic = |helper: &str| match witness {
+        Some(witness) => format!("{RUNTIME}.<{witness}>{helper}({f}, {k}, {hole})"),
+        None => format!("{RUNTIME}.{helper}({f}, {k}, {hole})"),
+    };
     let call = |helper: &str| format!("{RUNTIME}.{helper}({f}, {k}, {hole})");
     match value {
         ReturnValue::True => call("rT"),
         ReturnValue::False => call("rF"),
-        ReturnValue::BoxedTrue => call("rBT"),
-        ReturnValue::BoxedFalse => call("rBF"),
-        ReturnValue::Null => call("rN"),
+        ReturnValue::BoxedTrue => generic("rBT"),
+        ReturnValue::BoxedFalse => generic("rBF"),
+        ReturnValue::Null => generic("rN"),
         ReturnValue::Zero(prim @ (Prim::Byte | Prim::Short | Prim::Char)) => {
             format!("(({}) {})", prim.java(), call("rZ"))
         }
         ReturnValue::Zero(_) => call("rZ"),
-        ReturnValue::BoxedZero(prim) => call(boxed_zero_helper(prim)),
+        ReturnValue::BoxedZero(prim) => generic(boxed_zero_helper(prim)),
         ReturnValue::EmptyString => call("rS"),
-        ReturnValue::EmptyList => call("rList"),
-        ReturnValue::EmptySet => call("rSet"),
-        ReturnValue::EmptyMap => call("rMap"),
-        ReturnValue::EmptyOptional => call("rOpt"),
-        ReturnValue::EmptyStream => call("rStream"),
+        ReturnValue::EmptyList => generic("rList"),
+        ReturnValue::EmptySet => generic("rSet"),
+        ReturnValue::EmptyMap => generic("rMap"),
+        ReturnValue::EmptyOptional => generic("rOpt"),
+        ReturnValue::EmptyStream => generic("rStream"),
     }
 }
 
-fn kotlin_return(value: ReturnValue, f: usize, k: usize, hole: &str) -> String {
+fn kotlin_return(
+    value: ReturnValue,
+    f: usize,
+    k: usize,
+    hole: &str,
+    witness: Option<&str>,
+) -> String {
     // The same Java helpers: Kotlin calls them with its own types, which
-    // are the JVM's, and has no literal to cast back from `int`.
-    match value {
-        ReturnValue::Zero(_) => format!("{RUNTIME}.rZ({f}, {k}, {hole})"),
-        other => java_return(other, f, k, hole),
+    // are the JVM's, and has no literal to cast back from `int`. Its type
+    // argument follows the name.
+    match (value, witness) {
+        (ReturnValue::Zero(_), _) | (ReturnValue::EmptyString, _) | (_, None) => {
+            java_return(value, f, k, hole, None)
+        }
+        (other, Some(witness)) => {
+            let plain = java_return(other, f, k, hole, None);
+            let (name, rest) = plain.split_once('(').expect("a call");
+            format!("{name}<{witness}>({rest}")
+        }
     }
 }
 
@@ -408,4 +435,98 @@ pub fn offset_of(text: &str, line: usize, column: usize) -> Option<usize> {
         .nth(column.saturating_sub(1))
         .map_or(line_text.len(), |(at, _)| at);
     Some(start + within)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm_mutants::{ProjectIndex, enumerate};
+
+    fn switched(source: &str, language: JvmLanguage) -> (Switched, Vec<JvmMutant>) {
+        let tree = crate::jvm_instrumenter::parse(source, language).unwrap();
+        let path = match language {
+            JvmLanguage::Java => "A.java",
+            JvmLanguage::Kotlin => "A.kt",
+        };
+        let index = ProjectIndex::of([(path, source)]);
+        let mutants = enumerate(source, &tree, language, &index);
+        let all = (0..mutants.len()).collect::<Vec<_>>();
+        (switch_source(source, language, 3, &mutants, &all), mutants)
+    }
+
+    #[test]
+    fn java_switches_nest_as_the_code_does() {
+        let source = "class A {\n  boolean f(int a, int b) { return a + 1 < b; }\n}\n";
+        let (out, mutants) = switched(source, JvmLanguage::Java);
+        let names = mutants.iter().map(|m| m.mutator.name()).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "BooleanTrueReturnVals",
+                "NegateConditionals",
+                "ConditionalsBoundary",
+                "Math"
+            ]
+        );
+        let s = RUNTIME;
+        assert_eq!(
+            out.source,
+            format!(
+                "class A {{\n  boolean f(int a, int b) {{ return {s}.rT(3, 0, {s}.n(3, 1, {s}.lt(3, 2, {s}.add(3, 3, a, 1), b))); }}\n}}\n"
+            )
+        );
+        // Each switch's region holds the switches inside it, and an offset
+        // finds the innermost.
+        let add = out.source.find(".add(").unwrap();
+        assert_eq!(mutant_at(&out, add), Some(3));
+        let lt = out.source.find(".lt(").unwrap();
+        assert_eq!(mutant_at(&out, lt), Some(2));
+        assert_eq!(mutant_at(&out, 0), None);
+    }
+
+    #[test]
+    fn java_statement_forms_are_statement_expressions() {
+        let source = "class A {\n  int c;\n  void f(int i) {\n    for (; i < 3; i++) { c++; log(); }\n  }\n  void log() {}\n}\n";
+        let (out, _) = switched(source, JvmLanguage::Java);
+        assert!(
+            out.source
+                .contains(&format!("{RUNTIME}.v({RUNTIME}.on(3, ")),
+            "{}",
+            out.source
+        );
+        assert!(out.source.contains("? c-- : c++)"), "{}", out.source);
+        assert!(
+            out.source.contains(&format!("{{ if (!{RUNTIME}.on(3, ")),
+            "{}",
+            out.source
+        );
+    }
+
+    #[test]
+    fn kotlin_switches_bind_operands_and_keep_smart_casts() {
+        let source = "fun f(s: String?, a: Int): Int {\n    if (s != null) return s.length + a\n    return -a\n}\n";
+        let (out, _) = switched(source, JvmLanguage::Kotlin);
+        assert!(
+            out.source.contains(&format!("{KOTLIN_NEGATE}(3, ")),
+            "{}",
+            out.source
+        );
+        assert!(out.source.contains(".let { supercovL3_"), "{}", out.source);
+        assert!(out.source.contains("else -supercovV3_"), "{}", out.source);
+        assert!(
+            out.source.contains(&format!("{RUNTIME}.rZ(3, ")),
+            "{}",
+            out.source
+        );
+    }
+
+    #[test]
+    fn a_compiler_position_is_an_offset() {
+        let text = "ab\ncdé\nf";
+        assert_eq!(offset_of(text, 1, 1), Some(0));
+        assert_eq!(offset_of(text, 2, 3), Some(5));
+        assert_eq!(offset_of(text, 2, 9), Some(7));
+        assert_eq!(offset_of(text, 3, 1), Some(8));
+        assert_eq!(offset_of(text, 5, 1), None);
+    }
 }

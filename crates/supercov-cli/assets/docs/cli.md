@@ -393,6 +393,33 @@ of StrykerJS's survivors this run says no test infects or reaches. A mutant
 this run says is not infected, not reached or equivalent that StrykerJS killed
 is a soundness violation: each is listed, and the command exits `1`.
 
+Java and Kotlin runs list PIT 1.17.1's mutants (its `DEFAULTS` group,
+`mutantSet: "pitest@1.17.1"`), under PIT's mutator names less `Mutator`
+(`ConditionalsBoundary`, `NegateConditionals`, `Math`, `Increments`,
+`InvertNegs`, `VoidMethodCall` and the five return mutators). PIT mutates
+bytecode; Supercov lists the source each of its mutants changes, with PIT's
+filters applied in the same terms. `mutants test` builds the strong copy once
+and runs the mutants inside the build's own test JVM (the JUnit Platform, or
+TestNG), several JVMs sharing the work (`SUPERCOV_STRONG_JVMS`, half the
+processors by default). A switch the compiler refuses is `unviable`.
+
+```sh supercov-example
+npx supercov runs <run-id> mutants pit target/pit-reports/mutations.xml
+npx supercov runs <run-id> mutants pit build/reports/pitest/mutations.xml --json
+```
+
+`mutants pit` joins PIT's `mutations.xml` (written with `outputFormats` XML)
+with the run's Java and Kotlin mutants by file, line, mutator and what PIT's
+description says, and compares the verdicts: the strong pass's where it ran,
+else what the run decided without running. It counts the mutants matched,
+those only PIT made, by the kind of compiler-written code they come from (a
+Kotlin property's getter, a range loop's counter, a `when` subject's
+comparisons, the null checks of `?.`, `?:` and `!!`), and those only Supercov
+made. A mutant PIT detects and Supercov calls survived or no-coverage, or the
+reverse, is a soundness violation: each is listed with PIT's killing tests,
+and the command exits `1`. `--file` narrows both lists to a source file, for a
+PIT run given some target classes.
+
 The HTML report (`supercov report`) shows a run's mutants where it shows its
 coverage: the weak score and the counts by status, a column of each file's
 not-infected and not-reached mutants, and, in a file's source, a mark on each

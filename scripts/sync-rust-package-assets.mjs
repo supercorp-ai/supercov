@@ -109,6 +109,10 @@ const mappings = [
     "com/supercorp/supercov/SupercovStrong.java",
     "com/supercorp/supercov/SupercovStrongPass.java",
     "com/supercorp/supercov/SupercovStrongTestNG.java",
+    "com/supercorp/supercov/SupercovStrongJUnit4.java",
+    "com/supercorp/supercov/SupercovStrongAnt.java",
+    "com/supercorp/supercov/SupercovStrongListener.java",
+    "com/supercorp/supercov/SupercovStrongTestNGListener.java",
     "com/supercorp/supercov/SupercovSwitch.kt",
   ]),
   ...runtimeFiles("ruby", [

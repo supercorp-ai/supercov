@@ -86,6 +86,14 @@ const STRONG_PASS_SOURCE: &str =
 const STRONG_TESTNG_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongTestNG.java");
 const STRONG_TESTNG_CLASS: &str = "com.supercorp.supercov.SupercovStrongTestNG";
+const STRONG_JUNIT4_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongJUnit4.java");
+const STRONG_ANT_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongAnt.java");
+const STRONG_LISTENER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongListener.java");
+const STRONG_TESTNG_LISTENER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongTestNGListener.java");
 const KOTLIN_SWITCH_SOURCE: &str =
     include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovSwitch.kt");
 const STRONG_CLASS: &str = "com.supercorp.supercov.SupercovStrong";
@@ -1208,7 +1216,13 @@ fn instrument_workspace(
         .max()
         .map_or(0, |highest| *highest as usize + 1);
     if build == JvmBuild::Ant {
-        return instrument_ant(workspace, evidence_directory, project, probe_count);
+        return instrument_ant(
+            workspace,
+            evidence_directory,
+            project,
+            probe_count,
+            strong.is_some(),
+        );
     }
 
     // Which frameworks a module runs is a question about that module. A
@@ -1811,6 +1825,7 @@ fn instrument_ant(
     evidence_directory: &Path,
     project: PreparedJvmProject,
     probe_count: usize,
+    strong: bool,
 ) -> Result<InstrumentedWorkspace, String> {
     // The root the build compiles most of the product from: a stray example
     // tree sorting first is not where the runtime belongs.
@@ -1887,6 +1902,49 @@ fn instrument_ant(
             .join("SupercovConfig.java"),
         &config,
     )?;
+    if strong {
+        // A strong pass's drivers, under the class names the patched build
+        // gives its formatter and listeners.
+        for (directory, name, text) in [
+            (&sources, "SupercovAntFormatter.java", STRONG_ANT_SOURCE),
+            (&sources, "SupercovStrongJUnit4.java", STRONG_JUNIT4_SOURCE),
+            (&sources, "SupercovStrongPass.java", STRONG_PASS_SOURCE),
+            (
+                &listener_sources,
+                "SupercovListener.java",
+                STRONG_LISTENER_SOURCE,
+            ),
+            (&listener_sources, "SupercovStrong.java", STRONG_SOURCE),
+            (
+                &listener_sources,
+                "SupercovStrongPass.java",
+                STRONG_PASS_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovTestNGListener.java",
+                STRONG_TESTNG_LISTENER_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovStrongTestNG.java",
+                STRONG_TESTNG_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovStrongPass.java",
+                STRONG_PASS_SOURCE,
+            ),
+        ] {
+            write(&directory.join(PACKAGE_DIRECTORY).join(name), text)?;
+        }
+        // `<junitlauncher>` reads discovery filters from its class path,
+        // which holds the drivers' classes.
+        write(
+            &classes.join(FILTER_SERVICES_FILE),
+            &format!("{STRONG_CLASS}\n"),
+        )?;
+    }
 
     let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
     // Everything changed outside the project is changed within the copy's
@@ -4222,7 +4280,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1293, 1313, 1402, 1438, 1449] {
+        for line in [1377, 1397, 1486, 1530, 1541] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4289,13 +4347,13 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1734@2", || {
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1834@2", || {
             instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1751, 1771, 1777, 1781, 1787, 1793, 1799, 1873] {
+        for line in [1851, 1871, 1877, 1881, 1887, 1893, 1899, 2016] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4395,13 +4453,13 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1842", || {
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1985", || {
             instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1819",
+            "fs.read_dir#jvm_run.rs:1962",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {

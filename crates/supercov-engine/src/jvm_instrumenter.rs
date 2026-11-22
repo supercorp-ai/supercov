@@ -1143,6 +1143,35 @@ pub fn rewrite_plain(source: &str, edits: &[GoEdit]) -> String {
 }
 
 #[cfg(test)]
+mod kotlin_scanner_tests {
+    use super::*;
+
+    /// A name that starts with `import` after `return` is the value
+    /// returned, not a new statement: the scanner checked the keyword
+    /// without its word boundary, and `return importedType` lost its value.
+    #[test]
+    fn a_name_starting_with_import_continues_a_return() {
+        let source = "fun f(importedType: Int): Int {\n  return importedType\n}\n";
+        let tree = parse(source, JvmLanguage::Kotlin).unwrap();
+        let block = tree
+            .root_node()
+            .named_child(0)
+            .and_then(|function| {
+                let mut cursor = function.walk();
+                function
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "function_body")
+            })
+            .and_then(|body| body.named_child(0))
+            .unwrap();
+        assert_eq!(block.named_child_count(), 1, "{}", block.to_sexp());
+        let returned = block.named_child(0).unwrap();
+        assert_eq!(returned.kind(), "return_expression");
+        assert_eq!(&source[returned.byte_range()], "return importedType");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

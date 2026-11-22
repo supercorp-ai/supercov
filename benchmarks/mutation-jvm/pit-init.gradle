@@ -2,7 +2,7 @@
 // Gradle build, for the JVM mutation benchmark: `gradle --init-script pit-init.gradle pitest`.
 initscript {
     repositories { gradlePluginPortal() }
-    dependencies { classpath "info.solidsoft.gradle.pitest:gradle-pitest-plugin:1.15.0" }
+    dependencies { classpath "info.solidsoft.gradle.pitest:gradle-pitest-plugin:${System.getenv("PIT_GRADLE_PLUGIN") ?: "1.15.0"}" }
 }
 allprojects { project ->
     project.plugins.withId("java") {
@@ -18,6 +18,7 @@ allprojects { project ->
             if (System.getenv("PIT_TESTNG") == "1") { testPlugin = "testng" }
             failWhenNoMutations = false
             timeoutConstInMillis = 10000
+            jvmArgs = ["-Xmx1g"]
         }
     }
 }

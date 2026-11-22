@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use supercov_engine::run_store::{discover_runs, select_run};
 
 pub(crate) const HELP: &str = "\
-Usage: supercov runs <run-id> mutants pit <mutations.xml>... [--json]
+Usage: supercov runs <run-id> mutants pit <mutations.xml>... [--file <path>]... [--json]
 
 Joins the run's Java and Kotlin mutants with PIT's report (outputFormats
 XML; fullMutationMatrix lists every killing test) and compares the verdicts:
@@ -22,7 +22,9 @@ A mutant PIT detects and Supercov calls survived or no-coverage, or the
 reverse, is a soundness violation: the command exits 1.
 
 Options:
-  --json   the answer as JSON
+  --file <path>  only this source file's mutants (repeatable): those PIT
+                 was given, where its run named target classes
+  --json         the answer as JSON
 ";
 
 /// `args` is `[<run-id>, "mutants", "pit", ...]`.
@@ -32,11 +34,34 @@ pub fn command(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let as_json = args.iter().any(|a| a == "--json");
-    let reports = args[3..]
-        .iter()
-        .filter(|a| !a.starts_with("--"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut reports = Vec::new();
+    let mut files = Vec::new();
+    let mut rest = args[3..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--json" => {}
+            "--file" => match rest.next() {
+                Some(file) => files.push(file.clone()),
+                None => {
+                    return crate::refuse(
+                        "runs.mutants.pit",
+                        as_json,
+                        "--file needs a path".into(),
+                        HELP,
+                    );
+                }
+            },
+            other if other.starts_with("--") => {
+                return crate::refuse(
+                    "runs.mutants.pit",
+                    as_json,
+                    format!("Unknown option: {other}"),
+                    HELP,
+                );
+            }
+            report => reports.push(report.to_owned()),
+        }
+    }
     if reports.is_empty() {
         return crate::refuse(
             "runs.mutants.pit",
@@ -45,7 +70,7 @@ pub fn command(args: &[String]) -> ExitCode {
             HELP,
         );
     }
-    match compare(&args[0], &reports) {
+    match compare(&args[0], &reports, &files) {
         Ok(data) => {
             if as_json {
                 println!("{}", serde_json::to_string(&data).expect("JSON"));
@@ -62,7 +87,7 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 
-fn compare(run_id: &str, reports: &[String]) -> Result<Value, String> {
+fn compare(run_id: &str, reports: &[String], only: &[String]) -> Result<Value, String> {
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
     let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
     let run = select_run(&inventory, Some(run_id)).map_err(|e| e.to_string())?;
@@ -71,6 +96,9 @@ fn compare(run_id: &str, reports: &[String]) -> Result<Value, String> {
         let text = std::fs::read_to_string(report).map_err(|e| format!("{report}: {e}"))?;
         pit.extend(supercov_engine::jvm_strong::parse_pit_report(&text));
     }
+    if !only.is_empty() {
+        pit.retain(|mutant| only.iter().any(|file| file.ends_with(&mutant.file)));
+    }
     let plan = crate::mutants_test_command::plan_of(&root, run)?;
     let saved = crate::mutants_test_command::read_saved(run);
     // Each file the run listed, enumerated again for the join's keys.
@@ -78,6 +106,7 @@ fn compare(run_id: &str, reports: &[String]) -> Result<Value, String> {
         .mutants
         .iter()
         .map(|mutant| mutant.file.clone())
+        .filter(|file| only.is_empty() || only.contains(file))
         .collect::<std::collections::BTreeSet<_>>();
     let sources = supercov_engine::jvm_project::discover_jvm_files(&root)?
         .sources

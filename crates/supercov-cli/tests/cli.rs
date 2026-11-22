@@ -18085,18 +18085,18 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
-        ("fs.read_dir#jvm_project.rs:281@7", "jvm_project.rs:281"),
+        ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
+        ("fs.read_dir#jvm_project.rs:287@7", "jvm_project.rs:287"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.create_dir_all#jvm_run.rs:2505", "jvm_run.rs:2505"),
-        ("fs.create_dir_all#jvm_run.rs:2515", "jvm_run.rs:2515"),
-        ("fs.write#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.write#jvm_run.rs:2505", "jvm_run.rs:2505"),
+        ("fs.create_dir_all#jvm_run.rs:2690", "jvm_run.rs:2690"),
+        ("fs.create_dir_all#jvm_run.rs:2706", "jvm_run.rs:2706"),
+        ("fs.create_dir_all#jvm_run.rs:2716", "jvm_run.rs:2716"),
+        ("fs.write#jvm_run.rs:2690", "jvm_run.rs:2690"),
+        ("fs.write#jvm_run.rs:2706", "jvm_run.rs:2706"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19276,6 +19276,90 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
     );
 }
 
+/// Java mutants through Maven, end to end: the run lists PIT's mutants
+/// and records their values, the strong pass runs each in the build's own
+/// test JVM against its candidates, a switch javac refuses is `unviable`
+/// and the rest of the pass goes on, and a boundary whose operands were
+/// never equal is decided without running.
+#[test]
+fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-mutants");
+    small_maven_project(&project);
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static boolean small(int n) {\n        return n < 10;\n    }\n\n    public static String named(String s) {\n        return System.getProperty(\"w\") + s;\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let status = |id: &str| {
+        verdicts["mutants"][id]["status"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let file = "src/main/java/w/W.java";
+    assert_eq!(verdicts["mutantSet"], "pitest@1.17.1", "{verdicts}");
+    // `n * 2` is told from `n / 2` by twice(2), and its return from 0.
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:Math:/")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:PrimitiveReturns:0")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // `n < 10` with n = 3 never had its operands equal: the boundary
+    // mutant survives without running.
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:ConditionalsBoundary:<=")).as_deref(),
+        Some("survived"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:NegateConditionals:negated")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // A `+` of a call whose type the source does not show was taken for an
+    // addition: javac refuses its switch, and the mutant is unviable.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:44:Math:-")).as_deref(),
+        Some("unviable"),
+        "{tested}"
+    );
+    // No test calls named(): its return is not covered.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:44:EmptyObjectReturnVals:\"\"")).as_deref(),
+        Some("no-coverage"),
+        "{tested}"
+    );
+}
+
 /// A Maven project with one class and its test.
 /// A JVM test whose class is declared in a file of another name has no
 /// file to name, and is listed without evidence all the same.
@@ -19462,8 +19546,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1962", "jvm_run.rs:1962"),
-                ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
+                ("fs.canonicalize#jvm_run.rs:2105", "jvm_run.rs:2105"),
+                ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -23237,12 +23321,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:826",
+            "fs.write#mutants_test_command.rs:831",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:831"),
         "{}",
         unwritten.stderr()
     );

@@ -231,6 +231,17 @@ pub(crate) fn candidate(
     mutant: &JvmMutant,
     spans: &[(String, PointKind, usize, usize)],
 ) -> CandidateMutant {
+    // A point that holds the lambda the mutant is deferred in ran when the
+    // lambda was made, not when it ran: such a mutant's reach is unknown,
+    // and every test is its candidate, unless its probe says otherwise.
+    let own = |kind: PointKind| {
+        let point = innermost(spans, kind, mutant.range)?;
+        let span = spans.iter().find(|(id, ..)| *id == point)?;
+        match mutant.deferred {
+            Some(lambda) if span.2 <= lambda.0 && lambda.1 <= span.3 => None,
+            _ => Some(point),
+        }
+    };
     CandidateMutant {
         id: String::new(),
         mutator: mutant.mutator.name().to_owned(),
@@ -243,8 +254,8 @@ pub(crate) fn candidate(
             at: *at,
         }),
         value_used: false,
-        statement: innermost(spans, PointKind::Statement, mutant.range),
-        function: innermost(spans, PointKind::Function, mutant.range),
+        statement: own(PointKind::Statement),
+        function: own(PointKind::Function),
         decision: None,
         branch: None,
         chain: None,
@@ -674,6 +685,39 @@ mod tests {
         for id in &join.only_supercov {
             println!("OURS {id}");
         }
+    }
+
+    /// `PROBE=<file>`: the file as a measured run with its mutants listed
+    /// writes it, coverage probes and value probes both.
+    #[test]
+    #[ignore]
+    fn print_probed() {
+        let path = std::env::var("PROBE").unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let language = language_of(&path).unwrap();
+        let index = ProjectIndex::of([(path.as_str(), source.as_str())]);
+        let mut next_probe = 0;
+        let mut next_decision = 0;
+        let obligations = crate::jvm_instrumenter::build_jvm_obligations(
+            &path,
+            &source,
+            language,
+            &mut next_probe,
+            &mut next_decision,
+        )
+        .unwrap();
+        let tree = crate::jvm_instrumenter::parse(&source, language).unwrap();
+        let found = crate::jvm_mutants::enumerate(&source, &tree, language, &index);
+        let mut listed = found
+            .iter()
+            .map(|mutant| candidate(mutant, &obligations.point_spans))
+            .collect::<Vec<_>>();
+        let (edits, _) = probe_edits(&path, &source, &found, &mut listed, &mut next_probe);
+        let mut all = obligations.edits;
+        if std::env::var("COVERAGE_ONLY").is_err() {
+            all.extend(edits);
+        }
+        print!("{}", crate::jvm_instrumenter::rewrite_plain(&source, &all));
     }
 
     #[test]

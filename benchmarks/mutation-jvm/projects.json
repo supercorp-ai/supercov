@@ -24,7 +24,8 @@
     "flags": "-Dmaven.javadoc.skip",
     "targets": "net.jodah.typetools.*",
     "testng": true,
-    "jdk": "11"
+    "jdk": "11",
+    "surefire": "2.22.2"
   },
   "kotlinpoet": {
     "repository": "https://github.com/square/kotlinpoet.git",
@@ -34,16 +35,18 @@
     "flags": "-x spotlessCheck -x apiCheck",
     "targets": "com.squareup.kotlinpoet.*",
     "junit5": false,
-    "jdk": "17"
+    "jdk": "17",
+    "shards": 6
   },
-  "klaxon": {
-    "repository": "https://github.com/cbeust/klaxon.git",
-    "tag": "v5.0.13",
+  "picnic": {
+    "repository": "https://github.com/JakeWharton/picnic.git",
+    "tag": "0.5.0",
     "build": "gradle",
-    "module": "klaxon",
+    "module": "picnic",
     "flags": "",
-    "targets": "com.beust.klaxon.*",
-    "testng": true,
-    "jdk": "11"
+    "targets": "com.jakewharton.picnic.*",
+    "junit5": false,
+    "jdk": "11",
+    "gradlePlugin": "1.5.2"
   }
 }

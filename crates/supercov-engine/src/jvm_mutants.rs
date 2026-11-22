@@ -149,8 +149,10 @@ pub enum Form {
     /// A call statement removed: holes `[statement]`. `lambda` where the
     /// call is a lambda's expression body.
     RemoveCall { lambda: bool },
-    /// A returned value replaced: holes `[value]`.
-    Return(ReturnValue),
+    /// A returned value replaced: holes `[value]`, and the method's declared
+    /// return type, where it is written, as the helper's type argument: the
+    /// value's own type would add a cast the bytecode mutant does not have.
+    Return(ReturnValue, Option<String>),
 }
 
 /// What a return is replaced with.
@@ -206,6 +208,11 @@ pub struct JvmMutant {
     /// mutant's value differs, where one can be placed without changing
     /// what compiles (`jvm_strong::probe_edits`).
     pub probe: Option<ValueProbe>,
+    /// The innermost lambda around the mutant whose body has no coverage
+    /// point of its own (an expression body, or a Kotlin lambda a non-inline
+    /// function keeps): its code runs when the lambda is called, not when
+    /// the statement that makes it runs.
+    pub deferred: Option<Range>,
 }
 
 /// What a value probe records.
@@ -233,6 +240,39 @@ pub struct ValueProbe {
 /// probes' wrappers (5, 20), and the shorter span inside the longer.
 fn opening_rank(span: Range) -> i32 {
     30 + (1_000_000 - (span.1 - span.0).min(999_999) as i32)
+}
+
+/// The rank of a probe's closing at its span's end: outside the coverage
+/// wrappers' parentheses (5, 20, 21) that close there, inside the braces
+/// (60) and `else` arms of statements that end there.
+fn closing_rank_of(_node: Node) -> i32 {
+    50
+}
+
+/// Whether a Kotlin expression ends in a construct whose branches the
+/// coverage instrumenter braces (`if`, `when`, `try`, a lambda): a probe
+/// closing there would close inside the last brace.
+fn ends_in_braced_branch(node: Node) -> bool {
+    let mut current = Some(node);
+    while let Some(at) = current {
+        if matches!(
+            at.kind(),
+            "if_expression"
+                | "when_expression"
+                | "try_expression"
+                | "lambda_literal"
+                | "annotated_lambda"
+                | "anonymous_function"
+                | "object_literal"
+        ) {
+            return true;
+        }
+        current = (0..at.child_count())
+            .rev()
+            .filter_map(|index| at.child(index))
+            .find(|child| child.end_byte() == node.end_byte() && !child.is_extra());
+    }
+    false
 }
 
 /// The runtime class a probe calls.
@@ -1099,6 +1139,8 @@ struct Method {
     /// A static field's initializer whose type names a functional
     /// interface: a lambda in it runs later, when called, and PIT mutates it.
     functional_field: bool,
+    /// The return type as the declaration writes it, where it does.
+    written_returns: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1129,6 +1171,7 @@ pub fn enumerate(
         loggers: BTreeSet::new(),
         logging_lines: BTreeSet::new(),
         package: String::new(),
+        deferred: Vec::new(),
     };
     enumerator.loggers = logger_names(tree.root_node(), source, language);
     match language {
@@ -1182,6 +1225,8 @@ struct Enumerator<'a> {
     loggers: BTreeSet<String>,
     logging_lines: BTreeSet<u32>,
     package: String,
+    /// The lambdas being walked whose code runs later (`JvmMutant::deferred`).
+    deferred: Vec<Range>,
 }
 
 /// The logging packages PIT's `LoggingCallsFilter` knows by default.
@@ -1341,6 +1386,7 @@ impl<'a> Enumerator<'a> {
             key,
             lines,
             probe: None,
+            deferred: self.deferred.last().copied(),
         });
     }
 
@@ -1799,6 +1845,7 @@ impl Enumerator<'_> {
                             && member
                                 .child_by_field_name("type")
                                 .is_some_and(|ty| names_functional_type(text(ty, self.source))),
+                        written_returns: None,
                     });
                     // An enum's instance fields are set in its constructor,
                     // which the static initializer calls.
@@ -1835,6 +1882,7 @@ impl Enumerator<'_> {
                         not_null: false,
                         static_init: static_context,
                         functional_field: false,
+                        written_returns: None,
                     });
                     self.java_node(member, Context::Statement);
                     self.methods.pop();
@@ -1919,6 +1967,10 @@ impl Enumerator<'_> {
                 || modifiers.contains(".NotNull"),
             static_init: initializing || generated,
             functional_field: false,
+            written_returns: (!constructor)
+                .then(|| node.child_by_field_name("type"))
+                .flatten()
+                .map(|ty| without_annotations(text(ty, self.source))),
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) = node.child_by_field_name("parameters") {
@@ -1993,6 +2045,7 @@ impl Enumerator<'_> {
             not_null: false,
             static_init,
             functional_field: false,
+            written_returns: None,
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) = node.child_by_field_name("parameters") {
@@ -2012,6 +2065,7 @@ impl Enumerator<'_> {
             if body.kind() == "block" {
                 self.java_node(body, Context::Statement);
             } else {
+                self.deferred.push((node.start_byte(), node.end_byte()));
                 // An expression body is the lambda's return value, or, in a
                 // lambda that returns nothing, its statement.
                 let returns = self.method().and_then(|method| method.returns.clone());
@@ -2022,6 +2076,7 @@ impl Enumerator<'_> {
                     self.java_return(body, body);
                     self.java_node(body, Context::Value);
                 }
+                self.deferred.pop();
             }
         }
         self.scopes.pop();
@@ -2226,6 +2281,7 @@ impl Enumerator<'_> {
                 }
             }
         }
+        let witness = method.written_returns.clone();
         let method_name = method.name.clone();
         let cast = match (&returns, self.language) {
             (Ty::Prim(prim @ (Prim::Byte | Prim::Short | Prim::Char)), JvmLanguage::Java) => {
@@ -2233,7 +2289,7 @@ impl Enumerator<'_> {
             }
             _ => None,
         };
-        let probe = return_probe(range, cast);
+        let probe = return_probe(value, cast);
         let before = self.mutants.len();
         for value_replacement in replacements {
             self.push(
@@ -2245,7 +2301,7 @@ impl Enumerator<'_> {
                 Placement {
                     span: range,
                     holes: vec![range],
-                    form: Form::Return(value_replacement),
+                    form: Form::Return(value_replacement, witness.clone()),
                     layer: 0,
                 },
                 method_name.clone(),
@@ -2253,7 +2309,9 @@ impl Enumerator<'_> {
             );
         }
         // One probe serves every return mutant of the value.
-        if self.mutants.len() > before
+        let placeable = self.language == JvmLanguage::Java || !ends_in_braced_branch(value);
+        if placeable
+            && self.mutants.len() > before
             && let Some(first) = self.mutants.get_mut(before)
         {
             first.probe = Some(probe);
@@ -2851,6 +2909,9 @@ impl Enumerator<'_> {
                     })
             }
             JvmLanguage::Kotlin => {
+                if ends_in_braced_branch(right) {
+                    return false;
+                }
                 let (Ty::Prim(a), Ty::Prim(b)) =
                     (self.kotlin_type_of(left), self.kotlin_type_of(right))
                 else {
@@ -2876,10 +2937,13 @@ impl Enumerator<'_> {
         let before = self.mutants.len();
         let safe = match self.language {
             JvmLanguage::Java => true,
-            JvmLanguage::Kotlin => matches!(
-                self.kotlin_type_of(operand),
-                Ty::Prim(Prim::Int | Prim::Long | Prim::Float | Prim::Double)
-            ),
+            JvmLanguage::Kotlin => {
+                !ends_in_braced_branch(operand)
+                    && matches!(
+                        self.kotlin_type_of(operand),
+                        Ty::Prim(Prim::Int | Prim::Long | Prim::Float | Prim::Double)
+                    )
+            }
         };
         let minus = (range.0, operand.start_byte());
         let probe = safe.then(|| ValueProbe {
@@ -2892,7 +2956,7 @@ impl Enumerator<'_> {
                     format!("{PROBES}.wneg(\u{2}, /*"),
                 ),
                 (minus.1, 10, "*/".to_owned()),
-                (operand.end_byte(), 10, ")".to_owned()),
+                (operand.end_byte(), closing_rank_of(node), ")".to_owned()),
             ],
         });
         self.push(
@@ -2942,6 +3006,63 @@ fn names_functional_type(ty: &str) -> bool {
         })
 }
 
+/// A type as written without its annotations: a type argument may not
+/// carry a declaration annotation (`@Nullable String`).
+fn without_annotations(ty: &str) -> String {
+    let mut out = String::new();
+    let mut chars = ty.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '@' {
+            // The name, then any arguments in parentheses.
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
+            {
+                chars.next();
+            }
+            if chars.peek() == Some(&'(') {
+                let mut depth = 0;
+                for c in chars.by_ref() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A Kotlin function's return type as written, where it is.
+fn kotlin_written_return(node: Node, source: &str) -> Option<String> {
+    let mut after_parameters = false;
+    for child in children(node) {
+        match child.kind() {
+            "function_value_parameters" => after_parameters = true,
+            "function_body" => return None,
+            kind if after_parameters
+                && matches!(
+                    kind,
+                    "user_type" | "nullable_type" | "function_type" | "parenthesized_type"
+                ) =>
+            {
+                return Some(text(child, source).to_owned());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A probe in place of a binary operator: `helper(slot, left /*op*/, right)`,
 /// the operator kept in a comment so that nothing is taken out of the
 /// source and the probe composes with the coverage probes' insertions.
@@ -2970,7 +3091,8 @@ fn binary_probe(
 }
 
 /// A probe around a returned value: outside every coverage wrapper of it.
-fn return_probe(range: Range, cast: Option<&str>) -> ValueProbe {
+fn return_probe(value: Node, cast: Option<&str>) -> ValueProbe {
+    let range = (value.start_byte(), value.end_byte());
     let (open, close) = match cast {
         Some(cast) => (format!("(({cast}) {PROBES}.wr(\u{2}, "), "))".to_owned()),
         None => (format!("{PROBES}.wr(\u{2}, "), ")".to_owned()),
@@ -2978,7 +3100,7 @@ fn return_probe(range: Range, cast: Option<&str>) -> ValueProbe {
     ValueProbe {
         kind: ProbeKind::Return,
         span: range,
-        edits: vec![(range.0, 1, open), (range.1, 40, close)],
+        edits: vec![(range.0, 1, open), (range.1, closing_rank_of(value), close)],
     }
 }
 
@@ -3714,6 +3836,7 @@ impl Enumerator<'_> {
                     not_null: false,
                     static_init: is_static,
                     functional_field: false,
+                    written_returns: None,
                 });
                 self.scopes.push(HashMap::new());
                 for child in named_children(node) {
@@ -3728,6 +3851,7 @@ impl Enumerator<'_> {
                                 not_null: false,
                                 static_init: is_static,
                                 functional_field: false,
+                                written_returns: None,
                             });
                         }
                         "property_delegate" => {}
@@ -3744,6 +3868,7 @@ impl Enumerator<'_> {
                     not_null: false,
                     static_init: static_context,
                     functional_field: false,
+                    written_returns: None,
                 });
                 self.kotlin_children(node, Context::Statement);
                 self.methods.pop();
@@ -3755,6 +3880,7 @@ impl Enumerator<'_> {
                     not_null: false,
                     static_init: static_context,
                     functional_field: false,
+                    written_returns: None,
                 });
                 self.scopes.push(HashMap::new());
                 for child in named_children(node) {
@@ -3902,6 +4028,7 @@ impl Enumerator<'_> {
             not_null: true,
             static_init: self.suppressed_context(),
             functional_field: false,
+            written_returns: None,
         });
         self.scopes.push(HashMap::new());
         self.kotlin_children(accessor, Context::Statement);
@@ -3953,6 +4080,7 @@ impl Enumerator<'_> {
             not_null: false,
             static_init: initializing || abstract_or_external,
             functional_field: false,
+            written_returns: kotlin_written_return(node, self.source),
         });
         self.scopes.push(HashMap::new());
         if let Some(parameters) =
@@ -4169,6 +4297,10 @@ impl Enumerator<'_> {
                         KOTLIN_INLINE.contains(&name) || kotlin_collection_inline(name)
                     })
                     .unwrap_or(false);
+                let deferred = !inline;
+                if deferred {
+                    self.deferred.push((node.start_byte(), node.end_byte()));
+                }
                 if let Some(enclosing) = enclosing {
                     self.methods.push(Method {
                         name: if inline {
@@ -4180,6 +4312,7 @@ impl Enumerator<'_> {
                         not_null: true,
                         static_init: enclosing.static_init,
                         functional_field: false,
+                        written_returns: None,
                     });
                 }
                 if let Some(parameters) =
@@ -4228,6 +4361,9 @@ impl Enumerator<'_> {
                     self.methods.pop();
                 }
                 self.scopes.pop();
+                if deferred {
+                    self.deferred.pop();
+                }
             }
             "return_expression" => {
                 if let Some(value) = named_children(node).find(|child| child.kind() != "label") {
@@ -4737,6 +4873,7 @@ impl Enumerator<'_> {
                 }
             }
         }
+        let witness = method.written_returns.clone();
         let method_name = method.name.clone();
         let cast = match (&returns, self.language) {
             (Ty::Prim(prim @ (Prim::Byte | Prim::Short | Prim::Char)), JvmLanguage::Java) => {
@@ -4744,7 +4881,7 @@ impl Enumerator<'_> {
             }
             _ => None,
         };
-        let probe = return_probe(range, cast);
+        let probe = return_probe(value, cast);
         let before = self.mutants.len();
         for replacement in replacements {
             self.push(
@@ -4756,7 +4893,7 @@ impl Enumerator<'_> {
                 Placement {
                     span: range,
                     holes: vec![range],
-                    form: Form::Return(replacement),
+                    form: Form::Return(replacement, witness.clone()),
                     layer: 0,
                 },
                 method_name.clone(),
@@ -4764,7 +4901,9 @@ impl Enumerator<'_> {
             );
         }
         // One probe serves every return mutant of the value.
-        if self.mutants.len() > before
+        let placeable = self.language == JvmLanguage::Java || !ends_in_braced_branch(value);
+        if placeable
+            && self.mutants.len() > before
             && let Some(first) = self.mutants.get_mut(before)
         {
             first.probe = Some(probe);

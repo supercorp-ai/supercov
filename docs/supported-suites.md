@@ -832,6 +832,13 @@ same goes for a loop over a constant, `while (true)`, which can only go one
 way. A Kotlin `contract { }` has to stay the first statement of its function,
 so the probe that records the function being entered is written after it.
 
+Mutation testing (`npx supercov mutants -- mvn test`) lists PIT's mutants of
+the Java and Kotlin the run measured and runs them in the build's own test
+JVM, under JUnit 5, JUnit 4 (through Vintage), Kotest and Spock on the JUnit
+Platform, and TestNG, with Maven and Gradle; an Ant build's `<junit>`,
+`<junitlauncher>` and `<testng>` tasks run them the same way. See
+`docs/design/jvm-mutation.md`.
+
 Every one of these is named in the run: ask for `npx supercov runs latest
 limitations` and each appears with its file, its line, and why it was left
 alone. A source file the parser cannot read is declared there too, so a hole in
