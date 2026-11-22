@@ -704,7 +704,8 @@ fn list_measured_mutants(
         .probes
         .values()
         .filter_map(|probe| match &probe.target {
-            crate::go_instrumenter::GoProbeTarget::Comparison { site } => Some(site.clone()),
+            crate::go_instrumenter::GoProbeTarget::Comparison { site }
+            | crate::go_instrumenter::GoProbeTarget::Operation { site } => Some(site.clone()),
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();

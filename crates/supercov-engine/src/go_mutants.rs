@@ -185,6 +185,33 @@ pub fn sites(tree: &tree_sitter::Tree, source: &str) -> Vec<GoSite> {
     found
 }
 
+/// The site `node` is the operator's node of, if any.
+pub(crate) fn site_of(node: Node, source: &str) -> Option<GoSite> {
+    site(node, source)
+}
+
+/// Whether reading `node` again gives what reading it once did, and does
+/// nothing else: a name, a field of one, an element at a name or a literal.
+pub(crate) fn reads_alike(node: Node, source: &str) -> bool {
+    match node.kind() {
+        "identifier" | "field_identifier" | "int_literal" => &source[node.byte_range()] != "_",
+        "selector_expression" => node
+            .child_by_field_name("operand")
+            .is_some_and(|operand| reads_alike(operand, source)),
+        "index_expression" => {
+            node.child_by_field_name("operand")
+                .is_some_and(|operand| reads_alike(operand, source))
+                && node
+                    .child_by_field_name("index")
+                    .is_some_and(|index| reads_alike(index, source))
+        }
+        "parenthesized_expression" => node
+            .named_child(0)
+            .is_some_and(|inner| reads_alike(inner, source)),
+        _ => false,
+    }
+}
+
 fn site(node: Node, source: &str) -> Option<GoSite> {
     let (kind, token) = match node.kind() {
         "binary_expression" => (SiteKind::Binary, node.child_by_field_name("operator")?),
@@ -482,8 +509,14 @@ pub(crate) fn candidates_of(
             .descendant_for_byte_range(site.token.0, site.token.1)
             .unwrap_or(node);
         let (statement, function) = points(file, token);
-        let compare =
+        let probed_here =
             Some(comparison_site(file, source, site.token.0)).filter(|site| probed.contains(site));
+        let relational = matches!(site.operator.as_str(), "<" | "<=" | ">" | ">=")
+            && site.kind == SiteKind::Binary;
+        let compare = probed_here.clone().filter(|_| relational);
+        // An operation's probe, where the run put one there: its swap's
+        // value at `#0`, a removed self-assignment's at `#1`.
+        let operation = probed_here.filter(|_| !relational);
         let original = source[site.node.0..site.node.1].to_owned();
         let start = position(source, site.token.0);
         let end = position(source, site.token.1);
@@ -506,7 +539,9 @@ pub(crate) fn candidates_of(
                 branch: None,
                 chain: None,
                 compare: compare.clone(),
-                probe: None,
+                probe: operation
+                    .as_ref()
+                    .map(|base| format!("{base}#{}", u8::from(*replacement == "="))),
                 arrow: None,
                 equivalent: (site.operator == *replacement).then(|| {
                     crate::js_mutant_links::StaticNote {

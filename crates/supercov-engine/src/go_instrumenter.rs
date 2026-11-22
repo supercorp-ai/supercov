@@ -58,6 +58,13 @@ pub enum GoProbeTarget {
     Comparison {
         site: String,
     },
+    /// An integer operation's result beside each of its mutants', for weak
+    /// mutation: bits 16 and 32 say the mutant's value was the same or
+    /// differed (`<site>#0`, the operator's swap), 64 and 128 the same of a
+    /// removed self-assignment (`<site>#1`, `x += y` to `x = y`).
+    Operation {
+        site: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +389,12 @@ pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
 /// Statements Go nests directly inside a block. Declarations that cannot
 /// execute -- an import, a type -- carry no coverage question and are absent
 /// rather than counted as uncovered.
+/// How many ancestors `node` has: a wrapper deeper in the tree goes inside
+/// one at the same bytes.
+fn depth(node: Node) -> i32 {
+    std::iter::successors(node.parent(), Node::parent).count() as i32
+}
+
 pub(crate) fn is_statement(kind: &str) -> bool {
     matches!(
         kind,
@@ -437,6 +450,10 @@ struct Collector<'a> {
     /// Whether comparisons get weak mutation's value probes.
     comparisons: bool,
     removed: Vec<(usize, usize)>,
+    /// What the type checker says of each mutated token's expression, by
+    /// the token's offset: an operation is probed only where it is an
+    /// integer one whose type the file can write.
+    facts: Option<&'a std::collections::HashMap<usize, SiteFacts>>,
 }
 
 /// A branch whose condition is a single operand needs no independence
@@ -735,21 +752,116 @@ impl<'a> Collector<'a> {
         let site = format!("{}:{line}:{column}", self.file);
         let slot = self.probe(GoProbeTarget::Comparison { site }, node.start_byte());
         // Inside every wrapper at the same bytes: opened last, closed first.
+        let depth = depth(node);
         self.edit(
             node.start_byte(),
-            30,
+            1000 + depth,
             format!("({}.Cmp({slot}, {code}, ", self.alias),
         );
         self.edit(operator.start_byte(), 30, ", ".to_owned());
         self.removed
             .push((operator.start_byte(), operator.end_byte()));
-        self.edit(node.end_byte(), 1, ") == true)".to_owned());
+        self.edit(node.end_byte(), -depth, ") == true)".to_owned());
+    }
+
+    /// An integer operation the type checker typed: `x + y` as
+    /// `__supercov.Arith[T](<slot>, <op>, x, y)`, `-x` as
+    /// `__supercov.Unary[T](<slot>, <op>, x)`, `x += y` as `x +=
+    /// __supercov.Assign[T](<slot>, <op>, x, y)`; each evaluates its operands
+    /// once, in order (`x` of an assignment again, where reading it again
+    /// does nothing), and records whether each mutant's value differed.
+    fn probe_operation(&mut self, node: Node) {
+        let Some(site) = crate::go_mutants::site_of(node, self.source) else {
+            return;
+        };
+        let Some(facts) = self.facts.and_then(|facts| facts.get(&site.token.0)) else {
+            return;
+        };
+        if !facts.integer
+            || facts.constant
+            || facts.type_name.is_empty()
+            || facts.type_name.contains('\0')
+            || !in_function_body(node)
+        {
+            return;
+        }
+        let binary = ["+", "-", "*", "/", "%", "&", "|", "^", "&^"];
+        let shifts = ["<<", ">>"];
+        let operator = site.operator.as_str();
+        let (line, column) = crate::go_mutants::position(self.source, site.token.0);
+        let base = format!("{}:{line}:{column}", self.file);
+        let alias = self.alias.to_owned();
+        let type_name = facts.type_name.clone();
+        let depth = depth(node);
+        let (function, code, wrapped, operands) = match site.kind {
+            crate::go_mutants::SiteKind::Binary => {
+                match (
+                    binary.iter().position(|seen| *seen == operator),
+                    shifts.iter().position(|seen| *seen == operator),
+                ) {
+                    (Some(code), _) => ("Arith", code, node, None),
+                    (_, Some(code)) => ("Shift", code, node, None),
+                    _ => return,
+                }
+            }
+            crate::go_mutants::SiteKind::Unary => match operator {
+                "-" => ("Unary", 0, node, None),
+                "+" => ("Unary", 1, node, None),
+                _ => return,
+            },
+            crate::go_mutants::SiteKind::Assignment => {
+                let assigned = operator.trim_end_matches('=');
+                let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) else {
+                    return;
+                };
+                if left.named_child_count() != 1 || right.named_child_count() != 1 {
+                    return;
+                }
+                let target = left.named_child(0).expect("one operand");
+                let value = right.named_child(0).expect("one operand");
+                if !crate::go_mutants::reads_alike(target, self.source) {
+                    return;
+                }
+                let target = self.source[target.byte_range()].to_owned();
+                match (
+                    binary.iter().position(|seen| *seen == assigned),
+                    shifts.iter().position(|seen| *seen == assigned),
+                ) {
+                    (Some(code), _) => ("Assign", code, value, Some(target)),
+                    (_, Some(code)) => ("AssignShift", code, value, Some(target)),
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        let slot = self.probe(GoProbeTarget::Operation { site: base }, node.start_byte());
+        let target = operands.map_or(String::new(), |target| format!("{target}, "));
+        self.edit(
+            wrapped.start_byte(),
+            1000 + depth,
+            format!("{alias}.{function}[{type_name}]({slot}, {code}, {target}"),
+        );
+        if site.kind != crate::go_mutants::SiteKind::Assignment {
+            // The operator becomes the comma between the operands, or, of a
+            // unary operation, nothing.
+            self.removed.push(site.token);
+            if site.kind == crate::go_mutants::SiteKind::Binary {
+                self.edit(site.token.0, 30, ", ".to_owned());
+            }
+        }
+        self.edit(wrapped.end_byte(), -depth, ")".to_owned());
     }
 
     fn walk(&mut self, node: Node) {
         let alias = self.alias.to_owned();
         if self.comparisons && crate::go_mutants::comparison_probe(node, self.source) {
             self.probe_comparison(node);
+        }
+        if self.comparisons && self.facts.is_some() {
+            self.probe_operation(node);
         }
         match node.kind() {
             "function_declaration" | "method_declaration" | "func_literal" => {
@@ -1274,6 +1386,31 @@ pub fn build_go_obligations_probing(
     generics: bool,
     comparisons: bool,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_valued(
+        file,
+        source,
+        next_probe,
+        next_decision,
+        alias,
+        generics,
+        comparisons,
+        None,
+    )
+}
+
+/// `build_go_obligations_probing`, and with `facts` (the type checker's, by
+/// token offset) a value probe on every integer operation a mutant changes.
+#[allow(clippy::too_many_arguments)]
+pub fn build_go_obligations_valued(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    next_decision: &mut u32,
+    alias: &str,
+    generics: bool,
+    comparisons: bool,
+    facts: Option<&std::collections::HashMap<usize, SiteFacts>>,
+) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
     let decision_base = *next_decision;
     let mut collector = Collector {
@@ -1294,6 +1431,7 @@ pub fn build_go_obligations_probing(
         unmeasured_values: Vec::new(),
         comparisons,
         removed: Vec::new(),
+        facts,
     };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().children(&mut cursor) {
@@ -1407,6 +1545,8 @@ pub struct SiteFacts {
     /// one, and holding a NUL where a package in it is not imported.
     #[serde(rename = "type")]
     pub type_name: String,
+    /// The operands' type is an integer one.
+    pub integer: bool,
     /// For a constant: the bytes of the largest constant expression around
     /// it, which a switch must hold whole.
     pub root: Option<(usize, usize)>,
@@ -2186,6 +2326,65 @@ mod strong_tests {
         let plain = build_go_obligations_probing("p.go", source, &mut 0, &mut 0, "rt", true, false)
             .unwrap();
         assert!(plain.removed.is_empty());
+    }
+
+    #[test]
+    fn an_integer_operation_gets_a_value_probe_where_its_type_is_known() {
+        let source = "package p\n\nfunc f(a, b int, s []int) int {\n\ta += b\n\ts[f(1, 2, s)] -= 1\n\treturn -a*b + (a << b)\n}\n";
+        let integer = |type_name: &str| SiteFacts {
+            integer: true,
+            type_name: type_name.to_owned(),
+            ..SiteFacts::default()
+        };
+        let mut facts = HashMap::new();
+        for (token, _, _) in crate::go_mutants::listed_tokens(source).unwrap() {
+            facts.insert(token.0, integer("int"));
+        }
+        // A constant, and an operand whose type the file cannot write, get
+        // none.
+        let plus = source.find(" + ").unwrap() + 1;
+        facts.insert(
+            plus,
+            SiteFacts {
+                constant: true,
+                ..integer("int")
+            },
+        );
+        let shift = source.find("<<").unwrap();
+        facts.insert(shift, integer("x.T\0"));
+        let obligations = build_go_obligations_valued(
+            "p.go",
+            source,
+            &mut 0,
+            &mut 0,
+            "rt",
+            true,
+            true,
+            Some(&facts),
+        )
+        .unwrap();
+        let text = rewrite_removing(source, &obligations.edits, &obligations.removed);
+        let plain = text
+            .split("/*line ")
+            .map(|part| part.split_once("*/").map_or(part, |(_, rest)| rest))
+            .collect::<String>();
+        let sites = obligations
+            .probes
+            .values()
+            .filter_map(|probe| match &probe.target {
+                GoProbeTarget::Operation { site } => Some(site.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sites, ["p.go:4:4", "p.go:6:11", "p.go:6:9"], "{plain}");
+        assert!(plain.contains("a += rt.Assign[int]("), "{plain}");
+        assert!(plain.contains(", 0, a, b)"), "{plain}");
+        // `s[f(...)]` is read again by the probe only where reading it does
+        // nothing: not here.
+        assert!(plain.contains("s[f(1, 2, s)] -= 1"), "{plain}");
+        assert!(plain.contains("rt.Arith[int]("), "{plain}");
+        assert!(plain.contains("rt.Unary[int]("), "{plain}");
+        parse(&plain).unwrap();
     }
 
     #[test]

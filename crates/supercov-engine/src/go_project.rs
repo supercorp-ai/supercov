@@ -391,6 +391,12 @@ pub fn prepare_go_project(
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
     let mut next_decision = 0_u32;
+    // A run that lists its mutants probes their values; an operation's probe
+    // needs its type, which only the type checker knows.
+    let facts = crate::go_run::mutants_requested()
+        .then(|| crate::go_strong::site_facts(root, &files.sources))
+        .flatten()
+        .unwrap_or_default();
     for relative in &files.sources {
         let path = root.join(relative);
         let Ok(source) = crate::fault_fs::read_to_string(&path) else {
@@ -405,7 +411,7 @@ pub fn prepare_go_project(
         // file that has one is compiled as Go 1.21 at least, whose inference
         // of untyped operands the probe's generic call leans on.
         let language = language_minor(root, relative, &source);
-        match crate::go_instrumenter::build_go_obligations_probing(
+        match crate::go_instrumenter::build_go_obligations_valued(
             relative,
             &source,
             &mut next_probe,
@@ -413,6 +419,7 @@ pub fn prepare_go_project(
             crate::go_instrumenter::RUNTIME_ALIAS,
             language >= 18,
             crate::go_run::mutants_requested(),
+            facts.get(relative),
         ) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);

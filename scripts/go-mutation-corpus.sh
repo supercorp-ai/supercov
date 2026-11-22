@@ -56,5 +56,35 @@ case $command in
     cp -R "$dir/.supercov/runs" "$out/runs"
     find "$dir/.supercov/strong" -name 'results.jsonl*' -exec cp {} "$out/" \; || true
     ;;
+  probes)
+    # What the value probes cost and what they spare: the measured run with
+    # and without them, three times each, and the plan's unknown mutants and
+    # candidate test runs from each.
+    dir=$1 out=$2 binary=$3
+    mkdir -p "$out"
+    chmod +x "$binary"
+    clock() { python3 -c 'import time; print(time.time())'; }
+    {
+      for round in 1 2 3; do
+        for mode in plain probes; do
+          rm -rf "$dir/.supercov"
+          start=$(clock)
+          if [ "$mode" = probes ]; then
+            (cd "$dir" && SUPERCOV_MUTANTS=1 "$binary" -- go test ./... > /dev/null 2>&1) || true
+          else
+            (cd "$dir" && "$binary" -- go test ./... > /dev/null 2>&1) || true
+          fi
+          end=$(clock)
+          plan=$(cd "$dir" && "$binary" runs latest mutants test --plan --json 2>/dev/null || echo '{}')
+          weak=$(cd "$dir" && "$binary" runs latest mutants --json --limit 0 2>/dev/null || echo '{}')
+          echo "{\"round\": $round, \"mode\": \"$mode\", \"seconds\": $(python3 -c "print($end - $start)"), \"plan\": $(echo "$plan" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("summary", d.get("data", {}).get("summary"))))'), \"weak\": $(echo "$weak" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps((d.get("data") or {}).get("summary")))')}"
+        done
+        start=$(clock)
+        (cd "$dir" && go test -count=1 ./... > /dev/null 2>&1) || true
+        echo "{\"round\": $round, \"mode\": \"go test\", \"seconds\": $(python3 -c "print($(clock) - $start)")}"
+      done
+    } > "$out/probes.jsonl"
+    cat "$out/probes.jsonl"
+    ;;
   *) echo "unknown command $command" >&2; exit 2 ;;
 esac

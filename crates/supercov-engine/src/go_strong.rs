@@ -315,12 +315,55 @@ fn vet_one(
         })
 }
 
+/// What the type checker says of every mutated token of `files` under
+/// `root`, by file and token offset: for a measured run's value probes,
+/// which need an operation's type. `None` where it cannot say (no `go`,
+/// a package that does not check).
+pub(crate) fn site_facts(
+    root: &Path,
+    files: &[String],
+) -> Option<HashMap<String, HashMap<usize, SiteFacts>>> {
+    let helper = helper(root, "go").ok()?;
+    let mut asked = Vec::new();
+    for file in files {
+        let Ok(source) = std::fs::read_to_string(root.join(file)) else {
+            continue;
+        };
+        let Ok(tokens) = crate::go_mutants::listed_tokens(&source) else {
+            continue;
+        };
+        for (token, _, replacement) in tokens {
+            asked.push((file.clone(), token.0, replacement));
+        }
+    }
+    let patterns = files
+        .iter()
+        .map(|file| pattern(&directory_of(file)))
+        .collect::<BTreeSet<_>>();
+    let request = json!({
+        "dir": root,
+        "patterns": patterns,
+        "factsOnly": true,
+        "mutants": asked.iter().map(|(file, offset, replacement)| json!({
+            "file": file, "offset": offset, "new": replacement,
+        })).collect::<Vec<_>>(),
+    });
+    let answer = run_helper(&helper, root, &request).ok()?;
+    let mut facts = HashMap::<String, HashMap<usize, SiteFacts>>::new();
+    for ((file, offset, _), checked) in asked.into_iter().zip(answer.mutants) {
+        if checked.status != "unchecked" {
+            facts.entry(file).or_default().insert(offset, checked.facts);
+        }
+    }
+    Some(facts)
+}
+
 /// The type checker's helper, built from the embedded source into the
 /// project's `.supercov`, once per version of it.
 const HELPER_SOURCE: &str = include_str!("../runtime-assets/go/mutants/main.go");
 const HELPER_MODULE: &str = include_str!("../runtime-assets/go/mutants/go.mod");
 
-fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
+pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
     let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
     let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
     let binary = directory.join(if cfg!(windows) {

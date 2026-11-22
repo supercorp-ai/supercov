@@ -46,8 +46,10 @@ type request struct {
 	// Build tags, as `-tags` takes them.
 	Tags string `json:"tags"`
 	// The go command to list with: the one the project's tests run.
-	Go      string   `json:"go"`
-	Mutants []mutant `json:"mutants"`
+	Go string `json:"go"`
+	// Only the facts of each site: no mutant is checked again.
+	FactsOnly bool     `json:"factsOnly"`
+	Mutants   []mutant `json:"mutants"`
 }
 
 type mutant struct {
@@ -83,6 +85,8 @@ type verdict struct {
 	Float bool `json:"float,omitempty"`
 	// The operands' type is a string one.
 	String bool `json:"string,omitempty"`
+	// The operands' type is an integer one (not a type parameter).
+	Integer bool `json:"integer,omitempty"`
 	// The expression's own type, where it is typed and named in a way the
 	// file can write (`int64`, `time.Duration`): what a switch over two
 	// untyped constants converts to.
@@ -395,7 +399,7 @@ func checkPackage(req request, p *listed, exports map[string]string, indices []i
 			continue
 		}
 		v := facts(s, info, parents, pkg, file)
-		if needsCheck(s, v, replacement, info) {
+		if !req.FactsOnly && needsCheck(s, v, replacement, info) {
 			original := *s.tok
 			*s.tok = replacement
 			var mutatedErrors []types.Error
@@ -441,9 +445,16 @@ func facts(s site, info *types.Info, parents map[ast.Node]ast.Node, pkg *types.P
 	}
 	if operand != nil {
 		if tv, ok := info.Types[operand]; ok && tv.Type != nil {
+			if expr == nil {
+				// A statement's own type is its operand's: `x` of `x += y`.
+				if basic, ok := tv.Type.(*types.Basic); !ok || basic.Info()&types.IsUntyped == 0 {
+					v.Type = types.TypeString(tv.Type, qualifier(pkg, file))
+				}
+			}
 			if basic, ok := tv.Type.Underlying().(*types.Basic); ok {
 				v.Float = basic.Info()&(types.IsFloat|types.IsComplex) != 0
 				v.String = basic.Info()&types.IsString != 0
+				v.Integer = basic.Info()&types.IsInteger != 0
 			}
 		}
 	}

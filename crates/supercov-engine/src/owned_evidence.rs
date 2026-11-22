@@ -469,20 +469,42 @@ fn obligations(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
             let obligation = match &probe.target {
                 GoProbeTarget::Statement { id } | GoProbeTarget::Function { id } => id.clone(),
                 GoProbeTarget::Alternative { alternative, .. } => alternative.clone(),
-                GoProbeTarget::Comparison { .. } => return None,
+                GoProbeTarget::Comparison { .. } | GoProbeTarget::Operation { .. } => {
+                    return None;
+                }
             };
             Some((*id as u32, obligation))
         })
         .collect()
 }
 
-/// Each comparison probe's site, by probe id.
-fn comparison_sites(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
+/// Each value probe's site, by probe id, and whether it is an operation's.
+fn comparison_sites(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, (String, bool)> {
     probes
         .iter()
         .filter_map(|(id, probe)| match &probe.target {
-            GoProbeTarget::Comparison { site } => Some((*id as u32, site.clone())),
+            GoProbeTarget::Comparison { site } => Some((*id as u32, (site.clone(), false))),
+            GoProbeTarget::Operation { site } => Some((*id as u32, (site.clone(), true))),
             _ => None,
+        })
+        .collect()
+}
+
+/// An operation probe's bits as the outcomes of each of its alternatives:
+/// `<site>#0` (bits 16, 32) and `<site>#1` (64, 128), `same` or `differs`.
+fn operation_outcomes(site: &str, bits: u32) -> Vec<crate::coverage_report::ComparisonSnapshot> {
+    (0..2)
+        .filter_map(|alternative| {
+            let shift = 2 * alternative;
+            let outcomes = [(16 << shift, "same"), (32 << shift, "differs")]
+                .into_iter()
+                .filter(|(bit, _)| bits & bit != 0)
+                .map(|(_, outcome)| outcome.to_owned())
+                .collect::<Vec<_>>();
+            (!outcomes.is_empty()).then(|| crate::coverage_report::ComparisonSnapshot {
+                id: format!("{site}#{alternative}"),
+                outcomes,
+            })
         })
         .collect()
 }
@@ -501,7 +523,7 @@ fn snapshot(
     evidence: &OwnedTestEvidence,
     manifest: &CoverageManifest,
     by_probe: &BTreeMap<u32, String>,
-    sites: &BTreeMap<u32, String>,
+    sites: &BTreeMap<u32, (String, bool)>,
     phase: &str,
 ) -> RuntimeSnapshot {
     let mut events = Vec::new();
@@ -561,11 +583,16 @@ fn snapshot(
     let comparisons = evidence
         .probes
         .iter()
-        .filter_map(|(probe, bits)| {
-            Some(crate::coverage_report::ComparisonSnapshot {
-                id: sites.get(probe)?.clone(),
-                outcomes: relations(*bits),
-            })
+        .filter_map(|(probe, bits)| Some((sites.get(probe)?, *bits)))
+        .flat_map(|((site, operation), bits)| {
+            if *operation {
+                operation_outcomes(site, bits)
+            } else {
+                vec![crate::coverage_report::ComparisonSnapshot {
+                    id: site.clone(),
+                    outcomes: relations(bits),
+                }]
+            }
         })
         .collect();
     RuntimeSnapshot {
