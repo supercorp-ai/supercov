@@ -113,6 +113,8 @@ pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
 mod stable_ids;
+#[cfg(test)]
+mod store_shapes;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;

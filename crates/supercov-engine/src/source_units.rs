@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One declaration, positioned the way anchors are: one-based lines and
 /// one-based UTF-8 byte columns, end exclusive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Unit {
     /// Name path from the file's top level -- `Server.start`, `tests::it_works`
@@ -51,6 +52,7 @@ pub struct Unit {
 
 /// What a parser could say about one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Code {
     /// Digest of everything a program can observe: the whole file with

@@ -1,0 +1,144 @@
+name: Record a release for the compatibility corpus
+
+# Each published release records its runs of every fixture into
+# tests/compat/runs (tests/compat/README.md), and the recordings come back
+# as a pull request against the default branch: nothing here pushes to it.
+# publish.yml calls this once npm has the release; run it by hand for a
+# release that was published without it.
+#
+# A pull request opened with the workflow's own token starts no workflow, so
+# its checks run once someone pushes to it. COMPAT_PR_TOKEN, a token with
+# contents and pull-requests write on this repository, opens it as a user
+# instead, and the compatibility suite runs on it at once.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version publish.yml published
+        required: true
+        type: string
+    secrets:
+      COMPAT_PR_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A version published to npm
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      fixtures: ${{ steps.list.outputs.fixtures }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: List the fixtures
+        id: list
+        run: |
+          set -euo pipefail
+          fixtures=$(ls tests/compat/fixtures | jq -R . | jq -sc .)
+          echo "fixtures=$fixtures" >> "$GITHUB_OUTPUT"
+      # npm serves reads through a cache; a release just published can be
+      # missing from it for minutes (publish.yml waits for the same reason).
+      - name: Wait until npm serves the release
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          for attempt in $(seq 1 16); do
+            if npm view "supercov@${RELEASE_VERSION}" version 2>/dev/null | grep -qx "${RELEASE_VERSION}"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "npm does not serve supercov@${RELEASE_VERSION}" >&2
+          exit 1
+
+  # A fixture each, so that no job records more than one.
+  record:
+    needs: fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: ${{ fromJSON(needs.fixtures.outputs.fixtures) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Record ${{ matrix.fixture }} as the release measures it
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: scripts/compat-record.sh "${{ matrix.fixture }}" "${RELEASE_VERSION}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compat-${{ matrix.fixture }}
+          path: tests/compat/runs/${{ matrix.fixture }}/${{ inputs.version }}
+          if-no-files-found: error
+          include-hidden-files: true
+
+  pull-request:
+    needs: [fixtures, record]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.COMPAT_PR_TOKEN || github.token }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: compat-*
+          path: recorded
+      - name: Put each fixture's recording in the corpus
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for recording in recorded/compat-*; do
+            fixture=${recording#recorded/compat-}
+            target="tests/compat/runs/${fixture}/${RELEASE_VERSION}"
+            rm -rf "$target"
+            mkdir -p "$target"
+            cp -R "$recording/." "$target/"
+          done
+          rm -rf recorded
+      - name: Open a pull request with the recordings
+        env:
+          GH_TOKEN: ${{ secrets.COMPAT_PR_TOKEN || github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git add -A tests/compat/runs
+          if git diff --cached --quiet; then
+            echo "The corpus already holds ${RELEASE_VERSION} as published."
+            exit 0
+          fi
+          branch="compat/record-${RELEASE_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -q -m "The compatibility corpus holds the runs ${RELEASE_VERSION} recorded as published"
+          git push --force origin "$branch"
+          if [ -n "$(gh pr list --head "$branch" --base "$BASE" --state open --json number --jq '.[].number')" ]; then
+            echo "The pull request for ${branch} has the new recordings."
+            exit 0
+          fi
+          gh pr create --base "$BASE" --head "$branch" \
+            --title "Record ${RELEASE_VERSION} in the compatibility corpus" \
+            --body "$(printf '%s\n\n%s\n' \
+              "The runs supercov@${RELEASE_VERSION}, as published to npm, recorded of each fixture in tests/compat/fixtures (scripts/compat-record.sh)." \
+              "Where the release commit recorded itself from its checkout, these replace that recording with the published package's.")"

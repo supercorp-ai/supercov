@@ -406,6 +406,7 @@ pub fn rust_coverage_v1_contract() -> Result<RustCoverageV1Contract, serde_json:
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StructuralSource {
     OwnedProbes,
@@ -414,6 +415,7 @@ pub enum StructuralSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutionModel {
     ProcessPerTest,
@@ -423,6 +425,7 @@ pub enum ExecutionModel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AttributionPrecision {
     Exact,
@@ -442,6 +445,7 @@ pub enum FrontendTransitionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum FrontendLimitationScope {
     Worker,
@@ -453,6 +457,7 @@ pub enum FrontendLimitationScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrontendAttribution {
     pub run: AttributionPrecision,
@@ -465,6 +470,7 @@ pub struct FrontendAttribution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrontendLimitation {
     pub id: String,
@@ -473,6 +479,7 @@ pub struct FrontendLimitation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrontendRunDeclaration {
     pub protocol_version: u32,
@@ -485,6 +492,7 @@ pub struct FrontendRunDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "store-shapes", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrontendRunnerDeclaration {
     pub runner: String,

@@ -66,6 +66,7 @@ pub struct Inputs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileFingerprint {
     pub sha256: String,
@@ -99,6 +100,7 @@ pub type FileManifest = BTreeMap<String, FileFingerprint>;
 
 /// The run stores identities and hashes, never complete source files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InputManifest {
     pub schema_version: u32,
@@ -130,6 +132,7 @@ impl InputManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestSelector {
     pub file: String,
@@ -138,6 +141,7 @@ pub struct TestSelector {
 
 /// What each test of a run executed, in the units of that run's manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Executions {
     pub tests: Vec<Execution>,
@@ -156,6 +160,7 @@ pub struct Executions {
     pub covered: BTreeMap<String, Vec<usize>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Execution {
     pub test: TestSelector,
@@ -263,8 +268,9 @@ pub const EXECUTIONS_FILE: &str = "test-executions.json";
 pub use crate::source_capture::ARCHIVE_PATH;
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ManifestCache {
+pub(crate) struct ManifestCache {
     evidence_digest: String,
     manifest: InputManifest,
     #[serde(default)]
