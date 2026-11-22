@@ -161,6 +161,46 @@ pub struct StrongPlan {
     pub mutants: Vec<PlannedMutant>,
 }
 
+/// The runners whose tests a strong pass runs: those with a driver in
+/// `runtime/javascript` (`vitestStrong.mjs`, `playwrightStrong.mjs`), and
+/// Rust's libtest, nextest and rustdoc tests (`rust_strong`).
+pub const STRONG_RUNNERS: [&str; 5] =
+    ["vitest", "playwright", "rust-libtest", "nextest", "rustdoc"];
+
+/// The file in a run's directory that holds its strong verdicts.
+pub const STRONG_VERDICTS_FILE: &str = "strong-mutation.json";
+
+/// The version of [`STRONG_VERDICTS_FILE`].
+pub const STRONG_VERDICTS_SCHEMA_VERSION: u32 = 1;
+
+/// A run's strong verdicts, as `mutants test` saves them into the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct StrongVerdicts {
+    pub schema_version: u32,
+    pub run: String,
+    pub mutant_set: String,
+    /// Each mutant's verdict, by its id.
+    pub mutants: BTreeMap<String, Verdict>,
+}
+
+/// One mutant's strong verdict, as saved, and as a driver reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Verdict {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
+    #[serde(default)]
+    pub tests: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// A stored run's plan, and the files whose mutants could not be listed.
 pub struct ArchivePlan {
     /// `None` when the run has no mutants and none could be listed.

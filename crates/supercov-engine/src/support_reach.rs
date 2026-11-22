@@ -26,6 +26,7 @@ pub const ARCHIVE_PATH: &str = "support-reach.json";
 pub const DIRECTORY_VARIABLE: &str = "SUPERCOV_SUPPORT_DIR";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct SupportReach {
     /// Each project file a serving process loaded or read, relative to the
     /// project, and the tests (by id) those processes served.
