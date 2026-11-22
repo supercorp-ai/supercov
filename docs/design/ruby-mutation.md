@@ -31,26 +31,41 @@ enumerates the same set without running mutant (`ruby_mutants/`):
   more loosely than its operator (`(a + b) * c` prints as `a + b * c`), a
   regexp literal in a condition (a match against `$_` once parsed), and
   `(a || b) && c` anywhere but a statement (Unparser writes it with `and`),
-  and a pin of anything but a variable or parentheses (`^nil`). A call by a
-  local variable's name is written with parentheses (`rule()`). Floats are
-  equal as Ruby holds them equal, so `-0.0` made `0.0` is no change.
+  a pin of anything but a variable or parentheses (`^nil`), `a[] = v`
+  without its value, an operator assignment whose target became a plain
+  value, a name in `alias` or `undef` made an expression, an interpolation
+  of several statements (`"#{a; b}"`), and a regexp part that is neither
+  text nor `#{...}` (`/a#@b/`, which Unparser prints `#{@b}`: a method
+  holding one has no mutants). A call by a local variable's name is written
+  with parentheses (`rule()`). Floats are equal as Ruby holds them equal, so
+  `-0.0` made `0.0` is no change. Integers past 64 bits (and past `i128`)
+  get mutant's 0, 1 and neighbours; an imaginary's value is `(0+2i)` or
+  `(0-2i)`, as `inspect` prints it.
 - A regexp's body is parsed as `regexp_parser` parses it (`regexp.rs`) and
   mutated as mutant's regexp mutators do: a quantifier removed or `*` made
   `+`, `\d` and `\D` (and the other character types, `\b`, `^`, `$`)
   swapped, an alternative removed, a capturing group made passive or a named
-  one renamed `_name`. An interval followed by `?` or `+` is two
-  quantifiers, as Ruby reads it (`a{2}?` is `(?:a{2})?`), each removed
-  apart. A mutation that leaves a back reference or subexpression call
-  without its group (`(a)\1` made `(?:a)\1`) is not a regexp Ruby parses,
-  and is dropped. A pattern with a conditional or a set intersection is not
+  one renamed `_name`. An exact interval followed by `?`, any interval
+  followed by `+`, and intervals one after another are several quantifiers,
+  as Ruby reads them (`a{2}?` is `(?:a{2})?`, `a{2}{3}` is
+  `(?:a{2}){3}`), each removed apart; `a{1,2}?` is one reluctant
+  quantifier. A mutation that leaves a back reference or subexpression call
+  without its group (`(a)\1` made `(?:a)\1`), or a whole-regexp call
+  (`\g<0>`) without an alternative that ends it, is not a regexp Ruby
+  parses, and is dropped. A pattern with a conditional or a set intersection is not
   read, and gets no body mutations.
 
 `scripts/mutant-parity.rb` prints mutant's own mutants of the fixtures in
 `crates/supercov-engine/tests/fixtures/mutant-parity` and writes the goldens
 (`FILE.mutant.json`); the engine's tests compare node by node: each method's
 tree, and each mutant's located node and replacement, in mutant's order
-(3,835 mutants on the fixtures, every one equal; the tests also take a
-project's files and goldens from `MUTANT_PARITY_FIXTURES`).
+(7,023 mutants on the fixtures, every one equal; the tests also take a
+project's files and goldens from `MUTANT_PARITY_FIXTURES`). Beside parity
+the tests check that every fixture method and every mutant of it, printed
+from its tree alone, parses back to that tree; that every switch slot
+printed in its own place does; that a method holding syntax the port does
+not convert, put at any node in turn, is refused whole; and that printing,
+mutating and validating malformed trees refuses instead of panicking.
 
 ### Ids
 
