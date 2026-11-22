@@ -34,6 +34,10 @@ puts JSON.pretty_generate(
   mutants: data["mutants"].size,
   counts: counts,
   join: data["stryker"]&.slice("matched", "onlySupercov", "onlyStryker"),
+  # A mutant mutant kills that the weak verdict calls not infected or not
+  # reached, or the reverse for an equivalent one.
+  weakSoundnessViolations: data.dig("stryker", "soundnessViolations"),
+  weak: data["mutants"].group_by { |mutant| mutant["status"] }.transform_values(&:size),
   killedBySupercovSurvivedMutant: disagreements.count { |each| killed.call(each[:supercov]) },
   survivedSupercovKilledByMutant: disagreements.count { |each| !killed.call(each[:supercov]) },
   disagreements: disagreements,

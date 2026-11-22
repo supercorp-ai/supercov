@@ -75,7 +75,9 @@ cp .mutant/results/*.json.gz "$out/" 2>/dev/null || true
 
 # Supercov: the measured run, then the strong pass.
 start=$(seconds)
-timeout 120 "$SUPERCOV_BIN" -- "${command[@]}" > "$out/supercov-run.log" 2>&1
+# With the mutants listed and their values recorded, as `supercov mutants`
+# measures: the weak verdicts are joined too.
+SUPERCOV_MUTANTS=1 timeout 120 "$SUPERCOV_BIN" -- "${command[@]}" > "$out/supercov-run.log" 2>&1
 measured_seconds=$(echo "$(seconds) - $start" | bc)
 start=$(seconds)
 SUPERCOV_STRONG_JOBS="$jobs" timeout "${STRONG_TIMEOUT:-240}" "$SUPERCOV_BIN" runs latest mutants test --json > "$out/supercov-strong.json" 2> "$out/supercov-strong.log" || true
