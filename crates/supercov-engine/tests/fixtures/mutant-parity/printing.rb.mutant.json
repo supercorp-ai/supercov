@@ -5274,6 +5274,312 @@
           "replacement": "(int 167)"
         }
       ]
+    },
+    {
+      "subject": "block_with_ensure:96",
+      "sexp": "(def :block_with_ensure (args (optarg :env (hash)) (blockarg :block)) (block (send (const nil :LOCK) :synchronize) (args) (ensure (begin (lvasgn :diff (send (lvar :env) :dup)) (send (lvar :block) :call)) (send nil :restore (lvar :diff)))))",
+      "mutants": [
+        {
+          "start": [
+            96,
+            25
+          ],
+          "end": [
+            96,
+            33
+          ],
+          "node": "optarg",
+          "replacement": "(arg :env)"
+        },
+        {
+          "start": [
+            96,
+            31
+          ],
+          "end": [
+            96,
+            33
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(begin (lvasgn :env (hash)) (block (send (const nil :LOCK) :synchronize) (args) (ensure (begin (lvasgn :diff (send (lvar :env) :dup)) (send (lvar :block) :call)) (send nil :restore (lvar :diff)))))"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": null
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send (const nil :LOCK) :synchronize)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(const nil :LOCK)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            97,
+            9
+          ],
+          "node": "const",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            98,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "ensure",
+          "replacement": null
+        },
+        {
+          "start": [
+            98,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "ensure",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            97,
+            5
+          ],
+          "end": [
+            102,
+            8
+          ],
+          "node": "block",
+          "replacement": "(ensure (begin (lvasgn :diff (send (lvar :env) :dup)) (send (lvar :block) :call)) (send nil :restore (lvar :diff)))"
+        },
+        {
+          "start": [
+            98,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "ensure",
+          "replacement": "(begin (lvasgn :diff (send (lvar :env) :dup)) (send (lvar :block) :call))"
+        },
+        {
+          "start": [
+            98,
+            14
+          ],
+          "end": [
+            98,
+            21
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            98,
+            14
+          ],
+          "end": [
+            98,
+            21
+          ],
+          "node": "send",
+          "replacement": "(lvar :env)"
+        },
+        {
+          "start": [
+            98,
+            14
+          ],
+          "end": [
+            98,
+            17
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            99,
+            7
+          ],
+          "end": [
+            99,
+            17
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            99,
+            7
+          ],
+          "end": [
+            99,
+            17
+          ],
+          "node": "send",
+          "replacement": "(lvar :block)"
+        },
+        {
+          "start": [
+            99,
+            7
+          ],
+          "end": [
+            99,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            98,
+            7
+          ],
+          "end": [
+            99,
+            17
+          ],
+          "node": "begin",
+          "replacement": "(lvasgn :diff (send (lvar :env) :dup))"
+        },
+        {
+          "start": [
+            101,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            101,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "send",
+          "replacement": "(lvar :diff)"
+        },
+        {
+          "start": [
+            101,
+            7
+          ],
+          "end": [
+            101,
+            20
+          ],
+          "node": "send",
+          "replacement": "(send nil :restore)"
+        },
+        {
+          "start": [
+            101,
+            15
+          ],
+          "end": [
+            101,
+            19
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        }
+      ]
     }
   ]
 }

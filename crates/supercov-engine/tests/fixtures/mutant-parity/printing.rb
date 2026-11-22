@@ -92,4 +92,13 @@ class Printing
   def bare_super_operand(a)
     (super a) * 2
   end
+
+  def block_with_ensure(env = {}, &block)
+    LOCK.synchronize do
+      diff = env.dup
+      block.call
+    ensure
+      restore(diff)
+    end
+  end
 end

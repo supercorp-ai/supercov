@@ -1230,6 +1230,8 @@ impl Printer<'_> {
                     format!("begin; {}; end", self.rescue_body(node)?)
                 }
             }
+            // A `do` block's body with an ensure clause, made the value.
+            "ensure" => format!("begin; {}; end", self.ensure_body(node)?),
             "return" | "next" | "break" => {
                 if children.is_empty() {
                     node.ty.to_owned()
