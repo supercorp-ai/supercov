@@ -34,6 +34,8 @@ flags="$(field flags)"
 targets="$(field targets)"
 all_targets="$targets"
 module="$(field module)"
+sources="$(field sources)"
+target_tests="$(field targetTests)"
 junit5="$(field junit5)"
 testng="$(field testng)"
 jdk="$(field jdk)"
@@ -54,19 +56,26 @@ if [ ! -d "$source" ]; then
 fi
 
 # A shard (SHARD=k/n) is the k-th of n shares of the project's source files:
-# PIT mutates their classes and the strong pass runs their mutants.
+# PIT mutates their classes and the strong pass runs their mutants. A
+# project's `sources` (a directory) narrows the files to its own, the shard
+# or not.
 shard_files=()
-if [ -n "${SHARD:-}" ]; then
+if [ -n "${SHARD:-}" ] || [ -n "$sources" ]; then
   k="${SHARD%/*}"
   n="${SHARD#*/}"
-  # A module's own sources only: the tests run are the module's, and PIT
-  # mutates only the module's classes.
-  mapfile -t all < <(cd "$source" && find "${module:-.}" -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
+  [ -n "${SHARD:-}" ] || { k=1; n=1; }
+  if [ -n "$sources" ]; then
+    mapfile -t all < <(cd "$source" && find "$sources" -maxdepth 1 \( -name '*.java' -o -name '*.kt' \) | sort)
+  else
+    # A module's own sources only: the tests run are the module's, and PIT
+    # mutates only the module's classes.
+    mapfile -t all < <(cd "$source" && find "${module:-.}" -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
+  fi
   for i in "${!all[@]}"; do
     if [ $((i % n)) -eq $((k - 1)) ]; then shard_files+=("${all[$i]}"); fi
   done
   targets="$(for f in "${shard_files[@]}"; do
-    rel="${f#*/src/main/java/}"; rel="${rel#*/src/main/kotlin/}"; rel="${rel#src/main/java/}"; rel="${rel#src/main/kotlin/}"
+    rel="${f#*/src/main/java/}"; rel="${rel#*/src/main/kotlin/}"; rel="${rel#src/main/java/}"; rel="${rel#src/main/kotlin/}"; rel="${rel#src/main/}"
     class="$(echo "${rel%.*}" | tr / .)"
     echo "$class,$class\$*,${class}Kt,${class}Kt\$*"
   done | paste -sd, -)"
@@ -98,8 +107,29 @@ fi
 now() { date +%s.%N; }
 elapsed() { node -e "process.stdout.write(String(Math.round(($2-$1)*1000)))"; }
 
+# Ant, where the project builds with it: the version the build asks for,
+# from Apache's archive, and the JUnit jars its build looks for in
+# lib/optional.
+if [ "$build" = ant ]; then
+  ant_version="$(field antVersion)"
+  if ! command -v ant > /dev/null || ! ant -version 2>/dev/null | grep -q "$ant_version"; then
+    if [ ! -d "$work/apache-ant-$ant_version" ]; then
+      curl -fsSL "https://archive.apache.org/dist/ant/binaries/apache-ant-$ant_version-bin.tar.gz" | tar -xz -C "$work"
+    fi
+    export ANT_HOME="$work/apache-ant-$ant_version"
+    export PATH="$ANT_HOME/bin:$PATH"
+  fi
+  mkdir -p lib/optional
+  for artifact in junit:junit:4.13.2 org.hamcrest:hamcrest-core:1.3 org.hamcrest:hamcrest-library:1.3; do
+    mvn -B -q dependency:copy -Dartifact="$artifact" -DoutputDirectory=lib/optional > /dev/null
+  done
+fi
+
 tests_command() {
-  if [ "$build" = maven ]; then
+  if [ "$build" = ant ]; then
+    # shellcheck disable=SC2086
+    echo ant -noinput $flags "$(field antTarget)"
+  elif [ "$build" = maven ]; then
     # shellcheck disable=SC2086
     echo mvn -B -q $flags test
   else
@@ -112,7 +142,32 @@ tests_command() {
 
 run_pit() {
   local matrix="$1"
-  if [ "$build" = maven ]; then
+  if [ "$build" = ant ]; then
+    # PIT's command line over the classes Ant compiled: its Ant task is no
+    # more than a launcher for the same.
+    # shellcheck disable=SC2086
+    ant -noinput -q $flags "$(field antCompile)" >&2
+    mkdir -p "$work/pit-cli"
+    for artifact in org.pitest:pitest-command-line:1.17.1 org.pitest:pitest-entry:1.17.1 org.pitest:pitest:1.17.1; do
+      mvn -B -q dependency:copy -Dartifact="$artifact" -DoutputDirectory="$work/pit-cli" > /dev/null
+    done
+    local classpath
+    classpath="$(field antClasspath | tr ',' '\n' | while read -r entry; do
+      if [[ "$entry" == *'*'* ]]; then ls "$PWD"/$entry; else echo "$PWD/$entry"; fi
+    done | paste -sd, -)"
+    local full=false
+    [ "$matrix" = 1 ] && full=true
+    # shellcheck disable=SC2046
+    java -cp "$(ls "$work"/pit-cli/*.jar | paste -sd: -)" \
+      org.pitest.mutationtest.commandline.MutationCoverageReport \
+      --reportDir pit-reports --timestampedReports=false --outputFormats XML \
+      --targetClasses "$targets" --targetTests "$target_tests" \
+      --sourceDirs "$(field antSourceDir)" --classPath "$classpath" \
+      --threads "$threads" --fullMutationMatrix="$full" \
+      --timeoutConst 10000 \
+      --jvmArgs "$(field antJvmArgs | sed "s|ROOT|$PWD|g; s|ANTHOME|${ANT_HOME:-}|g")" >&2
+    echo pit-reports/mutations.xml
+  elif [ "$build" = maven ]; then
     python3 "$here/pit-maven.py" pom.xml "${targets%%,*}"
     # Every target class pattern, where a shard names several.
     python3 - pom.xml "$targets" <<'PY'
