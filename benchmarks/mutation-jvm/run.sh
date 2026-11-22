@@ -282,31 +282,57 @@ assert old in lines[line - 1], lines[line - 1]
 lines[line - 1] = lines[line - 1].replace(old, new, 1)
 open(path, "w").write("\n".join(lines))
 PY
+    # Each phase's output goes to a file of its own, then into the log, and
+    # the verdict is read from that file: a pipe into `grep -q` would stop
+    # the build's output at the first match, and `tee /dev/stderr` reopens
+    # the log at its start and writes over what is there.
+    log="$results/handcheck-$(echo "$HANDCHECK" | tr '/:' '__').log"
+    phase="$(mktemp)"
+    # An Ant build's verdict: its <junit> reports failures without failing
+    # the build, so the summary says; a build that did not get that far is
+    # neither.
+    ant_verdict() {
+      if grep -q "Tests FAILED" "$phase"; then
+        echo "FAILED $1"
+      elif grep -q "BUILD SUCCESSFUL" "$phase"; then
+        echo "PASSED $1"
+      else
+        echo "BUILD ERROR $1"
+      fi
+    }
     {
       echo "== $HANDCHECK"
       echo "== alone: $HANDCHECK_TEST"
-      if [ "$build" = ant ]; then
-        # Ant's <junit> reports failures without failing the build: its
-        # summary says.
+    } > "$log"
+    status=0
+    if [ "$build" = ant ]; then
+      # shellcheck disable=SC2086
+      ant -noinput $flags -Djunit.includes="$HANDCHECK_TEST" "$(field antTarget)" > "$phase" 2>&1 || true
+      cat "$phase" >> "$log"
+      ant_verdict alone >> "$log"
+    else
+      if [ "$build" = maven ]; then
         # shellcheck disable=SC2086
-        ant -noinput $flags -Djunit.includes="$HANDCHECK_TEST" "$(field antTarget)" 2>&1 | tee /dev/stderr | grep -q "Tests FAILED" && echo "FAILED alone" || echo "PASSED alone"
-      elif [ "$build" = maven ]; then
-        # shellcheck disable=SC2086
-        mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test && echo "PASSED alone" || echo "FAILED alone"
+        mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test > "$phase" 2>&1 || status=$?
       else
         task="test"
         [ -n "$module" ] && task=":$module:test"
         # shellcheck disable=SC2086
-        ./gradlew --no-daemon -q $flags "$task" --tests "$HANDCHECK_TEST" && echo "PASSED alone" || echo "FAILED alone"
+        ./gradlew --no-daemon -q $flags "$task" --tests "$HANDCHECK_TEST" > "$phase" 2>&1 || status=$?
       fi
-      echo "== whole suite"
-      # shellcheck disable=SC2086
-      if [ "$build" = ant ]; then
-        $(tests_command) 2>&1 | tee /dev/stderr | grep -q "Tests FAILED" && echo "FAILED whole" || echo "PASSED whole"
-      else
-        $(tests_command) && echo "PASSED whole" || echo "FAILED whole"
-      fi
-    } > "$results/handcheck-$(echo "$HANDCHECK" | tr '/:' '__').log" 2>&1
+      cat "$phase" >> "$log"
+      [ "$status" = 0 ] && echo "PASSED alone" >> "$log" || echo "FAILED alone" >> "$log"
+    fi
+    echo "== whole suite" >> "$log"
+    status=0
+    $(tests_command) > "$phase" 2>&1 || status=$?
+    cat "$phase" >> "$log"
+    if [ "$build" = ant ]; then
+      ant_verdict whole >> "$log"
+    else
+      [ "$status" = 0 ] && echo "PASSED whole" >> "$log" || echo "FAILED whole" >> "$log"
+    fi
+    rm -f "$phase"
     ;;
   *)
     echo "unknown scenario $scenario" >&2
