@@ -6468,10 +6468,12 @@ fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
     );
     project.git(&["init", "-q"]);
     project.commit("mocha");
-    // Serially and with --parallel, where each worker runs its own files.
+    // Serially, with --parallel, where each worker runs its own files, and
+    // with --check-leaks, which must not see Supercov's own globals.
     for command in [
         &["--", "npx", "mocha"][..],
         &["--", "npx", "mocha", "--parallel"],
+        &["--", "npx", "mocha", "--check-leaks"],
     ] {
         project.supercov(command).succeeds();
         let summary = project.supercov(&["runs", "latest"]).succeeds();
