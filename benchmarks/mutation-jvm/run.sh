@@ -61,9 +61,9 @@ fi
 # or not.
 shard_files=()
 if [ -n "${SHARD:-}" ] || [ -n "$sources" ]; then
-  k="${SHARD%/*}"
-  n="${SHARD#*/}"
-  [ -n "${SHARD:-}" ] || { k=1; n=1; }
+  shard="${SHARD:-1/1}"
+  k="${shard%/*}"
+  n="${shard#*/}"
   if [ -n "$sources" ]; then
     mapfile -t all < <(cd "$source" && find "$sources" -maxdepth 1 \( -name '*.java' -o -name '*.kt' \) | sort)
   else
