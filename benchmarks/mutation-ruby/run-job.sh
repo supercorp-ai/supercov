@@ -20,12 +20,13 @@ work="$(mktemp -d)"
 case "$project" in
   dry-inflector)
     repo=dry-rb/dry-inflector tag=v1.3.1 integration=rspec subjects='Dry::Inflector*' requires=(dry/inflector)
-    command=(bundle exec rspec) ;;
+    command=(bundle exec rspec) dependencies=() ;;
   dotenv)
     repo=bkeepers/dotenv tag=v3.2.0 integration=rspec subjects='Dotenv*' requires=(dotenv)
     command=(bundle exec rspec) ;;
   erubi)
     repo=jeremyevans/erubi tag=1.13.1 integration=minitest subjects='Erubi*' requires=(erubi ./test/test.rb)
+    dependencies=('"minitest", "~> 5.25"' '"minitest-global_expectations"')
     command=(bundle exec ruby -Ilib test/test.rb) ;;
   *) echo "unknown project $project" >&2; exit 2 ;;
 esac
@@ -37,14 +38,16 @@ git -c advice.detachedHead=false checkout -q "$tag"
 # mutant and its integration in the project's bundle, and every test made a
 # candidate for every subject: mutant otherwise picks tests by their names.
 if [ ! -f Gemfile ]; then
-  printf 'source "https://rubygems.org"\ngemspec\n' > Gemfile
+  # Without `gemspec`: erubi's gemspec requires the library itself, which
+  # Bundler would load before anything else.
+  printf 'source "https://rubygems.org"\n' > Gemfile
+  for dependency in "${dependencies[@]}"; do printf 'gem %s\n' "$dependency" >> Gemfile; done
 fi
 printf '\ngem "mutant", "0.17.1"\ngem "mutant-%s", "0.17.1"\n' "$integration" >> Gemfile
 if [ "$integration" = rspec ]; then
   printf '\nRSpec.configure { |config| config.define_derived_metadata { |metadata| metadata[:mutant_expression] = "%s" } }\n' "$subjects" >> spec/spec_helper.rb
   printf 'gem "rspec"\n' >> Gemfile
 else
-  printf 'gem "minitest"\n' >> Gemfile
   mkdir -p "$work/shim"
   printf 'require "mutant/minitest/coverage"\nMinitest::Test.cover("%s")\n' "$subjects" > "$work/shim/every_test.rb"
   requires=("$work/shim/every_test.rb" "${requires[@]}")

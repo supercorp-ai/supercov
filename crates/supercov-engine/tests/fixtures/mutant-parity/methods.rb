@@ -53,3 +53,19 @@ class Methods
     end
   end
 end
+
+class Heredocs
+  def message(name)
+    raise ArgumentError, <<~EOS.tr("\n", " ")
+      no #{name}
+      here
+    EOS
+  end
+
+  def plain
+    <<~TEXT
+      one
+      two
+    TEXT
+  end
+end

@@ -197,17 +197,27 @@ fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
         let Some((start, end)) = located.span else {
             continue;
         };
-        let Some(edit) = edit(source, tree, &mutated) else {
-            into.unprintable += 1;
-            continue;
-        };
-        let descriptor = match &replacement {
-            None => "removed".to_owned(),
-            Some(_) if edit.start == start && edit.end == end => descriptor(&edit.text),
-            Some(replacement) => descriptor(
+        // A mutant whose code cannot be written in place (one in a line
+        // holding a heredoc's opening) is still a mutant: its descriptor is
+        // its replacement's code.
+        let edit = edit(source, tree, &mutated);
+        let descriptor = match (&replacement, &edit) {
+            (None, _) => "removed".to_owned(),
+            (Some(_), Some(edit)) if edit.start == start && edit.end == end => {
+                descriptor(&edit.text)
+            }
+            (Some(replacement), _) => descriptor(
                 &print::one_line(source, replacement).unwrap_or_else(|| tree::sexp(replacement)),
             ),
         };
+        if edit.is_none() {
+            into.unprintable += 1;
+        }
+        let edit = edit.unwrap_or(Edit {
+            start,
+            end,
+            text: String::new(),
+        });
         into.mutants.push(RubyMutant {
             start,
             end,
@@ -303,6 +313,7 @@ pub(crate) fn edit(source: &[u8], tree: &Rc<N>, mutated: &Rc<N>) -> Option<Edit>
             continue;
         };
         let text = match &mutated {
+            None if print::holds_heredoc(source, &original) => continue,
             None => {
                 let parent = &path.last()?.0;
                 if may_be_empty(parent) {
@@ -783,7 +794,21 @@ pub fn parse_mutant_session(
         let Some(source_path) = subject["source_path"].as_str() else {
             continue;
         };
-        let file = path_of(source_path);
+        // Results made in another checkout name its paths: the file is the
+        // longest tail of the path that is under this project.
+        let mut file = path_of(source_path);
+        if read(&file).is_none() {
+            let parts: Vec<&str> = source_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            if let Some(tail) = (0..parts.len())
+                .map(|from| parts[from..].join("/"))
+                .find(|tail| read(tail).is_some())
+            {
+                file = tail;
+            }
+        }
         // `Name#method:/path/file.rb:LINE`: the method's first line.
         let line = subject["identification"]
             .as_str()

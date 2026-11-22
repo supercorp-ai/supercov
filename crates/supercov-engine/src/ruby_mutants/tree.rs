@@ -87,6 +87,8 @@ pub(crate) mod syntax {
     /// An expression in a slot that holds any expression in parentheses: a
     /// switch can go around it.
     pub const EXPRESSION: u16 = 1 << 14;
+    /// A heredoc: its span is its opening, and its body follows its line.
+    pub const HEREDOC: u16 = 1 << 15;
 }
 
 /// A parser AST node.
@@ -945,7 +947,15 @@ impl<'s> Converter<'s> {
             .opening_loc()
             .is_some_and(|opening| self.text(&opening).starts_with(b"<<"))
         {
-            return self.unsupported("a heredoc", &string.location());
+            let lines = string
+                .unescaped()
+                .split_inclusive(|byte| *byte == b'\n')
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>();
+            return Ok(heredoc(
+                lines.into_iter().map(HeredocPart::Text).collect(),
+                at,
+            ));
         }
         if self.text(&string.content_loc()).contains(&b'\n') {
             let parts = self.lines(string)?;
@@ -1104,7 +1114,18 @@ impl<'s> Converter<'s> {
                     .opening_loc()
                     .is_some_and(|opening| self.text(&opening).starts_with(b"<<"))
                 {
-                    return self.unsupported("a heredoc", &location);
+                    let mut parts = Vec::new();
+                    for part in &string.parts() {
+                        match part.as_string_node() {
+                            Some(text) => parts.extend(
+                                text.unescaped()
+                                    .split_inclusive(|byte| *byte == b'\n')
+                                    .map(|line| HeredocPart::Text(line.to_vec())),
+                            ),
+                            None => parts.push(HeredocPart::Node(self.convert(&part)?)),
+                        }
+                    }
+                    return Ok(heredoc(parts, at));
                 }
                 let parts = self.string_parts(string.parts())?;
                 if parts.len() == 1
@@ -2067,6 +2088,61 @@ impl<'s> Converter<'s> {
     }
 }
 
+enum HeredocPart {
+    Text(Vec<u8>),
+    Node(Rc<N>),
+}
+
+/// A heredoc as the compiler's `visit_heredoc` builds it: one `str` per line
+/// (a line joins the one before only where that has no line break yet), no
+/// empty `str`, and `str` alone where one part is left. Its span is its
+/// opening only: its body lies after the line, so it is never printed as
+/// written (`HEREDOC`).
+fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
+    let mut children: Vec<Child> = Vec::new();
+    for part in parts {
+        match part {
+            HeredocPart::Text(text) if text.is_empty() => {}
+            HeredocPart::Text(text) => {
+                let joins = children.last().and_then(Child::node).is_some_and(|last| {
+                    last.ty == "str"
+                        && matches!(last.child(0), Child::Str(bytes) if !bytes.ends_with(b"\n"))
+                });
+                if joins {
+                    let Some(Child::Node(last)) = children.pop() else {
+                        unreachable!()
+                    };
+                    let Child::Str(mut bytes) = last.child(0).clone() else {
+                        unreachable!()
+                    };
+                    bytes.extend_from_slice(&text);
+                    children.push(node(made_with(
+                        "str",
+                        vec![Child::Str(bytes)],
+                        at,
+                        syntax::HEREDOC,
+                    )));
+                } else {
+                    children.push(node(made_with(
+                        "str",
+                        vec![Child::Str(text)],
+                        at,
+                        syntax::HEREDOC,
+                    )));
+                }
+            }
+            HeredocPart::Node(value) => children.push(node(value)),
+        }
+    }
+    if children.len() == 1
+        && let Some(only) = children[0].node()
+        && only.ty == "str"
+    {
+        return made_with("str", only.children.clone(), at, syntax::HEREDOC);
+    }
+    made_with("dstr", children, at, syntax::HEREDOC)
+}
+
 fn elsif_end(if_node: &ruby_prism::IfNode<'_>) -> usize {
     match if_node.subsequent() {
         Some(subsequent) => match subsequent.as_else_node() {
@@ -2177,7 +2253,7 @@ fn mark_slots(tree: &Rc<N>, source: &[u8], pattern: bool) -> Rc<N> {
             "or_asgn" | "and_asgn" => vec![1],
             "return" | "next" | "break" | "index" => (0..tree.children.len()).collect(),
             "array" if !tree.has(syntax::SYNTHETIC) => (0..tree.children.len()).collect(),
-            "pair" => vec![1],
+            "pair" | "optarg" | "kwoptarg" => vec![1],
             _ => Vec::new(),
         }
     };

@@ -1446,6 +1446,282 @@
           "replacement": "(nil)"
         }
       ]
+    },
+    {
+      "subject": "message:58",
+      "sexp": "(def :message (args (arg :name)) (send nil :raise (const nil :ArgumentError) (send (dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\")) :tr (str s\"0a\") (str s\"20\"))))",
+      "mutants": [
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            11
+          ],
+          "end": [
+            59,
+            24
+          ],
+          "node": "const",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise (send (dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\")) :tr (str s\"0a\") (str s\"20\")))"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\"))"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            32
+          ],
+          "node": "dstr",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            60,
+            12
+          ],
+          "end": [
+            60,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send (dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\")) :tr)"
+        },
+        {
+          "start": [
+            59,
+            36
+          ],
+          "end": [
+            59,
+            40
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            36
+          ],
+          "end": [
+            59,
+            40
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send (dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\")) :tr (str s\"20\"))"
+        },
+        {
+          "start": [
+            59,
+            42
+          ],
+          "end": [
+            59,
+            45
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            59,
+            42
+          ],
+          "end": [
+            59,
+            45
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            59,
+            26
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send (dstr (str s\"6e6f20\") (begin (lvar :name)) (str s\"0a\") (str s\"686572650a\")) :tr (str s\"0a\"))"
+        },
+        {
+          "start": [
+            59,
+            5
+          ],
+          "end": [
+            59,
+            46
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise (const nil :ArgumentError))"
+        }
+      ]
+    },
+    {
+      "subject": "plain:65",
+      "sexp": "(def :plain (args) (dstr (str s\"6f6e650a\") (str s\"74776f0a\")))",
+      "mutants": [
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            66,
+            12
+          ],
+          "node": "dstr",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            66,
+            12
+          ],
+          "node": "dstr",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            66,
+            12
+          ],
+          "node": "dstr",
+          "replacement": null
+        },
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            66,
+            12
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        }
+      ]
     }
   ]
 }

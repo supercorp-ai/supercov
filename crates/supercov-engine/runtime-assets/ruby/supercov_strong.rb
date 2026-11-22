@@ -74,6 +74,12 @@ module Supercov
 
       def timed_out? = @timed_out
 
+      # Whether a switched file was compiled with its switches: one loaded
+      # before this runtime (by a gemspec Bundler evaluates, say) was not.
+      def compiled?(relative)
+        (@compiled || {}).key?(File.join(@root, relative))
+      end
+
       def note_timeout
         path = @plan && @plan["timeouts"]
         return unless path
@@ -99,7 +105,9 @@ module Supercov
         switched = @files[absolute]
         return nil unless switched
 
-        RubyVM::InstructionSequence.compile(File.binread(switched), path, path, 1)
+        iseq = RubyVM::InstructionSequence.compile(File.binread(switched), path, path, 1)
+        (@compiled ||= {})[absolute] = true
+        iseq
       end
     end
 
@@ -188,7 +196,12 @@ module Supercov
         end
         @failing = baseline[:failed].to_h { |id| [id, true] }
         @durations = baseline[:durations]
-        queue = @plan["mutants"].dup
+        queue = @plan["mutants"].select do |mutant|
+          next true if Strong.compiled?(mutant["file"])
+
+          write(mutant, "error", nil, 0, 0, "its file was loaded before Supercov's runtime, without its switches")
+          false
+        end
         running = {}
         until queue.empty? && running.empty?
           while running.size < @jobs && (mutant = queue.shift)
@@ -410,11 +423,21 @@ module Supercov
         reporter = ::RSpec::Core::Reporter.new(configuration)
         listener = Listener.new
         reporter.register_listener(listener, :example_finished)
-        world.example_groups.each do |group|
-          next if group.descendant_filtered_examples.empty?
+        # The suite's own `before(:suite)` and `after(:suite)` hooks run
+        # around the examples, in this process, as RSpec runs them: code
+        # they call runs with the mutant on.
+        run_groups = lambda do
+          world.example_groups.each do |group|
+            next if group.descendant_filtered_examples.empty?
 
-          group.run(reporter)
-          break if world.wants_to_quit
+            group.run(reporter)
+            break if world.wants_to_quit
+          end
+        end
+        if configuration.respond_to?(:with_suite_hooks)
+          configuration.with_suite_hooks(&run_groups)
+        else
+          run_groups.call
         end
         by_id = @examples.invert
         sequence = listener.finished.map { |example| by_id.fetch(example) }

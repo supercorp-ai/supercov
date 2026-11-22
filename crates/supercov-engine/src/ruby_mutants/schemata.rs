@@ -74,6 +74,32 @@ fn placeable(node: &N) -> Option<Shape> {
 /// Where `mutant`'s switch goes, and its copy there.
 fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, String), String> {
     let pairs = path(&mutant.method, &mutant.mutated);
+    // An optional parameter made required: its default, evaluated exactly
+    // where a call leaves the parameter out, raises what the required one
+    // would.
+    if let Some((original, Some(mutated))) = pairs.last()
+        && matches!(
+            (original.ty, mutated.ty),
+            ("optarg", "arg") | ("kwoptarg", "kwarg")
+        )
+        && let Some(default) = original.node(1)
+        && let Some((start, end)) = default.span
+    {
+        let error = if original.ty == "optarg" {
+            "wrong number of arguments".to_owned()
+        } else {
+            format!(
+                "missing keyword: :{}",
+                original.child(0).sym().unwrap_or_default()
+            )
+        };
+        return Ok((
+            start,
+            end,
+            Shape::Expression,
+            format!("::Kernel.raise(::ArgumentError, {error:?})"),
+        ));
+    }
     // A removed node: a statement in a list that is not the list's value
     // (`nil` there is the same program), or else its parent's place.
     let mut index = pairs.len() - 1;

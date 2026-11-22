@@ -150,6 +150,32 @@ fn escaped(bytes: &[u8], delimiter: u8) -> String {
     out
 }
 
+/// Whether `node`'s span holds a heredoc's opening, whose body is outside it.
+pub(crate) fn holds_heredoc(source: &[u8], node: &N) -> bool {
+    node.has(syntax::HEREDOC)
+        || node.span.is_some_and(|(start, end)| {
+            std::str::from_utf8(&source[start..end]).is_ok_and(opens_heredoc)
+        })
+}
+
+/// Whether `text` holds a heredoc's opening (`<<~EOS`, `<<-"X"`, `<<ID`).
+fn opens_heredoc(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(2)).any(|at| {
+        if &bytes[at..at + 2] != b"<<" {
+            return false;
+        }
+        let mut next = at + 2;
+        if matches!(bytes.get(next), Some(b'~' | b'-')) {
+            next += 1;
+        }
+        matches!(
+            bytes.get(next),
+            Some(b'"' | b'\'' | b'`' | b'A'..=b'Z' | b'a'..=b'z' | b'_')
+        )
+    })
+}
+
 fn float(bits: u64) -> String {
     let value = f64::from_bits(bits);
     let text = format!("{value:?}");
@@ -162,18 +188,20 @@ fn float(bits: u64) -> String {
 
 impl Printer<'_> {
     fn slice(&self, node: &N) -> Option<String> {
-        if node.has(syntax::SYNTHETIC | syntax::WORD) {
+        if node.has(syntax::SYNTHETIC | syntax::WORD | syntax::HEREDOC) {
             return None;
         }
         let (start, end) = node.span?;
         let text = std::str::from_utf8(self.source.get(start..end)?).ok()?;
-        (!text.contains('\n')).then(|| text.to_owned())
+        // A heredoc's opening without its body is no code.
+        (!text.contains('\n') && !opens_heredoc(text)).then(|| text.to_owned())
     }
 
     /// `replacement` written where `located` was.
     fn in_place_of(&self, located: &N, replacement: &N) -> Option<String> {
         // A `%w` word holds no code: the array around it is printed instead.
-        if located.has(syntax::WORD) {
+        // Nor can a heredoc's opening stand for it, or a span holding one.
+        if located.has(syntax::WORD | syntax::HEREDOC) || self.holds_heredoc(located) {
             return None;
         }
         if located.ty == "if" && located.has(syntax::ELSIF) {
@@ -258,6 +286,10 @@ impl Printer<'_> {
         } else {
             Some(format!("({text})"))
         }
+    }
+
+    fn holds_heredoc(&self, node: &N) -> bool {
+        holds_heredoc(self.source, node)
     }
 
     /// A node in its own slot's syntax.

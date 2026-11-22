@@ -9,8 +9,11 @@ use super::*;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mutant-parity");
 
+/// The parity fixtures, or the directory `MUTANT_PARITY_FIXTURES` names (a
+/// project's files and their goldens, to compare on real code).
 fn fixtures() -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<_> = fs::read_dir(FIXTURES)
+    let directory = std::env::var("MUTANT_PARITY_FIXTURES").unwrap_or_else(|_| FIXTURES.to_owned());
+    let mut paths: Vec<_> = fs::read_dir(directory)
         .expect("the parity fixtures")
         .map(|entry| entry.expect("a fixture").path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "rb"))
@@ -214,7 +217,12 @@ fn printed_ruby_mutants_parse_back_to_their_trees() {
                     continue;
                 }
                 let Some(Edit { start, end, text }) = edit(&source, &def, &mutated) else {
-                    failures.push(format!("unprintable: {}", sexp(&mutated)));
+                    // A mutant on a line with a heredoc's opening has no code
+                    // in place; its switch is placed around the heredoc.
+                    let (from, to) = def.span.unwrap();
+                    if !String::from_utf8_lossy(&source[from..to]).contains("<<~") {
+                        failures.push(format!("unprintable: {}", sexp(&mutated)));
+                    }
                     continue;
                 };
                 let mut spliced = source[..start].to_vec();
@@ -275,11 +283,7 @@ fn every_fixture_mutant_has_a_switch_and_the_switched_file_parses_on_its_lines()
                 String::from_utf8_lossy(&switched)
             ));
         }
-        let unplaceable: Vec<_> = switches
-            .unplaceable
-            .iter()
-            .filter(|(_, reason)| reason.as_str() != "arguments")
-            .collect();
+        let unplaceable: Vec<_> = switches.unplaceable.iter().collect();
         if !unplaceable.is_empty() {
             let enumeration = enumerate(&source);
             for (index, reason) in unplaceable {
