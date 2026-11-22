@@ -2182,12 +2182,17 @@ pub fn prepare_javascript_frontend(
         &evidence.join("statement-exclusions.json"),
         &serde_json::to_vec(&exclusions).expect("plain data serializes"),
     )?;
-    let mutants = crate::js_mutant_links::MutantsFile {
-        schema_version: crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
-        mutant_set: crate::js_instrumenter::mutants_enabled()
-            .then(|| crate::js_mutants::MUTANT_SET.to_owned()),
-        files: mutants,
-        tests_without_values: Vec::new(),
+    let mutants = if crate::js_instrumenter::mutants_enabled() {
+        crate::mutant_list::MutantsFile::listed(
+            crate::mutant_list::JAVASCRIPT,
+            crate::js_mutants::MUTANT_SET,
+            mutants,
+        )
+    } else {
+        crate::mutant_list::MutantsFile {
+            files: mutants,
+            ..crate::mutant_list::MutantsFile::unlisted()
+        }
     };
     atomic_write(
         &evidence.join("mutants.json"),

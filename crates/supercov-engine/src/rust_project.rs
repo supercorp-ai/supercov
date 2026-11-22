@@ -1172,13 +1172,14 @@ pub(crate) struct StrongWorkspace {
     pub project: PreparedRustProject,
     /// Each switched file, by its path in the workspace.
     pub switched: BTreeMap<String, crate::rust_schemata::SwitchedFile>,
-    /// Mutants given that were not switched, and why: their file is not one
-    /// a crate compiles (`not-compiled`), or a proc-macro crate's, which the
-    /// compiler runs as it builds (`proc-macro`).
-    pub declined: Vec<(u64, &'static str)>,
+    /// Mutants given that were not switched (by file and index), and why:
+    /// their file is not one a crate compiles (`not-compiled`), or a
+    /// proc-macro crate's, which the compiler runs as it builds
+    /// (`proc-macro`).
+    pub declined: Vec<((String, u64), &'static str)>,
 }
 
-/// Switches `mutants` (by file, each with its ordinal) into the copy at
+/// Switches `mutants` (by file, each with its index there) into the copy at
 /// `workspace`, which holds the project's sources as written.
 pub(crate) fn prepare_rust_strong_project(
     workspace: &Path,
@@ -1231,21 +1232,29 @@ pub(crate) fn prepare_rust_strong_project(
             sources.get(file),
             owners.get(&normalize(&workspace.join(file))),
         ) else {
-            declined.extend(placed.iter().map(|(ordinal, _)| (*ordinal, "not-compiled")));
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "not-compiled")),
+            );
             continue;
         };
         if file_owners
             .iter()
             .any(|root| proc_macro_roots.contains(root))
         {
-            declined.extend(placed.iter().map(|(ordinal, _)| (*ordinal, "proc-macro")));
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "proc-macro")),
+            );
             continue;
         }
         let chosen = placed
             .iter()
             .map(|(ordinal, mutant)| (*ordinal, mutant))
             .collect::<Vec<_>>();
-        let file_switched = crate::rust_schemata::switch(source, &runtime_path, &chosen);
+        let file_switched = crate::rust_schemata::switch(source, &runtime_path, file, &chosen);
         let path = workspace.join(file);
         fs::write(&path, &file_switched.code).map_err(|error| RustProjectError::Io {
             path: path.clone(),

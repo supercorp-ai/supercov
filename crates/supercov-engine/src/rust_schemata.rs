@@ -2,9 +2,10 @@
 //! pass (mutant schemata, Untch 1992), and the runtime's active mutant picks
 //! which one runs.
 //!
-//! Each mutant has an ordinal for the pass; `crate::<runtime>::on(n)` is
-//! true only in a process started with `SUPERCOV_ACTIVE_MUTANT=n`, and counts
-//! that mutant's evaluations against the hit limit. A switch is:
+//! A mutant is its file and its index in the file's list;
+//! `crate::<runtime>::on("src/a.rs", n)` is true only in a process started
+//! with `SUPERCOV_ACTIVE_MUTANT=src/a.rs#n`, and counts that mutant's
+//! evaluations against the hit limit. A switch is:
 //!
 //! - a function body: `if on(n) { return <value>; }` before its statements;
 //! - an operator: `(if on(n) { <the expression with the operator replaced> }
@@ -101,8 +102,13 @@ struct Placed {
 /// `source` with `mutants` (each with its ordinal) behind switches that read
 /// `runtime` (`crate::<module>`). Every mutant given is switched: the caller
 /// leaves out what `placeable` refuses.
-pub(crate) fn switch(source: &str, runtime: &str, mutants: &[(u64, &RustMutant)]) -> SwitchedFile {
-    let on = |ordinal: u64| format!("{runtime}::on({ordinal})");
+pub(crate) fn switch(
+    source: &str,
+    runtime: &str,
+    file: &str,
+    mutants: &[(u64, &RustMutant)],
+) -> SwitchedFile {
+    let on = |ordinal: u64| format!("{runtime}::on({file:?}, {ordinal})");
     let mut placed: Vec<Placed> = Vec::new();
     // Mutants that share a site share one switch.
     let mut wrap = |range: TextRange, rank: u8, ordinal: u64, code: String| {
@@ -173,9 +179,10 @@ pub(crate) fn switch(source: &str, runtime: &str, mutants: &[(u64, &RustMutant)]
     });
     let mut out = SwitchedFile::default();
     let mut next = 0;
+    let runtime = format!("{runtime}::on({file:?}, ");
     emit(
         source,
-        runtime,
+        &runtime,
         &placed,
         &mut next,
         0..source.len(),
@@ -227,8 +234,7 @@ fn emit(
                 let switch_start = out.code.len();
                 out.code.push('(');
                 for (ordinal, code) in cases {
-                    out.code
-                        .push_str(&format!("if {runtime}::on({ordinal}) {{ "));
+                    out.code.push_str(&format!("if {runtime}{ordinal}) {{ "));
                     let own_start = out.code.len();
                     out.code.push_str(code);
                     out.replacements.push((*ordinal, own_start..out.code.len()));
@@ -311,7 +317,7 @@ mod tests {
             .filter(|(_, mutant)| placeable(tree.syntax(), mutant).is_none())
             .map(|(index, mutant)| (index as u64, mutant))
             .collect::<Vec<_>>();
-        (switch(source, "crate::rt", &chosen), mutants)
+        (switch(source, "crate::rt", "a.rs", &chosen), mutants)
     }
 
     #[test]
@@ -321,7 +327,7 @@ mod tests {
         assert_eq!(mutants.len(), 7);
         assert_eq!(
             file.code,
-            "pub fn f(a: i32, b: i32) -> i32 { if crate::rt::on(0) { return 0; } if crate::rt::on(1) { return 1; } if crate::rt::on(2) { return -1; }\n    (if crate::rt::on(3) { a - b * 2 } else if crate::rt::on(4) { a * b * 2 } else { a + (if crate::rt::on(5) { b + 2 } else if crate::rt::on(6) { b / 2 } else { b * 2 }) })\n}\n"
+            "pub fn f(a: i32, b: i32) -> i32 { if crate::rt::on(\"a.rs\", 0) { return 0; } if crate::rt::on(\"a.rs\", 1) { return 1; } if crate::rt::on(\"a.rs\", 2) { return -1; }\n    (if crate::rt::on(\"a.rs\", 3) { a - b * 2 } else if crate::rt::on(\"a.rs\", 4) { a * b * 2 } else { a + (if crate::rt::on(\"a.rs\", 5) { b + 2 } else if crate::rt::on(\"a.rs\", 6) { b / 2 } else { b * 2 }) })\n}\n"
         );
         let own = |ordinal: u64| {
             let (_, range) = file
@@ -339,20 +345,23 @@ mod tests {
         let source = "fn g(n: Option<u8>, s: S) -> S {\n    #![allow(unused)]\n    match n {\n        Some(0) => s,\n        Some(x) if x > 1 => S { a: x, ..s },\n        _ => s,\n    }\n}\n";
         let (file, _) = switched(source);
         assert!(
-            file.code
-                .contains("#![allow(unused)] if crate::rt::on(0) { return Default::default(); }"),
+            file.code.contains(
+                "#![allow(unused)] if crate::rt::on(\"a.rs\", 0) { return Default::default(); }"
+            ),
             "{}",
             file.code
         );
         assert!(
-            file.code.contains("Some(0) if !crate::rt::on(1) => s,"),
+            file.code
+                .contains("Some(0) if !crate::rt::on(\"a.rs\", 1) => s,"),
             "{}",
             file.code
         );
-        assert!(file.code.contains("Some(x) if (if crate::rt::on(2) { true } else if crate::rt::on(3) { false } else { (if crate::rt::on(4) { x == 1 }"), "{}", file.code);
+        assert!(file.code.contains("Some(x) if (if crate::rt::on(\"a.rs\", 2) { true } else if crate::rt::on(\"a.rs\", 3) { false } else { (if crate::rt::on(\"a.rs\", 4) { x == 1 }"), "{}", file.code);
         assert!(
-            file.code
-                .contains("(if crate::rt::on(7) { S {  ..s } } else { S { a: x, ..s } })"),
+            file.code.contains(
+                "(if crate::rt::on(\"a.rs\", 7) { S {  ..s } } else { S { a: x, ..s } })"
+            ),
             "{}",
             file.code
         );

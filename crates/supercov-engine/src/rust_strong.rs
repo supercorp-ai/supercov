@@ -84,8 +84,8 @@ fn hit_limit() -> u64 {
 /// The compiler errors that say a mutant's own code does not type-check,
 /// wherever it is put: the mutant is unviable.
 const OWN_ERRORS: &[&str] = &[
-    "E0061", "E0277", "E0282", "E0283", "E0308", "E0369", "E0412", "E0423", "E0425", "E0433",
-    "E0599", "E0600", "E0603", "E0614", "E0624",
+    "E0061", "E0067", "E0277", "E0282", "E0283", "E0308", "E0368", "E0369", "E0412", "E0423",
+    "E0425", "E0433", "E0599", "E0600", "E0603", "E0604", "E0605", "E0606", "E0614", "E0624",
 ];
 
 /// One mutant the pass runs.
@@ -93,6 +93,7 @@ const OWN_ERRORS: &[&str] = &[
 struct Job {
     id: String,
     file: String,
+    /// Its index in its file's list: what its switch is named by.
     ordinal: u64,
     mutant: RustMutant,
     /// Its candidate tests, as indices into the plan's tests.
@@ -292,7 +293,7 @@ pub fn run_strong_rust(
         jobs.push(Job {
             id,
             file,
-            ordinal: jobs.len() as u64,
+            ordinal: index as u64,
             mutant: mutant.clone(),
             candidates,
         });
@@ -363,6 +364,7 @@ pub fn run_strong_rust(
         .map(|artifact| (artifact.source.clone(), artifact))
         .collect::<BTreeMap<_, _>>();
     let runner = TestRunner {
+        results: request.results.clone(),
         launcher: &built.launcher,
         target_libdir: &built.target_libdir,
         by_source: by_id,
@@ -410,13 +412,14 @@ pub fn run_strong_rust(
                         break;
                     };
                     let job = &jobs[*at];
+                    let named = format!("{}#{}", job.file, job.ordinal);
                     let status = run_job(
                         job,
                         &tests,
                         &runner,
                         &usable,
                         &limit_of,
-                        Some(job.ordinal),
+                        Some(&named),
                         &results,
                     );
                     *counts.lock().expect("counts").entry(status).or_default() += 1;
@@ -459,6 +462,7 @@ pub fn run_strong_rust(
             }
             Ok(Ok(alone_build)) => {
                 let alone_runner = TestRunner {
+                    results: request.results.clone(),
                     launcher: &alone_build.launcher,
                     target_libdir: &alone_build.target_libdir,
                     by_source: alone_build
@@ -786,9 +790,9 @@ fn build_switched(
             let declined = prepared
                 .declined
                 .iter()
-                .copied()
-                .collect::<HashMap<u64, &'static str>>();
-            switchable.retain(|at| match declined.get(&jobs[*at].ordinal) {
+                .cloned()
+                .collect::<HashMap<(String, u64), &'static str>>();
+            switchable.retain(|at| match declined.get(&key(&jobs[*at])) {
                 Some(why) => {
                     alone.push((*at, why));
                     false
@@ -819,7 +823,7 @@ fn build_switched(
         };
         let ordinal_of = switchable
             .iter()
-            .map(|at| (jobs[*at].ordinal, *at))
+            .map(|at| (key(&jobs[*at]), *at))
             .collect::<HashMap<_, _>>();
         let mut out = BTreeSet::new();
         let mut unexplained = BTreeSet::new();
@@ -830,8 +834,8 @@ fn build_switched(
                 .as_deref()
                 .is_some_and(|code| OWN_ERRORS.contains(&code));
             if own.len() == 1 && typed {
-                let ordinal = *own.iter().next().expect("one");
-                if let Some(at) = ordinal_of.get(&ordinal) {
+                let ordinal = own.iter().next().expect("one");
+                if let Some(at) = ordinal_of.get(ordinal) {
                     unviable
                         .entry(*at)
                         .or_insert_with(|| first_line(&error.rendered));
@@ -912,21 +916,29 @@ fn build_switched(
     }
 }
 
-/// The mutants an error is in the own code of, and those of the innermost
-/// switch it is in.
+/// A mutant by its file and its index there.
+type MutantKey = (String, u64);
+
+/// A job's mutant: its file and its index there.
+fn key(job: &Job) -> (String, u64) {
+    (job.file.clone(), job.ordinal)
+}
+
+/// The mutants (by file and index) an error is in the own code of, and
+/// those of the innermost switch it is in.
 fn attribute(
     error: &CompileError,
     switched: &BTreeMap<String, crate::rust_schemata::SwitchedFile>,
-) -> (BTreeSet<u64>, BTreeSet<u64>) {
+) -> (BTreeSet<MutantKey>, BTreeSet<MutantKey>) {
     let mut own = BTreeSet::new();
     let mut at_switch = BTreeSet::new();
-    for (file, range) in &error.spans {
-        let Some(file) = switched.get(file) else {
+    for (name, range) in &error.spans {
+        let Some(file) = switched.get(name) else {
             continue;
         };
         for (ordinal, code) in &file.replacements {
             if code.start <= range.start && range.end <= code.end {
-                own.insert(*ordinal);
+                own.insert((name.clone(), *ordinal));
             }
         }
         if let Some((_, ordinals)) = file
@@ -935,7 +947,7 @@ fn attribute(
             .filter(|(whole, _)| whole.start <= range.start && range.end <= whole.end)
             .min_by_key(|(whole, _)| whole.len())
         {
-            at_switch.extend(ordinals.iter().copied());
+            at_switch.extend(ordinals.iter().map(|ordinal| (name.clone(), *ordinal)));
         }
     }
     (own, at_switch)
@@ -993,6 +1005,9 @@ fn build_alone(
 
 /// How the pass runs a test of a build.
 struct TestRunner<'b> {
+    /// The pass's results, beside which a process stopped at the hit limit
+    /// says so.
+    results: PathBuf,
     launcher: &'b crate::rust_test_runner::ArtifactLauncher,
     target_libdir: &'b Path,
     by_source: BTreeMap<String, &'b Artifact>,
@@ -1079,7 +1094,7 @@ impl TestRunner<'_> {
     fn run(
         &self,
         test: &PlannedTest,
-        mutant: Option<u64>,
+        mutant: Option<&str>,
         hit_limit: u64,
         limit: Duration,
     ) -> Option<Ran> {
@@ -1096,9 +1111,10 @@ impl TestRunner<'_> {
             ))
             .env(HIT_LIMIT_ENV, hit_limit.to_string());
         match mutant {
-            Some(ordinal) => command.env(ACTIVE_MUTANT_ENV, ordinal.to_string()),
+            Some(named) => command.env(ACTIVE_MUTANT_ENV, named),
             None => command.env_remove(ACTIVE_MUTANT_ENV),
         };
+        command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
         Some(timed(&mut command, limit))
     }
 
@@ -1107,15 +1123,16 @@ impl TestRunner<'_> {
         &self,
         package: &str,
         names: &[&str],
-        mutant: Option<u64>,
+        mutant: Option<&str>,
         limit: Duration,
     ) -> (Ran, Option<String>) {
         let mut command = self.doctest.command(package, names);
         command.env(HIT_LIMIT_ENV, hit_limit().to_string());
         match mutant {
-            Some(ordinal) => command.env(ACTIVE_MUTANT_ENV, ordinal.to_string()),
+            Some(named) => command.env(ACTIVE_MUTANT_ENV, named),
             None => command.env_remove(ACTIVE_MUTANT_ENV),
         };
+        command.env(crate::strong_driver::STRONG_RESULTS, &self.results);
         let (ran, stdout) = timed_with_output(&mut command, limit);
         let failed = stdout.lines().find_map(|line| {
             line.strip_prefix("test ")
@@ -1246,7 +1263,7 @@ fn run_job(
     runner: &TestRunner<'_>,
     usable: &dyn Fn(usize) -> bool,
     limit_of: &dyn Fn(usize) -> Duration,
-    ordinal: Option<u64>,
+    ordinal: Option<&str>,
     results: &Results,
 ) -> &'static str {
     let started = Instant::now();

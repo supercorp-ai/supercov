@@ -58,13 +58,7 @@ pub struct DirectJavascriptRunRequest {
     pub strong: Option<StrongRun>,
 }
 
-/// What a strong pass hands the command: the plan the driver runs, and where
-/// it writes each mutant's verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrongRun {
-    pub plan: PathBuf,
-    pub results: PathBuf,
-}
+pub use crate::strong_driver::StrongRun;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -987,10 +981,10 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
-        if let Some(files) = strong_files(strong) {
+        if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
-            let path = strong_files_path(strong);
+            let path = strong.switched_files_path();
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&files).expect("plain data serializes"),
@@ -2345,11 +2339,11 @@ mod tests {
             plan: root.join("plan.json"),
             results: root.join("results.jsonl"),
         };
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(&strong.plan, "not json").unwrap();
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(&strong.plan, r#"{"mutants": {}}"#).unwrap();
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(
             &strong.plan,
             r#"{"mutants": [
@@ -2360,7 +2354,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            strong_files(&strong),
+            strong.switched_files(),
             Some(["src/run.js".to_owned(), "src/null.js".to_owned()].into())
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -2905,7 +2899,7 @@ impl StrongModeGuard {
     fn set(strong: Option<&StrongRun>) -> Self {
         if let Some(strong) = strong {
             crate::js_instrumenter::set_strong_mode(Some(true));
-            crate::js_instrumenter::set_strong_files(strong_files(strong));
+            crate::js_instrumenter::set_strong_files(strong.switched_files());
         }
         Self(strong.is_some())
     }
@@ -2918,24 +2912,4 @@ impl Drop for StrongModeGuard {
             crate::js_instrumenter::set_strong_files(None);
         }
     }
-}
-
-/// The files of the plan's mutants that run: `None` when the plan cannot
-/// be read, which switches every file.
-fn strong_files(strong: &StrongRun) -> Option<std::collections::HashSet<String>> {
-    let plan =
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&strong.plan).ok()?).ok()?;
-    Some(
-        plan["mutants"]
-            .as_array()?
-            .iter()
-            .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
-            .filter_map(|mutant| mutant["file"].as_str().map(str::to_owned))
-            .collect(),
-    )
-}
-
-/// Where a strong pass lists its files for other processes.
-fn strong_files_path(strong: &StrongRun) -> PathBuf {
-    strong.results.with_file_name("strong-files.json")
 }

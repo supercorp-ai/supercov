@@ -4,55 +4,90 @@
 #[allow(warnings)]
 mod __SUPERCOV_MODULE__ {
     extern crate std;
-    use std::option::Option::{None, Some};
+    use std::option::Option::{self, None, Some};
     use std::result::Result::Ok;
+    use std::string::String;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// The active mutant's ordinal; `UNREAD` before the environment is read,
-    /// `NONE` where it names none.
+    /// The active mutant's index in its file's list; `UNREAD` before the
+    /// environment is read, `NONE` where it names none.
     static ACTIVE: AtomicU64 = AtomicU64::new(UNREAD);
+    /// The active mutant's file, as `mutants.json` keys it.
+    static FILE: OnceLock<String> = OnceLock::new();
     static HITS: AtomicU64 = AtomicU64::new(0);
     static LIMIT: AtomicU64 = AtomicU64::new(0);
     const UNREAD: u64 = u64::MAX;
     const NONE: u64 = u64::MAX - 1;
+    /// The hit limit where `SUPERCOV_MUTANT_HIT_LIMIT` is unset; `0` there
+    /// is none.
+    const DEFAULT_LIMIT: u64 = 1_000_000;
 
+    /// Reads `SUPERCOV_ACTIVE_MUTANT` (`<file>#<index>`, `-` for none).
     #[cold]
     #[inline(never)]
     fn read() -> u64 {
-        let number = |name: &str| match std::env::var(name) {
-            Ok(value) => value.trim().parse::<u64>().ok(),
-            _ => None,
+        let limit = match std::env::var("SUPERCOV_MUTANT_HIT_LIMIT") {
+            Ok(value) => value.trim().parse::<u64>().unwrap_or(DEFAULT_LIMIT),
+            _ => DEFAULT_LIMIT,
         };
-        LIMIT.store(number("SUPERCOV_MUTANT_HIT_LIMIT").unwrap_or(0), Ordering::Relaxed);
-        let active = number("SUPERCOV_ACTIVE_MUTANT").unwrap_or(NONE);
+        LIMIT.store(limit, Ordering::Relaxed);
+        let named = match std::env::var("SUPERCOV_ACTIVE_MUTANT") {
+            Ok(value) => value,
+            _ => String::new(),
+        };
+        let active = match named.rsplit_once('#') {
+            Some((file, index)) => match index.parse::<u64>() {
+                Ok(index) if index < NONE => {
+                    let _ = FILE.set(String::from(file));
+                    index
+                }
+                _ => NONE,
+            },
+            None => NONE,
+        };
         ACTIVE.store(active, Ordering::Relaxed);
         active
     }
 
+    /// Past the limit a loop the mutant made endless ends here, in its own
+    /// process, which nothing the code under test catches can carry on
+    /// from. The pass reads the line it appends beside the results.
     #[cold]
     #[inline(never)]
-    fn timeout() -> ! {
-        // Past the limit a loop the mutant made endless ends here, in its own
-        // process; nothing the code under test catches can carry on.
+    fn timeout(file: &str, index: u64) -> ! {
+        if let Ok(results) = std::env::var("SUPERCOV_STRONG_RESULTS") {
+            let line = std::format!(
+                "{{\"mutant\": {:?}, \"attemptId\": null, \"pass\": \"main\"}}\n",
+                std::format!("{file}#{index}")
+            );
+            if let Ok(mut out) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::format!("{results}.timeouts.jsonl"))
+            {
+                let _ = std::io::Write::write_all(&mut out, line.as_bytes());
+            }
+        }
         let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\nSUPERCOV_MUTANT_TIMEOUT\n");
         std::process::abort()
     }
 
-    /// Whether mutant `ordinal` is the process's active one. Counts its
-    /// evaluations.
+    /// Whether mutant `index` of `file` is the process's active one. Counts
+    /// its evaluations.
     #[inline]
-    pub fn on(ordinal: u64) -> bool {
+    pub fn on(file: &'static str, index: u64) -> bool {
         let mut active = ACTIVE.load(Ordering::Relaxed);
         if active == UNREAD {
             active = read();
         }
-        if active != ordinal {
+        if active != index || FILE.get().map(String::as_str) != Some(file) {
             return false;
         }
         let hits = HITS.fetch_add(1, Ordering::Relaxed) + 1;
         let limit = LIMIT.load(Ordering::Relaxed);
         if limit != 0 && hits > limit {
-            timeout();
+            timeout(file, index);
         }
         true
     }
