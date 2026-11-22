@@ -187,11 +187,12 @@ Five modules, at their tags, on SoroCI (16 CPUs each tool, Go stable):
 | --- | --- | --- | --- | --- | --- |
 | dustin/go-humanize v1.0.1 | 301 | 224 / 214 | 50 | 15.2 | 15.4 |
 | google/btree v1.1.3 | 343 | 134 / 134 | 3 | 11.0 | 8.0 |
-| hashicorp/golang-lru v2.0.7 | 154 | 111 / 106 | 0 | 31.1 | 16.5 |
-| google/uuid v1.6.0 | 146 | 88 / 88 | 0 | 13.5 | 15.9 |
+| hashicorp/golang-lru v2.0.7 | 154 | 111 / 107 | 0 | 31.1 | 16.5 |
+| google/uuid v1.6.0 | 146 | 88 / 101 | 0 | 13.5 | 15.9 |
 | spf13/cast v1.7.1 | 184 | 123 / 122 | 1 | 8.9 | 6.3 |
 
-Supercov's time is the whole of `supercov mutants -- go test ./...`: the
+Counts are of one run (the fourth of five); Supercov kills more where Gremlins
+leaves constants uncovered. Supercov's time is the whole of `supercov mutants -- go test ./...`: the
 measured run, the type check, the copy, the builds and the strong pass.
 Gremlins' killed counts include the mutants that do not compile, which it
 calls killed. On these small modules both tools take seconds, and
