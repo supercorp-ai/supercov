@@ -144,6 +144,73 @@ function writeEvidence(payload) {
     journal.size += Buffer.byteLength(line);
 }
 
+// A strong pass's job (strongJob.mjs, which this CommonJS file cannot
+// import): the tests of this file it runs, and whether it stops at the
+// first failure.
+function readStrongJob() {
+    const path = process.env.SUPERCOV_STRONG_JOB;
+    if (!path)
+        return null;
+    try {
+        const spec = JSON.parse(require("node:fs").readFileSync(path, "utf8"));
+        const files = new Map(Object.entries(spec.files ?? {}));
+        const known = new Set(spec.known ?? []);
+        return {
+            bail: spec.bail === true,
+            selects(file, testId) {
+                if (!files.has(file))
+                    return !known.has(file);
+                const tests = files.get(file);
+                return tests === null || tests.includes(testId);
+            },
+        };
+    }
+    catch {
+        return null;
+    }
+}
+// Circus's state, where it keeps the file's tests.
+function circusState() {
+    const symbol = Object.getOwnPropertySymbols(globalThis)
+        .find(key => key.description === "JEST_STATE_SYMBOL");
+    return symbol && globalThis[symbol];
+}
+// Each test of the file with its id, as the reporter names it.
+function eachTest(state, testFile, visitTest) {
+    const names = new Map();
+    function visit(block, parents) {
+        for (const child of block.children ?? []) {
+            if (child.type === "describeBlock") visit(child, [...parents, child.name]);
+            else if (child.type === "test") {
+                const name = [...parents, child.name].join(" ");
+                const occurrence = names.get(name) ?? 0;
+                names.set(name, occurrence + 1);
+                visitTest(child, testIdentity(testFile, name, occurrence));
+            }
+        }
+    }
+    if (state?.rootDescribeBlock) visit(state.rootDescribeBlock, []);
+}
+const strongJob = readStrongJob();
+if (strongJob && typeof beforeAll === "function" && typeof afterEach === "function") {
+    // Before the file's first test, every test the job does not run is
+    // skipped; Circus then runs no hook of a describe block left without one.
+    beforeAll(() => {
+        const testFile = localFile(expect.getState().testPath ?? "unknown");
+        eachTest(circusState(), testFile, (test, testId) => {
+            if (!strongJob.selects(testFile, testId)) test.mode = "skip";
+        });
+    });
+    // The first failure settles the job's mutant: the rest are skipped.
+    afterEach(() => {
+        const state = circusState();
+        if (!strongJob.bail || !(state?.currentlyRunningTest?.errors?.length > 0)) return;
+        eachTest(state, "", (test) => {
+            if (test !== state.currentlyRunningTest) test.mode = "skip";
+        });
+    });
+}
+
 if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof afterAll === "function") {
     // One in-memory snapshot per test; the server JSONL transport would be
     // redundant and unattributed, as under Vitest.

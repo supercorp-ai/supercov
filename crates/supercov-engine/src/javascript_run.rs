@@ -1095,14 +1095,18 @@ fn run_javascript(
     // alone (`run_strong_restarts`), with these settings and its own.
     let strong_overrides = request.strong.as_ref().map(|_| overrides.clone());
     // The command, and nothing before it.
+    let command = match &request.strong {
+        Some(strong) => strong_command(strong, &request.command, &workspace),
+        None => request.command.clone(),
+    };
     let plan = ExecutionPlan {
         preparation: Vec::new(),
         test: ExecutionPhase {
             name: "test".into(),
             kind: PhaseKind::Test,
             command: CommandSpec {
-                program: request.command[0].clone().into(),
-                arguments: request.command[1..].iter().map(OsString::from).collect(),
+                program: command[0].clone().into(),
+                arguments: command[1..].iter().map(OsString::from).collect(),
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
                 // A strong pass's command prints its stages: they go to a
@@ -2887,6 +2891,54 @@ fn run_strong_restarts(
             return Ok(());
         }
     }
+}
+
+/// What a strong pass starts: the command itself, which Vitest's and
+/// Playwright's configurations turn into their drivers, or, where a mutant's
+/// candidates ran under a runner of `JAVASCRIPT_JOB_RUNNERS`, the jobs driver with the
+/// command after `--`. It runs on Bun where the command is Bun's.
+fn strong_command(strong: &StrongRun, command: &[String], workspace: &Path) -> Vec<String> {
+    let Some(plan) = std::fs::read(&strong.plan)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return command.to_vec();
+    };
+    let tests = plan["tests"].as_array().cloned().unwrap_or_default();
+    let jobs = plan["mutants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
+        .flat_map(|mutant| mutant["candidates"].as_array().cloned().unwrap_or_default())
+        .filter_map(|candidate| candidate["test"].as_u64())
+        .filter_map(|test| tests.get(usize::try_from(test).ok()?))
+        .any(|test| {
+            crate::strong_driver::JAVASCRIPT_JOB_RUNNERS
+                .contains(&test["runner"].as_str().unwrap_or_default())
+        });
+    if !jobs {
+        return command.to_vec();
+    }
+    let on_bun = command.first().is_some_and(|program| {
+        Path::new(program)
+            .file_stem()
+            .is_some_and(|stem| stem == "bun")
+    });
+    let mut driver = vec![
+        if on_bun {
+            command[0].clone()
+        } else {
+            "node".to_owned()
+        },
+        workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string(),
+        "--".to_owned(),
+    ];
+    driver.extend(command.iter().cloned());
+    driver
 }
 
 /// Strong mode for the run's own instrumentation, set back when it ends.

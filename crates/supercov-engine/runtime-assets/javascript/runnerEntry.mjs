@@ -78,6 +78,14 @@ function useGeneratedVitestConfig(entrypoint) {
 
 /** Adapt the runner whose entry point `entrypoint` is, if any. */
 export async function adaptRunnerEntry(entrypoint) {
+    // A strong pass's job runs one test file: node:test and tap start a
+    // process for each of the run's, and those of the others end here,
+    // before they load anything.
+    if ((process.env.NODE_TEST_CONTEXT || process.env.TAP_CHILD_ID) && process.env.SUPERCOV_STRONG_JOB && entrypoint) {
+        const { strongJob } = await import(new URL("./strongJob.mjs", import.meta.url).href);
+        if (strongJob()?.runsFile(entrypoint) === false)
+            process.exit(0);
+    }
     useGeneratedVitestConfig(entrypoint);
     // The Mocha CLI, the child it forks for Node options, and each --parallel
     // worker run tests through Mocha's Runner, which the adapter patches before

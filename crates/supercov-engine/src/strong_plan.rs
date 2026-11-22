@@ -476,6 +476,9 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     let mut tests = Vec::<PlannedTest>::new();
     let mut test_index = HashMap::<String, usize>::new();
     let mut runnable = Vec::<bool>::new();
+    // Whether any record of the test said how it ended: Jest writes a test's
+    // evidence (`unknown`) and its outcome in two records.
+    let mut stated = Vec::<bool>::new();
     let mut by_file = BTreeMap::<String, Vec<usize>>::new();
     for raw in raw_results.iter().filter(|raw| role_of(raw) == "test") {
         let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
@@ -491,6 +494,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 runnable: true,
             });
             runnable.push(true);
+            stated.push(false);
             if let Some(file) = &raw.test_file {
                 by_file
                     .entry(file.clone())
@@ -499,7 +503,12 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             }
             tests.len() - 1
         });
-        runnable[index] &= passed(raw);
+        if raw.status.as_deref() == Some("unknown") && !raw.flaky {
+            // Its evidence alone: the outcome is another record's.
+        } else {
+            runnable[index] &= passed(raw);
+            stated[index] = true;
+        }
         // An attempt has two records under Playwright, the reporter's (its
         // status, no span) and the fixture's (its evidence, its span), in
         // either order: the span is the first attempt's, whichever record
@@ -528,7 +537,8 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         record: usize,
         seen: Observations,
     }
-    for (test, ok) in tests.iter_mut().zip(&runnable) {
+    for ((test, ok), stated) in tests.iter_mut().zip(&mut runnable).zip(&stated) {
+        *ok &= *stated;
         test.runnable = *ok;
     }
     let mut seen = Vec::<Seen>::new();

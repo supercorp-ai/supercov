@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
 import { runnerExecutionScope, writeRunnerEvidence } from "./runnerEvidence.mjs";
+import { strongJob } from "./strongJob.mjs";
 
 // The classes that make subtests in the project's tap.
 async function subtestClasses() {
@@ -152,12 +153,21 @@ function patch(TestBase, testFile, evidenceDirectory) {
             ...(ordinal ? { registrationOrdinal: ordinal } : {}),
         };
         const scope = runnerExecutionScope(identity);
+        // A strong pass's job runs its own tests, none after its first
+        // failure. A subtest runs with its parent, as it does without
+        // Supercov.
+        const job = strongJob();
+        const topLevel = !this.parent;
+        if (job && (job.stopped || (topLevel && !job.selects(testFile, scope.testId))))
+            extra = { ...extra, skip: true };
         beginBufferedServerEvidence(scope);
         let written = false;
         const finish = (status) => {
             if (written)
                 return;
             written = true;
+            if (status === "failed")
+                job?.fail();
             writeRunnerEvidence(identity, status, scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
         };
         // Both libtap and @tapjs/core announce the subtest they make, before
