@@ -447,6 +447,10 @@ module Supercov
         return super if Strong.ran || Strong.plan.nil?
 
         Strong.ran = true
+        # What `Minitest.run` sets before it runs anything.
+        options = respond_to?(:process_args) ? process_args(args) : {}
+        self.seed ||= options[:seed] || (Random.new_seed % 0xFFFF)
+        srand(seed)
         Pass.new(MinitestRunner.new).run
         true
       end

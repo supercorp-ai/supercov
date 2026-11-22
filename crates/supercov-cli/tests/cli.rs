@@ -24157,3 +24157,88 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         );
     }
 }
+
+/// A Ruby method's mutants are the mutant gem's, listed from a plain run,
+/// and the strong pass runs them in forks of the loaded Minitest suite: a
+/// boundary the test checks is killed, a literal it cannot tell from 0
+/// survives, and a method no test calls is no coverage.
+#[cfg(unix)]
+#[test]
+fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong");
+    project.write(
+        "lib/calc.rb",
+        "class Calc\n  def add(a, b)\n    a + b\n  end\n\n  def big?(n)\n    n > 10\n  end\n\n  def unused(x)\n    x * 2\n  end\nend\n",
+    );
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\nclass CalcTest < Minitest::Test\n  def test_adds\n    assert_equal 3, Calc.new.add(1, 2)\n  end\n\n  def test_big\n    assert Calc.new.big?(20)\n    refute Calc.new.big?(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/calc_test.rb"])
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    assert_eq!(listed["data"]["mutantSet"], "mutant@0.17.1", "{listed}");
+    let ids = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| mutant["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for id in [
+        "lib/calc.rb:7:5-7:11:Send:n == 10",
+        "lib/calc.rb:7:9-7:11:Integer:0",
+        "lib/calc.rb:3:5-3:10:Send:a - b",
+        "lib/calc.rb:11:5-11:10:Send:x / 2",
+    ] {
+        assert!(ids.iter().any(|each| each == id), "{id} in {ids:?}");
+    }
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    let status = |id: &str| {
+        strong["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .map(|mutant| {
+                mutant["strong"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        status("lib/calc.rb:7:5-7:11:Send:n == 10"),
+        "killed",
+        "{strong}\n{said}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:3:5-3:10:Send:a - b"),
+        "killed",
+        "{strong}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:7:9-7:11:Integer:11"),
+        "survived",
+        "{strong}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:11:5-11:10:Send:x / 2"),
+        "no-coverage",
+        "{strong}"
+    );
+}
