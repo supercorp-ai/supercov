@@ -55,6 +55,9 @@ jobs:
         timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/no-build-node
+        # This commit's build, not the published package `npm ci` installed.
+        env:
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -138,6 +141,9 @@ jobs:
         timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/generic-playwright
+        # This commit's build, not the published package `npm ci` installed.
+        env:
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
         env:
           SUPERCOV_BROWSER: ${{ matrix.browser }}
       # A failure here ends this commit's other runs too: no waiting on them.
