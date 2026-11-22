@@ -678,6 +678,7 @@ mod tests {
         let (first, second) = (listing(), listing());
         assert!(first == second);
         assert!(first.get().files.is_empty());
+        assert!(MutantListing::start(Vec::new()).get().files.is_empty());
     }
 
     #[test]

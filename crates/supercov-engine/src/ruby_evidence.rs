@@ -2107,6 +2107,7 @@ pub(crate) mod tests {
         ];
         let mut records = head.to_vec();
         records.push(json!({"t":"cmps","ctx":1,"n":[0,1],"o":[1,6]}));
+        records.push(json!({"t":"cmps","ctx":1,"n":[],"o":[]}));
         records.push(json!({"t":"assert","ctx":1}));
         // After the first assertion, and empty: nothing more.
         records.push(json!({"t":"cmps","ctx":1,"n":[],"o":[]}));
