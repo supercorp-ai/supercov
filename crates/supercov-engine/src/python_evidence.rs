@@ -3446,6 +3446,7 @@ pub(crate) mod tests {
             json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"lt"}),
             json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"eq"}),
             json!({"t":"cmps","ctx":1,"v":[["m.py:2:12","gt"],["m.py:3:5","same"]]}),
+            json!({"t":"cmps","ctx":1,"v":[]}),
             json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
             json!({"t":"exit","at":9}),
         ];
@@ -3490,26 +3491,28 @@ pub(crate) mod tests {
         let read: crate::mutant_list::MutantsFile =
             serde_json::from_slice(&listed.contents).unwrap();
         assert_eq!(read.mutant_set.as_deref(), Some("mutmut@3.8.1"));
-        // An outcome of a context no phase declared is refused.
-        let directory = temporary("mutant-probes-unknown");
-        write_transport(
-            &directory.join("main.1.mmap"),
-            &[
-                lines[0].clone(),
-                json!({"t":"cmp","ctx":7,"id":"m.py:2:12","o":"lt"}),
-                json!({"t":"exit","at":9}),
-            ],
-            0,
-        );
-        let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
-        assert!(
-            matches!(
-                unknown,
-                PythonEvidenceError::UnknownContext { context: 7, .. }
-            ),
-            "{unknown:?}"
-        );
-        fs::remove_dir_all(directory).unwrap();
+        // An outcome of a context no phase declared is refused, alone or
+        // with others.
+        for record in [
+            json!({"t":"cmp","ctx":7,"id":"m.py:2:12","o":"lt"}),
+            json!({"t":"cmps","ctx":7,"v":[["m.py:2:12","lt"]]}),
+        ] {
+            let directory = temporary("mutant-probes-unknown");
+            write_transport(
+                &directory.join("main.1.mmap"),
+                &[lines[0].clone(), record, json!({"t":"exit","at":9})],
+                0,
+            );
+            let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
+            assert!(
+                matches!(
+                    unknown,
+                    PythonEvidenceError::UnknownContext { context: 7, .. }
+                ),
+                "{unknown:?}"
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     /// A server that left no interpreter's evidence, or evidence that is no
