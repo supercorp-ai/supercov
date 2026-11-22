@@ -1909,7 +1909,7 @@ mod tests {
         // is not one.
         fs::write(
             root.join("package.json"),
-            r#"{"main":"index.js","browser":{"./index.js":"missing.js","fs":"https://x/y.js"}}"#,
+            r#"{"main":"index.js","browser":{"./index.js":"missing.js","fs":"https://x/y.js","os":"/abs/os.js"}}"#,
         )
         .unwrap();
         let discovered = discover_source_scope(&root, None).unwrap();

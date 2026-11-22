@@ -538,6 +538,59 @@ pub struct ArrowLink {
 
 #[cfg(test)]
 mod tests {
+    /// A Rust run's mutants are listed from every file its manifest names
+    /// through a point, a decision or a branch, and only its Rust files: a
+    /// file gone since is no list, and a manifest of nothing lists nothing.
+    #[test]
+    fn a_rust_run_lists_the_files_its_decisions_and_branches_name() {
+        use crate::coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta,
+        };
+        let manifest = CoverageManifest {
+            decisions: vec![DecisionMeta {
+                id: "d".into(),
+                file: "src/gone.rs".into(),
+                line: 1,
+                column: 1,
+                source: "a && b".into(),
+                conditions: vec!["a".into(), "b".into()],
+                kind: "if".into(),
+            }],
+            points: vec![],
+            branches: vec![BranchMeta {
+                id: "b".into(),
+                kind: "match".into(),
+                file: "web/app.js".into(),
+                line: 1,
+                column: 1,
+                source: "x".into(),
+                alternatives: vec![BranchAlternativeMeta {
+                    id: "b:0".into(),
+                    label: "A".into(),
+                }],
+            }],
+            limitations: vec![],
+            unmeasured: vec![],
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let root =
+            std::env::temp_dir().join(format!("supercov-rust-run-list-{}", std::process::id()));
+        let listed = list_rust_run(&root, &manifest, ["site".to_owned()]);
+        assert!(listed.files.is_empty());
+        let nothing = CoverageManifest {
+            decisions: vec![],
+            branches: vec![],
+            ..manifest
+        };
+        assert!(
+            list_rust_run(&root, &nothing, Vec::<String>::new())
+                .files
+                .is_empty()
+        );
+    }
+
     use super::*;
 
     fn mutant(file: &str) -> CandidateMutant {

@@ -436,7 +436,10 @@ mod tests {
         assert_eq!(left, ["restart-0.log"]);
         assert!(keeps_work_directories(Some("1".into())));
         assert!(!keeps_work_directories(Some("0".into())) && !keeps_work_directories(None));
-        // Gone already: nothing to finish.
+        // Nothing in it, or gone already: nothing to finish.
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        finish_work_directory(&empty);
         finish_work_directory(&root.join("gone"));
         // Another process's: one that runs (this test's parent, say), one
         // that ended, one that named none, one that named nonsense.
@@ -469,8 +472,10 @@ mod tests {
         // The finished pass's own directory, its owner gone with the rest,
         // is removed by the pass after it.
         assert_eq!(kept, ["a-file", "run_1-8", "running"]);
-        // A project with no passes yet.
+        // A project with no passes yet, or none left.
         prune_work_directories(&root.join("none"));
+        std::fs::create_dir_all(root.join("bare/.supercov/strong")).unwrap();
+        prune_work_directories(&root.join("bare"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
