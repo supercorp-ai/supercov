@@ -27,7 +27,7 @@ import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest"]);
+const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
 
 function parallelism() {
     const given = Number(process.env.SUPERCOV_STRONG_WORKERS);

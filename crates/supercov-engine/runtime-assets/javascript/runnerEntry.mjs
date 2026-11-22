@@ -4,6 +4,7 @@
 // probe a test reaches is counted as background. Node runs this from
 // register.mjs before the CLI parses argv; Bun loads no Node preload, so its
 // adapter does instead.
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // A project's own coverage tool measures what runs, and under Supercov that is
@@ -66,6 +67,17 @@ function useGeneratedVitestConfig(entrypoint) {
         process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG = originalConfig;
     }
     process.argv.push("--config", generatedVitestConfig);
+    // A strong pass's job runs one test file: Vitest's file filter keeps it
+    // from collecting the others (its adapter would skip their tests).
+    const job = process.env.SUPERCOV_STRONG_JOB;
+    if (job) {
+        try {
+            process.argv.push(...Object.keys(JSON.parse(readFileSync(job, "utf8")).files ?? {}));
+        }
+        catch {
+            // Without its job the adapter runs every test.
+        }
+    }
     if (process.env.SUPERCOV_DEBUG === "1") {
         console.error("[supercov] Vitest argv configured", {
             entrypoint,

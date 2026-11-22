@@ -488,7 +488,17 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 file: raw.test_file.clone(),
                 name: raw.test.clone(),
                 title: raw.title.clone(),
-                runner: raw.provenance.runner.clone(),
+                // Vitest's Browser Mode runs a test in the browser, where
+                // a mutant is switched on another way than in its workers.
+                runner: if raw
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.worker_id == "vitest-browser")
+                {
+                    "vitest-browser".to_owned()
+                } else {
+                    raw.provenance.runner.clone()
+                },
                 duration_ms: None,
                 span: raw.span,
                 runnable: true,

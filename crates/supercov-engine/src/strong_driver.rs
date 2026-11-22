@@ -103,13 +103,21 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "ava",
     "tap",
     "bun:test",
+    "vitest-browser",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
 /// starts the command again with one mutant on, as these runners start a
 /// process (or a worker) per test file anyway.
-pub const JAVASCRIPT_JOB_RUNNERS: &[&str] =
-    &["jest", "mocha", "node:test", "ava", "tap", "bun:test"];
+pub const JAVASCRIPT_JOB_RUNNERS: &[&str] = &[
+    "jest",
+    "mocha",
+    "node:test",
+    "ava",
+    "tap",
+    "bun:test",
+    "vitest-browser",
+];
 
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
