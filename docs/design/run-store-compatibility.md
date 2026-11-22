@@ -83,7 +83,7 @@ The fixture's tests run under `node:test`. A strong pass over such a run used
 to start the command, find no driver for the runner, and save an `error`
 verdict for every mutant it meant to run, reported as a mutation score of 0%.
 `mutants test` now refuses a pass with mutants to run and no test of a runner
-a strong driver drives (`strong_plan::STRONG_RUNNERS`: Vitest, Playwright, and Rust's libtest, nextest and rustdoc),
+a strong driver drives (`strong_driver::STRONG_RUNNERS`),
 naming the runners the run's tests used, before it runs anything or saves
 anything. The suite accepts either outcome, a verdict for every mutant or that
 refusal, so that a driver for `node:test` changes nothing here but the

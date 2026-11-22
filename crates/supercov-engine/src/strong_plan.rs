@@ -161,12 +161,6 @@ pub struct StrongPlan {
     pub mutants: Vec<PlannedMutant>,
 }
 
-/// The runners whose tests a strong pass runs: those with a driver in
-/// `runtime/javascript` (`vitestStrong.mjs`, `playwrightStrong.mjs`), and
-/// Rust's libtest, nextest and rustdoc tests (`rust_strong`).
-pub const STRONG_RUNNERS: [&str; 5] =
-    ["vitest", "playwright", "rust-libtest", "nextest", "rustdoc"];
-
 /// The file in a run's directory that holds its strong verdicts.
 pub const STRONG_VERDICTS_FILE: &str = "strong-mutation.json";
 
@@ -482,6 +476,9 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     let mut tests = Vec::<PlannedTest>::new();
     let mut test_index = HashMap::<String, usize>::new();
     let mut runnable = Vec::<bool>::new();
+    // Whether any record of the test said how it ended: Jest writes a test's
+    // evidence (`unknown`) and its outcome in two records.
+    let mut stated = Vec::<bool>::new();
     let mut by_file = BTreeMap::<String, Vec<usize>>::new();
     for raw in raw_results.iter().filter(|raw| role_of(raw) == "test") {
         let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
@@ -491,12 +488,23 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                 file: raw.test_file.clone(),
                 name: raw.test.clone(),
                 title: raw.title.clone(),
-                runner: raw.provenance.runner.clone(),
+                // Vitest's Browser Mode runs a test in the browser, where
+                // a mutant is switched on another way than in its workers.
+                runner: if raw
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.worker_id == "vitest-browser")
+                {
+                    "vitest-browser".to_owned()
+                } else {
+                    raw.provenance.runner.clone()
+                },
                 duration_ms: None,
                 span: raw.span,
                 runnable: true,
             });
             runnable.push(true);
+            stated.push(false);
             if let Some(file) = &raw.test_file {
                 by_file
                     .entry(file.clone())
@@ -505,7 +513,12 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             }
             tests.len() - 1
         });
-        runnable[index] &= passed(raw);
+        if raw.status.as_deref() == Some("unknown") && !raw.flaky {
+            // Its evidence alone: the outcome is another record's.
+        } else {
+            runnable[index] &= passed(raw);
+            stated[index] = true;
+        }
         // An attempt has two records under Playwright, the reporter's (its
         // status, no span) and the fixture's (its evidence, its span), in
         // either order: the span is the first attempt's, whichever record
@@ -534,7 +547,8 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         record: usize,
         seen: Observations,
     }
-    for (test, ok) in tests.iter_mut().zip(&runnable) {
+    for ((test, ok), stated) in tests.iter_mut().zip(&mut runnable).zip(&stated) {
+        *ok &= *stated;
         test.runnable = *ok;
     }
     let mut seen = Vec::<Seen>::new();

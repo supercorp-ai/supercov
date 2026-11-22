@@ -89,6 +89,41 @@ pub struct StrongPass {
     pub strong: StrongRun,
 }
 
+/// The runners whose tests a strong pass runs: those a language's driver
+/// drives. JavaScript's: Vitest and Playwright drive themselves from within
+/// the command (`vitestStrong*.mjs`, `playwrightStrong*.mjs`), the others
+/// through `strongJobs.mjs` (`JAVASCRIPT_JOB_RUNNERS`). A language adds its
+/// runners as it adds its driver.
+pub const STRONG_RUNNERS: &[&str] = &[
+    "vitest",
+    "playwright",
+    "jest",
+    "mocha",
+    "node:test",
+    "ava",
+    "tap",
+    "bun:test",
+    "vitest-browser",
+    // Rust's (`rust_strong`): libtest and nextest tests by name through
+    // their binaries, doctests through `cargo test --doc`.
+    "rust-libtest",
+    "nextest",
+    "rustdoc",
+];
+
+/// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
+/// starts the command again with one mutant on, as these runners start a
+/// process (or a worker) per test file anyway.
+pub const JAVASCRIPT_JOB_RUNNERS: &[&str] = &[
+    "jest",
+    "mocha",
+    "node:test",
+    "ava",
+    "tap",
+    "bun:test",
+    "vitest-browser",
+];
+
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
     matches!(

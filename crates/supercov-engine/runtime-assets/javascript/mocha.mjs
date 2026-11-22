@@ -12,7 +12,8 @@ import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendEvidenceRecord } from "./atomic.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
-import { runnerExecutionScope } from "./runnerEvidence.mjs";
+import { runnerExecutionScope, runnerTestId } from "./runnerEvidence.mjs";
+import { strongJob } from "./strongJob.mjs";
 
 const SETUP_HOOK = /^"(?:before|after) all" hook/;
 
@@ -59,11 +60,24 @@ export async function adaptMocha(entrypoint) {
     const write = (payload) => appendEvidenceRecord(directory, "mocha", payload);
     // A --parallel parent overrides run() and never reaches this: its workers
     // run the tests, each with a Runner of its own.
+    const job = strongJob();
     Runner.prototype.run = function supercovMochaRun(...args) {
         observe(this, runtime, write);
+        if (job) {
+            keepJobTests(this.suite, job);
+            // A failure settles the job's mutant: the rest need not run.
+            this.on("fail", (runnable) => {
+                job.fail();
+                if (job.stopped && typeof this.abort === "function")
+                    this.abort();
+            });
+        }
         return Reflect.apply(run, this, args);
     };
     Runner.prototype.run.supercovMocha = true;
+    // A strong pass's job loads only its own test file, of the run's.
+    if (job)
+        await keepJobFiles(root, job);
     // Mocha takes its working directory off the front of each frame and
     // prints the rest. Under Supercov that is the copy, while an application
     // frame names the project's own file, so it printed whole:
@@ -77,6 +91,58 @@ export async function adaptMocha(entrypoint) {
         Runner.prototype.fail = function supercovMochaFail(runnable, error, ...rest) {
             place(error);
             return Reflect.apply(fail, this, [runnable, error, ...rest]);
+        };
+    }
+}
+
+// Mocha's test ids, as `observe` gives them, in the order Mocha runs the
+// tests (a suite's own tests, then its suites'); a strong pass's job removes
+// every test it does not run, and a suite left with none runs no hook.
+function keepJobTests(root, job) {
+    const occurrences = new Map();
+    const visit = (suite) => {
+        suite.tests = suite.tests.filter((test) => {
+            const name = test.titlePath().join(" > ");
+            const key = `${test.file ?? ""}\0${name}`;
+            const occurrence = occurrences.get(key) ?? 0;
+            occurrences.set(key, occurrence + 1);
+            test.supercovOccurrence = occurrence;
+            const testId = runnerTestId({
+                runner: "mocha",
+                file: test.file,
+                name,
+                ...(occurrence ? { registrationOrdinal: occurrence } : {}),
+            });
+            return job.selects(test.file, testId);
+        });
+        suite.suites.forEach(visit);
+    };
+    visit(root);
+}
+
+// Leaves out the run's other test files before Mocha loads them; under
+// --parallel, before it hands them to its workers.
+async function keepJobFiles(root, job) {
+    let loaded;
+    try {
+        loaded = await import(pathToFileURL(join(root, "lib", "mocha.js")).href);
+    }
+    catch {
+        return;
+    }
+    const Mocha = loaded.Mocha ?? loaded.default?.Mocha ?? loaded.default;
+    const prototype = Mocha?.prototype;
+    if (!prototype || prototype.supercovJobFiles)
+        return;
+    prototype.supercovJobFiles = true;
+    for (const name of ["loadFiles", "loadFilesAsync", "run"]) {
+        const original = prototype[name];
+        if (typeof original !== "function")
+            continue;
+        prototype[name] = function supercovJobFiles(...args) {
+            if (Array.isArray(this.files))
+                this.files = this.files.filter((file) => job.runsFile(file));
+            return Reflect.apply(original, this, args);
         };
     }
 }
@@ -131,6 +197,9 @@ function observe(runner, runtime, write) {
             occurrence = Math.max(occurrence - 1, 0);
         else
             firstAttempts.set(key, occurrence + 1);
+        // A strong pass's job numbered its tests before it left some out.
+        if (test.supercovOccurrence !== undefined)
+            occurrence = test.supercovOccurrence;
         const value = {
             runner: "mocha",
             file,

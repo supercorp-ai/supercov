@@ -311,7 +311,7 @@ pub fn command(args: &[String]) -> ExitCode {
 /// strong driver drives. Without one every mutant would end without a
 /// verdict, and the pass would read as a score of nothing killed.
 fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), String> {
-    use supercov_engine::strong_plan::STRONG_RUNNERS;
+    use supercov_engine::strong_driver::STRONG_RUNNERS;
     let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
     let drivable = plan
         .tests

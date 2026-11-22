@@ -42,32 +42,6 @@ pub struct PreparedRustProject {
     pub preparation: RustPreparationTimings,
 }
 
-impl PreparedRustProject {
-    /// A workspace built as written, with nothing instrumented: a strong
-    /// pass's copy for a mutant built on its own.
-    pub(crate) fn plain(workspace_root: PathBuf) -> Self {
-        Self {
-            target_directory: workspace_root.join("target"),
-            workspace_root,
-            source_files: Vec::new(),
-            crate_roots: Vec::new(),
-            runtime_module: String::new(),
-            manifest: CoverageManifest {
-                unmeasured: Vec::new(),
-                decisions: Vec::new(),
-                points: Vec::new(),
-                branches: Vec::new(),
-                limitations: Vec::new(),
-                scope: None,
-                assertion_sites: Vec::new(),
-                probe_tables: Default::default(),
-            },
-            probes: Default::default(),
-            preparation: Default::default(),
-        }
-    }
-}
-
 #[cfg(test)]
 impl PreparedRustProject {
     /// A workspace with nothing instrumented, for tests of what runs in it.
@@ -1162,6 +1136,32 @@ pub fn prepare_rust_project_for(
         probes,
         preparation,
     })
+}
+
+impl PreparedRustProject {
+    /// A workspace built as written, with nothing instrumented: a strong
+    /// pass's copy for a mutant built on its own.
+    pub(crate) fn plain(workspace_root: PathBuf) -> Self {
+        Self {
+            target_directory: workspace_root.join("target"),
+            workspace_root,
+            source_files: Vec::new(),
+            crate_roots: Vec::new(),
+            runtime_module: String::new(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
+            },
+            probes: Default::default(),
+            preparation: Default::default(),
+        }
+    }
 }
 
 /// A strong pass's copy of the workspace: the files holding the mutants it

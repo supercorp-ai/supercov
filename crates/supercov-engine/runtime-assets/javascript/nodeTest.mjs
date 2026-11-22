@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, withStackRoom, } from "./runtime.mjs";
 import { callerLocation, runnerExecutionScope, runnerTestId, stackAsWritten, writeRunnerEvidence, } from "./runnerEvidence.mjs";
+import { strongJob } from "./strongJob.mjs";
 function callbackIndex(args) {
     for (let index = args.length - 1; index >= 0; index -= 1)
         if (typeof args[index] === "function")
@@ -131,6 +132,9 @@ function wrappedSuite(original, mark) {
     }
     return wrapped;
 }
+function emitSkipped(identity, scope, evidenceDirectory) {
+    writeRunnerEvidence(identity, "skipped", scope, evidenceDirectory);
+}
 const registrationCounts = new Map();
 function wrappedRegistration(original, parentTestId, forcedStatus) {
     const wrapped = function supercovNodeTest(...args) {
@@ -167,6 +171,19 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
             writeRunnerEvidence(identity, marked ?? "passed", scope, evidenceDirectory);
             return Reflect.apply(original, this, args);
         }
+        // A strong pass's job runs its own tests; a subtest runs with its
+        // parent, as it does without Supercov.
+        const job = strongJob();
+        if (job && !parentTestId && !job.selects(identity.file, scope.testId)) {
+            const skipped = [...args];
+            skipped[index] = () => { };
+            const at = skipped.findIndex((value, place) => place < index && value === options);
+            if (at >= 0)
+                skipped[at] = { ...options, skip: true };
+            else
+                skipped.splice(index, 0, { skip: true });
+            return Reflect.apply(original, this, skipped);
+        }
         if (marked)
             writeRunnerEvidence(identity, marked, scope, evidenceDirectory);
         const next = [...args];
@@ -177,10 +194,17 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
             beginBufferedServerEvidence(scope);
             // A todo test runs, and stays todo whether its body passes or fails.
             let status = marked ?? "passed";
+            const job = strongJob();
             const fail = () => {
                 if (status !== "todo")
                     status = "failed";
+                job?.fail();
             };
+            // A strong pass's job stops at its first failure.
+            if (job?.stopped && !marked) {
+                emitSkipped(identity, scope, evidenceDirectory);
+                return context.skip();
+            }
             const contextProxy = new Proxy(context, {
                 get(target, property) {
                     // Read with the real context as receiver: TestContext accessors

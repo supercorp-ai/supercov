@@ -21831,8 +21831,8 @@ fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it(
 #[cfg(unix)]
 #[test]
 fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
-    let project = mutants_project("strong-undriven");
-    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    let project = vitest_mutants_project("strong-undriven");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
     let run = project.latest();
     // Listed beside the run, as `supercov mutants` lists a plain run's.
     project.write(

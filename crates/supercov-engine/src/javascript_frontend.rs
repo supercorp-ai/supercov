@@ -70,6 +70,8 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
+    "strongJob.mjs",
+    "strongJobs.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
@@ -1757,7 +1759,7 @@ fn write_playwright_config(
 }
 
 fn write_vitest_commands(generated: &Path) -> Result<(), JavascriptFrontendError> {
-    let adapter = "import { mkdirSync } from 'node:fs';\n\
+    let adapter = "import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';\n\
 import { relative, resolve, sep } from 'node:path';\n\
 import { atomicWriteFileSync } from './node_modules/atomic.mjs';\n\
 import { inferTestProvenance } from './node_modules/provenance.mjs';\n\
@@ -1798,6 +1800,23 @@ export function supercovBrowserCommands(root) {\n\
       const directory = resolve(root, evidenceDirectory, suffix);\n\
       mkdirSync(directory, { recursive: true });\n\
       atomicWriteFileSync(resolve(directory, 'mcdc.json'), JSON.stringify(complete) + '\\n');\n\
+    },\n\
+    // A strong pass's job (strongJob.mjs): which mutant the browser switches\n\
+    // on before the test file loads, and which of its tests run.\n\
+    __supercovStrongJob(context) {\n\
+      const path = process.env['SUPERCOV_STRONG_JOB'];\n\
+      if (!path) return null;\n\
+      const absolute = context.testPath;\n\
+      return {\n\
+        mutant: process.env['SUPERCOV_ACTIVE_MUTANT'] ?? '-',\n\
+        file: absolute ? relative(root, absolute).split(sep).join('/') : undefined,\n\
+        job: JSON.parse(readFileSync(path, 'utf8')),\n\
+      };\n\
+    },\n\
+    // The mutant passed its hit limit in the browser, which can write nothing.\n\
+    __supercovMutantTimeout(context, mutant) {\n\
+      const results = process.env['SUPERCOV_STRONG_RESULTS'];\n\
+      if (results) appendFileSync(results + '.timeouts.jsonl', JSON.stringify({ mutant, attemptId: null, pass: 'main' }) + '\\n');\n\
     },\n\
   };\n\
 }\n";

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
 import { runnerExecutionScope, stackAsWritten, writeRunnerEvidence } from "./runnerEvidence.mjs";
+import { strongJob } from "./strongJob.mjs";
 
 // The installed ava package the entrypoint belongs to.
 function avaRoot(entrypoint) {
@@ -60,11 +61,19 @@ export async function adaptAva(entrypoint) {
     const runTest = Runner?.prototype?.runTest;
     if (typeof runTest !== "function" || runTest.supercovAva)
         return;
+    const job = strongJob();
     Runner.prototype.runTest = function supercovAvaRunTest(task, contextRef) {
         // AVA refuses two tests with one title in a file, so the title names
         // the test.
         const identity = { runner: "ava", file: this.file, name: task.title };
         const scope = runnerExecutionScope(identity);
+        // A strong pass's job runs its own tests, none after its first
+        // failure; a test it leaves out runs no hook and counts as passed.
+        if (job && (job.stopped || !job.selects(this.file, scope.testId))) {
+            if (job.stopped)
+                writeRunnerEvidence(identity, "skipped", scope, evidenceDirectory);
+            return Promise.resolve(true);
+        }
         beginBufferedServerEvidence(scope);
         const finish = (status) => writeRunnerEvidence(identity, status, scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
         let settled;
@@ -76,9 +85,12 @@ export async function adaptAva(entrypoint) {
             throw error;
         }
         return settled.then((passed) => {
+            if (!passed)
+                job?.fail();
             finish(passed ? "passed" : "failed");
             return passed;
         }, (error) => {
+            job?.fail();
             finish("failed");
             throw error;
         });
