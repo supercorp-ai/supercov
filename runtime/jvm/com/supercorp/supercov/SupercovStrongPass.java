@@ -456,7 +456,7 @@ public final class SupercovStrongPass {
     final Outcome outcome = new Outcome();
     Switches switches = Switches.of(loader);
     if (mutated) {
-      switches.on(file, index);
+      switches.on(file, index, (int) Math.min(Integer.MAX_VALUE, test.limitMillis(retry)));
     } else {
       switches.off();
     }
@@ -509,10 +509,10 @@ public final class SupercovStrongPass {
 
     // The JVM's own copy is switched too: code loaded from a jar (another
     // module's, packaged) is not reloaded, and calls that copy.
-    void on(int file, int index) {
-      call("setActiveMutant", file, index);
+    void on(int file, int index, int budgetMillis) {
+      call("setActiveMutant", file, index, budgetMillis);
       if (runtime != Supercov.class) {
-        Supercov.setActiveMutant(file, index);
+        Supercov.setActiveMutant(file, index, budgetMillis);
       }
     }
 

@@ -532,7 +532,10 @@ public final class Supercov {
   private static int activeIndex = -1;
   private static long mutantHits = 0;
   private static long mutantHitLimit = 1_000_000L;
+  private static long mutantHitsAllowed = 1_000_000L;
   private static boolean mutantHitLimitReached = false;
+  /** Until when the test may run on, in nanoseconds; 0 for no time. */
+  private static long mutantDeadline = 0;
 
   /** Thrown once the active mutant has been evaluated past its limit. */
   public static final class MutantTimeoutError extends Error {
@@ -548,7 +551,19 @@ public final class Supercov {
     activeFile = file;
     activeIndex = index;
     mutantHits = 0;
+    mutantHitsAllowed = mutantHitLimit;
     mutantHitLimitReached = false;
+    mutantDeadline = 0;
+  }
+
+  /**
+   * Switches one mutant on for a test with {@code budgetMillis} to run: past
+   * the evaluation limit within that time, the mutant is busy, not stuck
+   * (a hot loop of a heavy algorithm), and is allowed as many again.
+   */
+  public static void setActiveMutant(int file, int index, int budgetMillis) {
+    setActiveMutant(file, index);
+    mutantDeadline = System.nanoTime() + budgetMillis * 1_000_000L;
   }
 
   public static void clearActiveMutant() {
@@ -587,7 +602,11 @@ public final class Supercov {
     if (index != activeIndex || file != activeFile) {
       return false;
     }
-    if (++mutantHits > mutantHitLimit) {
+    if (++mutantHits > mutantHitsAllowed) {
+      if (mutantDeadline != 0 && System.nanoTime() < mutantDeadline) {
+        mutantHitsAllowed += mutantHitLimit;
+        return true;
+      }
       mutantHitLimitReached = true;
       throw new MutantTimeoutError();
     }

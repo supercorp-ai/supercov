@@ -81,10 +81,10 @@
     "tag": "v3.0.4",
     "build": "gradle",
     "module": "aedile-core",
-    "flags": "",
+    "flags": "-Porg.gradle.java.installations.fromEnv=JAVA_HOME_11_X64",
     "targets": "com.sksamuel.aedile.*",
     "junit5": true,
-    "jdk": "11",
+    "jdk": "21",
     "pit": false
   }
 }
