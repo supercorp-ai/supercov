@@ -194,6 +194,28 @@ let observeRun;
 // Whether Supercov's spawner forks Vitest's workers.
 let spawnerInstalled = false;
 
+// Vitest 3's workers are tinypool's processes, forked by tinypool. One the
+// pass stops (a copy a failed test decided, or one past its limit), or one a
+// mutant ends, has lost its channel while tinypool still relays to it: the
+// write fails with "Channel closed" or EPIPE, which tinypool 1.1 rejects with
+// nothing to catch it, and Vitest 3.2 ended the whole run at that, the
+// mutants left without verdicts (destr: 81 of 141, in every pass). The
+// process's exit tells tinypool it is gone, as it does for any worker that
+// dies; the failed write says nothing more, and is dropped.
+const TINYPOOL_WORKER = /[\\/]tinypool[\\/]dist[\\/]entry[\\/]process\.js$/;
+function quietWhenGone(modulePath, child) {
+    const path = modulePath instanceof URL ? fileURLToPath(modulePath) : String(modulePath);
+    if (!TINYPOOL_WORKER.test(path) || !child)
+        return child;
+    const emit = child.emit;
+    child.emit = function (event, ...rest) {
+        if (event === "error" && CLOSED_CHANNEL.has(rest[0]?.code))
+            return false;
+        return emit.call(this, event, ...rest);
+    };
+    return child;
+}
+
 // Vitest's workers forked by a small process of their own instead of
 // Vitest's: forking copies the parent's memory map, and Vitest's process
 // held about a gigabyte (on hono each fork held its event loop for 24 ms,
@@ -205,10 +227,15 @@ let spawnerInstalled = false;
 // for them (vitestStrongSpawner.mjs; SUPERCOV_STRONG_WORKERS_AHEAD=0 starts
 // each when Vitest asks).
 function forkThroughSpawner(ahead) {
-    if (process.env["SUPERCOV_STRONG_DIRECT_FORK"] === "1")
-        return;
-    spawnerInstalled = true;
     const original = childProcess.fork;
+    if (process.env["SUPERCOV_STRONG_DIRECT_FORK"] === "1") {
+        childProcess.fork = function fork(modulePath) {
+            return quietWhenGone(modulePath, original.apply(this, arguments));
+        };
+        syncBuiltinESMExports();
+        return;
+    }
+    spawnerInstalled = true;
     const standIns = new Map();
     // One spawner: every message to and from a worker goes through it, and
     // four of them sharing the workers were no faster on hono.
@@ -510,7 +537,7 @@ function forkThroughSpawner(ahead) {
     childProcess.fork = function fork(modulePath, args, options) {
         const path = modulePath instanceof URL ? fileURLToPath(modulePath) : String(modulePath);
         if (!VITEST_WORKER.test(path))
-            return original.apply(this, arguments);
+            return quietWhenGone(path, original.apply(this, arguments));
         if (!Array.isArray(args)) {
             options = args;
             args = [];
