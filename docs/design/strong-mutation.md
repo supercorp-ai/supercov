@@ -95,16 +95,18 @@ mutated value for the file's later tests, which never run that code again.
 Where Supercov's spawner forks Vitest's workers (Vitest 4 and later, files
 isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
 
-- **Baselines once per file.** Before any mutant, one run holds every test
-  file's baseline: the union of its mutants' candidates, and the file whole
-  where a mutant runs it whole (a mutant of module-level code). A union that
-  fails, or does not finish, without a mutant means a candidate leans on a
-  test the union left out: the file's copies run whole from then on, and its
-  whole baseline runs. That and a mutant whose kill a confirmation overturned
-  (it runs the file whole, below) are the only reasons a file has a second
-  baseline; no baseline is repeated for a copy.
-- **One run for the mutants.** It lists more worker slots than the pass can
-  use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
+- **Baselines once per file.** Each test file's baseline runs once, the
+  union of its mutants' candidates, at the head of the run, from a slot of
+  the file's own (Vitest's "start" for it says the file's project and
+  environment); a mutant's copy of the file runs once it is known. A union
+  that fails, or does not finish, without a mutant means a candidate leans
+  on a test the union left out: the file's copies run whole from then on.
+  A file's whole baseline runs only when a copy of the whole file fails (a
+  mutant of module-level code takes every file that loads the module whole,
+  and most such copies pass): it decides that kill and every later one in
+  the file, and a whole copy goes on past a test that fails without the
+  mutant too. Those are the only repeats, and none is per copy.
+- **One run.** It lists more worker slots than the pass can use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
   "run", for work that is ready: a baseline a mutant now needs, a
   confirmation, or the next file of a mutant whose copy before ended with
   every test passing. The worker is then told to run that work's test file
