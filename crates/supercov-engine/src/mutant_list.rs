@@ -100,12 +100,6 @@ impl MutantsFile {
     /// with different sets did not enumerate the same mutants, and `Err` says
     /// which.
     pub fn merge(mut self, other: MutantsFile) -> Result<MutantsFile, String> {
-        if other.mutant_set.is_none() {
-            return Ok(self);
-        }
-        if self.mutant_set.is_none() {
-            return Ok(other);
-        }
         let mut sets = self.sets();
         for (language, set) in other.sets() {
             match sets.get(&language) {
@@ -132,7 +126,9 @@ impl MutantsFile {
         self.tests_without_values.extend(other.tests_without_values);
         self.tests_without_values.sort();
         self.tests_without_values.dedup();
-        self.mutant_set = Some(sets.values().cloned().collect::<Vec<_>>().join(", "));
+        // Two unlisted lists list nothing.
+        self.mutant_set =
+            (!sets.is_empty()).then(|| sets.values().cloned().collect::<Vec<_>>().join(", "));
         // A list of JavaScript alone names no sets, as it always did.
         self.mutant_sets = if sets.keys().all(|language| language == JAVASCRIPT) {
             BTreeMap::new()
@@ -146,8 +142,8 @@ impl MutantsFile {
 /// The language a source file is listed under, by its extension: what
 /// routes a file measured without its mutants to its language's enumerator.
 pub fn language_of_path(path: &str) -> Option<&'static str> {
-    let extension = std::path::Path::new(path).extension()?.to_str()?;
-    Some(match extension {
+    let extension = std::path::Path::new(path).extension()?.to_string_lossy();
+    Some(match &*extension {
         "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => JAVASCRIPT,
         "py" => "python",
         "rs" => RUST,
@@ -621,11 +617,59 @@ mod tests {
             merged
         );
         assert_eq!(
+            MutantsFile::unlisted()
+                .merge(MutantsFile::unlisted())
+                .unwrap(),
+            MutantsFile::unlisted()
+        );
+        assert_eq!(
             merged
                 .merge(one("python", "mutmut@4", "src/b.py"))
                 .unwrap_err(),
             "its python mutants are those of mutmut@4, and the other's those of mutmut@3"
         );
+    }
+
+    /// Files measured without their mutants go to their language's
+    /// enumerator; a language without one, or a file of none, lists
+    /// nothing.
+    #[test]
+    fn files_measured_without_their_mutants_are_listed_by_their_language() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-mutant-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.js"), "export const a = (x) => x > 1;\n").unwrap();
+        std::fs::write(root.join("src/a.py"), "a = 1 > 2\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn a(x: u32) -> bool {\n    x > 1\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.txt"), "a\n").unwrap();
+        let recorded = ["src/a.js", "src/a.py", "src/a.rs", "notes.txt"]
+            .into_iter()
+            .map(|file| (file.to_owned(), std::collections::BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        // The JavaScript file went to its enumerator, which says it is not
+        // the file the run measured (no point of it was recorded); the
+        // Python and text files to none.
+        let listed = list_from_sources(&root, &recorded);
+        assert_eq!(listed.changed, ["src/a.js"]);
+        // cargo-mutants' mutants of the Rust file, under its set.
+        assert_eq!(
+            listed.mutants.files.keys().collect::<Vec<_>>(),
+            ["src/a.rs"]
+        );
+        assert_eq!(listed.mutants.language_of("src/a.rs"), RUST);
+        let nothing = list_from_sources(&root, &BTreeMap::new());
+        assert_eq!(nothing.mutants, MutantsFile::unlisted());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

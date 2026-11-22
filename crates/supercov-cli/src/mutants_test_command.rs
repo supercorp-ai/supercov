@@ -276,7 +276,7 @@ pub fn command(args: &[String]) -> ExitCode {
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
-        refuse_without_a_driver(run, &plan)?;
+        refuse_without_a_driver(&run.id, &plan)?;
         let mut data = execute(&root, run, plan, saved, &options)?;
         let verdicts = read_saved(run);
         data["gate"] = gate(&root, &asked, &verdicts, &options)?;
@@ -310,7 +310,7 @@ pub fn command(args: &[String]) -> ExitCode {
 /// A pass with mutants to run needs a test it can run: one of a runner a
 /// strong driver drives. Without one every mutant would end without a
 /// verdict, and the pass would read as a score of nothing killed.
-fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), String> {
+fn refuse_without_a_driver(run: &str, plan: &StrongPlan) -> Result<(), String> {
     use supercov_engine::strong_driver::STRONG_RUNNERS;
     let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
     let drivable = plan
@@ -330,10 +330,8 @@ fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), Str
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(
-        "The strong pass runs tests under {}, and run {}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {} mutants` lists them with what the run's own tests tell of each.",
+        "The strong pass runs tests under {}, and run {run}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {run} mutants` lists them with what the run's own tests tell of each.",
         STRONG_RUNNERS.join(", "),
-        run.id,
-        run.id,
     ))
 }
 
@@ -809,69 +807,74 @@ fn execute(
                 .iter()
                 .map(|mutant| mutant.language.clone())
                 .collect::<BTreeSet<_>>();
-            for language in languages {
-                let nonce = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
-                std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-                let plan_path = work.join("plan.json");
-                let results = work.join("results.jsonl");
-                let mutants = remaining
-                    .iter()
-                    .filter(|mutant| mutant.language == language)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let pass_plan = StrongPlan {
-                    mutant_set: plan.mutant_set.clone(),
-                    tests: plan.tests.clone(),
-                    mutants,
-                };
-                supercov_engine::fault_fs::write(
-                    &plan_path,
-                    serde_json::to_vec(&pass_plan).expect("plain data serializes"),
-                )
-                .map_err(|e| format!("{}: {e}", plan_path.display()))?;
-                let pass = supercov_engine::strong_driver::StrongPass {
-                    root: root.to_owned(),
-                    command: command.clone(),
-                    run_id: format!("strong-{nonce}"),
-                    watchdog_program: std::env::current_exe()
-                        .ok()
-                        .and_then(|path| std::fs::canonicalize(path).ok()),
-                    strong: supercov_engine::strong_driver::StrongRun {
-                        plan: plan_path,
-                        results: results.clone(),
-                    },
-                };
-                let mut diagnostics = std::io::stderr();
-                let progress = Progress::start(results.clone(), pass_plan.mutants.len());
-                exit = supercov_engine::strong_driver::run_strong_pass(
-                    &language,
-                    &pass,
-                    &mut diagnostics,
-                )?;
-                drop(progress);
-                command_exit = Some(exit);
-                let text = std::fs::read_to_string(&results).unwrap_or_default();
-                for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                    let Ok(record) = serde_json::from_str::<Value>(line) else {
-                        continue;
+            // A pass with mutants left has a language of them at least.
+            languages
+                .into_iter()
+                .try_for_each(|language| -> Result<(), String> {
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
+                    std::fs::create_dir_all(&work)
+                        .map_err(|e| format!("{}: {e}", work.display()))?;
+                    let plan_path = work.join("plan.json");
+                    let results = work.join("results.jsonl");
+                    let mutants = remaining
+                        .iter()
+                        .filter(|mutant| mutant.language == language)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let pass_plan = StrongPlan {
+                        mutant_set: plan.mutant_set.clone(),
+                        tests: plan.tests.clone(),
+                        mutants,
                     };
-                    if record["summary"] == true {
-                        passes.push(record);
-                        continue;
-                    }
-                    let Some(id) = record["id"].as_str() else {
-                        continue;
+                    supercov_engine::fault_fs::write(
+                        &plan_path,
+                        serde_json::to_vec(&pass_plan).expect("plain data serializes"),
+                    )
+                    .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+                    let pass = supercov_engine::strong_driver::StrongPass {
+                        root: root.to_owned(),
+                        command: command.clone(),
+                        run_id: format!("strong-{nonce}"),
+                        watchdog_program: std::env::current_exe()
+                            .ok()
+                            .and_then(|path| std::fs::canonicalize(path).ok()),
+                        strong: supercov_engine::strong_driver::StrongRun {
+                            plan: plan_path,
+                            results: results.clone(),
+                        },
                     };
-                    if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
-                        saved.insert(id.to_owned(), verdict);
+                    let mut diagnostics = std::io::stderr();
+                    let progress = Progress::start(results.clone(), pass_plan.mutants.len());
+                    exit = supercov_engine::strong_driver::run_strong_pass(
+                        &language,
+                        &pass,
+                        &mut diagnostics,
+                    )?;
+                    drop(progress);
+                    command_exit = Some(exit);
+                    let text = std::fs::read_to_string(&results).unwrap_or_default();
+                    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                        let Ok(record) = serde_json::from_str::<Value>(line) else {
+                            continue;
+                        };
+                        if record["summary"] == true {
+                            passes.push(record);
+                            continue;
+                        }
+                        let Some(id) = record["id"].as_str() else {
+                            continue;
+                        };
+                        if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
+                            saved.insert(id.to_owned(), verdict);
+                        }
                     }
-                }
-                remaining.retain(|mutant| !saved.contains_key(&mutant.id));
-                save(run, &plan.mutant_set, &saved)?;
-            }
+                    remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+                    save(run, &plan.mutant_set, &saved)?;
+                    Ok(())
+                })?;
             if remaining.len() == before {
                 break;
             }
@@ -944,6 +947,62 @@ mod tests {
         assert_eq!(span_lines("src/a.ts"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:Mutator"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
+    }
+
+    fn planned_test(runner: &str) -> supercov_engine::strong_plan::PlannedTest {
+        supercov_engine::strong_plan::PlannedTest {
+            id: format!("t/{runner}"),
+            file: None,
+            name: runner.into(),
+            title: None,
+            runner: runner.into(),
+            duration_ms: None,
+            span: None,
+            runnable: true,
+        }
+    }
+
+    fn planned_mutant(
+        decided: Option<supercov_engine::strong_plan::Decided>,
+    ) -> supercov_engine::strong_plan::PlannedMutant {
+        supercov_engine::strong_plan::PlannedMutant {
+            id: "src/a.py:1:1-1:2:Op:+".into(),
+            file: "src/a.py".into(),
+            language: "python".into(),
+            index: 0,
+            mutator: "Op".into(),
+            weak: "unknown",
+            decided,
+            reason: None,
+            candidates: Vec::new(),
+            whole_files: Vec::new(),
+            server_wide: None,
+            covering: 0,
+            statement: None,
+            function: None,
+            function_hit_by: Default::default(),
+        }
+    }
+
+    /// A pass with mutants to run refuses a run none of whose tests a
+    /// driver runs, naming the runners its tests ran under.
+    #[test]
+    fn a_pass_with_no_test_a_driver_runs_is_refused() {
+        let plan = |runners: &[&str], decided| StrongPlan {
+            mutant_set: "set".into(),
+            tests: runners.iter().map(|runner| planned_test(runner)).collect(),
+            mutants: vec![planned_mutant(decided)],
+        };
+        let refused =
+            refuse_without_a_driver("r1", &plan(&["pytest", "background"], None)).unwrap_err();
+        assert!(
+            refused.contains("run r1's tests ran under pytest: it cannot run their mutants. `supercov runs r1 mutants`"),
+            "{refused}"
+        );
+        // A test a driver runs, or nothing left to run: no refusal.
+        assert!(refuse_without_a_driver("r1", &plan(&["pytest", "jest"], None)).is_ok());
+        let decided = Some(supercov_engine::strong_plan::Decided::Survived);
+        assert!(refuse_without_a_driver("r1", &plan(&["pytest"], decided)).is_ok());
     }
 
     #[test]

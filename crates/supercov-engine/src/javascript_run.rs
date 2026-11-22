@@ -2328,6 +2328,64 @@ mod tests {
         );
     }
 
+    /// A strong pass starts the command itself, or the jobs driver before
+    /// it where a mutant's candidate ran under a job runner, on Bun where
+    /// the command is Bun's.
+    #[test]
+    fn a_strong_pass_starts_the_jobs_driver_for_a_job_runner_s_candidates() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-strong-command-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let strong = StrongRun {
+            plan: directory.join("plan.json"),
+            results: directory.join("results.jsonl"),
+        };
+        let workspace = Path::new("/copy");
+        let command = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let driver = workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string();
+        // No plan to read: the command.
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["npx", "jest"])
+        );
+        let plan = |runner: &str| {
+            serde_json::json!({
+                "tests": [{"runner": runner}],
+                "mutants": [
+                    {"candidates": [{"test": 0}, {"test": 9}]},
+                    {"decided": "survived", "candidates": [{"test": 0}]}
+                ]
+            })
+        };
+        std::fs::write(&strong.plan, plan("jest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["node", &driver, "--", "npx", "jest"])
+        );
+        assert_eq!(
+            strong_command(&strong, &command(&["/usr/bin/bun", "test"]), workspace),
+            command(&["/usr/bin/bun", &driver, "--", "/usr/bin/bun", "test"])
+        );
+        // Vitest drives itself from within the command.
+        std::fs::write(&strong.plan, plan("vitest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "vitest"]), workspace),
+            command(&["npx", "vitest"])
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// The files a strong pass switches are those of the plan's mutants it
     /// runs; a plan that does not read, or lists no mutants, switches every
     /// file.
@@ -2912,7 +2970,7 @@ fn strong_command(strong: &StrongRun, command: &[String], workspace: &Path) -> V
         .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
         .flat_map(|mutant| mutant["candidates"].as_array().cloned().unwrap_or_default())
         .filter_map(|candidate| candidate["test"].as_u64())
-        .filter_map(|test| tests.get(usize::try_from(test).ok()?))
+        .filter_map(|test| tests.get(test as usize))
         .any(|test| {
             crate::strong_driver::JAVASCRIPT_JOB_RUNNERS
                 .contains(&test["runner"].as_str().unwrap_or_default())
