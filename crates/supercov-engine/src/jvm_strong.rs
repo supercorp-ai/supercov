@@ -531,6 +531,7 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             .or_default() += 1;
     }
     let mut crowded = vec![false; pit.len()];
+    let mut crowded_lines = std::collections::BTreeSet::<(String, String, String, u32)>::new();
     for ((file, mutator, key), group) in &by_group {
         let mut theirs_on_line = BTreeMap::<u32, Vec<usize>>::new();
         for at in group {
@@ -542,6 +543,7 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                 .copied()
                 .unwrap_or(0);
             if ours > 0 && theirs.len() > ours {
+                crowded_lines.insert((file.clone(), mutator.clone(), key.clone(), line));
                 for at in theirs {
                     crowded[at] = true;
                 }
@@ -556,6 +558,16 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
         for (file, mutant, key) in unmatched {
             let group =
                 by_group.get(&(file.clone(), mutant.mutator.name().to_owned(), key.clone()));
+            // A Kotlin mutant of a crowded line has its counterpart there,
+            // for the statement pass: not a lone one of a line before (a
+            // `?.` of its own).
+            let own_line_crowded = file.ends_with(".kt")
+                && crowded_lines.contains(&(
+                    file.clone(),
+                    mutant.mutator.name().to_owned(),
+                    key.clone(),
+                    mutant.start.0,
+                ));
             let fits = |at: usize| {
                 !taken[at]
                     && match pass {
@@ -565,7 +577,7 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                         // statement.
                         1 => {
                             !crowded[at]
-                                && !file.ends_with(".kt")
+                                && !own_line_crowded
                                 && (mutant.lines.0.saturating_sub(3)
                                     ..=mutant.lines.1.max(mutant.end.0))
                                     .contains(&pit[at].line)
@@ -856,6 +868,40 @@ mod tests {
     /// which PIT's static-initializer filter leaves alone), `Arrays.setAll`
     /// removed, and a lambda returning a value of the caller's own type
     /// variable, erased to Object.
+    /// `require(a && b)` inlines to a jump on the whole condition besides
+    /// its operands': PIT negates it, and so does Supercov. A single
+    /// comparison's is the comparison's own mutant, listed once.
+    #[test]
+    fn a_kotlin_require_of_a_compound_condition_negates_the_whole() {
+        let file = "fixture/Check.kt";
+        let source = "fun f(i: Int, n: Int) {\n    require(i >= 0 && i < n) { \"index\" }\n    check(i < n)\n}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let ids = file_mutants(file, source, &index)
+            .unwrap()
+            .mutants
+            .iter()
+            .map(|mutant| mutant_id(file, mutant))
+            .collect::<Vec<_>>();
+        let negated = |line: u32| {
+            ids.iter()
+                .filter(|id| {
+                    id.starts_with(&format!("{file}:{line}:")) && id.contains("NegateConditionals")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            negated(2),
+            [
+                format!("{file}:2:13-2:28:NegateConditionals:negated"),
+                format!("{file}:2:13-2:19:NegateConditionals:negated"),
+                format!("{file}:2:23-2:28:NegateConditionals:negated"),
+            ],
+            "{ids:#?}"
+        );
+        assert_eq!(negated(3).len(), 1, "{ids:#?}");
+    }
+
     #[test]
     fn java_mutants_pit_made_on_public_projects() {
         let file = "fixture/Reach.java";
