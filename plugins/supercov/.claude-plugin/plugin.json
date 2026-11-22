@@ -12,6 +12,7 @@
   "keywords": [
     "coverage",
     "testing",
+    "mutation-testing",
     "code-quality",
     "security"
   ]

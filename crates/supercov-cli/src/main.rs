@@ -132,6 +132,7 @@ const DOC_TOPICS: &[(&str, &str)] = &[
     ),
     ("agent-loop", include_str!("../assets/docs/agent-loop.md")),
     ("assertions", include_str!("../assets/docs/assertions.md")),
+    ("mutation", include_str!("../assets/docs/mutation.md")),
     (
         "troubleshooting",
         include_str!("../assets/docs/troubleshooting.md"),

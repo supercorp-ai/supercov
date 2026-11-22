@@ -16,21 +16,32 @@ npx supercov -- mvn test
 
 ## Language support
 
-| Language | Status | Start with |
-| --- | --- | --- |
-| JavaScript | Available | `npx supercov -- npm test` |
-| TypeScript | Available | `npx supercov -- npm test` |
-| Rust | Available | `npx supercov -- cargo test` |
-| Python | Available | `npx supercov -- pytest` |
-| Ruby | Available | `npx supercov -- rspec` |
-| Go | Available | `npx supercov -- go test ./...` |
-| Java | Available | `npx supercov -- mvn test` |
-| Kotlin | Available | `npx supercov -- ./gradlew test` |
-| Zig | Coming soon | — |
-| PHP | Coming soon | — |
-| C | Coming soon | — |
+| Language | Status | Start with | Mutation testing |
+| --- | --- | --- | --- |
+| JavaScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
+| TypeScript | Available | `npx supercov -- npm test` | StrykerJS 10.1.1's mutants |
+| Rust | Available | `npx supercov -- cargo test` | cargo-mutants 27.1.0's mutants |
+| Python | Available | `npx supercov -- pytest` | mutmut 3.8.1's mutants |
+| Ruby | Available | `npx supercov -- rspec` | mutant 0.17.1's mutants |
+| Go | Available | `npx supercov -- go test ./...` | Gremlins 0.6.0's mutants |
+| Java | Available | `npx supercov -- mvn test` | PIT 1.17.1's mutants |
+| Kotlin | Available | `npx supercov -- ./gradlew test` | PIT 1.17.1's mutants |
+| Zig | Coming soon | — | — |
+| PHP | Coming soon | — | — |
+| C | Coming soon | — | — |
 
 The npm-distributed CLI requires Node.js 22 or newer for every language.
+
+## Mutation testing
+
+`npx supercov mutants -- <test command>` lists the mutants the language's
+established tool would make of every source the run measured, says from the
+run which ones no test reaches or infects, and runs the rest against the tests
+that reach them. The Mutation testing column of each runner table below says
+whether that runner's tests run against mutants. A runner without it still
+gets the mutants list and the weak report, from its coverage. See
+[Mutation testing](mutation.md) for each language's limits and how its
+verdicts compare with its tool's.
 
 ## What exact and aggregate mean
 
@@ -46,18 +57,18 @@ Supercov reports the level it actually observed. It does not guess.
 
 ## JavaScript and TypeScript
 
-| Runner | Attribution |
-| --- | --- |
-| Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
-| Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
-| `node:test` | Exact per test |
-| `bun:test` (Bun 1.2.17 and 1.4.4 verified) | Exact test-body coverage, including concurrent and parameterized tests; lifecycle hooks recorded as setup |
-| Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
-| AVA | Exact per test, concurrent tests included, in worker threads or child processes |
-| node-tap 15 and newer | Exact per subtest, nested and parallel (`t.jobs`) subtests included |
-| Other Node-based runners | Aggregate when their processes remain visible to Supercov |
-| Browser component runners without an adapter | Aggregate structural coverage |
+| Runner | Attribution | Mutation testing |
+| --- | --- | --- |
+| Playwright | Exact per test, worker, retry, outcome, action, and assertion phase | Yes: each test's mutant travels with its requests |
+| Vitest | Exact per test, with setup execution kept separate; Browser Mode included | Yes, Browser Mode included |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept | Yes |
+| `node:test` | Exact per test | Yes |
+| `bun:test` (Bun 1.2.17 and 1.4.4 verified) | Exact test-body coverage, including concurrent and parameterized tests; lifecycle hooks recorded as setup | Yes |
+| Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate | Yes |
+| AVA | Exact per test, concurrent tests included, in worker threads or child processes | Yes |
+| node-tap 15 and newer | Exact per subtest, nested and parallel (`t.jobs`) subtests included | Yes |
+| Other Node-based runners | Aggregate when their processes remain visible to Supercov | Weak report only |
+| Browser component runners without an adapter | Aggregate structural coverage | Weak report only |
 
 One command may launch several runners. Supercov combines their evidence into
 one run and preserves runner identity wherever the runner exposes it.
@@ -183,11 +194,11 @@ loses nothing there either.
 
 ## Rust
 
-| Runner | Attribution | Current requirement |
-| --- | --- | --- |
-| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` |
-| rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` |
-| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or newer (tested with 0.9.140 and 0.9.148) |
+| Runner | Attribution | Current requirement | Mutation testing |
+| --- | --- | --- | --- |
+| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` | Yes |
+| rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` | Yes |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or newer (tested with 0.9.140 and 0.9.148) | Yes, with the project's nextest configuration |
 
 Supercov preserves Cargo's test selection, scheduling, fail-fast behavior,
 environment and exit status. Doctests run with their own identities; nextest
@@ -424,12 +435,12 @@ npx supercov -- wasm-pack test --headless --chrome
 
 ## Python
 
-| Runner | Attribution | Current requirement |
-| --- | --- | --- |
-| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
-| pytest-xdist | Exact per worker | Workers inherit the run through the environment |
-| pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
-| `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
+| Runner | Attribution | Current requirement | Mutation testing |
+| --- | --- | --- | --- |
+| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.9 or newer; run with `npx supercov -- pytest` or `python -m pytest` | Yes, on Linux and macOS |
+| pytest-xdist | Exact per worker | Workers inherit the run through the environment | Yes: the pass turns xdist off and forks its own workers |
+| pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | | Not verified |
+| `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test | Yes, on Linux and macOS; not a suite that runs unittest through its own script |
 
 Your project runs in place with its own interpreter and virtual environment.
 Supercov adds its runner hooks through the process environment and places a
@@ -501,14 +512,14 @@ when you set it, list the Python directories as well.
 
 ## Ruby
 
-| Runner | Attribution | Current requirement |
-| --- | --- | --- |
-| RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
-| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
-| test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
-| parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
-| Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
-| Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+| Runner | Attribution | Current requirement | Mutation testing |
+| --- | --- | --- | --- |
+| RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` | Yes |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` | Yes |
+| test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` | Yes (test-unit 3.7 verified) |
+| parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers | Not verified |
+| Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | | Not verified |
+| Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` | Yes (Cucumber 12 verified) |
 
 Every test is credited with every line it runs: each statement of an
 instrumented file carries a probe. Code Supercov cannot instrument -- a file
@@ -607,11 +618,11 @@ what changes is whether a line can be traced to the test that ran it.
 
 ## Go
 
-| Runner | Attribution | Current requirement |
-| --- | --- | --- |
-| `go test` | Exact per test | Go 1.22 or newer |
-| A test that calls `t.Parallel()` | Aggregate: its coverage counts run-wide | — |
-| An `Example` with an `Output` comment, and a `Fuzz` target's seed corpus | Aggregate: measured, but named by no test | — |
+| Runner | Attribution | Current requirement | Mutation testing |
+| --- | --- | --- | --- |
+| `go test` | Exact per test | Go 1.22 or newer | Yes: each package run whole, with the command's own flags |
+| A test that calls `t.Parallel()` | Aggregate: its coverage counts run-wide | — | Yes, with the rest of its package |
+| An `Example` with an `Output` comment, and a `Fuzz` target's seed corpus | Aggregate: measured, but named by no test | — | Yes, with the rest of their package |
 
 Supercov instruments an isolated copy of the module and runs your own command
 against it. Your tree is not touched, and your test sources are not rewritten
@@ -770,17 +781,17 @@ npx supercov -- npx playwright test
 
 ## Java and Kotlin
 
-| Runner | Attribution | Current requirement |
-| --- | --- | --- |
-| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle |
-| JUnit 4 (through Vintage) | Exact per test | — |
-| Kotest | Exact per test, under the names Kotest itself reports | — |
-| Spock | Exact per feature, under the names Spock itself reports | — |
-| TestNG | Exact per test, each data-provider invocation its own | — |
-| JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle |
-| JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below |
-| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below |
-| TestNG under Ant's `<testng>` | Exact per test, through the TestNG listener | TestNG 6.x with its Ant task — see below |
+| Runner | Attribution | Current requirement | Mutation testing |
+| --- | --- | --- | --- |
+| JUnit 5 (Jupiter) | Exact per test | JDK 17 or newer, Maven or Gradle | Yes |
+| JUnit 4 (through Vintage) | Exact per test | — | Yes |
+| Kotest | Exact per test, under the names Kotest itself reports | — | Yes |
+| Spock | Exact per feature, under the names Spock itself reports | — | Yes |
+| TestNG | Exact per test, each data-provider invocation its own | — | Yes |
+| JUnit 4 alone | Exact per test, through Vintage — see below | Maven or Gradle | Yes |
+| JUnit 4 under Ant's `<junit>` | Exact per test, under the names Ant's XML report uses | Ant 1.10 — see below | Yes |
+| Any platform engine under Ant's `<junitlauncher>` | Exact per test, through the platform listener | Ant 1.10 — see below | Yes |
+| TestNG under Ant's `<testng>` | Exact per test, through the TestNG listener | TestNG 6.x with its Ant task — see below | Yes |
 
 Multi-module builds are measured module by module: each compiles its own source
 set and forks its own JVM, so each gets a runtime and records evidence of its

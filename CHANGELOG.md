@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.29.0
+
+**Added**
+
+- Mutation testing for every language and runner Supercov measures. `supercov mutants -- <test command>` measures the suite, lists the mutants the language's established tool would make of every source the run measured, and runs each against the tests that reach it, saving `killed`, `survived`, `timeout`, `no-coverage` and `error` into the run, and the mutation score. Each language uses its tool's mutants by the same rules, so counts and verdicts compare: StrykerJS 10.1.1 for JavaScript and TypeScript, mutmut 3.8.1 for Python, cargo-mutants 27.1.0 for Rust, Gremlins 0.6.0 (every mutator) for Go, mutant 0.17.1 (light operators) for Ruby, and PIT 1.17.1 (`DEFAULTS`) for Java and Kotlin. A mutant that does not compile in Rust, Go, Java or Kotlin is `unviable`, counted apart and left out of the score. See [Mutation testing](docs/mutation.md).
+- The strong pass runs under Vitest (in one resident Vitest, many mutants at once), Vitest Browser Mode, Playwright (each test's mutant travels with its requests, so one server serves several), Jest and CommonJS Mocha (in resident runners), `node:test`, ES module Mocha, AVA, node-tap and `bun:test`; pytest and `python -m unittest` (a fork of the collected process per mutant); `cargo test` with its doctests, cargo-nextest, and Rust built for wasm in Node, under WASI and in Chrome, also when JavaScript tests load it in Node; `go test` (each package whole, with the command's own flags); RSpec, Minitest, test-unit and Cucumber (a fork of the loaded suite per mutant); and JUnit 5, JUnit 4, Kotest, Spock and TestNG under Maven and Gradle, and Ant's `<junit>`, `<junitlauncher>` and `<testng>`.
+- It runs no mutant no test reached (`no-coverage`) or infected (`survived`), and each other mutant only against the tests whose own evidence reached or infected it, the likeliest killer first, stopping at the first failure. Every verdict was compared with the reference tool's on public projects, every disagreement applied by hand and the suite run as written:
+  - StrykerJS, 11 projects across Mocha, Jest, `node:test`, AVA, node-tap, `bun:test` and Vitest Browser Mode (16-CPU AWS c8a and m8a.4xlarge CI machines, 15 workers each tool, 2026-11-22): no soundness violation; two mutants Supercov could not switch are `error`, and one kill is of a test that fails alone and passes in the whole suite. Where StrykerJS runs the whole command per mutant (`node:test`, AVA, Bun) Supercov's pass is 2.5 to 3.5 times faster (p-map 355 s against 144 s).
+  - StrykerJS's full kill matrix under Vitest, on defu, scule, cookie-es, pathe, ufo, hono and tRPC (16-vCPU AWS c8a.4xlarge, 2026-11-22): no disagreement on the five libraries; hono's 10 and tRPC's 2 are kills of StrykerJS's covering subset, a flaky test, and a mutant StrykerJS calls Timeout though every test passes. StrykerJS is faster per mutant here: 51 ms against Supercov's 69 on hono, 755 against 1,173 on tRPC. TBD(Vitest per-mutant times with the continuous pass, machine and date).
+  - mutmut's full kill matrix, on python-slugify, cachetools (pytest and unittest), parse and humanize, 5,438 mutants (16-CPU CI machines, 2026-11-22): every mutant the matrix detects, Supercov detects; the five it detects alone fail the suite as written. Strong pass 9.7-18.4 s against mutmut's 10.4-269.2 s. TBD(parse's mutmut time without pytest-cov).
+  - cargo-mutants, on strsim-rs, rust-hex and semver, 832 mutants (16-CPU machines, 2026-11-22): no soundness violation; of five viability disagreements, four are mutants cargo-mutants' build refuses on a deny-by-default lint, which Supercov caps as a measured run does, and one is in a `const` no test reaches. Strong pass 15.7-22.5 s against cargo-mutants' 43.0-74.2 s (shards summed).
+  - Gremlins, on go-humanize, btree, golang-lru, uuid and cast (16-CPU CI machines, 2026-11-22): no soundness violation outside two time-dependent kills and a flaky Example; Supercov also kills 29 mutants of constant declarations Gremlins never runs. 6.3-16.5 s against Gremlins' 8.9-31.1 s for the whole `supercov mutants`.
+  - mutant, on dry-inflector, dotenv and erubi, 4,977 mutants (16-CPU AWS c8a.4xlarge, Ruby 3.4.13, 2026-11-22): every mutation matched, no disagreement. 2.6-25 ms a mutant against mutant's 8.4-16.
+  - PIT's full mutation matrix, on commons-cli, commons-csv, typetools, kotlinpoet, picnic and Ant's `util` package: TBD(JVM results, machine and date).
+- The weak report: `supercov runs <id> mutants` reads, from the run alone, which mutants no test reached, which a test reached but never gave another value (`not-infected`, a certain survivor, with the input that is missing), and which are equivalent. A plain run places no probe and lists no mutant; the first query lists a run's mutants from its sources, runs from every earlier release included. `SUPERCOV_MUTANTS=1` (which `supercov mutants` sets) records the values that decide more of them. The HTML report has a Mutants card with the weak score, a Mutants column in the file list, and a mark on each line with a mutant the tests leave alive.
+- The pull request gate: `--diff <base>` keeps the mutants on lines the change touched; `--format markdown` writes them as a table for a pull request's comment; `--fail-on` fails the command on weak statuses (`runs <id> mutants`) or strong ones (`mutants test`); `--critical <glob>` requires every mutant in those files killed or accepted; `supercov.accepted.json` lists mutants no test can tell apart, with a reason. `--stryker` joins StrykerJS's `mutation.json` reports and mutant's session results by mutant, and `mutants pit <mutations.xml>` joins PIT's report.
+- `supercov docs mutation`, and a `/supercov:mutants` command in the Claude Code plugin and Gemini CLI extension. The agent skill runs mutation testing after writing tests, and with `--diff` on a branch.
+- A backward-compatibility suite: runs that every minor release from 1.0 to 4.28 recorded of a `node:test` and a pytest fixture, each read by every build with the numbers its release gave, every query and report format, shards merging, `diff` across releases and `merge` refused across them with its reason.
+
+**Changed**
+
+- A change to the shape of a file a run stores fails the build until `tests/compat/store-shapes.txt` changes with it, and says what the change owes: a version bump with a refusal or a conversion, or reading the old shape as well.
+- Each release records its own runs into the compatibility corpus, from its checkout before it is published and from npm after.
+- `mutants test` over a run whose tests are under no runner a strong pass drives is refused, rather than reported as a score of nothing killed.
+- A large run publishes sooner: its views, index and files are worked out side by side (#231), and a passed view that differs from the whole view only by skipped tests that recorded nothing has the whole view's index records copied rather than built again. TBD(time to publish a large run before and after, machine and date).
+
+**Fixed**
+
+- Runs recorded before 4.24.0 no longer opened: every query stopped at "unknown field `meta`", because 4.24.0 renamed a field of the evidence without a new schema version. Evidence is read in either shape.
+- Python runs recorded before 4.14.0 kept what ran while no test was running under the kind `unit`, so `minimize --kind unit` refused. It is read under its own kind, whatever release stored it.
+- A Mocha suite run with `--check-leaks` failed on Supercov's own globals. They are no longer among the global object's keys.
+- A second run of a suite in the same checkout restored the instrumented modules Next.js bundles from the frontend cache without the browser runtime they import, and every test importing one failed with "Cannot find module .../browser-runtime.mjs" (107 of a Next app's unit test files). The runtime is now cached with them.
+- Since 4.25.0 a test's Jest docblock was no longer its first comment, so `@jest-environment` was ignored and the test ran in the project's default environment; and a `'use strict'` directive became a plain string, so the file ran sloppy. Both stay where the file had them ([#235](https://github.com/supercorp-ai/supercov/issues/235)).
+- Go tests of one name in two packages (`TestLRU` in a module's root and in a subpackage) shared one record's evidence, so the root package's code read as run by no test.
+- A Ruby suite that loads test-unit before Supercov's runtime (`ruby -rhelper`, as Rake's test task does) ran its tests after the runtime had closed its evidence, and a child started with `--disable-gems` failed to find `RbConfig`.
+
+**Contributors**
+
+- [@npapagna](https://github.com/npapagna)
+
 ## 4.28.0
 
 **Added**
