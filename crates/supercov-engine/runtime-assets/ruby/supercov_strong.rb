@@ -162,6 +162,66 @@ module Supercov
       end
     end
 
+    # A process forked from the loaded suite that runs jobs, each in a fork
+    # of its own: forks are made side by side, not one after another by the
+    # pass.
+    class Worker
+      attr_reader :reader
+
+      def initialize(pass, others)
+        @reader, child_writer = IO.pipe
+        child_reader, @writer = IO.pipe
+        [@reader, child_writer, child_reader, @writer].each(&:binmode)
+        @pid = fork do
+          @reader.close
+          @writer.close
+          # The pass's ends of the other workers' pipes: held here, a
+          # worker's input would never reach its end.
+          others.each(&:close_ends)
+          Pass.child do
+            while (job = Worker.read(child_reader))
+              Worker.write(child_writer, pass.send(:run_job, job))
+            end
+          end
+        end
+        child_writer.close
+        child_reader.close
+      end
+
+      def close_ends
+        @reader.close
+        @writer.close
+      end
+
+      def send_job(job)
+        Worker.write(@writer, job.slice(:key, :ids, :all, :limit))
+      end
+
+      def receive
+        Worker.read(@reader) || { data: nil, killed: false, status: "the worker ended", duration: 0 }
+      end
+
+      def stop
+        @writer.close
+        Process.waitpid(@pid)
+      rescue StandardError
+        nil
+      end
+
+      def self.write(io, value)
+        data = Marshal.dump(value)
+        io.write([data.bytesize].pack("N"), data)
+        io.flush
+      end
+
+      def self.read(io)
+        header = io.read(4)
+        return nil if header.nil? || header.bytesize < 4
+
+        Marshal.load(io.read(header.unpack1("N"))) # rubocop:disable Security/MarshalLoad
+      end
+    end
+
     # The pass: every mutant of the plan, each in a fork of this process.
     class Pass
       # A forked process's work, ended without the parent's `at_exit` hooks
@@ -203,20 +263,44 @@ module Supercov
           write(mutant, "error", nil, 0, 0, "its file was loaded before Supercov's runtime, without its switches")
           false
         end
-        running = {}
-        until queue.empty? && running.empty?
-          while running.size < @jobs && (mutant = queue.shift)
-            start(mutant, tests, running)
+        @queue = queue.map { |mutant| { kind: :mutant, mutant: mutant } }
+        # Kills waiting on a confirmation, by the tests they ran.
+        @waiting = {}
+        @confirmations = 0
+        @overturned = 0
+        workers = []
+        @jobs.times { workers << Worker.new(self, workers.dup) }
+        idle = workers.dup
+        busy = {}
+        until @queue.empty? && busy.empty?
+          while (worker = idle.first) && (job = @queue.shift)
+            next unless (sent = dispatch(job, tests))
+
+            idle.shift
+            worker.send_job(sent)
+            busy[worker.reader] = [worker, sent]
           end
-          reap(running)
+          ready, = IO.select(busy.keys, nil, nil, 0.1)
+          (ready || []).each do |reader|
+            worker, job = busy.delete(reader)
+            idle << worker
+            finish(job, worker.receive)
+          end
         end
+        workers.each(&:stop)
+        @results.write("#{Json.value('summary' => true, 'driver' => 'ruby', 'confirmations' => @confirmations, 'overturned' => @overturned)}\n")
         @results.close
       end
 
       private
 
       def candidates(mutant, tests)
-        mutant["tests"].select { |id| tests.key?(id) && !@failing[id] }
+        mutant_tests(mutant).select { |id| tests.key?(id) && !@failing[id] }
+      end
+
+      # A mutant's candidate tests, in the baseline's order.
+      def mutant_tests(mutant)
+        @plan["sets"][mutant["set"]].map { |index| @plan["baseline"][index] }
       end
 
       def limit(ids)
@@ -224,12 +308,26 @@ module Supercov
         (total * 3) + 10 + Float(@plan["extraSeconds"] || 0)
       end
 
-      def start(mutant, tests, running)
+      # The job a worker runs: a mutant's candidates with it on, or a kill's
+      # tests again without it. Nil where there is nothing to run.
+      def dispatch(job, tests)
+        if job[:kind] == :confirm
+          # In the pool, so a confirmation holds a worker, not the pass.
+          return job.merge(key: -1, ids: job[:sequence], all: true, limit: limit(job[:sequence]))
+        end
+
+        mutant = job[:mutant]
         ids = candidates(mutant, tests)
         if ids.empty?
           write(mutant, "survived", nil, 0, 0, "no candidate test passes without the mutant")
-          return
+          return nil
         end
+        job.merge(key: mutant["key"], ids: ids, all: false, limit: limit(ids))
+      end
+
+      # In a worker process: forks the loaded suite for the job, holds the
+      # fork to its time limit, and says how it ended.
+      def run_job(job)
         reader, writer = IO.pipe
         reader.binmode
         writer.binmode
@@ -237,51 +335,45 @@ module Supercov
         pid = fork do
           reader.close
           Pass.child do
-            outcome = attempt(mutant["key"], ids, all: false)
+            outcome = attempt(job[:key], job[:ids], all: job[:all])
             writer.write(Marshal.dump(outcome))
             writer.close
           end
         end
         writer.close
         # Read as the fork writes: a large outcome would fill the pipe and
-        # hold the fork, which would never be reaped.
+        # hold the fork.
         output = Thread.new { reader.read }
-        running[pid] = { mutant: mutant, reader: reader, output: output, started: started, deadline: started + limit(ids), ids: ids }
-      end
-
-      def reap(running)
+        killed = false
+        status = nil
         loop do
-          pid, status = begin
-            Process.waitpid2(-1, Process::WNOHANG)
-          rescue Errno::ECHILD
-            nil
+          _, status = Process.waitpid2(pid, Process::WNOHANG)
+          break if status
+
+          if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > job[:limit]
+            Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
+            killed = true
+            _, status = Process.waitpid2(pid)
+            break
           end
-          break unless pid
-
-          job = running.delete(pid)
-          next unless job
-
-          finish(job, status)
+          sleep 0.001
         end
-        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        running.each do |pid, job|
-          next unless now > job[:deadline]
-
-          Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
-          job[:killed] = true
-        end
-        sleep 0.005
+        data = output.value
+        reader.close
+        duration = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
+        { data: data, killed: killed, status: status.inspect, duration: duration }
       end
 
-      def finish(job, status)
+      def finish(job, ended)
+        data = ended[:data]
+        duration = ended[:duration]
+        outcome = data.nil? || data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
+        return confirmed(job, outcome) if job[:kind] == :confirm
+
         mutant = job[:mutant]
-        data = job[:output].value
-        job[:reader].close
-        duration = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - job[:started]) * 1000).round
-        outcome = data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
         if outcome.nil?
-          status_word = job[:killed] ? "timeout" : "killed"
-          reason = job[:killed] ? "its tests ran past their time" : "the test process ended (#{status.inspect}) before its tests did"
+          status_word = ended[:killed] ? "timeout" : "killed"
+          reason = ended[:killed] ? "its tests ran past their time" : "the test process ended (#{ended[:status]}) before its tests did"
           write(mutant, status_word, nil, job[:ids].size, duration, reason)
           return
         end
@@ -294,26 +386,44 @@ module Supercov
           write(mutant, "survived", nil, outcome[:ran], duration, nil)
           return
         end
-        if confirmed?(outcome[:sequence])
-          write(mutant, "killed", killer, outcome[:ran], duration, nil)
-          return
+        kill = { mutant: mutant, killer: killer, ran: outcome[:ran], duration: duration }
+        sequence = outcome[:sequence]
+        case @confirmed[sequence]
+        when true then write(mutant, "killed", killer, outcome[:ran], duration, nil)
+        when false then overturn(kill)
+        else
+          # The first kill after these tests asks for their confirmation;
+          # later ones wait on it.
+          unless @waiting.key?(sequence)
+            @confirmations += 1
+            @queue.unshift({ kind: :confirm, sequence: sequence })
+          end
+          (@waiting[sequence] ||= []) << kill
         end
-        # The killing test fails without the mutant after the same tests:
-        # the candidates' files run whole, with and without it.
-        files_whole(mutant, duration)
       end
 
-      # Whether the tests a kill ran, up to the failing one, pass without
-      # the mutant.
-      def confirmed?(sequence)
-        @confirmed.fetch(sequence) do
-          baseline = run_isolated(-1, sequence, nil, all: true)
-          @confirmed[sequence] = !baseline.nil? && baseline[:failed].empty?
+      def confirmed(job, outcome)
+        sequence = job[:sequence]
+        passed = !outcome.nil? && outcome[:failed].empty?
+        @confirmed[sequence] = passed
+        (@waiting.delete(sequence) || []).each do |kill|
+          if passed
+            write(kill[:mutant], "killed", kill[:killer], kill[:ran], kill[:duration], nil)
+          else
+            overturn(kill)
+          end
         end
+      end
+
+      # A killing test that fails without the mutant after the same tests:
+      # the candidates' files run whole, with and without it.
+      def overturn(kill)
+        @overturned += 1
+        files_whole(kill[:mutant], kill[:duration])
       end
 
       def files_whole(mutant, duration)
-        whole = @runner.whole(mutant["tests"])
+        whole = @runner.whole(mutant_tests(mutant))
         without = run_isolated(-1, whole, nil, all: true)
         unless without
           write(mutant, "error", nil, 0, duration, "its tests' files did not finish without it")
@@ -436,7 +546,10 @@ module Supercov
         configuration.reporter.register_listener(listener, :example_finished)
         $stdout.reopen(File::NULL)
         $stderr.reopen(File::NULL) unless ENV["SUPERCOV_STRONG_DEBUG"]
-        status = @runner.run_specs(world.ordered_example_groups)
+        # Only the groups that hold a chosen example: every other group would
+        # still be announced to the reporter.
+        groups = world.ordered_example_groups.reject { |group| group.descendant_filtered_examples.empty? }
+        status = @runner.run_specs(groups)
         by_id = @examples.invert
         sequence = listener.finished.map { |example| by_id.fetch(example) }
         failed = listener.finished.select { |example| example.execution_result.status == :failed }.map { |example| by_id.fetch(example) }

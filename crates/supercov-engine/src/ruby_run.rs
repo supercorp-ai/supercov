@@ -1107,6 +1107,7 @@ pub fn run_strong_ruby(
     let mut files = serde_json::Map::new();
     let mut mutants = Vec::new();
     let mut baseline = BTreeSet::new();
+    let mut candidate_sets = BTreeMap::<Vec<String>, usize>::new();
     let mut switched_count = 0;
     for (number, (file, wanted)) in by_file.into_iter().enumerate() {
         let number = number as u64 + 1;
@@ -1151,12 +1152,22 @@ pub fn run_strong_ruby(
             for test in mutant["tests"].as_array().into_iter().flatten() {
                 baseline.insert(test.as_str().unwrap_or_default().to_owned());
             }
+            // Mutants of one method share their candidates: each list is
+            // written once, and a mutant names it.
+            let list: Vec<String> = mutant["tests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|test| test.as_str().map(str::to_owned))
+                .collect();
+            let next = candidate_sets.len();
+            let set = *candidate_sets.entry(list).or_insert(next);
             mutants.push(serde_json::json!({
                 "id": id,
                 "file": file,
                 "index": index,
                 "key": number * crate::ruby_mutants::schemata::FILE_KEY + index as u64,
-                "tests": mutant["tests"],
+                "set": set,
             }));
         }
         let switched = directory.join(format!("switched-{number}.rb"));
@@ -1178,6 +1189,19 @@ pub fn run_strong_ruby(
         .filter_map(|test| test["id"].as_str())
         .filter(|id| baseline.contains(*id))
         .collect::<Vec<_>>();
+    // Each candidate list as indexes into the baseline's tests.
+    let position = baseline
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut sets = vec![Vec::new(); candidate_sets.len()];
+    for (list, index) in candidate_sets {
+        sets[index] = list
+            .iter()
+            .filter_map(|id| position.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+    }
     let jobs = std::env::var("SUPERCOV_STRONG_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1187,6 +1211,7 @@ pub fn run_strong_ruby(
         "files": files,
         "mutants": mutants,
         "baseline": baseline,
+        "sets": sets,
         "results": pass.strong.results.display().to_string(),
         "timeouts": pass.strong.timeouts_path().display().to_string(),
         "hitLimit": crate::strong_driver::DEFAULT_HIT_LIMIT,
