@@ -3036,10 +3036,12 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         );
     }
     // A command still running is reported at each interval, in ms then s.
+    // The interval is short enough that a busy machine still reports once
+    // before the first second.
     let slow = project
         .supercov_with(
             &["__supervise", "--", "sleep", "2.5"],
-            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "400")],
+            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "100")],
         )
         .exits(0);
     let reports = slow
