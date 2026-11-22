@@ -26,18 +26,25 @@ enumerates the same set without running mutant (`ruby_mutants/`):
 - mutant keeps a mutation only where Unparser prints it and parses it back to
   the same tree. That is emulated: a local variable read before any
   assignment to it (parsed again, it is a method call), a bare call by a
-  local's name, `retry` outside a rescue clause, `break`, `next` or `redo`
+  `retry` outside a rescue clause, `break`, `next` or `redo`
   outside a loop or block, `a || (b || c)`, and a left operand that binds
-  more loosely than its operator (`(a + b) * c` prints as `a + b * c`).
-- Regexp body mutations (removing a quantifier, swapping `\d` and `\D`, ...)
-  are not enumerated; mutant's `x =~ /\Afoo/` to `x.start_with?("foo")`
-  is.
+  more loosely than its operator (`(a + b) * c` prints as `a + b * c`), a
+  regexp literal in a condition (a match against `$_` once parsed), and
+  `(a || b) && c` anywhere but a statement (Unparser writes it with `and`).
+  A call by a local variable's name is written with parentheses (`rule()`).
+- A regexp's body is parsed as `regexp_parser` parses it (`regexp.rs`) and
+  mutated as mutant's regexp mutators do: a quantifier removed or `*` made
+  `+`, `\d` and `\D` (and the other character types, `\b`, `^`, `$`)
+  swapped, an alternative removed, a capturing group made passive or a named
+  one renamed `_name`. A pattern with a conditional or a set intersection is
+  not read, and gets no body mutations.
 
 `scripts/mutant-parity.rb` prints mutant's own mutants of the fixtures in
 `crates/supercov-engine/tests/fixtures/mutant-parity` and writes the goldens
 (`FILE.mutant.json`); the engine's tests compare node by node: each method's
 tree, and each mutant's located node and replacement, in mutant's order
-(1,003 mutants on the fixtures, every one equal).
+(1,118 mutants on the fixtures, every one equal; the tests also take a
+project's files and goldens from `MUTANT_PARITY_FIXTURES`).
 
 ### Ids
 
@@ -88,7 +95,12 @@ Each copy is the node with one mutant applied, printed on one line: no line
 after a switch moves, so backtraces and `__LINE__` stay those of the file.
 Every edit inserts text; the original stays between the switch's halves. A
 mutant whose only change is a method's parameters (an optional parameter
-made required) has no place for a switch and is `error` (`arguments`).
+made required) is switched in its default, which then raises the
+`ArgumentError` the required parameter would, where a call leaves it out.
+A receiver that is or becomes `self` is never switched alone: `(x).open`
+calls a private method only where `x` is written `self.`, so the switch goes
+around the call (dotenv's `File.open` made `self.open` was a kill that
+mutant, applying the mutant as written, rightly calls a survivor).
 
 ### The runtime and the driver
 
@@ -147,8 +159,8 @@ it makes. `summarize.rb` counts every disagreement.
 
 ## Not yet
 
-- Regexp body mutations.
-- Mutants of a method's parameters in the strong pass.
+- Two mutant mutations of a rescue clause's body added to a statement list
+  (dotenv's `parse`) that Unparser does not print back, and Supercov keeps.
 - test-unit and Cucumber in the strong pass (their runs list mutants and
   weak results).
 - Infection probes beyond binary operators.
