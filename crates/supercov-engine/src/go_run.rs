@@ -297,8 +297,9 @@ fn instrument_sources(
     project_root: &Path,
     workspace: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    tags: &str,
 ) -> Result<InstrumentedSources, String> {
-    let project = prepare_go_project(workspace, project_root, roots)?;
+    let project = prepare_go_project(workspace, project_root, roots, tags)?;
 
     // A go.work repository has several modules and no module at its root, so
     // each gets a runtime of its own: an import is resolved against the module
@@ -429,13 +430,14 @@ fn instrument_workspace(
     evidence_directory: &Path,
     serialised: bool,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    tags: &str,
 ) -> Result<InstrumentedWorkspace, String> {
     let InstrumentedSources {
         mut project,
         runtimes,
         probe_count,
         source_packages,
-    } = instrument_sources(project_root, workspace, roots)?;
+    } = instrument_sources(project_root, workspace, roots, tags)?;
     let import_for = |relative: &str| runtime_for(&runtimes, relative);
     let mut unparseable_tests: Vec<(String, String)> = Vec::new();
 
@@ -695,6 +697,18 @@ fn save_go_invocations(root: &Path, command: &[String], log: &Path) {
 }
 
 /// The `go test` invocations a command's last run with mutants recorded.
+/// The build tags `command` gives `go test`, or, where it wraps it (`make
+/// test`), those its last run with mutants started `go test` with: what
+/// the type checker's facts for the value probes are asked under. `GOFLAGS`
+/// reaches the type checker as it reaches `go test`.
+fn build_tags(root: &Path, command: &[String]) -> String {
+    crate::go_strong::recorded_flags(
+        crate::go_strong::go_flags(command),
+        &recorded_go_invocations(root, command),
+    )
+    .tags
+}
+
 pub fn recorded_go_invocations(root: &Path, command: &[String]) -> Vec<Vec<String>> {
     fs::read(go_invocations_path(root, command))
         .ok()
@@ -814,6 +828,7 @@ pub fn run_direct_go(
             &evidence_directory,
             serialised,
             roots.as_ref(),
+            &build_tags(&root, &request.command),
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
@@ -1196,7 +1211,8 @@ impl GoServer {
             &FrontendIntegrityInputs::embedded_go(),
         )
         .map_err(|error| error.to_string())?;
-        let sources = instrument_sources(root, workspace, roots.as_ref())?;
+        let sources =
+            instrument_sources(root, workspace, roots.as_ref(), &build_tags(root, command))?;
         let widths = sources
             .project
             .decision_widths
@@ -1591,7 +1607,7 @@ mod tests {
         write(&root.join("none/n.go"), "package none\n\nfunc N() {}\n").unwrap();
         write(&root.join("none/n_test.go"), "// nothing here\n").unwrap();
         let instrumented =
-            instrument_workspace(&root, &root, &root.join("evidence"), false, None).unwrap();
+            instrument_workspace(&root, &root, &root.join("evidence"), false, None, "").unwrap();
         let probes = fs::read_to_string(root.join("lib").join(PROBE_FILE)).unwrap();
         assert!(probes.contains("package lib\n"), "{probes}");
         let harness = fs::read_to_string(root.join(HARNESS_FILE)).unwrap();
@@ -1721,7 +1737,7 @@ mod tests {
             "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n}\n",
         )
         .unwrap();
-        let probes = crate::go_project::prepare_go_project(&root, &root, None)
+        let probes = crate::go_project::prepare_go_project(&root, &root, None, "")
             .unwrap()
             .probes
             .len();

@@ -341,8 +341,10 @@ fn run_direct_rust_timed(
         // `SUPERCOV_MUTANTS=1` places weak mutation's value probes, and
         // lists the run's mutants with them: another instrumentation, with a
         // build cache of its own.
-        let mutants = std::env::var("SUPERCOV_MUTANTS")
-            .is_ok_and(|value| matches!(value.trim(), "1" | "true"));
+        let mutants = matches!(
+            std::env::var("SUPERCOV_MUTANTS").as_deref().map(str::trim),
+            Ok("1" | "true")
+        );
         crate::rust_instrumenter::set_value_probes(mutants);
         let mut build_cache_key = rust_build_cache_key(
             &integrity,

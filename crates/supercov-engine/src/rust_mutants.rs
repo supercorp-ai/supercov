@@ -967,22 +967,13 @@ fn maybe_collection_or_container(path: &ast::Path) -> Option<(String, ast::Type)
     }
 }
 
-/// A bound's trait, inside any parentheses: `impl (Iterator<Item = T>)` is
-/// an iterator to `syn` too.
-fn bound_path(ty: ast::Type) -> Option<ast::Path> {
-    match ty {
-        ast::Type::ParenType(inner) => bound_path(inner.ty()?),
-        other => path_of(&other),
-    }
-}
-
 fn impl_iterator_item(ty: &ast::ImplTraitType) -> Option<ast::Type> {
     // The first `Iterator<Item = T>` among its bounds (a lifetime bound has
     // no type).
     ty.type_bound_list()
         .into_iter()
         .flat_map(|list| list.bounds())
-        .filter_map(|bound| bound_path(bound.ty()?))
+        .filter_map(|bound| path_of(&bound.ty()?))
         .filter(|path| last_name(path).as_deref() == Some("Iterator"))
         .find_map(|path| {
             match generic_arguments(&path).and_then(|arguments| arguments.into_iter().next()) {

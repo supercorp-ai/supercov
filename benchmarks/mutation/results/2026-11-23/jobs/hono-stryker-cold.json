@@ -1,0 +1,156 @@
+{
+  "project": "hono",
+  "scenario": "stryker-cold",
+  "shard": null,
+  "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+  "startedAt": "2026-11-19T23:59:22.053Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.6.0",
+    "vitest": "5.0.1",
+    "vitestProject": "5.0.1"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/honojs/hono 75ff8e3ea18485589816881c6278bc9783e56602 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.468,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.05,
+        "sysS": 0.02,
+        "cpuS": 0.07,
+        "cpuPercent": "16%",
+        "maxRssKiB": 18784,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.6.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.48,
+      "wallS": 1.678,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.68,
+        "sysS": 0.18,
+        "cpuS": 0.86,
+        "cpuPercent": "51%",
+        "maxRssKiB": 181576,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.16,
+      "wallS": 0.777,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.79,
+        "sysS": 0.81,
+        "cpuS": 3.6,
+        "cpuPercent": "465%",
+        "maxRssKiB": 272188,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 2.94,
+      "wallS": 0.907,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.97,
+        "sysS": 0.46,
+        "cpuS": 1.43,
+        "cpuPercent": "159%",
+        "maxRssKiB": 358216,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --config vitest.bench.config.ts --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 3.87,
+      "wallS": 6.586,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 21.28,
+        "sysS": 2.68,
+        "cpuS": 23.96,
+        "cpuPercent": "364%",
+        "maxRssKiB": 604440,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 5111,
+        "passed": 5010,
+        "failed": 0,
+        "files": 1427
+      }
+    },
+    {
+      "name": "stryker-cold",
+      "command": "node_modules/.bin/stryker run stryker.stryker-cold.json",
+      "startOffsetS": 10.46,
+      "wallS": 258.52,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2680.29,
+        "sysS": 102.42,
+        "cpuS": 2782.71,
+        "cpuPercent": "1076%",
+        "maxRssKiB": 1509696,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/*.ts",
+          "src/router/**/*.ts",
+          "src/utils/**/*.ts",
+          "!src/**/*.test.ts",
+          "!src/**/types.ts",
+          "!src/utils/http-status.ts",
+          "!src/**/*.d.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-cold.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-cold.json"
+    }
+  ],
+  "totalS": 268.99
+}

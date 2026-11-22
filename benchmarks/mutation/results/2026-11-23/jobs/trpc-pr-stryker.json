@@ -1,0 +1,260 @@
+{
+  "project": "trpc",
+  "scenario": "pr-stryker",
+  "shard": null,
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-20T00:17:11.796Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "PR scenario base runs mutate [\"packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts\",\"packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts\",\"packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts\",\"packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts\",\"packages/server/src/unstable-core-do-not-import/http/abortError.ts\",\"packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts\"]: the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
+    "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.685,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.09,
+        "sysS": 0.02,
+        "cpuS": 0.11,
+        "cpuPercent": "18%",
+        "maxRssKiB": 19072,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.7,
+      "wallS": 1.813,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.68,
+        "sysS": 0.17,
+        "cpuS": 0.85,
+        "cpuPercent": "47%",
+        "maxRssKiB": 176268,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.51,
+      "wallS": 4.076,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 13.54,
+        "sysS": 4.72,
+        "cpuS": 18.26,
+        "cpuPercent": "448%",
+        "maxRssKiB": 708428,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 6.59,
+      "wallS": 8.673,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 5.85,
+        "sysS": 2.53,
+        "cpuS": 8.38,
+        "cpuPercent": "96%",
+        "maxRssKiB": 1225760,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "stryker-incremental-base",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental-base.json",
+      "startOffsetS": 15.31,
+      "wallS": 207.253,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 469.36,
+        "sysS": 58.83,
+        "cpuS": 528.19,
+        "cpuPercent": "254%",
+        "maxRssKiB": 504488,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts",
+          "packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts",
+          "packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts",
+          "packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts",
+          "packages/server/src/unstable-core-do-not-import/http/abortError.ts",
+          "packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts",
+          "!packages/server/src/**/*.test.ts",
+          "!packages/server/src/**/*.d.ts"
+        ],
+        "ignorePatterns": [
+          ".claude",
+          ".agents",
+          "www",
+          "examples"
+        ],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental-base.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true,
+        "tsconfigFile": "tsconfig.stryker-none.json"
+      },
+      "report": "stryker-incremental-base.json"
+    },
+    {
+      "name": "stryker-lines",
+      "command": "node_modules/.bin/stryker run stryker.stryker-lines.json",
+      "startOffsetS": 222.57,
+      "wallS": 92.988,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 63.77,
+        "sysS": 8.19,
+        "cpuS": 71.96,
+        "cpuPercent": "77%",
+        "maxRssKiB": 504004,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts:80-80"
+        ],
+        "ignorePatterns": [
+          ".claude",
+          ".agents",
+          "www",
+          "examples"
+        ],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-lines.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true,
+        "tsconfigFile": "tsconfig.stryker-none.json"
+      },
+      "report": "stryker-lines.json"
+    },
+    {
+      "name": "stryker-incremental",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental.json",
+      "startOffsetS": 315.56,
+      "wallS": 94.495,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 65.45,
+        "sysS": 8.4,
+        "cpuS": 73.85,
+        "cpuPercent": "78%",
+        "maxRssKiB": 491708,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts",
+          "packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts",
+          "packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts",
+          "packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts",
+          "packages/server/src/unstable-core-do-not-import/http/abortError.ts",
+          "packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts",
+          "!packages/server/src/**/*.test.ts",
+          "!packages/server/src/**/*.d.ts"
+        ],
+        "ignorePatterns": [
+          ".claude",
+          ".agents",
+          "www",
+          "examples"
+        ],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true,
+        "tsconfigFile": "tsconfig.stryker-none.json"
+      },
+      "report": "stryker-incremental.json"
+    }
+  ],
+  "changedLines": [
+    "packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts:80-80"
+  ],
+  "totalS": 410.06
+}

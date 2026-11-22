@@ -186,6 +186,15 @@ try {
     // A strong pass runs the crate's mutants under the JavaScript tests
     // that load its wasm: the wasm is built from the switched crate, and
     // each instance is handed the active mutant through its exports.
+    // A switch that cannot read the pass's plan ends the pass, saying where.
+    if (entry.suite === 'node:test') {
+      const strong = readFileSync(resolve(repository, 'crates/supercov-engine/src/rust_strong.rs'), 'utf8');
+      const line = strong.slice(0, strong.indexOf('crate::fault_fs::read(plan_path)')).split('\n').length;
+      const unread = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json'], { SUPERCOV_TEST_FAULT: `fs.read#rust_strong.rs:${line}` });
+      assert.notEqual(unread.status, 0, `${unread.stdout}${unread.stderr}`);
+      assert.ok(unread.stderr.includes(`test fault at fs (rust_strong.rs:${line}`), unread.stderr);
+      assert.doesNotMatch(unread.stderr, /panicked/u, unread.stderr);
+    }
     {
       const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
       assert.equal(tested.status, 0, `${entry.suite}\n${tested.stdout}${tested.stderr}`);

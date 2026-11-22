@@ -520,32 +520,21 @@ fn push_wrapper(
 
 /// Spaces in place of `bytes`, their line breaks kept so every line stays
 /// where it was.
-/// The scope a wrapper of `range` needs to go around every wrapper inside
-/// it that starts or ends where it does, and inside every wrapper around it
-/// that does: `None` where no scope can (a wrapper's pair of insertions is
-/// pushed together, its start then its end).
-fn outer_scope(insertions: &[Insertion], range: TextRange) -> Option<usize> {
+/// The scope a returned value's wrapper of `range` needs to go around every
+/// wrapper inside it that starts or ends where it does. A wrapper's pair of
+/// insertions is pushed together, its start then its end; and the returned
+/// value is placed last, so no wrapper placed before it goes around it.
+fn outer_scope(insertions: &[Insertion], range: TextRange) -> usize {
     let (start, end) = range_offsets(range);
-    let mut lowest = 1usize;
-    let mut highest = usize::MAX;
-    for pair in insertions.windows(2) {
-        let [opening, closing] = pair else { continue };
-        if opening.kind != InsertionKind::Start || closing.kind != InsertionKind::End {
-            continue;
-        }
-        let (from, to) = (opening.offset, closing.offset);
-        let inside = from >= start && to <= end && (from == start || to == end);
-        let around = from <= start
-            && to >= end
-            && (from == start || to == end)
-            && (from, to) != (start, end);
-        if inside {
-            lowest = lowest.max(opening.scope_len.saturating_add(1));
-        } else if around {
-            highest = highest.min(opening.scope_len.saturating_sub(1));
-        }
-    }
-    (lowest <= highest).then_some(lowest)
+    insertions
+        .windows(2)
+        .filter(|pair| pair[0].kind == InsertionKind::Start)
+        .filter(|pair| {
+            let (from, to) = (pair[0].offset, pair[1].offset);
+            from >= start && to <= end && (from == start || to == end)
+        })
+        .map(|pair| pair[0].scope_len.saturating_add(1))
+        .fold(1, usize::max)
 }
 
 fn blank(bytes: &mut [u8]) {
@@ -3278,45 +3267,42 @@ fn numbered_file(
                 crate::rust_value_probes::ValueEdit::Wrap { outer: true, .. }
             )
         });
-        for edit in edits {
-            match edit {
-                // An operator's probe goes inside every wrapper of its
-                // range, a returned value's around all of them.
-                crate::rust_value_probes::ValueEdit::Wrap {
-                    range,
-                    prefix,
-                    suffix,
-                    outer: false,
-                } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
-                crate::rust_value_probes::ValueEdit::Wrap {
-                    range,
-                    prefix,
-                    suffix,
-                    outer: true,
-                } => {
-                    if let Some(scope_len) = outer_scope(&insertions, range) {
-                        let (start, end) = range_offsets(range);
-                        insertions.push(Insertion {
-                            offset: start,
-                            kind: InsertionKind::Start,
-                            scope_len,
-                            rank: 0,
-                            text: prefix,
-                        });
-                        insertions.push(Insertion {
-                            offset: end,
-                            kind: InsertionKind::End,
-                            scope_len,
-                            rank: 0,
-                            text: suffix,
-                        });
-                    }
-                }
-                crate::rust_value_probes::ValueEdit::At { offset, text } => {
-                    push_direct(&mut insertions, offset, text);
-                }
+        edits.into_iter().for_each(|edit| match edit {
+            // An operator's probe goes inside every wrapper of its
+            // range, a returned value's around all of them.
+            crate::rust_value_probes::ValueEdit::Wrap {
+                range,
+                prefix,
+                suffix,
+                outer: false,
+            } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
+            crate::rust_value_probes::ValueEdit::Wrap {
+                range,
+                prefix,
+                suffix,
+                outer: true,
+            } => {
+                let scope_len = outer_scope(&insertions, range);
+                let (start, end) = range_offsets(range);
+                insertions.push(Insertion {
+                    offset: start,
+                    kind: InsertionKind::Start,
+                    scope_len,
+                    rank: 0,
+                    text: prefix,
+                });
+                insertions.push(Insertion {
+                    offset: end,
+                    kind: InsertionKind::End,
+                    scope_len,
+                    rank: 0,
+                    text: suffix,
+                });
             }
-        }
+            crate::rust_value_probes::ValueEdit::At { offset, text } => {
+                push_direct(&mut insertions, offset, text);
+            }
+        });
     }
 
     // Test faults stand in for insertions that overlap and for a transform
