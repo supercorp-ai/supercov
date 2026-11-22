@@ -18,7 +18,6 @@ use crate::{
     integrity::ExplicitIntegrityInputs,
     ruby_instrumenter::{
         RUBY_PROBE_PLAN_VERSION, RUBY_PROBE_RECEIVER, RubyFilePlan, RubyProbePlan,
-        build_ruby_obligations,
     },
     source_discovery::{SourceScope, SourceScopeEntry, SourceScopeMode, SourceScopeStatus},
 };
@@ -70,6 +69,9 @@ pub struct PreparedRubyProject {
     pub manifest: CoverageManifest,
     pub plan: RubyProbePlan,
     pub unparseable: Vec<(String, String)>,
+    /// The measured files' mutants, where the run lists them as it measures
+    /// (`SUPERCOV_MUTANTS=1`), with infection probes placed.
+    pub mutants: Option<crate::mutant_list::MutantsFile>,
 }
 
 /// Asked only of a `.rb` file.
@@ -220,11 +222,24 @@ fn prepare(
     let mut next_probe = 0u64;
     let mut limitation_ids = BTreeSet::new();
     let mut unparseable = Vec::new();
+    let listing = std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| value == "1");
+    let mut mutants = BTreeMap::new();
     for relative in &files.sources {
         let path = root.join(relative);
         let source = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        match build_ruby_obligations(relative, &source, &mut next_probe) {
+        match crate::ruby_instrumenter::build_ruby_obligations_with(
+            relative,
+            &source,
+            &mut next_probe,
+            listing,
+        ) {
             Ok(obligations) => {
+                if listing {
+                    let listed = crate::ruby_mutants::candidates(relative, &source, &obligations);
+                    if !listed.is_empty() {
+                        mutants.insert(relative.clone(), listed);
+                    }
+                }
                 manifest.points.extend(obligations.manifest.points);
                 manifest.decisions.extend(obligations.manifest.decisions);
                 manifest.branches.extend(obligations.manifest.branches);
@@ -326,6 +341,13 @@ fn prepare(
         manifest,
         files,
         unparseable,
+        mutants: listing.then(|| {
+            crate::mutant_list::MutantsFile::listed(
+                crate::ruby_mutants::RUBY,
+                crate::ruby_mutants::MUTANT_SET,
+                mutants,
+            )
+        }),
     }))
 }
 

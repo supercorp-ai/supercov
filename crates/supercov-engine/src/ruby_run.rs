@@ -375,7 +375,13 @@ fn run_direct_ruby_in(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
-        let entries = run.archive_entries();
+        let mut entries = run.archive_entries();
+        if let Some(mutants) = &project.mutants {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(mutants).expect("plain data serializes"),
+            });
+        }
         let entries = crate::source_capture::append(entries, &source_inputs);
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;

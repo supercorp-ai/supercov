@@ -138,6 +138,13 @@ enum Record {
         v: String,
         o: u8,
     },
+    /// An infection probe's outcome at a mutant's site (`file:L:C-EL:EC#kind`):
+    /// `same`, `differs` or `unknown`, once per context and outcome.
+    Cmp {
+        ctx: u64,
+        id: String,
+        o: String,
+    },
     /// The first assertion of a call phase: what the context recorded before
     /// this record is the assertion's evidence too.
     Assert {
@@ -288,6 +295,8 @@ fn relative(root: &Path, path: &str) -> Option<String> {
 struct Observations {
     hits: BTreeSet<String>,
     vectors: BTreeMap<String, ObservedVectors>,
+    /// Infection probe outcomes, by site.
+    values: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -712,6 +721,27 @@ fn read_evidence_file(
                 .or_default()
                 .insert((values, outcome));
             }
+            Record::Cmp { ctx, id, o } => {
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before
+                        .values
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(o.clone());
+                }
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .values
+                .entry(id)
+                .or_default()
+                .insert(o);
+            }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
@@ -728,6 +758,9 @@ fn read_evidence_file(
                     asserted.hits.extend(before.hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
+                    }
+                    for (id, outcomes) in before.values {
+                        asserted.values.entry(id).or_default().extend(outcomes);
                     }
                 }
             }
@@ -953,11 +986,22 @@ fn snapshot(
             vectors: observed,
         });
     }
+    let comparisons = observations
+        .values
+        .iter()
+        .map(
+            |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                id: id.clone(),
+                outcomes: outcomes.iter().cloned().collect(),
+            },
+        )
+        .collect();
     Ok(RuntimeSnapshot {
         decisions,
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
+        comparisons,
         ..Default::default()
     })
 }
@@ -1211,6 +1255,9 @@ fn credit_requests_by_time(
         into.hits.extend(observations.hits);
         for (id, vectors) in observations.vectors {
             into.vectors.entry(id).or_default().extend(vectors);
+        }
+        for (id, outcomes) in observations.values {
+            into.values.entry(id).or_default().extend(outcomes);
         }
     }
     credited
@@ -1522,7 +1569,10 @@ fn build_from_evidence(
         });
     }
     for (worker, observations) in &background {
-        if observations.hits.is_empty() && observations.vectors.is_empty() {
+        if observations.hits.is_empty()
+            && observations.vectors.is_empty()
+            && observations.values.is_empty()
+        {
             continue;
         }
         let test = format!("__supercov_background__:{worker}");

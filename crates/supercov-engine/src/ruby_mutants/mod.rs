@@ -619,6 +619,7 @@ pub const RUBY: &str = "ruby";
 /// A Ruby file's mutants as `mutants.json` lists them, each linked to the
 /// innermost statement and method points of `obligations` around it.
 pub(crate) fn candidates(
+    file: &str,
     source: &[u8],
     obligations: &crate::ruby_instrumenter::RubyFileObligations,
 ) -> Vec<crate::mutant_list::CandidateMutant> {
@@ -641,6 +642,13 @@ pub(crate) fn candidates(
             start,
             end,
             original: String::from_utf8_lossy(&source[mutant.start..mutant.end]).into_owned(),
+            probe: probe_kind(&mutant).and_then(|kind| {
+                let site = format!("{}:{}:{}-{}:{}", file, start.0, start.1, end.0, end.1);
+                obligations
+                    .value_sites
+                    .contains(&site)
+                    .then(|| format!("{site}#{kind}"))
+            }),
             operator: None,
             value_used: false,
             statement: innermost(PointKind::Statement, mutant.start, mutant.end),
@@ -649,7 +657,6 @@ pub(crate) fn candidates(
             branch: None,
             chain: None,
             compare: None,
-            probe: None,
             arrow: None,
             equivalent: None,
             untestable: None,
@@ -715,7 +722,7 @@ pub(crate) fn list_mutants(
             .iter()
             .map(|point| point.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        (Some(&points) == recorded.get(file)).then(|| candidates(&source, &obligations))
+        (Some(&points) == recorded.get(file)).then(|| candidates(file, &source, &obligations))
     });
     let mut mutants = std::collections::BTreeMap::new();
     let mut changed = Vec::new();
@@ -768,8 +775,9 @@ pub fn parse_mutant_session(
     let subjects = session["subject_results"]
         .as_array()
         .ok_or("it has no `subject_results`; is it mutant's session results?")?;
-    let mut cache: std::collections::HashMap<String, Option<(Vec<u8>, Vec<Described>)>> =
-        Default::default();
+    // Each file read once: its source and its mutants.
+    type Listed = Option<(Vec<u8>, Vec<Described>)>;
+    let mut cache: std::collections::HashMap<String, Listed> = Default::default();
     let mut out = Vec::new();
     for subject in subjects {
         let Some(source_path) = subject["source_path"].as_str() else {
@@ -861,4 +869,56 @@ fn method_of(code: &[u8]) -> Option<Rc<N>> {
 /// Whether two methods are the same tree, whatever the spans.
 fn same_method(left: &N, right: &N) -> bool {
     left == right
+}
+
+/// The kinds an operator's infection probe records, besides `left` and
+/// `right`: each operator the light set replaces it with, and for `!=`,
+/// `not:eql?` and `not:equal?`.
+pub(crate) fn operator_kinds(operator: &str) -> Vec<String> {
+    let mut kinds: Vec<String> = mutators::selector_replacements(operator)
+        .iter()
+        .map(|each| (*each).to_owned())
+        .collect();
+    if operator == "!=" {
+        kinds.extend(["not:eql?".to_owned(), "not:equal?".to_owned()]);
+    }
+    kinds
+}
+
+/// The infection probe kind that records `mutant`'s value, where its
+/// located node is a binary operator and its replacement one the probe
+/// computes: another operator, an operand alone, or `!=`'s negations.
+fn probe_kind(mutant: &RubyMutant) -> Option<String> {
+    let replacement = mutant.replacement.as_ref()?;
+    let located = path(&mutant.method, &mutant.mutated)
+        .last()
+        .map(|(original, _)| original.clone())?;
+    if located.ty != "send" || located.children.len() != 3 || located.child(0).is_nil() {
+        return None;
+    }
+    let operator = located.child(1).sym()?;
+    if replacement.ty == "send"
+        && replacement.children.len() == 3
+        && replacement.child(0) == located.child(0)
+        && replacement.child(2) == located.child(2)
+    {
+        let other = replacement.child(1).sym()?;
+        return operator_kinds(operator)
+            .into_iter()
+            .find(|kind| kind == other);
+    }
+    if Some(replacement) == located.node(0) {
+        return Some("left".into());
+    }
+    if Some(replacement) == located.node(2) {
+        return Some("right".into());
+    }
+    if operator == "!=" && replacement.ty == "send" && replacement.child(1).sym() == Some("!") {
+        let inner = replacement.node(0)?;
+        let name = inner.child(1).sym()?;
+        if inner.child(0) == located.child(0) && inner.child(2) == located.child(2) {
+            return Some(format!("not:{name}"));
+        }
+    }
+    None
 }

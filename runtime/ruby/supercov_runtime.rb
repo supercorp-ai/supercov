@@ -412,6 +412,7 @@ module Supercov
       @id_numbers = {}
       @line_ids = {}
       @seen_vectors = {}
+      @seen_values = {}
       @vector_counts = {}
       @open = {}
       @loop_state = {}
@@ -1304,6 +1305,77 @@ module Supercov
       tree["negate"] ? !result : result
     end
 
+    # -- infection probes ---------------------------------------------------
+    #
+    # A binary operator's receiver is wrapped in an Operand, whose operator
+    # method computes the original value and, for each of the mutant gem's
+    # mutants of that operator, whether the mutant's value would differ:
+    # another operator over the same operands, the left or right operand
+    # alone, `!l.eql?(r)` for `!=`. Another operator is computed only over
+    # plain values, where it cannot run code with effects; anything else is
+    # `unknown`.
+
+    PLAIN = [NilClass, TrueClass, FalseClass, Integer, Symbol, String, Rational].freeze
+
+    def plain_value?(value)
+      return true if PLAIN.include?(value.class)
+
+      value.instance_of?(Float) && value.finite? && !value.zero?
+    end
+
+    def same_value(left, right)
+      return "unknown" unless plain_value?(left) && plain_value?(right)
+      return "differs" unless left.class == right.class
+      return "differs" if left.is_a?(String) && left.encoding != right.encoding
+
+      left == right ? "same" : "differs"
+    end
+
+    def probe_operand(key, left)
+      Operand.new(self, key, left)
+    end
+
+    def probe_binary(key, left, operator, right)
+      result = left.public_send(operator, right)
+      target = @probes[key]
+      plain = plain_value?(left) && plain_value?(right)
+      context = current_context
+      target["kinds"].each do |kind|
+        outcome =
+          case kind
+          when "left" then same_value(result, left)
+          when "right" then same_value(result, right)
+          else
+            if plain
+              negate = kind.start_with?("not:")
+              name = negate ? kind.delete_prefix("not:") : kind
+              begin
+                other = left.public_send(name, right)
+                same_value(result, negate ? !other : other)
+              rescue StandardError
+                "differs"
+              end
+            else
+              "unknown"
+            end
+          end
+        note_value(context, "#{target['site']}##{kind}", outcome)
+      end
+      result
+    end
+
+    def note_value(context, id, outcome)
+      key = [context, id, outcome]
+      return if @seen_values[key]
+
+      @seen_lock.synchronize do
+        return if @seen_values[key]
+
+        @seen_values[key] = true
+      end
+      record("t" => "cmp", "ctx" => context, "id" => id, "o" => outcome)
+    end
+
     # while/until predicate: a decision plus the loop's zero/entered outcomes.
     def probe_while(key, value)
       target = @probes[key]
@@ -1552,6 +1624,7 @@ module Supercov
     def p(key) = @runtime.probe_propagated(key)
     def ok(key, value) = @runtime.probe_ok(key, value)
     def ok0(key) = @runtime.probe_ok0(key)
+    def bo(key, left) = @runtime.probe_operand(key, left)
   end
 
   # The receiver of a project that uses Ractors. A non-main Ractor cannot
@@ -1559,6 +1632,20 @@ module Supercov
   # the main Ractor; elsewhere each probe gives back what it was given, as
   # the probe would, and records nothing. A Ractor is shareable, so MAIN can
   # be read from any of them.
+  # A binary operator's receiver, standing in for it until the operator is
+  # called (`Runtime#probe_operand`).
+  class Operand < BasicObject
+    def initialize(runtime, key, left)
+      @runtime = runtime
+      @key = key
+      @left = left
+    end
+
+    %i[!= !~ % & * ** + - / < << <= <=> == === =~ > >= >> ^ |].each do |operator|
+      define_method(operator) { |right| @runtime.probe_binary(@key, @left, operator, right) }
+    end
+  end
+
   module RactorSafe
     MAIN = Ractor.current
 
@@ -1579,6 +1666,7 @@ module Supercov
     def self.p(key) = MAIN.equal?(Ractor.current) ? $__supercov.p(key) : nil
     def self.ok(key, value) = MAIN.equal?(Ractor.current) ? $__supercov.ok(key, value) : value
     def self.ok0(key) = MAIN.equal?(Ractor.current) ? $__supercov.ok0(key) : nil
+    def self.bo(key, left) = MAIN.equal?(Ractor.current) ? $__supercov.bo(key, left) : left
 
     # What a Ractor runs is not recorded, and the first one each file starts
     # says so: against that file when it is measured source, for the run when

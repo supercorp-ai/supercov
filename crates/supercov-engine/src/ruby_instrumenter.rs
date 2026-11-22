@@ -370,6 +370,12 @@ pub enum ProbeTarget {
         raised: String,
         handlers: Vec<HandlerTarget>,
     },
+    /// `bo(k, left)` around a binary operator's receiver, measuring the
+    /// mutant gem's mutants of that operator: each `kind` (another operator,
+    /// `left`, `right`, `not:eql?`) is recorded at `<site>#<kind>` as the
+    /// mutant's value `same` as the original's, `differs`, or `unknown`.
+    #[serde(rename_all = "camelCase")]
+    Operand { site: String, kinds: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -501,6 +507,8 @@ fn probe_obligations_of(probes: &BTreeMap<u64, ProbeTarget>) -> Vec<String> {
                         ids.insert(handler.id.clone());
                     }
                 }
+                // Values, not obligations.
+                ProbeTarget::Operand { .. } => {}
             }
         }
         ids.into_iter().collect()
@@ -583,6 +591,7 @@ fn target_ids(target: &ProbeTarget) -> Vec<String> {
         }
         ProbeTarget::SafeNavigation { nil, called } => vec![nil.clone(), called.clone()],
         ProbeTarget::Hits { ids } => ids.clone(),
+        ProbeTarget::Operand { .. } => Vec::new(),
     }
 }
 
@@ -646,6 +655,9 @@ fn stdlib_provable(
 #[derive(Debug, Clone, PartialEq)]
 pub struct RubyFileObligations {
     pub manifest: CoverageManifest,
+    /// The infection probe sites placed (`file:L:C-EL:EC`), where values
+    /// were asked for: each records its mutants' values.
+    pub value_sites: BTreeSet<String>,
     /// Each statement and function point's byte span, by id: where a
     /// mutant's reach is read from.
     pub point_spans: BTreeMap<String, (PointKind, usize, usize)>,
@@ -740,6 +752,9 @@ struct Collector<'a> {
     /// `elsif` nodes already handled through their parent's chain walk.
     elsif_nodes: BTreeSet<usize>,
     depth: i64,
+    /// Whether to place infection probes (`SUPERCOV_MUTANTS=1`).
+    values: bool,
+    value_sites: BTreeSet<String>,
     point_spans: BTreeMap<String, (PointKind, usize, usize)>,
     begin_unmeasured: Vec<(String, usize)>,
     /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
@@ -782,6 +797,8 @@ impl<'a> Collector<'a> {
             next_probe,
             point_ids: BTreeSet::new(),
             point_spans: BTreeMap::new(),
+            values: false,
+            value_sites: BTreeSet::new(),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             claimed_lines: BTreeSet::new(),
@@ -868,6 +885,75 @@ impl<'a> Collector<'a> {
         *self.next_probe += 1;
         self.probes.insert(key, target);
         key
+    }
+
+    /// An infection probe on a binary operator's receiver: the operator is
+    /// then called on the probe's stand-in, which computes the original and
+    /// each mutant's value from the same operands.
+    fn operand_probe(&mut self, node: &CallNode<'_>) {
+        let operator = String::from_utf8_lossy(node.name().as_slice()).into_owned();
+        let binary = matches!(
+            operator.as_str(),
+            "!=" | "!~"
+                | "%"
+                | "&"
+                | "*"
+                | "**"
+                | "+"
+                | "-"
+                | "/"
+                | "<"
+                | "<<"
+                | "<="
+                | "<=>"
+                | "=="
+                | "==="
+                | "=~"
+                | ">"
+                | ">="
+                | ">>"
+                | "^"
+                | "|"
+        );
+        let (Some(receiver), Some(arguments)) = (node.receiver(), node.arguments()) else {
+            return;
+        };
+        if !binary
+            || node.call_operator_loc().is_some()
+            || node.block().is_some()
+            || arguments.arguments().iter().count() != 1
+            || receiver.as_regular_expression_node().is_some()
+        {
+            return;
+        }
+        let location = node.location();
+        let (start, end) = (location.start_offset(), location.end_offset());
+        if self
+            .ractor_blocks
+            .iter()
+            .any(|(from, to)| *from <= start && end <= *to)
+        {
+            return;
+        }
+        let (start_line, start_column) = crate::ruby_mutants::position(self.source, start);
+        let (end_line, end_column) = crate::ruby_mutants::position(self.source, end);
+        let site = format!(
+            "{}:{start_line}:{start_column}-{end_line}:{end_column}",
+            self.file
+        );
+        let mut kinds = crate::ruby_mutants::operator_kinds(&operator);
+        kinds.extend(["left".to_owned(), "right".to_owned()]);
+        let key = self.probe_key(ProbeTarget::Operand {
+            site: site.clone(),
+            kinds,
+        });
+        let receiver_location = receiver.location();
+        self.wrap(
+            receiver_location.start_offset(),
+            receiver_location.end_offset(),
+            format!("{RUBY_PROBE_RECEIVER}.bo({key}, ("),
+        );
+        self.value_sites.insert(site);
     }
 
     fn wrap(&mut self, start: usize, end: usize, opener: String) {
@@ -3003,6 +3089,7 @@ impl<'a> Collector<'a> {
         self.manifest.unmeasured.dedup();
         RubyFileObligations {
             point_spans: std::mem::take(&mut self.point_spans),
+            value_sites: std::mem::take(&mut self.value_sites),
             manifest: self.manifest,
             plan: RubyFilePlan {
                 refine_blocks: std::mem::take(&mut self.refine_blocks),
@@ -3331,6 +3418,9 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         {
             self.iterator_loop(node, &receiver, &block);
         }
+        if self.values {
+            self.operand_probe(node);
+        }
         self.depth += 1;
         ruby_prism::visit_call_node(self, node);
         self.depth -= 1;
@@ -3585,6 +3675,17 @@ pub fn build_ruby_obligations(
     source: &[u8],
     next_probe: &mut u64,
 ) -> Result<RubyFileObligations, RubyInstrumenterError> {
+    build_ruby_obligations_with(file, source, next_probe, false)
+}
+
+/// [`build_ruby_obligations`], with infection probes on binary operators
+/// where `values` asks for them (`docs/design/ruby-mutation.md`).
+pub fn build_ruby_obligations_with(
+    file: &str,
+    source: &[u8],
+    next_probe: &mut u64,
+    values: bool,
+) -> Result<RubyFileObligations, RubyInstrumenterError> {
     let result = ruby_prism::parse(source);
     let errors = result
         .errors()
@@ -3594,6 +3695,7 @@ pub fn build_ruby_obligations(
         return Err(RubyInstrumenterError::Parse(errors.join("; ")));
     }
     let mut collector = Collector::new(file, source, next_probe);
+    collector.values = values;
     collector.visit(&result.node());
     Ok(collector.finish())
 }
