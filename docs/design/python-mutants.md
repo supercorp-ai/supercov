@@ -256,12 +256,23 @@ by hand and the suite run as written; each fails it:
   mutant in a fresh interpreter with the mutant on from its start, and
   `test_decorator_attributes` and `test_class_access_pickle` fail.
 
+Measured with the mutants' values (`SUPERCOV_MUTANTS=1`) the verdicts are the
+same, mutant for mutant. The probes decided 19 survivors without running
+them (a boundary whose operands were never equal, a value that was already
+the mutant's: 4 on python-slugify, 5 on parse, 10 on humanize), and the kill
+matrix detects none of them; they also take from each mutant the tests that
+reached it without infecting it. `scripts/python-probe-spans.py` checks that
+every probe the engine plans names an expression CPython parses at that span:
+all 2,535 of the corpus's do.
+
 Earlier passes disagreed in more places, each fixed: a test the measured run
 skipped (a subtest skipped before the assertion that would fail) was no
 candidate (python-slugify, 2); a mutant whose module a test module imports
 lost its kill when the fresh interpreter could not collect the test (6 on
 python-slugify, 24 on cachetools); and a count of evaluations per process made
-humanize's benchmark tests read as timeouts (3). The first matrix was also
+humanize's benchmark tests read as timeouts (3); and with values, a value
+made `None` whose evaluation raised read as never evaluated, and a generator
+that is a call's only argument was probed at the wrong span (12). The first matrix was also
 made on another machine, where a locale and gettext's tools changed what
 humanize's tests do (4), and without parse's README in mutmut's tree, whose
 doctests the suite runs (8): the matrix above was made again on SoroCI, with

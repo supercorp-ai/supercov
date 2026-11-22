@@ -1,14 +1,14 @@
 """Joins Supercov's strong verdicts to mutmut's full kill matrix.
 
-    python compare.py <ids.jsonl> <kill-matrix.jsonl> <strong-mutation.json> [mutmut-results.json] [weak.json]
+    python compare.py <ids.jsonl> <kill-matrix.jsonl> <strong-mutation.json> [mutmut-results.json] [weak.jsonl]
 
 `ids.jsonl` is `scripts/mutmut-parity.py --root <project> --module-root
 <where packages start> <its sources>`: each mutmut mutant's name and
 Supercov's id for it. The kill matrix runs every test against every mutant
 (`kill_matrix.py`). A soundness violation is a mutant the matrix detects
 (killed, timeout) that Supercov calls undetected (survived, no-coverage,
-equivalent), or the reverse. With `weak.json` (`supercov runs latest
-mutants --json --limit 0`), a mutant the weak report calls not reached or
+equivalent), or the reverse. With `weak.jsonl` (`supercov runs latest
+mutants --format jsonl`), a mutant the weak report calls not reached or
 not infected that the matrix detects is counted too. Prints one JSON
 summary.
 """
@@ -25,7 +25,8 @@ mutmut_path = sys.argv[4] if len(sys.argv) > 4 else None
 weak_path = sys.argv[5] if len(sys.argv) > 5 else None
 weak = {}
 if weak_path:
-    for mutant in json.load(open(weak_path, encoding="utf-8"))["data"]["mutants"]:
+    for line in open(weak_path, encoding="utf-8"):
+        mutant = json.loads(line)
         # The weak verdict, whatever a strong pass then said.
         facts = mutant.get("weak") or {}
         if facts.get("rule"):

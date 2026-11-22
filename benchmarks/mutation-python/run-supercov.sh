@@ -38,7 +38,7 @@ strong_exit=$?
 ended=$(now)
 run=$(ls -d .supercov/runs/run_* | head -1)
 cp "$run"/strong-mutation.json "$run"/mutants-listed.json "$out"/ 2>/dev/null
-"$supercov" runs latest mutants --json --limit 0 > "$out/weak.json" 2>/dev/null
+"$supercov" runs latest mutants --format jsonl --output "$out/weak.jsonl" > /dev/null 2>&1
 for results in .supercov/strong/*/results.jsonl; do
   cat "$results" >> "$out/results.jsonl"
 done
