@@ -245,6 +245,11 @@ was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
 the measured run the same everywhere. What warm workers saved is starting a
 process and Vitest for each copy, not compiling.
 
+The last version with warm workers (`SUPERCOV_STRONG_WARM=1`) is kept on the
+branch `archive/strong-warm-workers`, for a later attempt to make them exact:
+resetting what a test file leaves behind in its process, or proving per file
+that it leaves nothing.
+
 The pass summary's `profile` records its copies (of mutants, confirmations,
 and those that skipped), the copies stopped and hung, and for each stage its
 copies, its wall time, the copies' own time (claim to end), when its last
