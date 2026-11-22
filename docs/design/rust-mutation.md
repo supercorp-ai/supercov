@@ -232,7 +232,7 @@ v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
 
 ## Measured
 
-On SoroCI (16-CPU machines, one per job), 2026-11-22, run 8665618628123379:
+On 16-CPU Linux machines, one per job, 2026-11-22:
 cargo-mutants 27.1.0 with `-j 8`, in shards of a crate's mutants; Supercov
 built from this tree, one job per crate, the strong pass with its default 8
 workers, from a run measured with `SUPERCOV_MUTANTS=1`. Every mutant of the
