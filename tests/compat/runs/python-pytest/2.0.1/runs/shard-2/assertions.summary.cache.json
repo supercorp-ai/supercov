@@ -1,0 +1,118 @@
+{
+  "key": "79bf0f23ca9bdb4b853650ed8cea98211456d339a0c3d4e0cc589e503137bb1c",
+  "digest": "367fb41a3c1c484225fffd43d31d2db8264f8854bf3dce877766b984ca5e3806",
+  "report": {
+    "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
+    "summary": {
+      "status": "notAssessed",
+      "reason": "No recorded flow explanations",
+      "pendingChanges": 0,
+      "metric": "measured statements",
+      "statements": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 14,
+        "percentage": null
+      },
+      "assertions": 2,
+      "inventoryAssertions": 2,
+      "missingInventoryAssertions": 0,
+      "assertionsWithFlows": 0,
+      "assertionsWithoutFlows": 2,
+      "observedAssertionsWithoutCurrentExplanation": 0,
+      "questions": 0,
+      "currentFlows": 0,
+      "draftFlows": 0,
+      "staleFlows": 0,
+      "invalidFlows": 0,
+      "eligibleFlows": 0,
+      "retiredAssertions": 0,
+      "unobservedAssertions": 2,
+      "inventoryFailures": 0,
+      "unanchoredStatements": 0,
+      "runPassed": true,
+      "lines": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 14,
+        "percentage": null
+      },
+      "excludedStatements": 0
+    },
+    "assertions": [
+      {
+        "observation": "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests.",
+        "id": "a_2cb7ebad7d3484b7bc3f",
+        "at": {
+          "file": "tests/test_price.py",
+          "line": 5,
+          "column": 5,
+          "text": "assert price(200, True, False) == 180"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "assert"
+        ],
+        "observedPassingTests": [],
+        "flows": []
+      },
+      {
+        "observation": "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests.",
+        "id": "a_90886cd277eddb0d4d89",
+        "at": {
+          "file": "tests/test_price.py",
+          "line": 9,
+          "column": 5,
+          "text": "assert price(20, False, True) == 15"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "assert"
+        ],
+        "observedPassingTests": [],
+        "flows": []
+      }
+    ],
+    "statements": [],
+    "tests": [
+      {
+        "id": "__supercov_background__:main",
+        "file": null,
+        "name": "Python import, collection and background execution",
+        "role": "background",
+        "outcome": "unknown",
+        "provenance": {
+          "runner": "pytest",
+          "kind": "unit",
+          "source": "python-probes-v1"
+        },
+        "hasExecutionEvidence": true
+      },
+      {
+        "id": "tests/test_label.py::test_large_totals",
+        "file": "tests/test_label.py",
+        "name": "tests/test_label.py::test_large_totals",
+        "role": "test",
+        "outcome": "passed",
+        "provenance": {
+          "runner": "pytest",
+          "kind": "unit",
+          "source": "python-probes-v1"
+        },
+        "hasExecutionEvidence": true
+      }
+    ],
+    "creditedLines": [],
+    "unassertedLines": [],
+    "changes": [],
+    "validationErrors": [],
+    "advisories": [],
+    "limitations": [
+      "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit."
+    ]
+  }
+}

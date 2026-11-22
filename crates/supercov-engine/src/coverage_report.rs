@@ -104,13 +104,53 @@ pub struct ProbeTableIds {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "DecisionSnapshotRecord"
+)]
 pub struct DecisionSnapshot {
     /// The decision as the manifest has it. Evidence names a decision by id
     /// alone: its text came from the instrumented module, and in a browser
     /// chunk that was server code the bundler had otherwise removed.
     pub id: String,
     pub vectors: Vec<McdcVector>,
+}
+
+/// A decision as releases before 4.24.0 wrote it in evidence: with the
+/// decision's text beside its id. Their runs are still read; the manifest has
+/// the text, so the id is all that is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub struct RecordedDecision {
+    pub id: String,
+}
+
+/// [`DecisionSnapshot`] as evidence holds it, in either release's shape.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecisionSnapshotRecord {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    meta: Option<RecordedDecision>,
+    vectors: Vec<McdcVector>,
+}
+
+impl TryFrom<DecisionSnapshotRecord> for DecisionSnapshot {
+    type Error = &'static str;
+
+    fn try_from(record: DecisionSnapshotRecord) -> Result<Self, Self::Error> {
+        let id = match (record.id, record.meta) {
+            (Some(id), None) => id,
+            (None, Some(meta)) => meta.id,
+            (Some(_), Some(_)) => return Err("a decision with both `id` and `meta`"),
+            (None, None) => return Err("missing field `id`"),
+        };
+        Ok(Self {
+            id,
+            vectors: record.vectors,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,7 +394,11 @@ pub struct ExecutionScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "ServerRecordWire"
+)]
 pub struct ServerRecord {
     #[serde(rename = "type")]
     pub record_type: String,
@@ -386,6 +430,52 @@ pub struct ServerRecord {
 /// as `comparison` and `logical` records. Its silence about a value is then
 /// what a snapshot's is; a runtime older than these records writes no note.
 pub const SERVER_VALUES_RECORD: &str = "values";
+
+/// [`ServerRecord`] as evidence holds it. A decision record of a release
+/// before 4.24.0 named its decision in `meta` rather than by `id`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServerRecordWire {
+    #[serde(rename = "type")]
+    record_type: String,
+    #[serde(default)]
+    meta: Option<RecordedDecision>,
+    #[serde(default)]
+    vector: Option<McdcVector>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    timestamp_ms: Option<i64>,
+    #[serde(default)]
+    phase_id: Option<String>,
+    #[serde(default)]
+    scope: Option<ExecutionScope>,
+    #[serde(default)]
+    request: Option<u64>,
+    #[serde(default)]
+    outcome: Option<String>,
+}
+
+impl TryFrom<ServerRecordWire> for ServerRecord {
+    type Error = &'static str;
+
+    fn try_from(record: ServerRecordWire) -> Result<Self, Self::Error> {
+        let id = match (record.id, record.meta) {
+            (Some(_), Some(_)) => return Err("a record with both `id` and `meta`"),
+            (id, meta) => id.or(meta.map(|meta| meta.id)),
+        };
+        Ok(Self {
+            record_type: record.record_type,
+            vector: record.vector,
+            id,
+            timestamp_ms: record.timestamp_ms,
+            phase_id: record.phase_id,
+            scope: record.scope,
+            request: record.request,
+            outcome: record.outcome,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -3785,6 +3875,19 @@ pub fn analyze_coverage_entries(
 /// would parse again, taken instead.
 pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 
+/// What ran with no test running is in no test kind's row: `--kind unit`
+/// leaves it out, and `minimize` with it. Releases before 4.14.0 stored what
+/// Python and Ruby ran while loading under the kind `unit`, and an imported
+/// Python coverage report's under `unknown`; their runs read as
+/// later ones do.
+fn file_background_under_its_own_kind(raw_results: &mut [RawTestResult]) {
+    for raw in raw_results {
+        if raw.role == "background" {
+            raw.provenance.kind = "background".into();
+        }
+    }
+}
+
 /// `archive_request`, from entries `read` hands to the visitor in the
 /// archive's order.
 #[allow(clippy::type_complexity)]
@@ -3875,6 +3978,7 @@ fn archive_request_from<D>(
         return Err(error);
     }
     raw_results.extend(journal_results);
+    file_background_under_its_own_kind(&mut raw_results);
     // A read archive holds its manifest, declaration and model, or it is
     // refused as it is read.
     let held = |path: &str| {
@@ -7401,6 +7505,79 @@ mod tests {
         assert!(
             matches!(&unread, Some(ReportError::InvalidJson { path, .. }) if path == "mutants.json"),
             "{unread:?}"
+        );
+    }
+
+    /// Releases before 4.24.0 named a decision in evidence by `meta`, the
+    /// decision's whole description; later ones by `id`. A run either wrote
+    /// still reads, as the same record.
+    #[test]
+    fn a_decision_reads_in_either_release_s_shape() {
+        use serde_json::json;
+
+        let meta = json!({
+            "id": "d1", "file": "src/a.js", "line": 3, "column": 7,
+            "source": "a && b", "conditions": ["a", "b"], "kind": "if"
+        });
+        let vector = json!({ "values": [true, false], "outcome": false });
+
+        let current: ServerRecord = serde_json::from_value(
+            json!({ "type": "decision", "id": "d1", "vector": vector, "timestampMs": 5 }),
+        )
+        .unwrap();
+        let earlier: ServerRecord = serde_json::from_value(
+            json!({ "type": "decision", "meta": meta, "vector": vector, "timestampMs": 5 }),
+        )
+        .unwrap();
+        assert_eq!(earlier, current);
+        assert_eq!(earlier.id.as_deref(), Some("d1"));
+        // Written back, it takes the current shape.
+        assert!(
+            serde_json::to_value(&earlier)
+                .unwrap()
+                .get("meta")
+                .is_none()
+        );
+
+        let both = serde_json::from_value::<ServerRecord>(
+            json!({ "type": "decision", "id": "d1", "meta": meta, "vector": vector }),
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("both `id` and `meta`"), "{both}");
+        let unknown = serde_json::from_value::<ServerRecord>(
+            json!({ "type": "decision", "id": "d1", "label": "x" }),
+        )
+        .unwrap_err();
+        assert!(
+            unknown.to_string().contains("unknown field `label`"),
+            "{unknown}"
+        );
+        // A point record names no decision at all.
+        let point: ServerRecord =
+            serde_json::from_value(json!({ "type": "point", "id": "p1" })).unwrap();
+        assert_eq!(point.id.as_deref(), Some("p1"));
+
+        let snapshot = |value| serde_json::from_value::<DecisionSnapshot>(value);
+        let current = snapshot(json!({ "id": "d1", "vectors": [vector] })).unwrap();
+        assert_eq!(
+            snapshot(json!({ "meta": meta, "vectors": [vector] })).unwrap(),
+            current
+        );
+        assert_eq!(
+            serde_json::to_value(&current).unwrap(),
+            json!({ "id": "d1", "vectors": [vector] })
+        );
+        let both = snapshot(json!({ "id": "d1", "meta": meta, "vectors": [] })).unwrap_err();
+        assert!(both.to_string().contains("both `id` and `meta`"), "{both}");
+        let neither = snapshot(json!({ "vectors": [] })).unwrap_err();
+        assert!(
+            neither.to_string().contains("missing field `id`"),
+            "{neither}"
+        );
+        let unknown = snapshot(json!({ "id": "d1", "vectors": [], "x": 1 })).unwrap_err();
+        assert!(
+            unknown.to_string().contains("unknown field `x`"),
+            "{unknown}"
         );
     }
 }

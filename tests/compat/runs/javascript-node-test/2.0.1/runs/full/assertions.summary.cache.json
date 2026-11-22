@@ -1,0 +1,136 @@
+{
+  "key": "f94077880351ecd198e5e9f9719c919daf7fbde023c7adb91ad186b22d51ec4d",
+  "digest": "9ab640326ac52eb43d6a0eebae57a90b6eaadc749173739fc0b54c80783f8c00",
+  "report": {
+    "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
+    "summary": {
+      "status": "notAssessed",
+      "reason": "No recorded flow explanations",
+      "pendingChanges": 0,
+      "metric": "measured statements",
+      "statements": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 11,
+        "percentage": null
+      },
+      "assertions": 2,
+      "inventoryAssertions": 2,
+      "missingInventoryAssertions": 0,
+      "assertionsWithFlows": 0,
+      "assertionsWithoutFlows": 2,
+      "observedAssertionsWithoutCurrentExplanation": 2,
+      "questions": 0,
+      "currentFlows": 0,
+      "draftFlows": 0,
+      "staleFlows": 0,
+      "invalidFlows": 0,
+      "eligibleFlows": 0,
+      "retiredAssertions": 0,
+      "unobservedAssertions": 0,
+      "inventoryFailures": 0,
+      "unanchoredStatements": 0,
+      "runPassed": true,
+      "lines": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 10,
+        "percentage": null
+      },
+      "excludedStatements": 0
+    },
+    "assertions": [
+      {
+        "observation": "Passing assertion occurrence recorded.",
+        "id": "a_cf16c33f717a7061b6d7",
+        "at": {
+          "file": "test/price.test.js",
+          "line": 6,
+          "column": 3,
+          "text": "assert.equal(price(200, true, false), 180)"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "node:assert/strict.equal"
+        ],
+        "observedPassingTests": [
+          "node:test:6827e57d13c7fe3501479a72"
+        ],
+        "flows": []
+      },
+      {
+        "observation": "Passing assertion occurrence recorded.",
+        "id": "a_cb559430da4c3c77df32",
+        "at": {
+          "file": "test/price.test.js",
+          "line": 10,
+          "column": 3,
+          "text": "assert.equal(price(20, false, true), 15)"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "node:assert/strict.equal"
+        ],
+        "observedPassingTests": [
+          "node:test:5ad573eb9e726f1abc8bc58a"
+        ],
+        "flows": []
+      }
+    ],
+    "statements": [],
+    "tests": [
+      {
+        "id": "node:test:5ad573eb9e726f1abc8bc58a",
+        "file": "test/price.test.js",
+        "name": "coupons take five off",
+        "role": "test",
+        "outcome": "passed",
+        "provenance": {
+          "runner": "node:test",
+          "kind": "unit",
+          "source": "runner-default"
+        },
+        "hasExecutionEvidence": true
+      },
+      {
+        "id": "node:test:99520a2a164e20aa89a3d227",
+        "file": "test/label.test.js",
+        "name": "large totals",
+        "role": "test",
+        "outcome": "passed",
+        "provenance": {
+          "runner": "node:test",
+          "kind": "unit",
+          "source": "runner-default"
+        },
+        "hasExecutionEvidence": true
+      },
+      {
+        "id": "node:test:6827e57d13c7fe3501479a72",
+        "file": "test/price.test.js",
+        "name": "members save on large orders",
+        "role": "test",
+        "outcome": "passed",
+        "provenance": {
+          "runner": "node:test",
+          "kind": "unit",
+          "source": "runner-default"
+        },
+        "hasExecutionEvidence": true
+      }
+    ],
+    "creditedLines": [],
+    "unassertedLines": [],
+    "changes": [],
+    "validationErrors": [],
+    "advisories": [],
+    "limitations": [
+      "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit.",
+      "Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence."
+    ]
+  }
+}

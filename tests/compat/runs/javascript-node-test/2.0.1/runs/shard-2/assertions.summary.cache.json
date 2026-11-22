@@ -1,0 +1,106 @@
+{
+  "key": "f9654a4f2ae47bc2a668fd168efc347f662761ccc05e29a59e29bbaff5ca3129",
+  "digest": "e7aabffddab050653368f2621882ea2edb3c4c93558bc26244aebae6262cd7ce",
+  "report": {
+    "basis": "agent-assessed; passing assertion identity and same-test execution required; not mutation resistance",
+    "summary": {
+      "status": "notAssessed",
+      "reason": "No recorded flow explanations",
+      "pendingChanges": 0,
+      "metric": "measured statements",
+      "statements": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 11,
+        "percentage": null
+      },
+      "assertions": 2,
+      "inventoryAssertions": 2,
+      "missingInventoryAssertions": 0,
+      "assertionsWithFlows": 0,
+      "assertionsWithoutFlows": 2,
+      "observedAssertionsWithoutCurrentExplanation": 0,
+      "questions": 0,
+      "currentFlows": 0,
+      "draftFlows": 0,
+      "staleFlows": 0,
+      "invalidFlows": 0,
+      "eligibleFlows": 0,
+      "retiredAssertions": 0,
+      "unobservedAssertions": 2,
+      "inventoryFailures": 0,
+      "unanchoredStatements": 0,
+      "runPassed": true,
+      "lines": {
+        "asserted": 0,
+        "declared": 0,
+        "total": 10,
+        "percentage": null
+      },
+      "excludedStatements": 0
+    },
+    "assertions": [
+      {
+        "observation": "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests.",
+        "id": "a_cf16c33f717a7061b6d7",
+        "at": {
+          "file": "test/price.test.js",
+          "line": 6,
+          "column": 3,
+          "text": "assert.equal(price(200, true, false), 180)"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "node:assert/strict.equal"
+        ],
+        "observedPassingTests": [],
+        "flows": []
+      },
+      {
+        "observation": "No passing occurrence recorded. The assertion may be in an untaken branch or its execution attribution may be missing; inspect the selected tests.",
+        "id": "a_cb559430da4c3c77df32",
+        "at": {
+          "file": "test/price.test.js",
+          "line": 10,
+          "column": 3,
+          "text": "assert.equal(price(20, false, true), 15)"
+        },
+        "questions": [],
+        "inMap": true,
+        "observes": [],
+        "operations": [
+          "node:assert/strict.equal"
+        ],
+        "observedPassingTests": [],
+        "flows": []
+      }
+    ],
+    "statements": [],
+    "tests": [
+      {
+        "id": "node:test:99520a2a164e20aa89a3d227",
+        "file": "test/label.test.js",
+        "name": "large totals",
+        "role": "test",
+        "outcome": "passed",
+        "provenance": {
+          "runner": "node:test",
+          "kind": "unit",
+          "source": "runner-default"
+        },
+        "hasExecutionEvidence": true
+      }
+    ],
+    "creditedLines": [],
+    "unassertedLines": [],
+    "changes": [],
+    "validationErrors": [],
+    "advisories": [],
+    "limitations": [
+      "Syntax inventory covers recognized assertion forms, not every possible custom assertion. Agents may add exact source sites; missing runtime identity never earns credit.",
+      "Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence."
+    ]
+  }
+}
