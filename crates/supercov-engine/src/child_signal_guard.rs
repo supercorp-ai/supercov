@@ -34,6 +34,10 @@ const SLOTS: usize = 512;
 #[allow(clippy::declare_interior_mutable_const)]
 const FREE: AtomicU32 = AtomicU32::new(0);
 static CHILDREN: [AtomicU32; SLOTS] = [FREE; SLOTS];
+/// The bit a slot's pid carries when its child leads a process group of its
+/// own, which the signal goes to whole: a pid is a positive `pid_t`, so the
+/// bit is never a pid's.
+const GROUP: u32 = 1 << 31;
 static GUARDS: AtomicUsize = AtomicUsize::new(0);
 
 /// Send `signal` to every registered child. Safe to call from a signal
@@ -42,12 +46,17 @@ pub fn signal_registered_children(signal: i32) {
     CHILDREN.iter().for_each(|slot| {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
+            // A group's leader is signalled with its group: the negative pid.
+            let target = (pid & !GROUP).cast_signed() * if pid & GROUP == 0 { 1 } else { -1 };
             #[cfg(unix)]
-            // SAFETY: `kill` with a positive pid signals that process only;
-            // a Unix pid is a positive `pid_t`, whatever type it is read as.
+            // SAFETY: `kill` with a positive pid signals that process only,
+            // and with a negative one the process group the child leads; a
+            // Unix pid is a positive `pid_t`, whatever type it is read as.
             unsafe {
-                libc::kill(pid.cast_signed(), signal);
+                libc::kill(target, signal);
             }
+            #[cfg(not(unix))]
+            let _ = target;
             #[cfg(not(unix))]
             let _ = signal;
         }
@@ -169,7 +178,18 @@ impl Drop for RegisteredChild {
 
 /// Register a running child so a signal to the runner reaches it.
 pub fn register(child: &Child) -> RegisteredChild {
-    let pid = child.id();
+    register_pid(child, child.id())
+}
+
+/// [`register`] for a child that leads a process group of its own
+/// (`process_group(0)`): a signal to the runner reaches the whole group,
+/// which no terminal's Ctrl-C does.
+pub fn register_group(child: &Child) -> RegisteredChild {
+    register_pid(child, child.id() | GROUP)
+}
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn register_pid(child: &Child, pid: u32) -> RegisteredChild {
     #[cfg(windows)]
     windows_job::assign(child);
     RegisteredChild {
@@ -418,6 +438,40 @@ mod tests {
         SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A child that leads a group of its own is signalled with its group:
+    /// what it started stops too.
+    #[cfg(unix)]
+    #[test]
+    fn a_registered_group_is_signalled_whole() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let _serial = serial();
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let started: i32 = line.trim().parse().unwrap();
+        let registered = register_group(&child);
+        signal_registered_children(libc::SIGTERM);
+        drop(registered);
+        child.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the process is there.
+        while unsafe { libc::kill(started, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "what the group started outlived it"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A streamed child is read whole, both streams, whatever is shown of

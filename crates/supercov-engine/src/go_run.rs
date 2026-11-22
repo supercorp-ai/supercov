@@ -62,6 +62,23 @@ const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/superco
 /// The generic wrappers a decision used as a value calls, in a file of its
 /// own behind `go1.18`, so a module older than generics still builds the rest.
 const RUNTIME_VALUES_SOURCE: &str = include_str!("../runtime-assets/go/supercov/values.go");
+/// Strong mutation's switches and their generic helpers, behind `go1.21`.
+const RUNTIME_STRONG_SOURCE: &str = include_str!("../runtime-assets/go/supercov/strong.go");
+/// Weak mutation's value probes, behind `go1.21`.
+const RUNTIME_MUTANTS_SOURCE: &str = include_str!("../runtime-assets/go/supercov/mutants.go");
+
+/// The runtime package's directory in a module's copy.
+pub(crate) const RUNTIME_DIRECTORY_NAME: &str = RUNTIME_DIRECTORY;
+
+/// The runtime package's files, by name.
+pub(crate) fn runtime_files() -> [(&'static str, &'static str); 4] {
+    [
+        ("supercov.go", RUNTIME_SOURCE),
+        ("values.go", RUNTIME_VALUES_SOURCE),
+        ("strong.go", RUNTIME_STRONG_SOURCE),
+        ("mutants.go", RUNTIME_MUTANTS_SOURCE),
+    ]
+}
 
 /// The generated file that declares a package's probe array.
 const PROBE_FILE: &str = "supercov_probes.go";
@@ -281,7 +298,7 @@ fn instrument_sources(
     workspace: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<InstrumentedSources, String> {
-    let project = prepare_go_project(workspace, roots)?;
+    let project = prepare_go_project(workspace, project_root, roots)?;
 
     // A go.work repository has several modules and no module at its root, so
     // each gets a runtime of its own: an import is resolved against the module
@@ -302,14 +319,9 @@ fn instrument_sources(
                 at.display()
             )
         })?;
-        write(
-            &at.join(RUNTIME_DIRECTORY).join("supercov.go"),
-            RUNTIME_SOURCE,
-        )?;
-        write(
-            &at.join(RUNTIME_DIRECTORY).join("values.go"),
-            RUNTIME_VALUES_SOURCE,
-        )?;
+        runtime_files().into_iter().try_for_each(|(name, contents)| {
+            write(&at.join(RUNTIME_DIRECTORY).join(name), contents)
+        })?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
         Ok(())
     })?;
@@ -600,6 +612,117 @@ fn go_flags(
     (flags, fresh, serial)
 }
 
+/// The directory of the recording `go` and the file it appends to, where
+/// a `go` is on PATH to stand in front of.
+#[cfg(unix)]
+fn go_recorder(work: &Path) -> Option<(PathBuf, PathBuf)> {
+    which::which("go")
+        .ok()
+        .and_then(|real| recorder_in(work, &real).ok())
+}
+
+/// The recording `go` in front of `real`, written into `work`.
+#[cfg(unix)]
+fn recorder_in(work: &Path, real: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = work.join("go-recorder");
+    let log = work.join("go-invocations.log");
+    let quoted = |path: &Path| path.to_string_lossy().replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = test ]; then\n  {{ for argument in \"$@\"; do printf '%s\\037' \"$argument\"; done; printf '\\n'; }} >> '{}'\nfi\nexec '{}' \"$@\"\n",
+        quoted(&log),
+        quoted(real)
+    );
+    let shim = directory.join("go");
+    fs::create_dir_all(&directory)?;
+    fs::write(&shim, script)?;
+    fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    Ok((directory, log))
+}
+
+#[cfg(not(unix))]
+fn go_recorder(_work: &Path) -> Option<(PathBuf, PathBuf)> {
+    None
+}
+
+/// What separates the entries of PATH.
+#[cfg(windows)]
+const PATH_SEPARATOR: &str = ";";
+#[cfg(not(windows))]
+const PATH_SEPARATOR: &str = ":";
+
+/// `environment` with the recording `go` first on PATH.
+fn with_go_recorder(
+    mut environment: Vec<(OsString, OsString)>,
+    recorder: Option<&(PathBuf, PathBuf)>,
+) -> Vec<(OsString, OsString)> {
+    let Some((directory, _)) = recorder else {
+        return environment;
+    };
+    let mut path = directory.as_os_str().to_owned();
+    if let Some((_, existing)) = environment.iter().find(|(name, _)| name == "PATH") {
+        path.push(PATH_SEPARATOR);
+        path.push(existing);
+    }
+    environment.retain(|(name, _)| name != "PATH");
+    environment.push(("PATH".into(), path));
+    environment
+}
+
+/// Where the `go test` invocations of a command, as its last run with
+/// mutants recorded them, are kept: `.supercov/go-invocations/<digest>.json`.
+pub(crate) fn go_invocations_path(root: &Path, command: &[String]) -> PathBuf {
+    let digest = crate::stable_ids::digest(&[&command.join("\0")]);
+    root.join(".supercov/go-invocations")
+        .join(format!("{}.json", &digest[..16]))
+}
+
+fn save_go_invocations(root: &Path, command: &[String], log: &Path) {
+    let text = fs::read_to_string(log).unwrap_or_default();
+    let invocations = text
+        .lines()
+        .map(|line| {
+            line.split('\u{1f}')
+                .filter(|argument| !argument.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|arguments| !arguments.is_empty())
+        .collect::<Vec<_>>();
+    let path = go_invocations_path(root, command);
+    let _ = fs::create_dir_all(path.with_file_name(""));
+    let _ = fs::write(&path, serde_json::to_vec(&invocations).expect("plain data"));
+}
+
+/// The `go test` invocations a command's last run with mutants recorded.
+pub fn recorded_go_invocations(root: &Path, command: &[String]) -> Vec<Vec<String>> {
+    fs::read(go_invocations_path(root, command))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Whether the run lists its mutants: `SUPERCOV_MUTANTS` is `1` or `true`.
+pub(crate) fn mutants_requested() -> bool {
+    switched_on(std::env::var("SUPERCOV_MUTANTS").ok())
+}
+
+/// Whether a switch's variable, set to `value`, turns it on: `1` or `true`.
+fn switched_on(value: Option<String>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "1" | "true"))
+}
+
+/// A test's status as the run keeps it: an Example's outcome is checked
+/// after it returns, where no record of it reaches, so it ran `unknown`; a
+/// command that passed passed every one of them.
+fn kept_status(status: &str, exit_code: i32) -> String {
+    if status == "unknown" && exit_code == 0 {
+        "passed".to_owned()
+    } else {
+        status.to_owned()
+    }
+}
+
 /// The fingerprint a later query compares against the stored run.
 pub fn current_go_integrity(
     root: &Path,
@@ -753,6 +876,13 @@ pub fn run_direct_go(
                 "[supercov] added -count=1: `go test` caches passing packages, and a cached package does not run, so it would record no coverage"
             );
         }
+        // A run that lists its mutants records each `go test` the command
+        // starts, through a `go` of its own on PATH: a strong pass builds
+        // its test binaries with their flags, from `make test` or a script
+        // as much as from `go test` itself.
+        let recorder = mutants_requested()
+            .then(|| go_recorder(&work_directory))
+            .flatten();
         let test_started = Instant::now();
         let plan = ExecutionPlan {
             preparation: Vec::new(),
@@ -765,10 +895,13 @@ pub fn run_direct_go(
                     cwd: workspace.clone(),
                     // The run's id, for a test that wants to know it is
                     // measured; and Go's flags where Supercov added any.
-                    environment: Some(crate::rust_runtime::measured_environment(
-                        std::env::vars_os(),
-                        go_flags.map(|value| ("GOFLAGS", value)),
-                        &request.run_id,
+                    environment: Some(with_go_recorder(
+                        crate::rust_runtime::measured_environment(
+                            std::env::vars_os(),
+                            go_flags.map(|value| ("GOFLAGS", value)),
+                            &request.run_id,
+                        ),
+                        recorder.as_ref(),
                     )),
                     captured_output: None,
                     console: Some(crate::workspace::console_names(&root, &workspace)),
@@ -813,6 +946,9 @@ pub fn run_direct_go(
             ));
         }
         let exit_code = execution.exit_code;
+        if let Some((_, log)) = &recorder {
+            save_go_invocations(&root, &request.command, log);
+        }
 
         let publication_started = Instant::now();
         let mut parts = Vec::new();
@@ -827,15 +963,18 @@ pub fn run_direct_go(
                     silent.push(package.directory.clone());
                     return Ok(());
                 };
-                let evidence = read_evidence(&bytes)
+                let mut evidence = read_evidence(&bytes)
                     .map_err(|error| format!("{}: {error}", package.evidence.display()))?;
+                for test in &mut evidence.tests {
+                    test.package = package.directory.clone();
+                }
                 for test in &evidence.tests {
                     outcomes.push(OwnedTestOutcome {
                         name: test.name.clone(),
                         runner: test.runner.clone(),
                         package: package.directory.clone(),
                         file: package.declared_in.get(&test.name).cloned(),
-                        status: test.status.clone(),
+                        status: kept_status(&test.status, exit_code),
                         attributed: !test.unattributed,
                     });
                 }
@@ -894,8 +1033,22 @@ pub fn run_direct_go(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
+        let mut entries = run.archive_entries();
+        // `SUPERCOV_MUTANTS=1` (as `supercov mutants` measures): the
+        // mutants of every file measured, listed with the run.
+        if mutants_requested() {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&crate::mutant_list::MutantsFile::listed(
+                    crate::go_mutants::GO,
+                    crate::go_mutants::MUTANT_SET,
+                    instrumented.project.mutants.clone(),
+                ))
+                .expect("plain data serializes"),
+            });
+        }
         let raw = write_archive(
-            crate::source_capture::append(run.archive_entries(), &source_inputs),
+            crate::source_capture::append(entries, &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -1144,6 +1297,67 @@ impl GoServer {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_run_with_mutants_records_each_go_test_its_command_starts() {
+        let work =
+            std::env::temp_dir().join(format!("supercov-go-recorder-{}", std::process::id()));
+        let real = Path::new("/bin/echo");
+        let (directory, log) = recorder_in(&work, real).unwrap();
+        assert!(directory.join("go").is_file());
+        // Each step of writing it failing leaves no recorder.
+        for fault in ["fs.create_dir_all", "fs.write", "fs.set_permissions"] {
+            let failed = crate::fault::during(fault, || recorder_in(&work, real));
+            assert!(failed.is_err(), "{fault}");
+        }
+        let shim = directory.join("go");
+        std::process::Command::new(&shim)
+            .args(["test", "-tags", "a b", "./..."])
+            .output()
+            .unwrap();
+        std::process::Command::new(&shim)
+            .arg("version")
+            .output()
+            .unwrap();
+        let root = work.join("project");
+        let command = ["make".to_owned(), "test".to_owned()];
+        save_go_invocations(&root, &command, &log);
+        assert_eq!(
+            recorded_go_invocations(&root, &command),
+            [["test", "-tags", "a b", "./..."]]
+        );
+        assert!(recorded_go_invocations(&root, &["other".to_owned()]).is_empty());
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn the_recording_go_goes_first_on_path() {
+        let recorder = (PathBuf::from("/r"), PathBuf::from("/r/log"));
+        let with = |environment: Vec<(OsString, OsString)>| {
+            with_go_recorder(environment, Some(&recorder))
+                .into_iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(
+            with(vec![("PATH".into(), "/bin".into())]),
+            Some(OsString::from(format!("/r{PATH_SEPARATOR}/bin")))
+        );
+        assert_eq!(with(Vec::new()), Some(OsString::from("/r")));
+        assert!(with_go_recorder(Vec::new(), None).is_empty());
+    }
+
+    #[test]
+    fn mutants_are_asked_for_with_one_or_true_and_examples_pass_with_their_command() {
+        assert!(switched_on(Some(" 1 ".into())));
+        assert!(switched_on(Some("true".into())));
+        assert!(!switched_on(Some("0".into())));
+        assert!(!switched_on(None));
+        assert_eq!(kept_status("unknown", 0), "passed");
+        assert_eq!(kept_status("unknown", 1), "unknown");
+        assert_eq!(kept_status("failed", 0), "failed");
+    }
+
     use super::*;
 
     /// A file that does not parse is named for the project as it stands.
@@ -1506,7 +1720,7 @@ mod tests {
             "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n}\n",
         )
         .unwrap();
-        let probes = crate::go_project::prepare_go_project(&root, None)
+        let probes = crate::go_project::prepare_go_project(&root, &root, None)
             .unwrap()
             .probes
             .len();
