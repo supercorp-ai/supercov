@@ -78,8 +78,11 @@ pub struct PreparedRubyProject {
 /// Asked only of a `.rb` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
     let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    // A directory under `lib` is the library's own (`lib/rack/test/` is
+    // rack-test's code, loaded as `rack/test/...`), whatever its name.
     if directories
         .split('/')
+        .take_while(|component| *component != "lib")
         .any(|component| TEST_DIRECTORIES.contains(&component))
     {
         return Some("inside a test directory");
@@ -666,14 +669,26 @@ mod tests {
         let root = fixture("names");
         write(&root, "lib/a.rb", "A = 1\n");
         write(&root, "lib/a_test.rb", "A = 1\n");
+        // rack-test's layout: its library lives under `lib/rack/test/`.
+        write(&root, "lib/rack/test.rb", "R = 1\n");
+        write(&root, "lib/rack/test/utils.rb", "U = 1\n");
+        write(&root, "test/lib/helper.rb", "H = 1\n");
         write(&root, "test_b.rb", "B = 1\n");
         write(&root, "spec_helper.rb", "require 'rspec'\n");
         write(&root, "thing.gemspec", "Gem::Specification.new\n");
         let files = discover_ruby_files(&root).unwrap();
-        assert_eq!(files.sources, ["lib/a.rb"]);
+        assert_eq!(
+            files.sources,
+            ["lib/a.rb", "lib/rack/test.rb", "lib/rack/test/utils.rb"]
+        );
         assert_eq!(
             files.tests,
-            ["lib/a_test.rb", "spec_helper.rb", "test_b.rb"]
+            [
+                "lib/a_test.rb",
+                "spec_helper.rb",
+                "test/lib/helper.rb",
+                "test_b.rb"
+            ]
         );
         assert_eq!(files.dependency_files, [PathBuf::from("thing.gemspec")]);
         fs::remove_dir_all(&root).unwrap();

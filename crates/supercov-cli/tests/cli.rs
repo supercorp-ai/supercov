@@ -16648,7 +16648,7 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
-            "fs.read_dir entry#1 => ruby_project.rs:103",
+            "fs.read_dir entry#1 => ruby_project.rs:106",
             "fs.read_dir entry#2 => ruby_evidence.rs:340",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
@@ -18237,8 +18237,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#ruby_project.rs:230@1",
-            "ruby_project.rs:230",
+            "fs.read#ruby_project.rs:233@1",
+            "ruby_project.rs:233",
             "web/app.rb",
         ),
         (
@@ -19441,7 +19441,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &project,
             &[
                 ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
-                ("fs.read_dir#ruby_project.rs:103", "ruby_project.rs:103"),
+                ("fs.read_dir#ruby_project.rs:106", "ruby_project.rs:106"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
