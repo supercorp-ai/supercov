@@ -1,0 +1,135 @@
+{
+  "project": "trpc",
+  "scenario": "pr-mutator",
+  "shard": null,
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-20T00:19:20.002Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "PR scenario base runs mutate [\"packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts\",\"packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts\",\"packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts\",\"packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts\",\"packages/server/src/unstable-core-do-not-import/http/abortError.ts\",\"packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts\"]: the PR scenario's base runs (StrykerJS's incremental base, mutator's snapshot) and PR runs cover the edited file and its small siblings in http/: mutator needs about 8 minutes for the 390 mutants of http/ without resolveResponse.ts, and about 45 for the full set",
+    "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on trpc's TypeScript 7.1.0-beta: Package subpath './unstable/sync' is not defined by exports"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.674,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.09,
+        "sysS": 0.02,
+        "cpuS": 0.11,
+        "cpuPercent": "18%",
+        "maxRssKiB": 18888,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.69,
+      "wallS": 1.528,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.72,
+        "sysS": 0.17,
+        "cpuS": 0.89,
+        "cpuPercent": "58%",
+        "maxRssKiB": 191460,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.21,
+      "wallS": 3.825,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 13.57,
+        "sysS": 4.98,
+        "cpuS": 18.55,
+        "cpuPercent": "485%",
+        "maxRssKiB": 733612,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @mizchi/mutator@0.5.0",
+      "startOffsetS": 6.04,
+      "wallS": 10.581,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 5.74,
+        "sysS": 2.75,
+        "cpuS": 8.49,
+        "cpuPercent": "80%",
+        "maxRssKiB": 1182424,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "mutator-base",
+      "command": "node_modules/.bin/mutator --include 'packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts' --include 'packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts' --include 'packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts' --include 'packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts' --include 'packages/server/src/unstable-core-do-not-import/http/abortError.ts' --include 'packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts' --exclude 'packages/server/src/**/*.test.ts' --exclude 'packages/server/src/**/*.d.ts' --config vitest.bench.config.ts --reporter json --reporter text --report-dir reports-mutator/mutator-base --no-typecheck",
+      "startOffsetS": 16.67,
+      "wallS": 375.24,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1710.82,
+        "sysS": 234.01,
+        "cpuS": 1944.83,
+        "cpuPercent": "518%",
+        "maxRssKiB": 788504,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-base.json"
+    },
+    {
+      "name": "mutator-since-cold",
+      "command": "node_modules/.bin/mutator --include 'packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts' --include 'packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts' --include 'packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts' --include 'packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts' --include 'packages/server/src/unstable-core-do-not-import/http/abortError.ts' --include 'packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts' --exclude 'packages/server/src/**/*.test.ts' --exclude 'packages/server/src/**/*.d.ts' --config vitest.bench.config.ts --reporter json --reporter text --report-dir reports-mutator/mutator-since-cold --no-typecheck --since HEAD~1",
+      "startOffsetS": 391.93,
+      "wallS": 21.851,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 68.81,
+        "sysS": 8.87,
+        "cpuS": 77.68,
+        "cpuPercent": "355%",
+        "maxRssKiB": 595984,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-since-cold.json"
+    },
+    {
+      "name": "mutator-since-warm",
+      "command": "node_modules/.bin/mutator --include 'packages/server/src/unstable-core-do-not-import/http/getHTTPStatusCode.ts' --include 'packages/server/src/unstable-core-do-not-import/http/contentTypeParsers.ts' --include 'packages/server/src/unstable-core-do-not-import/http/formDataToObject.ts' --include 'packages/server/src/unstable-core-do-not-import/http/parseConnectionParams.ts' --include 'packages/server/src/unstable-core-do-not-import/http/abortError.ts' --include 'packages/server/src/unstable-core-do-not-import/http/pathSeparator.ts' --exclude 'packages/server/src/**/*.test.ts' --exclude 'packages/server/src/**/*.d.ts' --config vitest.bench.config.ts --reporter json --reporter text --report-dir reports-mutator/mutator-since-warm --no-typecheck --since HEAD~1",
+      "startOffsetS": 413.78,
+      "wallS": 2.807,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 19.56,
+        "sysS": 2.34,
+        "cpuS": 21.9,
+        "cpuPercent": "780%",
+        "maxRssKiB": 503804,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-since-warm.json"
+    }
+  ],
+  "totalS": 416.59
+}

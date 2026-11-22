@@ -1,0 +1,165 @@
+{
+  "project": "scule",
+  "scenario": "pr-mutator",
+  "shard": null,
+  "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+  "startedAt": "2026-11-20T00:03:37.240Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "9.0.6",
+    "vitest": "5.1.1",
+    "vitestProject": "1.5.3"
+  },
+  "notes": [
+    "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+    "also added vite@8.3.8: scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/scule 5bc68048caad7c0e7de35842c83a510e8e1a7c4f && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.231,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0,
+        "cpuS": 0.02,
+        "cpuPercent": "13%",
+        "maxRssKiB": 19032,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@9.0.6 >/dev/null && pnpm --version",
+      "startOffsetS": 0.24,
+      "wallS": 1.535,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.53,
+        "sysS": 0.13,
+        "cpuS": 0.66,
+        "cpuPercent": "44%",
+        "maxRssKiB": 146488,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.78,
+      "wallS": 1.235,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.08,
+        "sysS": 0.49,
+        "cpuS": 3.57,
+        "cpuPercent": "290%",
+        "maxRssKiB": 755700,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-plugins-remove",
+      "command": "pnpm remove @vitest/coverage-v8",
+      "startOffsetS": 3.02,
+      "wallS": 0.806,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.65,
+        "sysS": 0.21,
+        "cpuS": 1.86,
+        "cpuPercent": "232%",
+        "maxRssKiB": 543352,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-upgrade",
+      "command": "pnpm add -D vitest@5.1.1 vite@8.3.8",
+      "startOffsetS": 3.82,
+      "wallS": 1.227,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.34,
+        "sysS": 0.33,
+        "cpuS": 2.67,
+        "cpuPercent": "219%",
+        "maxRssKiB": 816384,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @mizchi/mutator@0.5.0",
+      "startOffsetS": 5.05,
+      "wallS": 1.003,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.98,
+        "sysS": 0.3,
+        "cpuS": 2.28,
+        "cpuPercent": "229%",
+        "maxRssKiB": 701492,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "mutator-base",
+      "command": "node_modules/.bin/mutator --include 'src/**/*.ts' --reporter json --reporter text --report-dir reports-mutator/mutator-base",
+      "startOffsetS": 6.06,
+      "wallS": 6.85,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 19.55,
+        "sysS": 2.51,
+        "cpuS": 22.06,
+        "cpuPercent": "322%",
+        "maxRssKiB": 720376,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-base.json"
+    },
+    {
+      "name": "mutator-since-cold",
+      "command": "node_modules/.bin/mutator --include 'src/**/*.ts' --reporter json --reporter text --report-dir reports-mutator/mutator-since-cold --since HEAD~1",
+      "startOffsetS": 12.92,
+      "wallS": 1.568,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.15,
+        "sysS": 0.33,
+        "cpuS": 3.48,
+        "cpuPercent": "222%",
+        "maxRssKiB": 540992,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-since-cold.json"
+    },
+    {
+      "name": "mutator-since-warm",
+      "command": "node_modules/.bin/mutator --include 'src/**/*.ts' --reporter json --reporter text --report-dir reports-mutator/mutator-since-warm --since HEAD~1",
+      "startOffsetS": 14.49,
+      "wallS": 1.491,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.17,
+        "sysS": 0.37,
+        "cpuS": 3.54,
+        "cpuPercent": "238%",
+        "maxRssKiB": 551768,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-since-warm.json"
+    }
+  ],
+  "totalS": 15.98
+}

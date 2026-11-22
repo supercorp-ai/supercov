@@ -1,0 +1,145 @@
+{
+  "project": "trpc",
+  "scenario": "stryker-cold",
+  "shard": "s4",
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-20T00:46:32.889Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.71,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.09,
+        "sysS": 0.03,
+        "cpuS": 0.12,
+        "cpuPercent": "17%",
+        "maxRssKiB": 18860,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.72,
+      "wallS": 1.52,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.71,
+        "sysS": 0.15,
+        "cpuS": 0.86,
+        "cpuPercent": "57%",
+        "maxRssKiB": 191764,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.24,
+      "wallS": 3.805,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 13.56,
+        "sysS": 4.79,
+        "cpuS": 18.35,
+        "cpuPercent": "482%",
+        "maxRssKiB": 770128,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 6.05,
+      "wallS": 9.063,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 5.79,
+        "sysS": 2.45,
+        "cpuS": 8.24,
+        "cpuPercent": "91%",
+        "maxRssKiB": 1073900,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "stryker-cold",
+      "command": "node_modules/.bin/stryker run stryker.stryker-cold.json",
+      "startOffsetS": 15.16,
+      "wallS": 408.925,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2495.39,
+        "sysS": 320.68,
+        "cpuS": 2816.07,
+        "cpuPercent": "688%",
+        "maxRssKiB": 502620,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "packages/server/src/unstable-core-do-not-import/clientish/serialize.ts",
+          "packages/server/src/unstable-core-do-not-import/initTRPC.ts",
+          "packages/server/src/unstable-core-do-not-import/rpc/codes.ts",
+          "packages/server/src/unstable-core-do-not-import/rpc/index.ts",
+          "packages/server/src/unstable-core-do-not-import/stream/utils/disposable.ts",
+          "packages/server/src/unstable-core-do-not-import/transformer.ts",
+          "!packages/server/src/**/*.test.ts",
+          "!packages/server/src/**/*.d.ts"
+        ],
+        "ignorePatterns": [
+          ".claude",
+          ".agents",
+          "www",
+          "examples"
+        ],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-cold.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true,
+        "tsconfigFile": "tsconfig.stryker-none.json"
+      },
+      "report": "stryker-cold.json"
+    }
+  ],
+  "totalS": 424.08
+}
