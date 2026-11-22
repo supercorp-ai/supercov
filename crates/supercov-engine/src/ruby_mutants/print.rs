@@ -248,14 +248,10 @@ fn rational(text: &str) -> Option<String> {
     Some(format!("{sign}{whole}.{fraction:0places$}r"))
 }
 
+/// A float's literal: Rust's `{:?}` always writes a point or an exponent
+/// (`1.0`, `1e16`), as Ruby's literal needs.
 fn float(bits: u64) -> String {
-    let value = f64::from_bits(bits);
-    let text = format!("{value:?}");
-    if text.contains('.') || text.contains('e') || text.contains("inf") || text.contains("NaN") {
-        text
-    } else {
-        format!("{text}.0")
-    }
+    format!("{:?}", f64::from_bits(bits))
 }
 
 impl Printer<'_> {
@@ -1293,6 +1289,59 @@ impl Printer<'_> {
             self.slot(node)
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Names, symbols, strings and numbers print as Ruby reads them back.
+    #[test]
+    fn ruby_literals_print_as_ruby_reads_them() {
+        assert!(method_name("caf\u{e9}") && method_name("\u{e9}t\u{e9}?") && method_name("_a!"));
+        assert!(!method_name("1a") && !method_name("a-b") && !method_name(""));
+        for (name, literal) in [
+            ("a", ":a"),
+            ("a=", ":a="),
+            ("+", ":+"),
+            ("!", ":!"),
+            ("[]=", ":[]="),
+            ("-@", ":-@"),
+            ("@@count", ":@@count"),
+            ("@count", ":@count"),
+            ("$count", ":$count"),
+            ("a b", ":\"a b\""),
+            ("@", ":\"@\""),
+        ] {
+            assert_eq!(symbol(name), literal);
+        }
+        assert_eq!(
+            quoted(b"\\\n\t\r\x1b#{#$#@#a\x01\x7f\"\xc3\xa9"),
+            "\"\\\\\\n\\t\\r\\e\\#{\\#$\\#@#a\\x01\\x7F\\\"\u{e9}\""
+        );
+        assert_eq!(escaped(b"it's", b'\''), "it\\'s");
+        assert_eq!(escaped(&[b'a', 0xff], b'"'), "\\x61\\xFF");
+        for (value, literal) in [
+            ("(1/1)", Some("1r")),
+            ("(7/2)", Some("3.5r")),
+            ("(-7/2)", Some("-3.5r")),
+            ("(5/4)", Some("1.25r")),
+            ("(1/3)", None),
+            ("(x/2)", None),
+            ("(1/x)", None),
+            ("1", None),
+        ] {
+            assert_eq!(rational(value).as_deref(), literal, "{value}");
+        }
+        for (value, literal) in [
+            (1.0, "1.0"),
+            (0.5, "0.5"),
+            (1e20, "1e20"),
+            (-2.5e-7, "-2.5e-7"),
+        ] {
+            assert_eq!(float(f64::to_bits(value)), literal);
         }
     }
 }

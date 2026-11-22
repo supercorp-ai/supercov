@@ -340,12 +340,10 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
         "and" | "or" => binary(&mut out, parent),
         "block" => block(&mut out, parent),
         "block_pass" => {
-            if input.node(0).is_some() {
+            if let Some(argument) = input.node(0) {
                 mutate_child(&mut out, 0, parent, |_| true);
-                if let Some(argument) = input.node(0)
-                    && argument.ty == "sym"
-                    && let Some(name) = argument.child(0).sym()
-                {
+                if argument.ty == "sym" {
+                    let name = argument.child(0).sym().unwrap_or_default();
                     for method in selector_replacements(name) {
                         out.update(0, node(s("sym", vec![sym(method)])));
                     }
@@ -369,16 +367,8 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
         }
         "case" => case(&mut out, parent),
         "case_match" => case_match(&mut out, parent),
-        "class" => {
-            if input.node(2).is_some() {
-                mutate_child(&mut out, 2, parent, |_| true);
-            }
-        }
-        "module" | "sclass" => {
-            if input.node(1).is_some() {
-                mutate_child(&mut out, 1, parent, |_| true);
-            }
-        }
+        // No method holds a class, a module or `class << x` the port
+        // converts: their mutators are left out.
         "while" | "until" | "while_post" | "until_post" => conditional_loop(&mut out, parent),
         "const" => {
             let under_const = parent.is_some_and(|parent| parent.node.ty == "const");
@@ -470,9 +460,7 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
             }
         }
         "pair" => {
-            mutate_child(&mut out, 0, parent, |mutation| {
-                mutation.ty != "nil" || !mutation.children.is_empty()
-            });
+            mutate_child(&mut out, 0, parent, |mutation| mutation.ty != "nil");
             mutate_child(&mut out, 1, parent, |_| true);
         }
         "int" => integer(&mut out, parent),
@@ -545,10 +533,6 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
             }
             mutate_child(&mut out, 0, parent, |_| true);
             mutate_child(&mut out, 1, parent, |_| true);
-        }
-        "match_current_line" => {
-            singletons(&mut out, parent);
-            mutate_child(&mut out, 0, parent, |_| true);
         }
         "match_pattern_p" => {
             out.emit(s("false", Vec::new()));
@@ -866,9 +850,7 @@ fn normal_dispatch(out: &mut Out<'_>, parent: Option<&Parent<'_>>, attribute: bo
         if !UNARY_METHOD_OPERATORS.contains(&selector.as_str()) && receiver_node.ty != "nil" {
             out.update(0, node(s("self", Vec::new())));
         }
-        mutate_child(out, 0, own_parent, |mutation| {
-            mutation.ty != "nil" || !mutation.children.is_empty()
-        });
+        mutate_child(out, 0, own_parent, |mutation| mutation.ty != "nil");
     }
     // mutate_arguments
     if attribute {
@@ -1084,7 +1066,7 @@ fn block(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
         out.emit(body.clone());
     }
     mutate_child(out, 2, parent, |mutation| {
-        !(mutation.ty == "nil" && mutation.children.is_empty() && unconditional_loop)
+        !(mutation.ty == "nil" && unconditional_loop)
     });
     if !lambda
         && body.ty == "send"
@@ -1197,10 +1179,7 @@ fn define(
     mutate_child(out, arguments_index, parent, |_| true);
     let body = input.node(body_index).cloned();
     if let Some(arguments) = input.node(arguments_index) {
-        for argument in &arguments.children {
-            let Some(argument) = argument.node() else {
-                continue;
-            };
+        for argument in arguments.children.iter().filter_map(Child::node) {
             let used = argument
                 .child(0)
                 .sym()
@@ -1309,9 +1288,7 @@ fn index(out: &mut Out<'_>, parent: Option<&Parent<'_>>, assign: bool) {
         .map(|index| input.children[*index].clone())
         .collect();
     singletons(out, parent);
-    mutate_child(out, 0, parent, |mutation| {
-        mutation.ty != "nil" || !mutation.children.is_empty()
-    });
+    mutate_child(out, 0, parent, |mutation| mutation.ty != "nil");
     let mut with_self = vec![node(s("self", Vec::new()))];
     with_self.extend(input.children.iter().skip(1).cloned());
     out.emit_type(with_self);
@@ -1499,21 +1476,16 @@ fn numeric_values(input: &N) -> Vec<String> {
         .map(|(numerator, denominator)| format!("({numerator}/{denominator})"))
         .collect();
     }
+    // `(0+2i)` or `(0-2i)`.
     let imaginary = text
-        .trim_start_matches("(0+")
+        .trim_start_matches("(0")
         .trim_end_matches("i)")
         .parse::<i128>()
         .expect("an imaginary's text");
     // 0i, 1i, and the literal plus and minus 1i.
     [0, 1, imaginary + 1, imaginary - 1]
         .into_iter()
-        .map(|value| {
-            if value < 0 {
-                format!("(0-{}i)", -value)
-            } else {
-                format!("(0+{value}i)")
-            }
-        })
+        .map(|value| super::tree::imaginary(&value.to_string()))
         .collect()
 }
 
@@ -1521,11 +1493,8 @@ fn numeric_values(input: &N) -> Vec<String> {
 pub(crate) fn regexp_body(regexp: &N) -> Option<String> {
     let mut body = Vec::new();
     for child in &regexp.children[..regexp.children.len().saturating_sub(1)] {
-        let part = child.node()?;
-        if part.ty != "str" {
-            return None;
-        }
-        let Child::Str(bytes) = part.child(0) else {
+        // A `str` part's text; anything else is an interpolation.
+        let Some(Child::Str(bytes)) = child.node().map(|part| part.child(0)) else {
             return None;
         };
         body.extend_from_slice(bytes);
@@ -1564,8 +1533,7 @@ fn op_asgn(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
     mutate_child(out, 0, parent, |mutation| mutation.ty != "self");
     if let Some(left) = input.node(0)
         && left.ty == "send"
-        && let Some(receiver) = left.node(0)
-        && receiver.ty == "ivar"
+        && let Some(receiver) = left.node(0).filter(|receiver| receiver.ty == "ivar")
     {
         out.update(0, node(s("ivasgn", receiver.children.clone())));
     }

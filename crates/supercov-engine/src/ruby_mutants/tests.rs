@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
-use super::tree::{Child, Converter, N, sexp};
+use super::tree::{Child, Converter, N, sexp, syntax};
 use super::*;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mutant-parity");
@@ -805,4 +805,86 @@ fn ruby_methods_with_unconverted_syntax_are_skipped_by_name() {
         );
         assert!(!enumeration.mutants.is_empty(), "{source}");
     }
+}
+
+/// Every statement and expression slot of every fixture method (where a
+/// switch goes), printed from its children in its own place, leaves the
+/// method parsing back to its own tree. Every other node printed in its
+/// place, and other trees put in each place, are printed or refused, never
+/// a panic.
+#[test]
+fn every_ruby_node_printed_in_its_own_place_parses_back() {
+    let mut failures = Vec::new();
+    let mut printed = 0;
+    let others = [
+        N::new("unknown", Vec::new()),
+        N::new("str", vec![Child::Str(b"x".to_vec())]),
+        N::new("sym", vec![Child::Sym("x".into())]),
+        N::new("nil", Vec::new()),
+        N::new("lvasgn", vec![Child::Sym("x".into())]),
+        N::new("args", Vec::new()),
+        N::new("regopt", Vec::new()),
+        N::new(
+            "if",
+            vec![
+                Child::Node(N::new("nil", Vec::new())),
+                Child::Nil,
+                Child::Nil,
+            ],
+        ),
+    ];
+    for path in fixtures() {
+        let source = fs::read(&path).unwrap();
+        for method in defs(&source) {
+            let mut nodes = Vec::new();
+            preorder(&method, &mut nodes);
+            for node in nodes {
+                let Some((start, end)) = node.span else {
+                    continue;
+                };
+                for other in &others {
+                    let _ = print::replacement(&source, &method, &node, other);
+                }
+                let Some(text) = print::replacement(&source, &method, &node, &unspanned(&node))
+                else {
+                    continue;
+                };
+                // Where a switch goes: a statement or an expression slot.
+                if !node.has(syntax::STATEMENT | syntax::EXPRESSION) {
+                    continue;
+                }
+                printed += 1;
+                let mut spliced = source[..start].to_vec();
+                spliced.extend_from_slice(text.as_bytes());
+                spliced.extend_from_slice(&source[end..]);
+                // Only code that parses is converted, as a file is.
+                let parses = ruby_prism::parse(&spliced).errors().next().is_none();
+                let converted = if parses { defs(&spliced) } else { Vec::new() };
+                let reparsed = converted
+                    .into_iter()
+                    .find(|each| each.span.map(|span| span.0) == method.span.map(|span| span.0));
+                let same = reparsed
+                    .as_ref()
+                    .is_some_and(|reparsed| normalized(reparsed) == normalized(&method));
+                if !same {
+                    failures.push(format!(
+                        "{}: {} -> {text}\n  want: {}\n  got:  {}",
+                        path.display(),
+                        String::from_utf8_lossy(&source[start..end]),
+                        sexp(&normalized(&method)),
+                        reparsed
+                            .map(|reparsed| sexp(&normalized(&reparsed)))
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(printed > 1000, "{printed}");
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

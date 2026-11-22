@@ -336,6 +336,15 @@ fn integer_text(value: ruby_prism::Integer<'_>) -> String {
     String::from_utf8(decimal).expect("digits")
 }
 
+/// An imaginary integer's value as Ruby's `inspect` prints it: `(0+2i)`,
+/// `(0-2i)`.
+pub(crate) fn imaginary(value: &str) -> String {
+    match value.strip_prefix('-') {
+        Some(magnitude) => format!("(0-{magnitude}i)"),
+        None => format!("(0+{value}i)"),
+    }
+}
+
 /// The integer value of a Prism integer: past `i128`, its decimal text.
 fn integer(value: ruby_prism::Integer<'_>) -> Child {
     integer_child(integer_text(value))
@@ -1179,10 +1188,7 @@ impl<'s> Converter<'s> {
                 match imaginary.numeric().as_integer_node() {
                     Some(integer) => leaf(
                         "complex",
-                        vec![Child::Raw(format!(
-                            "(0+{}i)",
-                            integer_text(integer.value())
-                        ))],
+                        vec![Child::Raw(self::imaginary(&integer_text(integer.value())))],
                     ),
                     None => self.unsupported("an imaginary literal", &location),
                 }
