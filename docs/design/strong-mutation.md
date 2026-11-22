@@ -635,7 +635,63 @@ projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
 command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
 its own), then Supercov, and joins every mutant's verdicts.
 
-RESULTS
+Measured on SoroCI, one project per 16-CPU machine (c8a/m8a.4xlarge), both
+tools with 15 workers. Times in seconds; Supercov's are its measured run
+(with the mutants' values) and its strong pass. "Joined" counts the mutants
+both list: StrykerJS's `Regex` mutants are not listed by Supercov (see
+`mutants.md`), and are left out.
+
+| project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| bytes.js | Mocha | mocha | 126 | 0 | 2.7 | 1.0 + 1.7 |
+| negotiator | Mocha | mocha | 544 | 0 | 2.9 | 1.1 + 5.9 |
+| ms | Jest | jest | 204 | 0 | 4.9 | 2.0 + 21.8 |
+| cron-parser | Jest | jest | 429 | 1 (error) | 33.6 | 2.8 + 37.3 |
+| classnames | node:test | command | 159 | 0 | 7.8 | 0.7 + 2.5 |
+| camelcase | node:test | command | 217 | 0 | 10.5 | 1.3 + 3.6 |
+| dot-prop | AVA | command | 584 | 0 | 50.1 | 1.4 + 28.5 |
+| p-map | AVA | command | 512 | 1 | 347.8 | 23.4 + 110.7 |
+| ini | tap | tap | 389 | 0 (28 StrykerJS errors) | 13.4 | 1.6 + 5.9 |
+| remix-auth | bun:test | command | 625 | 0 | 7.2 | 0.8 + 2.0 |
+| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.3 | 9.0 + 27.9 |
+
+No mutant StrykerJS detected (killed or timed out) is `survived` or
+`no-coverage` in Supercov, and none it let live is detected by Supercov but
+the ones explained here, each applied by hand:
+
+- p-map, `index.js:426` `preserveOrder` to `true`: Supercov kills it with
+  "with `preserveOrder: false`, a mapper error drops pending input while the
+  consumer is busy". Applied by hand, that test fails run alone (`ava --match`)
+  and passes in the whole suite, where AVA runs every test of the file at
+  once and the consumer is never busy at that moment. StrykerJS's command
+  runner runs the whole suite. A kill of the subset, as on hono.
+- ini: StrykerJS's tap runner ended 28 mutants in `RuntimeError`, which its
+  score leaves out; Supercov kills 22 and times out 6. Applied by hand
+  (`ini.js:52` `&&` to `||`), `bar.js`, `foo.js` and `win32.js` fail.
+- cron-parser `CronExpressionParser.ts:454` and mini-throttle `index.ts:25`,
+  a function body emptied: no switch could be placed
+  (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
+  An error is no verdict either way.
+- Verdicts StrykerJS and Supercov both detect differ in kind 39 times
+  (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
+  wrong is whichever the runner sees first.
+
+The validation found three soundness bugs, fixed before these numbers:
+assertions at a tap or node:test file's top level belonged to no test (ini:
+14 mutants only `win32.js` and `proto.js` killed survived); a condition that
+calls something was decided `survived` from its value alone (dot-prop
+`index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
+no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
+runs the whole command per mutant, and Supercov's jobs of one file and its
+candidates are 3-4 times faster (p-map 348 s against 134 s). Against
+StrykerJS's in-process Mocha runner a job's process start costs more: bytes.js
+about even, negotiator 2.4 times slower. Jest is slowest: each job starts Jest
+(about 1 s), where StrykerJS's runner keeps it resident; ms takes 4.9 s under
+StrykerJS and 23.8 s under Supercov, cron-parser 33.6 s and 40.1 s. Under tap,
+a job runs its file with `node` alone, as StrykerJS's runner does: ini 13.4 s
+against 7.5 s.
 
 ## Not yet
 
