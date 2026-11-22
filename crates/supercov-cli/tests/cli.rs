@@ -25241,6 +25241,25 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
         )
         .exits(2);
     assert!(unread.contains("could not read run "), "{unread}");
+    // A run whose index cannot be built again: refused the same way.
+    for entry in std::fs::read_dir(project.root.join(format!(".supercov/runs/{run}"))).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("query-index")
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let unopened = project
+        .supercov_with(
+            &["runs", "latest", "report", "--format", "html"],
+            &[("SUPERCOV_TEST_FAULT", "fs.rename@1")],
+        )
+        .exits(2);
+    assert!(unopened.contains("could not open run "), "{unopened}");
     let other = project
         .supercov(&[
             "runs", "latest", "report", "--format", "lcov", "--diff", "base",

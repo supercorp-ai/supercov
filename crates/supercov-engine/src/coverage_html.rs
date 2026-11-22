@@ -229,18 +229,19 @@ fn mutation_card(section: &Section) -> String {
         );
         // Why the rest have no verdict, each reason once.
         let mut reasons = BTreeMap::<&str, usize>::new();
-        for mutant in &section.mutants {
-            if !mutant.alive
-                && matches!(
-                    mutant.outcome,
-                    crate::mutation_report::Outcome::Error
-                        | crate::mutation_report::Outcome::NotRun
-                        | crate::mutation_report::Outcome::Pending
-                )
-            {
-                *reasons.entry(mutant.why.as_str()).or_default() += 1;
-            }
-        }
+        section
+            .mutants
+            .iter()
+            .filter(|mutant| {
+                !mutant.alive
+                    && matches!(
+                        mutant.outcome,
+                        crate::mutation_report::Outcome::Error
+                            | crate::mutation_report::Outcome::NotRun
+                            | crate::mutation_report::Outcome::Pending
+                    )
+            })
+            .for_each(|mutant| *reasons.entry(mutant.why.as_str()).or_default() += 1);
         if !reasons.is_empty() {
             let mut reasons = reasons
                 .into_iter()
@@ -262,8 +263,7 @@ fn mutation_card(section: &Section) -> String {
     }
     if section.languages.len() > 1 {
         card.push_str("<table aria-label=\"Mutants by language\"><thead><tr><th scope=\"col\">Language</th><th class=\"num\" scope=\"col\">Mutants</th><th class=\"num\" scope=\"col\">Weak score</th><th class=\"num\" scope=\"col\">Mutation score</th><th class=\"num\" scope=\"col\">Left alive</th></tr></thead><tbody>");
-        for (language, each) in &section.languages {
-            let each: &Tally = each;
+        section.languages.iter().for_each(|(language, each): (&String, &Tally)| {
             let _ = write!(
                 card,
                 "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
@@ -273,7 +273,7 @@ fn mutation_card(section: &Section) -> String {
                 score(each.mutation_score),
                 each.survivors
             );
-        }
+        });
         card.push_str("</tbody></table>");
     }
     // The survivors, by file: the most first, a few of each, the rest folded.
@@ -919,6 +919,13 @@ mod tests {
         let page = html(&view(), &BTreeMap::new(), "", Some(&empty));
         assert!(
             page.contains("No mutant is on a line this change added or changed."),
+            "{page}"
+        );
+        // Every verdict one a score counts: no reasons to give.
+        let settled = section(vec![mutant("src/a.js", 1, false, Killed)], true);
+        let page = html(&view(), &BTreeMap::new(), "", Some(&settled));
+        assert!(
+            page.contains("Strong mutation: 25.0%") && !page.contains("Why some have no verdict"),
             "{page}"
         );
         // No mutants: no card and no column.
