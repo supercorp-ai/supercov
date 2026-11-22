@@ -398,7 +398,10 @@ jobs:
           chmod +x "$supercov"
           out="$RUNNER_TEMP/out"
           mkdir -p .supercov/runs "$out"
-          for slice in "$RUNNER_TEMP"/runs/run-*; do
+          # Each slice's files, wherever the download put them: in a folder of
+          # the slice's name, or, when only one slice ran, straight in runs/.
+          slices=$(find "$RUNNER_TEMP/runs" -name run.tar.gz -exec dirname {} \; | sort)
+          for slice in $slices; do
             tar -C .supercov/runs -xzf "$slice/run.tar.gz"
             echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
           done
@@ -432,7 +435,7 @@ jobs:
           {
             echo "### ${{ matrix.os }}"
             echo '```'
-            for slice in "$RUNNER_TEMP"/runs/run-*; do
+            for slice in $slices; do
               echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
             done
             echo
