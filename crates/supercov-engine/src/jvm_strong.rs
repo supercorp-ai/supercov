@@ -851,6 +851,43 @@ mod tests {
         assert_eq!(pit[join.pairs[0].1].line, 3);
     }
 
+    /// Mutants PIT 1.17.1 made on public projects that Supercov once missed:
+    /// an anonymous class's methods in a static initializer (its own class,
+    /// which PIT's static-initializer filter leaves alone), `Arrays.setAll`
+    /// removed, and a lambda returning a value of the caller's own type
+    /// variable, erased to Object.
+    #[test]
+    fn java_mutants_pit_made_on_public_projects() {
+        let file = "fixture/Reach.java";
+        let source = "package fixture;\n\nimport java.lang.reflect.Field;\nimport java.security.AccessController;\nimport java.security.PrivilegedExceptionAction;\nimport java.util.Arrays;\nimport java.util.function.Supplier;\n\nclass Reach {\n  static final Object VALUE;\n\n  static {\n    try {\n      VALUE = AccessController.doPrivileged(new PrivilegedExceptionAction<Object>() {\n        @Override\n        public Object run() throws Exception {\n          final Field f = Reach.class.getDeclaredField(\"VALUE\");\n          f.setAccessible(true);\n          return f;\n        }\n      });\n    } catch (Exception e) {\n      throw new IllegalStateException(e);\n    }\n  }\n\n  static String[] names(final Object[] values) {\n    final String[] out = new String[values.length];\n    Arrays.setAll(out, i -> String.valueOf(values[i]));\n    return out;\n  }\n\n  <T> T value(final T defaultValue) {\n    return get(() -> defaultValue);\n  }\n\n  <T> T get(final Supplier<T> supplier) {\n    return supplier.get();\n  }\n}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let ids = file_mutants(file, source, &index)
+            .unwrap()
+            .mutants
+            .iter()
+            .map(|mutant| mutant_id(file, mutant))
+            .collect::<Vec<_>>();
+        for (line, mutator) in [
+            (18, "VoidMethodCall"),
+            (19, "NullReturnVals"),
+            (29, "VoidMethodCall"),
+            (34, "NullReturnVals"),
+        ] {
+            assert!(
+                ids.iter()
+                    .any(|id| id.starts_with(&format!("{file}:{line}:")) && id.contains(mutator)),
+                "{line} {mutator}: {ids:#?}"
+            );
+        }
+        // The static initializer's own code is not mutated.
+        assert!(
+            !ids.iter().any(|id| (12..=25)
+                .contains(&id.split(':').nth(1).unwrap().parse::<u32>().unwrap())
+                && !(18..=19).contains(&id.split(':').nth(1).unwrap().parse::<u32>().unwrap())),
+            "{ids:#?}"
+        );
+    }
+
     #[test]
     fn kotlin_mutants_are_pit_s_but_the_compiler_s_own_code() {
         let (only_pit, only_supercov) = parity("kotlin", &["fixture/Ops.kt"]);

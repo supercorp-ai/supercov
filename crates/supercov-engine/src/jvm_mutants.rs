@@ -934,6 +934,8 @@ fn known_void(name: &str, arguments: usize) -> Option<bool> {
         "printStackTrace",
         "addSuppressed",
         "setAccessible",
+        "setAll",
+        "putBoolean",
         "reset",
         "mark",
         "skipNBytes",
@@ -1778,6 +1780,35 @@ impl Enumerator<'_> {
     /// A class body: its fields first, so that a method above a field knows
     /// its type, then which private methods its static initialisation
     /// calls, then everything in order.
+    /// The anonymous classes of code PIT leaves alone (a static
+    /// initializer), walked as the classes they are: their methods run when
+    /// they are called, not as the class initialises.
+    fn java_anonymous_classes_in(&mut self, node: Node) {
+        for child in named_children(node) {
+            match child.kind() {
+                "object_creation_expression" => {
+                    for part in named_children(child) {
+                        if part.kind() == "class_body" {
+                            let position = self.classes.last().map_or(0, |class| class.lambdas) + 1;
+                            let outer_methods = std::mem::take(&mut self.methods);
+                            self.classes.push(Class {
+                                name: position.to_string(),
+                                ..Class::default()
+                            });
+                            self.java_class_body(part, false);
+                            self.classes.pop();
+                            self.methods = outer_methods;
+                        } else {
+                            self.java_anonymous_classes_in(part);
+                        }
+                    }
+                }
+                "lambda_expression" | "class_declaration" | "class_body" => {}
+                _ => self.java_anonymous_classes_in(child),
+            }
+        }
+    }
+
     fn java_class_body(&mut self, body: Node, static_context: bool) {
         let enumeration = body.kind() == "enum_body"
             || body
@@ -1934,7 +1965,9 @@ impl Enumerator<'_> {
                     self.methods.pop();
                 }
                 "static_initializer" => {
-                    // Not mutated by PIT; nothing in it needs walking.
+                    // Not mutated by PIT, but an anonymous class declared in
+                    // it is a class of its own, whose methods are.
+                    self.java_anonymous_classes_in(member);
                 }
                 "block" => {
                     // An instance initializer runs in every constructor.
@@ -3359,6 +3392,11 @@ fn functional_type_return(ty: &str, body: impl FnOnce() -> Option<Ty>) -> Option
                 Some(last) => match java_type(&last) {
                     Ty::Object(name) if name == "?" || name.len() == 1 => match body() {
                         Some(Ty::Prim(prim)) => Some(Ty::Boxed(prim)),
+                        // A value of the caller's own type variable: what
+                        // the interface's is inferred as, erased to Object.
+                        Some(Ty::Object(body)) if is_type_variable(&body) => {
+                            Some(Ty::Object("Object".into()))
+                        }
                         _ => None,
                     },
                     ty => Some(ty),
@@ -3368,6 +3406,11 @@ fn functional_type_return(ty: &str, body: impl FnOnce() -> Option<Ty>) -> Option
         }
         _ => return None,
     })
+}
+
+/// `T`, `E`: a single capital letter, as type variables are named.
+fn is_type_variable(name: &str) -> bool {
+    name.len() == 1 && name.chars().all(|c| c.is_ascii_uppercase())
 }
 
 fn split_type_arguments(arguments: &str) -> Vec<String> {
