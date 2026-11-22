@@ -1,0 +1,3503 @@
+{
+  "mutantSet": "mutant@0.17.1",
+  "subjects": [
+    {
+      "subject": "integers:2",
+      "sexp": "(def :integers (args) (array (int 0) (int 1) (int -1) (int 42) (int 300) (int 70000) (int 16)))",
+      "mutants": [
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 1) (int -1) (int 42) (int 300) (int 70000) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            6
+          ],
+          "end": [
+            3,
+            7
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            6
+          ],
+          "end": [
+            3,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            6
+          ],
+          "end": [
+            3,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int -1)"
+        },
+        {
+          "start": [
+            3,
+            6
+          ],
+          "end": [
+            3,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int -1) (int 42) (int 300) (int 70000) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            9
+          ],
+          "end": [
+            3,
+            10
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            9
+          ],
+          "end": [
+            3,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            9
+          ],
+          "end": [
+            3,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            3,
+            9
+          ],
+          "end": [
+            3,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int 1) (int 42) (int 300) (int 70000) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            12
+          ],
+          "end": [
+            3,
+            14
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            12
+          ],
+          "end": [
+            3,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            12
+          ],
+          "end": [
+            3,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            12
+          ],
+          "end": [
+            3,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int -2)"
+        },
+        {
+          "start": [
+            3,
+            12
+          ],
+          "end": [
+            3,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int 1) (int -1) (int 300) (int 70000) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 43)"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 41)"
+        },
+        {
+          "start": [
+            3,
+            16
+          ],
+          "end": [
+            3,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int 1) (int -1) (int 42) (int 70000) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(int 301)"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(int 299)"
+        },
+        {
+          "start": [
+            3,
+            20
+          ],
+          "end": [
+            3,
+            23
+          ],
+          "node": "int",
+          "replacement": "(int 55487)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int 1) (int -1) (int 42) (int 300) (int 16))"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(int 70001)"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(int 69999)"
+        },
+        {
+          "start": [
+            3,
+            25
+          ],
+          "end": [
+            3,
+            31
+          ],
+          "node": "int",
+          "replacement": "(int 2667278543)"
+        },
+        {
+          "start": [
+            3,
+            5
+          ],
+          "end": [
+            3,
+            38
+          ],
+          "node": "array",
+          "replacement": "(array (int 0) (int 1) (int -1) (int 42) (int 300) (int 70000))"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(int 17)"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(int 15)"
+        },
+        {
+          "start": [
+            3,
+            33
+          ],
+          "end": [
+            3,
+            37
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        }
+      ]
+    },
+    {
+      "subject": "floats:6",
+      "sexp": "(def :floats (args) (array (float f0000000000000000) (float f3ff8000000000000) (float fc002000000000000)))",
+      "mutants": [
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(array (float f3ff8000000000000) (float fc002000000000000))"
+        },
+        {
+          "start": [
+            7,
+            6
+          ],
+          "end": [
+            7,
+            9
+          ],
+          "node": "float",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            7,
+            6
+          ],
+          "end": [
+            7,
+            9
+          ],
+          "node": "float",
+          "replacement": "(float f3ff0000000000000)"
+        },
+        {
+          "start": [
+            7,
+            6
+          ],
+          "end": [
+            7,
+            9
+          ],
+          "node": "float",
+          "replacement": "(send (float f0000000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            6
+          ],
+          "end": [
+            7,
+            9
+          ],
+          "node": "float",
+          "replacement": "(send (float fbff0000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            6
+          ],
+          "end": [
+            7,
+            9
+          ],
+          "node": "float",
+          "replacement": "(send (float f3ff0000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(array (float f0000000000000000) (float fc002000000000000))"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(float f0000000000000000)"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(float f3ff0000000000000)"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(send (float f0000000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(send (float fbff0000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            11
+          ],
+          "end": [
+            7,
+            14
+          ],
+          "node": "float",
+          "replacement": "(send (float f3ff0000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            7,
+            22
+          ],
+          "node": "array",
+          "replacement": "(array (float f0000000000000000) (float f3ff8000000000000))"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(float f0000000000000000)"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(float f3ff0000000000000)"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(send (float f0000000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(send (float fbff0000000000000) :/ (float f0000000000000000))"
+        },
+        {
+          "start": [
+            7,
+            16
+          ],
+          "end": [
+            7,
+            21
+          ],
+          "node": "float",
+          "replacement": "(send (float f3ff0000000000000) :/ (float f0000000000000000))"
+        }
+      ]
+    },
+    {
+      "subject": "strings:10",
+      "sexp": "(def :strings (args (arg :name)) (array (str s\"\") (str s\"706c61696e\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (sym :quoted sym) (array (str s\"61\") (str s\"62\"))))",
+      "mutants": [
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"706c61696e\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (sym :quoted sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            6
+          ],
+          "end": [
+            11,
+            8
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (sym :quoted sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            10
+          ],
+          "end": [
+            11,
+            17
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            10
+          ],
+          "end": [
+            11,
+            17
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"706c61696e\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (sym :quoted sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            19
+          ],
+          "end": [
+            11,
+            27
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            19
+          ],
+          "end": [
+            11,
+            27
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"706c61696e\") (str s\"73696e676c65\") (sym :sym) (sym :quoted sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            29
+          ],
+          "end": [
+            11,
+            41
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            35
+          ],
+          "end": [
+            11,
+            39
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"706c61696e\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :quoted sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            43
+          ],
+          "end": [
+            11,
+            47
+          ],
+          "node": "sym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            43
+          ],
+          "end": [
+            11,
+            47
+          ],
+          "node": "sym",
+          "replacement": "(sym :sym__mutant__)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"706c61696e\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (array (str s\"61\") (str s\"62\")))"
+        },
+        {
+          "start": [
+            11,
+            49
+          ],
+          "end": [
+            11,
+            62
+          ],
+          "node": "sym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            49
+          ],
+          "end": [
+            11,
+            62
+          ],
+          "node": "sym",
+          "replacement": "(sym :quoted sym__mutant__)"
+        },
+        {
+          "start": [
+            11,
+            5
+          ],
+          "end": [
+            11,
+            72
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"\") (str s\"706c61696e\") (str s\"73696e676c65\") (dstr (str s\"686920\") (begin (lvar :name))) (sym :sym) (sym :quoted sym))"
+        },
+        {
+          "start": [
+            11,
+            64
+          ],
+          "end": [
+            11,
+            71
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            64
+          ],
+          "end": [
+            11,
+            71
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            11,
+            64
+          ],
+          "end": [
+            11,
+            71
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"62\"))"
+        },
+        {
+          "start": [
+            11,
+            67
+          ],
+          "end": [
+            11,
+            68
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            67
+          ],
+          "end": [
+            11,
+            68
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            11,
+            64
+          ],
+          "end": [
+            11,
+            71
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"61\"))"
+        },
+        {
+          "start": [
+            11,
+            69
+          ],
+          "end": [
+            11,
+            70
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            11,
+            69
+          ],
+          "end": [
+            11,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        }
+      ]
+    },
+    {
+      "subject": "booleans:14",
+      "sexp": "(def :booleans (args) (array (true) (false) (nil)))",
+      "mutants": [
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(array (false) (nil))"
+        },
+        {
+          "start": [
+            15,
+            6
+          ],
+          "end": [
+            15,
+            10
+          ],
+          "node": "true",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(array (true) (nil))"
+        },
+        {
+          "start": [
+            15,
+            12
+          ],
+          "end": [
+            15,
+            17
+          ],
+          "node": "false",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            23
+          ],
+          "node": "array",
+          "replacement": "(array (true) (false))"
+        }
+      ]
+    },
+    {
+      "subject": "ranges:18",
+      "sexp": "(def :ranges (args (arg :n)) (array (irange (int 1) (lvar :n)) (erange (int 1) (lvar :n)) (begin (irange (lvar :n) nil)) (begin (irange nil (lvar :n)))))",
+      "mutants": [
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(array (erange (int 1) (lvar :n)) (begin (irange (lvar :n) nil)) (begin (irange nil (lvar :n))))"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            10
+          ],
+          "node": "irange",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            7
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            7
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            19,
+            6
+          ],
+          "end": [
+            19,
+            10
+          ],
+          "node": "irange",
+          "replacement": "(erange (int 1) (lvar :n))"
+        },
+        {
+          "start": [
+            19,
+            9
+          ],
+          "end": [
+            19,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(array (irange (int 1) (lvar :n)) (begin (irange (lvar :n) nil)) (begin (irange nil (lvar :n))))"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            17
+          ],
+          "node": "erange",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            13
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            19,
+            12
+          ],
+          "end": [
+            19,
+            17
+          ],
+          "node": "erange",
+          "replacement": "(irange (int 1) (lvar :n))"
+        },
+        {
+          "start": [
+            19,
+            16
+          ],
+          "end": [
+            19,
+            17
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(array (irange (int 1) (lvar :n)) (erange (int 1) (lvar :n)) (begin (irange nil (lvar :n))))"
+        },
+        {
+          "start": [
+            19,
+            20
+          ],
+          "end": [
+            19,
+            23
+          ],
+          "node": "irange",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            20
+          ],
+          "end": [
+            19,
+            21
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            32
+          ],
+          "node": "array",
+          "replacement": "(array (irange (int 1) (lvar :n)) (erange (int 1) (lvar :n)) (begin (irange (lvar :n) nil)))"
+        },
+        {
+          "start": [
+            19,
+            27
+          ],
+          "end": [
+            19,
+            30
+          ],
+          "node": "irange",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            27
+          ],
+          "end": [
+            19,
+            30
+          ],
+          "node": "irange",
+          "replacement": "(erange nil (lvar :n))"
+        },
+        {
+          "start": [
+            19,
+            29
+          ],
+          "end": [
+            19,
+            30
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        }
+      ]
+    },
+    {
+      "subject": "hashes:22",
+      "sexp": "(def :hashes (args (arg :a) (arg :b)) (hash (pair (sym :a) (int 1)) (pair (str s\"62\") (lvar :b)) (pair (lvar :a) (lvar :b)) (kwsplat (lvar :b))))",
+      "mutants": [
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": null
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            23,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "sym",
+          "replacement": "(sym :a__mutant__)"
+        },
+        {
+          "start": [
+            23,
+            10
+          ],
+          "end": [
+            23,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            23,
+            10
+          ],
+          "end": [
+            23,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            23,
+            10
+          ],
+          "end": [
+            23,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            23,
+            10
+          ],
+          "end": [
+            23,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (str s\"62\") (lvar :b)) (pair (lvar :a) (lvar :b)) (kwsplat (lvar :b)))"
+        },
+        {
+          "start": [
+            23,
+            13
+          ],
+          "end": [
+            23,
+            16
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            23,
+            20
+          ],
+          "end": [
+            23,
+            21
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :a) (int 1)) (pair (lvar :a) (lvar :b)) (kwsplat (lvar :b)))"
+        },
+        {
+          "start": [
+            23,
+            28
+          ],
+          "end": [
+            23,
+            29
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :a) (int 1)) (pair (str s\"62\") (lvar :b)) (kwsplat (lvar :b)))"
+        },
+        {
+          "start": [
+            23,
+            33
+          ],
+          "end": [
+            23,
+            34
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            23,
+            5
+          ],
+          "end": [
+            23,
+            36
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :a) (int 1)) (pair (str s\"62\") (lvar :b)) (pair (lvar :a) (lvar :b)))"
+        }
+      ]
+    },
+    {
+      "subject": "regexps:26",
+      "sexp": "(def :regexps (args (arg :text)) (and (send (lvar :text) :=~ (regexp (str s\"5c41666f6f\") (regopt))) (send (lvar :text) :match? (regexp (str s\"6261725c7a\") (regopt :i)))))",
+      "mutants": [
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": null
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"5c41666f6f\") (regopt)))"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"6261725c7a\") (regopt :i)))"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "and",
+          "replacement": "(or (send (lvar :text) :=~ (regexp (str s\"5c41666f6f\") (regopt))) (send (lvar :text) :match? (regexp (str s\"6261725c7a\") (regopt :i))))"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            20
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            20
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            20
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5c41666f6f\") (regopt)))"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            27,
+            20
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c41666f6f\") (regopt))"
+        },
+        {
+          "start": [
+            27,
+            13
+          ],
+          "end": [
+            27,
+            20
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            27,
+            14
+          ],
+          "end": [
+            27,
+            19
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :end_with? (str s\"626172\"))"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"6261725c7a\") (regopt :i))"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            28
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            27,
+            24
+          ],
+          "end": [
+            27,
+            45
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            27,
+            43
+          ],
+          "end": [
+            27,
+            44
+          ],
+          "node": "regopt",
+          "replacement": "(regopt)"
+        },
+        {
+          "start": [
+            27,
+            36
+          ],
+          "end": [
+            27,
+            44
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt :i))"
+        },
+        {
+          "start": [
+            27,
+            37
+          ],
+          "end": [
+            27,
+            42
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        }
+      ]
+    },
+    {
+      "subject": "rationals:30",
+      "sexp": "(def :rationals (args) (array (rational (1/1)) (complex (0+2i))))",
+      "mutants": [
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(array (complex (0+2i)))"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            8
+          ],
+          "node": "rational",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            8
+          ],
+          "node": "rational",
+          "replacement": "(rational (0/1))"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            8
+          ],
+          "node": "rational",
+          "replacement": "(rational (2/1))"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            13
+          ],
+          "node": "array",
+          "replacement": "(array (rational (1/1)))"
+        },
+        {
+          "start": [
+            31,
+            10
+          ],
+          "end": [
+            31,
+            12
+          ],
+          "node": "complex",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            10
+          ],
+          "end": [
+            31,
+            12
+          ],
+          "node": "complex",
+          "replacement": "(complex (0+0i))"
+        },
+        {
+          "start": [
+            31,
+            10
+          ],
+          "end": [
+            31,
+            12
+          ],
+          "node": "complex",
+          "replacement": "(complex (0+1i))"
+        },
+        {
+          "start": [
+            31,
+            10
+          ],
+          "end": [
+            31,
+            12
+          ],
+          "node": "complex",
+          "replacement": "(complex (0+3i))"
+        }
+      ]
+    },
+    {
+      "subject": "singleton:34",
+      "sexp": "(defs (self) :singleton (args (arg :x)) (lvar :x))",
+      "mutants": [
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            6
+          ],
+          "node": "lvar",
+          "replacement": null
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        }
+      ]
+    },
+    {
+      "subject": "words:40",
+      "sexp": "(def :words (args (arg :text)) (send (send (lvar :text) :gsub (regexp (str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b293f\") (regopt)) (str s\"5c31\")) :=~ (regexp (str s\"5e617c62247c5b5e5c645f612d7a5d2b\") (regopt))))",
+      "mutants": [
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :gsub (regexp (str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b293f\") (regopt)) (str s\"5c31\"))"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :sub (regexp (str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b293f\") (regopt)) (str s\"5c31\"))"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :gsub)"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a5c772b295c732a2d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c572b295c732a2d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c77295c732a2d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c532a2d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732b2d5c732a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c532a283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c73283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732b283f3c726573743e5c642b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732a283f3a5c642b29\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732a283f3c5f726573743e5c642b29\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732a283f3c726573743e5c442b293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732a283f3c726573743e5c64293f\")"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b29\")"
+        },
+        {
+          "start": [
+            41,
+            15
+          ],
+          "end": [
+            41,
+            42
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            41,
+            16
+          ],
+          "end": [
+            41,
+            41
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :gsub (str s\"5c31\"))"
+        },
+        {
+          "start": [
+            41,
+            44
+          ],
+          "end": [
+            41,
+            48
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            41,
+            44
+          ],
+          "end": [
+            41,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :gsub (regexp (str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b293f\") (regopt)))"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(send (send (lvar :text) :gsub (regexp (str s\"285c772b295c732a2d5c732a283f3c726573743e5c642b293f\") (regopt)) (str s\"5c31\")) :match? (regexp (str s\"5e617c62247c5b5e5c645f612d7a5d2b\") (regopt)))"
+        },
+        {
+          "start": [
+            41,
+            5
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5e617c62247c5b5e5c645f612d7a5d2b\") (regopt))"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"62247c5b5e5c645f612d7a5d2b\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5e617c5b5e5c645f612d7a5d2b\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5e617c6224\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c41617c62247c5b5e5c645f612d7a5d2b\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5e617c625c7a7c5b5e5c645f612d7a5d2b\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5e617c62247c5b5e5c445f612d7a5d2b\")"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"5e617c62247c5b5e5c645f612d7a5d\")"
+        },
+        {
+          "start": [
+            41,
+            53
+          ],
+          "end": [
+            41,
+            71
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            41,
+            54
+          ],
+          "end": [
+            41,
+            70
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        }
+      ]
+    },
+    {
+      "subject": "anchored:44",
+      "sexp": "(def :anchored (args (arg :text)) (or (or (send (lvar :text) :match? (regexp (str s\"5c41612a\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt)))) (send (lvar :text) :scan (regexp (str s\"283f69295b5b3a616c7068613a5d5d7b322c337d5c2e\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": null
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(or (send (lvar :text) :match? (regexp (str s\"5c41612a\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt))))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(send (lvar :text) :scan (regexp (str s\"283f69295b5b3a616c7068613a5d5d7b322c337d5c2e\") (regopt)))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "or",
+          "replacement": "(and (or (send (lvar :text) :match? (regexp (str s\"5c41612a\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt)))) (send (lvar :text) :scan (regexp (str s\"283f69295b5b3a616c7068613a5d5d7b322c337d5c2e\") (regopt))))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "or",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "or",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5c41612a\") (regopt)))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "or",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt)))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "or",
+          "replacement": "(and (send (lvar :text) :match? (regexp (str s\"5c41612a\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt))))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :start_with? (str s\"61\"))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c41612a\") (regopt))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            45,
+            18
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c4161\")"
+        },
+        {
+          "start": [
+            45,
+            18
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c41612b\")"
+        },
+        {
+          "start": [
+            45,
+            17
+          ],
+          "end": [
+            45,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            45,
+            18
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            45,
+            28
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            28
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            45,
+            28
+          ],
+          "end": [
+            45,
+            32
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            28
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"283f3a787c79292b3f5c7a\") (regopt)))"
+        },
+        {
+          "start": [
+            45,
+            28
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"283f3a787c79292b3f5c7a\") (regopt))"
+        },
+        {
+          "start": [
+            45,
+            37
+          ],
+          "end": [
+            45,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a79292b3f5c7a\")"
+        },
+        {
+          "start": [
+            45,
+            37
+          ],
+          "end": [
+            45,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a78292b3f5c7a\")"
+        },
+        {
+          "start": [
+            45,
+            37
+          ],
+          "end": [
+            45,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a787c79295c7a\")"
+        },
+        {
+          "start": [
+            45,
+            36
+          ],
+          "end": [
+            45,
+            49
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            45,
+            37
+          ],
+          "end": [
+            45,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            45,
+            53
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            53
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            45,
+            53
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"283f69295b5b3a616c7068613a5d5d7b322c337d5c2e\") (regopt))"
+        },
+        {
+          "start": [
+            45,
+            53
+          ],
+          "end": [
+            45,
+            57
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            45,
+            53
+          ],
+          "end": [
+            45,
+            88
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :scan)"
+        },
+        {
+          "start": [
+            45,
+            64
+          ],
+          "end": [
+            45,
+            86
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f69295b5b3a616c7068613a5d5d5c2e\")"
+        },
+        {
+          "start": [
+            45,
+            63
+          ],
+          "end": [
+            45,
+            87
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            45,
+            64
+          ],
+          "end": [
+            45,
+            86
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        }
+      ]
+    }
+  ]
+}

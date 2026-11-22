@@ -276,9 +276,9 @@ test('a test that reaches no server', async () => {
   }
   // The Ruby server's evidence that cannot be listed: its run is not
   // published, its evidence is kept, and the run fails.
-  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby_evidence.rs:329' });
+  const unlistedRuby = run(binary, ['--', 'npx', 'playwright', 'test', '-c', 'grade.config.js'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#ruby_evidence.rs:343' });
   assert.notEqual(unlistedRuby.status, 0, unlistedRuby.stdout + unlistedRuby.stderr);
-  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby_evidence.rs:329'), unlistedRuby.stderr);
+  assert.ok(unlistedRuby.stderr.includes('test fault at fs (ruby_evidence.rs:343'), unlistedRuby.stderr);
   assert.match(unlistedRuby.stderr, /their evidence is kept at/u, unlistedRuby.stderr);
   // Failures injected (SUPERCOV_TEST_FAULT): the copy taken by another run
   // after the servers were prepared for it, which prepares them again; a
@@ -329,7 +329,7 @@ test('a test that reaches no server', async () => {
   // panics; the first server's failing ends the run.
   for (const [fault, place] of [
     ['fs.create_dir_all#python_run.rs:849', 'python_run.rs:849'],
-    ['fs.create_dir_all#ruby_run.rs:643', 'ruby_run.rs:643'],
+    ['fs.create_dir_all#ruby_run.rs:649', 'ruby_run.rs:649'],
     ['fs.rename#evidence_archive.rs:512', 'evidence_archive.rs:512'],
     ['fs.rename#evidence_archive.rs:512@2', 'evidence_archive.rs:512'],
     ['fs.rename#lifecycle.rs:1211', 'lifecycle.rs:1211'],

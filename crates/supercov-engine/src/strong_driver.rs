@@ -114,6 +114,12 @@ pub const STRONG_RUNNERS: &[&str] = &[
     // Python's (`python_strong`): pytest's and unittest's tests.
     "pytest",
     "unittest",
+    // Ruby's (`ruby_run`, `supercov_strong.rb`): each mutant in a fork of
+    // the loaded suite.
+    "rspec",
+    "minitest",
+    "test-unit",
+    "cucumber",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
@@ -185,6 +191,7 @@ pub fn has_driver(language: &str) -> bool {
             | crate::mutant_list::RUST
             | crate::go_mutants::GO
             | crate::python_mutants::PYTHON
+            | crate::ruby_mutants::RUBY
     )
 }
 
@@ -229,6 +236,7 @@ pub fn run_strong_pass(
             crate::go_strong::run_go_strong(&request, diagnostics).map(|_| 0)
         }
         crate::python_mutants::PYTHON => crate::python_strong::run_strong_python(pass, diagnostics),
+        crate::ruby_mutants::RUBY => crate::ruby_run::run_strong_ruby(pass, diagnostics),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }
