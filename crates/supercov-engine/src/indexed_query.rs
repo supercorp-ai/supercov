@@ -685,7 +685,12 @@ pub fn query_indexed(
         // Mutants' verdicts are of every attempt of the tests the index
         // keeps: a view of some outcomes, kinds or runners has none of them.
         if view == CoverageViewId::All && request.kind.is_none() && request.runner.is_none() {
-            data.mutants = crate::mutants_query::run_summary(index)?;
+            data.mutants = crate::mutants_query::run_summary(index)?.map(|mut mutants| {
+                if let Some(strong) = &request.mutants.strong {
+                    mutants.summary = mutants.summary.with_strong(strong);
+                }
+                mutants
+            });
         }
         return Ok(IndexedQueryOutput {
             command: "coverage.summary",

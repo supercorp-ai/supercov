@@ -6790,8 +6790,10 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         .find("starts without build output")
         .unwrap_or_else(|| panic!("{said}"));
     assert!(note < end, "{said}");
+    // The folder is made first, as this checkout has it: a build that
+    // starts by removing it (`rm -r dist`) fails in a copy without it.
     assert!(
-        said.contains("supercov -- sh -c \"npm run build && npm test\""),
+        said.contains("supercov -- sh -c \"mkdir -p dist && npm run build && npm test\""),
         "{said}"
     );
 
@@ -6829,6 +6831,18 @@ fn the_command_runs_as_given_and_a_build_is_the_commands_to_run() {
         .supercov(&["runs", "latest", "line", "src/fee.js:2"])
         .succeeds();
     assert!(line.contains("small orders pay"), "{line}");
+
+    // A command that builds and then runs no test: said, though no build
+    // is missing.
+    let none = project.supercov(&["--", "sh", "-c", "npm run build && exit 4"]);
+    assert_eq!(none.code(), 4, "{}", none.stdout());
+    assert!(
+        none.stderr().contains(
+            "the command exited 4 and the run recorded no test: its own output above says why"
+        ),
+        "{}",
+        none.stderr()
+    );
 
     // A test that fails on its own is named, and the build is not blamed.
     project.write(
@@ -16055,7 +16069,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2623 => main.rs:2623",
+            "fs.canonicalize#main.rs:2636 => main.rs:2636",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
         ],
@@ -17620,7 +17634,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // Each by its place: counted, a step's number moved with the platform
     // and with the query index, which is written beside the publication.
     for fault in [
-        "fs.create_dir_all#lifecycle.rs:1364",
+        "fs.create_dir_all#lifecycle.rs:1369",
         "fs.create_dir_all#javascript_run.rs:752",
         "fs.write#javascript_run.rs:1093",
         "fs.canonicalize#process_supervision.rs:1796",
@@ -17630,7 +17644,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#evidence_archive.rs:484",
         "fs.create_dir_all#javascript_run.rs:1644",
         "fs.create_dir_all#javascript_run.rs:1646",
-        "fs.create_dir_all#lifecycle.rs:1055",
+        "fs.create_dir_all#lifecycle.rs:1060",
         "fs.create_dir_all#javascript_run.rs:1746",
         "fs.create_dir_all#javascript_run.rs:1748",
     ] {
@@ -21715,9 +21729,9 @@ fn a_test_writing_one_of_the_run_s_own_files_into_its_evidence_stops_the_run() {
 #[test]
 fn a_replaced_workspace_is_swept_whatever_is_gone_meanwhile() {
     for (fault, emptied) in [
-        ("fs.remove_file:2#lifecycle.rs:1691", true),
-        ("fs.read_dir:2#lifecycle.rs:1660", true),
-        ("fs.remove_file#lifecycle.rs:1691", false),
+        ("fs.remove_file:2#lifecycle.rs:1696", true),
+        ("fs.read_dir:2#lifecycle.rs:1665", true),
+        ("fs.remove_file#lifecycle.rs:1696", false),
     ] {
         let project = Project::cart("sweep");
         assert_eq!(project.supercov(&["--", "node", "--test"]).code(), 0);
@@ -23866,12 +23880,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:948",
+            "fs.write#mutants_test_command.rs:1375",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:948"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1375"),
         "{}",
         unwritten.stderr()
     );
@@ -23999,7 +24013,9 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     contains_all(
         &half,
         &[
-            &format!("Strong mutation for {run}: mutation score "),
+            // The mutants asked about are named, and counted alone.
+            &format!("Strong mutation for {run} ("),
+            " mutants, in src/cart.js): mutation score ",
             "  killed        ",
         ],
     );
@@ -24111,7 +24127,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:222")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:283")],
         )
         .exits(2);
     assert!(
@@ -24310,13 +24326,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:682",
+            "coverage-index-read#mutants_query.rs:702",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:682"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:702"), "{said}");
 
     // The table of files.
     contains_all(

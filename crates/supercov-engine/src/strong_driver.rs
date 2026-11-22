@@ -197,8 +197,15 @@ pub fn run_strong_pass(
                 watchdog_program: pass.watchdog_program.clone(),
                 strong: Some(pass.strong.clone()),
             };
-            crate::javascript_run::run_strong_javascript(&request, diagnostics)
-                .map_err(|error| error.to_string())
+            // Interrupted: the signal's exit code, as the command's would be,
+            // so the caller keeps what the pass decided and stops.
+            match crate::javascript_run::run_strong_javascript(&request, diagnostics) {
+                Err(crate::javascript_run::DirectJavascriptRunError::Interrupted {
+                    exit_code,
+                    ..
+                }) => Ok(exit_code),
+                finished => finished.map_err(|error| error.to_string()),
+            }
         }
         crate::mutant_list::RUST => crate::rust_strong::run_strong_rust(
             &crate::rust_strong::StrongRustRequest {
@@ -218,6 +225,56 @@ pub fn run_strong_pass(
 pub fn work_directory(root: &Path, run_id: &str, nonce: u128) -> PathBuf {
     root.join(".supercov/strong")
         .join(format!("{run_id}-{nonce}"))
+}
+
+/// The file in a pass's directory naming the process that works there.
+const OWNER_FILE: &str = "owner";
+
+/// Makes the directory a pass works in, owned by this process.
+pub fn claim_work_directory(work: &Path) -> std::io::Result<()> {
+    crate::fault_fs::create_dir_all(work)?;
+    crate::fault_fs::write(work.join(OWNER_FILE), std::process::id().to_string())
+}
+
+/// What a finished pass keeps: its logs (the command's output, a Playwright
+/// pass's further invocations'). Its plan, results and each job's evidence
+/// are gone once its verdicts are saved into the run; a pass over nanoid's
+/// node:test suite left 1.2 GB.
+pub fn finish_work_directory(work: &Path) {
+    let Ok(entries) = std::fs::read_dir(work) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "log") {
+            continue;
+        }
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
+/// Removes the directories of passes whose process has ended, in whatever
+/// way it ended: a pass that was killed left its whole directory. A pass of
+/// another process still running keeps its own.
+pub fn prune_work_directories(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join(".supercov/strong")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let owner = std::fs::read_to_string(entry.path().join(OWNER_FILE))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        match owner {
+            Some(pid) if pid == std::process::id() || crate::lifecycle::process_alive(pid) => {}
+            _ => {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

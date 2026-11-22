@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
 import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
@@ -130,6 +131,47 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.ok(summary.confirmations >= 2, JSON.stringify(summary));
     assert.ok(summary.stopped >= 2, JSON.stringify(summary));
 });
+
+// Ctrl-C reaches the driver, not its jobs, which run in process groups of
+// their own: they stop with it. And a finished job leaves nothing on disk.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+    test(`every job stops when the pass gets ${signal}`, async (t) => {
+        const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
+        t.after(() => rmSync(root, { recursive: true, force: true }));
+        mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
+        writeFileSync(join(root, ".supercov/frontend-evidence/mutants.json"), JSON.stringify({ files: { "src/a.js": [{ id: "hang" }] } }));
+        writeFileSync(join(root, "suite.json"), JSON.stringify({ files: { "t/a.test.js": ["a1"] }, rules: { "src/a.js#0": { a1: "hang" } } }));
+        writeFileSync(join(root, "plan.json"), JSON.stringify({ tests: [test_("a1", "t/a.test.js")], mutants: [{ id: "hang", file: "src/a.js", candidates: [{ test: 0, reason: "infected" }] }] }));
+        const pids = join(root, "pids");
+        const driver = spawn(process.execPath, [resolve(import.meta.dirname, "../../runtime/javascript/strongJobs.mjs"), "--", process.execPath, runner], {
+            cwd: root,
+            env: { ...process.env, FAKE_SUITE: join(root, "suite.json"), FAKE_PIDS: pids, SUPERCOV_STRONG_PLAN: join(root, "plan.json"), SUPERCOV_STRONG_RESULTS: join(root, "results.jsonl") },
+            stdio: "ignore",
+        });
+        const ended = new Promise((done) => driver.once("exit", (code) => done(code)));
+        const started = () => (existsSync(pids) ? readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number) : []);
+        // The baseline's process, then the mutant's, which never ends.
+        while (started().length < 2)
+            await new Promise((done) => setTimeout(done, 50));
+        await new Promise((done) => setTimeout(done, 200));
+        // The baseline's job is over: its directory is gone.
+        assert.deepEqual(readdirSync(join(root, "results.jsonl.jobs")).filter((name) => /^\d+$/.test(name)), ["2"]);
+        driver.kill(signal);
+        assert.equal(await ended, signal === "SIGINT" ? 130 : 143);
+        const alive = (pid) => {
+            try {
+                process.kill(pid, 0);
+                return true;
+            }
+            catch {
+                return false;
+            }
+        };
+        for (let wait = 0; wait < 40 && started().some(alive); wait += 1)
+            await new Promise((done) => setTimeout(done, 50));
+        assert.deepEqual(started().filter(alive), []);
+    });
+}
 
 test("a test's outcome is its last attempt's that says one", () => {
     const directory = mkdtempSync(join(tmpdir(), "supercov-outcomes-"));

@@ -259,6 +259,26 @@ impl MutantsSummary {
             status,
         }
     }
+
+    /// The strong verdicts a pass saved into the run, by mutant id: their
+    /// counts and StrykerJS's score over them (killed and timed out over
+    /// those and the survivors and uncovered).
+    pub fn with_strong(mut self, strong: &BTreeMap<String, Value>) -> Self {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for status in strong
+            .values()
+            .filter_map(|verdict| verdict["status"].as_str())
+        {
+            *counts.entry(status.to_owned()).or_default() += 1;
+        }
+        let of = |status: &str| counts.get(status).copied().unwrap_or(0);
+        let detected = of("killed") + of("timeout");
+        let total = detected + of("survived") + of("no-coverage");
+        self.mutation_score =
+            (total > 0).then(|| (detected as f64 / total as f64 * 10_000.0).round() / 10_000.0);
+        self.strong = (!counts.is_empty()).then_some(counts);
+        self
+    }
 }
 
 /// The run summary's line: its mutants and scores.

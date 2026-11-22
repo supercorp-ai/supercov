@@ -588,6 +588,11 @@ pub fn interrupt_run_state(
     Ok(state)
 }
 
+/// Whether a process with this id runs (or exists under another account).
+pub fn process_alive(pid: u32) -> bool {
+    process_exists(pid)
+}
+
 #[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     if pid == 0 || pid > libc::pid_t::MAX as u32 {

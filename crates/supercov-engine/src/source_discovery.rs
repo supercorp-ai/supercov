@@ -1073,10 +1073,24 @@ fn entry_targets(directory: &Path, manifest: &Value) -> Vec<PathBuf> {
             string_targets(value, 0, &mut targets);
         }
     }
+    // A package that names no entry is loaded from its `index.js`, as Node
+    // loads it: many small packages keep all their code there, beside the
+    // manifest.
+    if manifest.get("main").is_none() && manifest.get("exports").is_none() {
+        targets.push("./index.js".into());
+    }
     targets
         .into_iter()
         .filter_map(|target| {
-            if !target.starts_with('.') || target.contains("node_modules") {
+            // `"main": "index.js"` names a file as `./index.js` does; a
+            // bare name in `browser` (`"fs": false`'s key aside) or
+            // `exports` is a package, and a URL or absolute path is no
+            // part of this one.
+            let relative = target.starts_with('.')
+                || (!target.starts_with('/')
+                    && !target.contains(':')
+                    && directory.join(&target).is_file());
+            if !relative || target.contains("node_modules") {
                 return None;
             }
             let prefix = target
@@ -1872,6 +1886,34 @@ mod tests {
             "{:?}",
             discovered.scope.entries
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A package that names no entry is loaded from its `index.js`, and one
+    /// that names it without `./` names it as well: content-type's layout,
+    /// its code in `index.js` beside the manifest and its tests in `test/`.
+    #[test]
+    fn a_package_s_root_index_and_bare_entries_are_its_source() {
+        let root = repository(
+            "root-index",
+            &[
+                ("package.json", r#"{"name":"content-type","bin":"cli.js"}"#),
+                ("index.js", "module.exports = 1;\n"),
+                ("cli.js", "require('./index.js');\n"),
+                ("test/test.js", "require('../index.js');\n"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(discovered.source_files, ["cli.js", "index.js"]);
+        // `main` named bare; an entry that is no file, a package or a URL
+        // is not one.
+        fs::write(
+            root.join("package.json"),
+            r#"{"main":"index.js","browser":{"./index.js":"missing.js","fs":"https://x/y.js"}}"#,
+        )
+        .unwrap();
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(discovered.source_files, ["index.js"]);
         fs::remove_dir_all(&root).unwrap();
     }
 

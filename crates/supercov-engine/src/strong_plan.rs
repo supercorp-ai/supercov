@@ -723,6 +723,11 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                             }
                         }
                     }
+                    // No test ran its code: what ran it was work no test of
+                    // the run could have caused (a run with no test, a test
+                    // file's modules loaded with no test of it), and no test
+                    // can kill it. StrykerJS calls it NoCoverage.
+                    let tested = !chosen.is_empty();
                     let mut candidates = chosen
                         .into_iter()
                         .filter(|(test, _)| runnable[*test])
@@ -736,7 +741,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                             &tb.name,
                         ))
                     });
-                    if candidates.is_empty() {
+                    if !tested {
+                        planned.decided = Some(Decided::NoCoverage);
+                        planned.reason = Some("no-test-ran-it".into());
+                    } else if candidates.is_empty() {
                         planned.decided = Some(Decided::Survived);
                         planned.reason = Some("no-passing-candidate".into());
                     }
@@ -1041,12 +1049,13 @@ mod tests {
         assert_eq!(module.whole_files, ["t/a.test.js"]);
         assert_eq!(module.covering, 1);
 
-        let survived = planned(&plan, "nobody");
+        // A test file's modules ran it, and the file has no test.
+        let nobody = planned(&plan, "nobody");
         assert_eq!(
-            (survived.decided, survived.reason.as_deref()),
-            (Some(Decided::Survived), Some("no-passing-candidate"))
+            (nobody.decided, nobody.reason.as_deref()),
+            (Some(Decided::NoCoverage), Some("no-test-ran-it"))
         );
-        assert!(survived.candidates.is_empty());
+        assert!(nobody.candidates.is_empty());
         // A setup that names no file (Mocha loads every test file before
         // its first test): every test of the run.
         let loose = planned(&plan, "loose");
@@ -1106,10 +1115,10 @@ mod tests {
     }
 
     /// Work no test was credited with makes every test of the run a
-    /// candidate: a run of none has no candidate, and each such mutant
-    /// survives, as does one whose function no record ran.
+    /// candidate: a run of none has no candidate, and no test ran such a
+    /// mutant, nor one whose function no record ran: no coverage.
     #[test]
-    fn a_mutant_only_uncredited_work_ran_survives_a_run_without_tests() {
+    fn a_mutant_only_uncredited_work_ran_has_no_coverage_in_a_run_without_tests() {
         let raw_results = [record("bg", "background", None, &["s"])];
         let mutants = vec![
             mutant(serde_json::json!({"id": "bg", "statement": "s"})),
@@ -1131,15 +1140,29 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let survived = Some(Decided::Survived);
-        let reason = Some("no-passing-candidate");
+        let none = Some(Decided::NoCoverage);
+        let reason = Some("no-test-ran-it");
         assert_eq!(
             outcomes,
             [
-                ("bg", "infected", survived, reason, 0),
-                ("nopoint", "unknown", survived, reason, 0),
-                ("unhit", "unknown", survived, reason, 0),
+                ("bg", "infected", none, reason, 0),
+                ("nopoint", "unknown", none, reason, 0),
+                ("unhit", "unknown", none, reason, 0),
             ]
+        );
+    }
+
+    /// A mutant only failing tests ran: they ran it, and kill nothing.
+    #[test]
+    fn a_mutant_only_failing_tests_ran_survives() {
+        let mut failed = record("f", "test", Some("t/f.test.js"), &["s"]);
+        failed.status = Some("failed".into());
+        let mutants = vec![mutant(serde_json::json!({"id": "m", "statement": "s"}))];
+        let plan = plan(&[failed], listed(mutants, &[])).unwrap();
+        let m = planned(&plan, "m");
+        assert_eq!(
+            (m.decided, m.reason.as_deref(), m.candidates.len()),
+            (Some(Decided::Survived), Some("no-passing-candidate"), 0)
         );
     }
 
