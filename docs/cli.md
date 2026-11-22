@@ -461,8 +461,13 @@ carry its own mutant, several copies of a file run side by side, a mutant is
 switched on before the test file's imports, and it stops at its first failing
 test. Playwright suites carry each attempt's mutant with its requests, so one
 server serves different mutants to different workers; mutants of a server's
-start-up run with the server restarted for them. See
-`docs/design/strong-mutation.md`.
+start-up run with the server restarted for them. Jest, node:test, Mocha, AVA,
+node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
+command, with the mutant switched on in every process from its start (in the
+page, under Browser Mode) and only that file's candidate tests, stopping at
+the first failure. Mutants of languages other than JavaScript and TypeScript
+are listed `error` until their language has a driver. See
+`docs/design/strong-mutation.md` and `docs/design/mutation-drivers.md`.
 
 - `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
