@@ -1,13 +1,16 @@
 """Joins Supercov's strong verdicts to mutmut's full kill matrix.
 
-    python compare.py <ids.jsonl> <kill-matrix.jsonl> <strong-mutation.json> [mutmut-results.json]
+    python compare.py <ids.jsonl> <kill-matrix.jsonl> <strong-mutation.json> [mutmut-results.json] [weak.json]
 
 `ids.jsonl` is `scripts/mutmut-parity.py --root <project> --module-root
 <where packages start> <its sources>`: each mutmut mutant's name and
 Supercov's id for it. The kill matrix runs every test against every mutant
 (`kill_matrix.py`). A soundness violation is a mutant the matrix detects
 (killed, timeout) that Supercov calls undetected (survived, no-coverage,
-equivalent), or the reverse. Prints one JSON summary.
+equivalent), or the reverse. With `weak.json` (`supercov runs latest
+mutants --json --limit 0`), a mutant the weak report calls not reached or
+not infected that the matrix detects is counted too. Prints one JSON
+summary.
 """
 
 import json
@@ -19,6 +22,19 @@ UNDETECTED = {"survived", "no-coverage", "equivalent", "no tests"}
 
 ids_path, matrix_path, strong_path = sys.argv[1:4]
 mutmut_path = sys.argv[4] if len(sys.argv) > 4 else None
+weak_path = sys.argv[5] if len(sys.argv) > 5 else None
+weak = {}
+if weak_path:
+    for mutant in json.load(open(weak_path, encoding="utf-8"))["data"]["mutants"]:
+        # The weak verdict, whatever a strong pass then said.
+        facts = mutant.get("weak") or {}
+        if facts.get("rule"):
+            status = "equivalent"
+        elif facts.get("reach") == "not-reached":
+            status = "not-reached"
+        else:
+            status = facts.get("infection") or "unknown"
+        weak[mutant["id"]] = status
 ids = {}
 for line in open(ids_path, encoding="utf-8"):
     record = json.loads(line)
@@ -58,6 +74,16 @@ for name, record in sorted(matrix.items()):
                 "mutmutOwn": mutmut.get(name),
             }
         )
+weak_pairs = Counter()
+weak_violations = []
+for name, record in sorted(matrix.items()):
+    mutant = ids.get(name)
+    status = weak.get(mutant)
+    if status is None:
+        continue
+    weak_pairs[(record["status"], status)] += 1
+    if record["status"] in DETECTED and status in ("not-reached", "not-infected", "equivalent"):
+        weak_violations.append({"mutmut": name, "id": mutant, "matrix": record["status"], "weak": status})
 summary = {
     "matrix": len(matrix),
     "joined": sum(pairs.values()),
@@ -68,5 +94,8 @@ summary = {
     "violationList": violations,
     "errorList": errors[:20],
     "unmatchedList": unmatched[:20],
+    "weakPairs": {f"{theirs} / {ours}": count for (theirs, ours), count in sorted(weak_pairs.items())},
+    "weakViolations": len(weak_violations),
+    "weakViolationList": weak_violations,
 }
 print(json.dumps(summary, indent=1))
