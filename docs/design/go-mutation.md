@@ -163,17 +163,24 @@ alone, all constant declarations; no switch was refused.
 2. Builds each candidate package's test binary once: `go test -c -vet=off`
    (vet would read the switches), with the run's `-tags`, `-race`, `-mod`,
    `-ldflags` and `-trimpath`.
-3. Runs each package's baseline: its candidates by exact name
-   (`-test.run '^(?:TestA|TestB)$'`), no mutant. A candidate that fails
-   there is no candidate; where the candidates fail together and the
-   package passes whole, the package runs whole.
-4. Runs each mutant, one process per package, its candidates by exact name,
-   the cheapest package first, `-test.failfast`, with
-   `SUPERCOV_ACTIVE_MUTANT=<file>#<index>`, until a test fails. Workers run
-   mutants side by side (`SUPERCOV_STRONG_WORKERS`, default every CPU).
-5. Confirms a kill whose tests up to the failing one are not the baseline's:
-   they run again without the mutant, and a kill they fail without it too
-   is overturned and the mutant runs with every candidate of its package.
+3. Runs each package's baseline: the package whole, no mutant. A test that
+   fails there (one the measured run saw fail, or a flaky one) is left out
+   of every run of the package (`-test.skip`), and the baseline is the rest.
+4. Runs each mutant, one process per package that holds a candidate, the
+   cheapest package first, the package whole (`-test.failfast`), with
+   `SUPERCOV_ACTIVE_MUTANT=<file>#<index>`, until a test fails. A package's
+   tests share its process: a test after a candidate can fail on what the
+   mutant left behind, and one before it set up what the candidate reads.
+   On uuid, `version7.go`'s clock state set by earlier tests is what lets
+   `TestVersion1` reach the code a mutant changes, and the
+   `version6.go` variant mutants fail `TestVersion6` alone but not after
+   the tests before it. Running the candidates by name (`-test.run`), as a
+   first version did, called the first survived and the second killed;
+   the suite as written says the opposite. Which packages run is still the
+   plan's: a package with no candidate cannot run the mutant's code.
+   Workers run mutants side by side (`SUPERCOV_STRONG_WORKERS`, default
+   every CPU).
+5. A kill is the mutant's: the package passed whole without it.
 6. A mutant's first attempt at a package has one and a half times the
    package's baseline and a second. A run past it is stopped, and the
    mutant runs again after every other has, in a round of retries alone,

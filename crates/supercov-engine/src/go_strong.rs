@@ -443,9 +443,8 @@ struct Package {
     binary: PathBuf,
     /// Tests that passed their baseline, with how long each took.
     passed: HashMap<String, u64>,
-    /// The baseline ran every test of the package: its candidates' baseline
-    /// failed alone and passed whole.
-    whole: bool,
+    /// Tests that fail without a mutant: left out of every run.
+    skip: Vec<String>,
     /// How long the baseline took.
     baseline_ms: u64,
     /// The package's binary did not build.
@@ -464,6 +463,8 @@ struct RunOutcome {
     hit_limit: bool,
     /// The first test reported failed, its top-level name.
     failed: Option<String>,
+    /// Every top-level test reported failed.
+    failures: Vec<String>,
     /// Top-level tests in the order they started.
     started: Vec<String>,
     /// Each top-level test that passed, and its duration.
@@ -472,8 +473,8 @@ struct RunOutcome {
 }
 
 /// Reads `go test -v` output for what ran and how it ended.
-fn read_output(text: &str) -> (Option<String>, Vec<String>, HashMap<String, u64>) {
-    let mut failed = None;
+fn read_output(text: &str) -> (Vec<String>, Vec<String>, HashMap<String, u64>) {
+    let mut failed = Vec::<String>::new();
     let mut started = Vec::new();
     let mut durations = HashMap::new();
     for line in text.lines() {
@@ -486,8 +487,8 @@ fn read_output(text: &str) -> (Option<String>, Vec<String>, HashMap<String, u64>
         } else if let Some(rest) = line.strip_prefix("--- FAIL:") {
             let name = rest.split_whitespace().next().unwrap_or_default();
             let top = name.split('/').next().unwrap_or(name);
-            if failed.is_none() && !top.is_empty() {
-                failed = Some(top.to_owned());
+            if !top.is_empty() && !failed.iter().any(|seen| seen == top) {
+                failed.push(top.to_owned());
             }
         } else if let Some(rest) = line.strip_prefix("--- PASS:") {
             let mut words = rest.split_whitespace();
@@ -506,7 +507,7 @@ fn read_output(text: &str) -> (Option<String>, Vec<String>, HashMap<String, u64>
     (failed, started, durations)
 }
 
-/// `-test.run` matching exactly `names`.
+/// A `-test.run` or `-test.skip` pattern matching exactly `names`.
 fn anchored(names: &[String]) -> String {
     format!("^(?:{})$", names.join("|"))
 }
@@ -519,7 +520,6 @@ struct Pass<'a> {
     scratch: PathBuf,
     profile: Mutex<Profile>,
     results: Mutex<std::fs::File>,
-    confirmed: Mutex<HashMap<(String, String), bool>>,
 }
 
 impl Pass<'_> {
@@ -559,7 +559,7 @@ impl Pass<'_> {
         &self,
         binary: &Path,
         directory: &str,
-        names: Option<&[String]>,
+        skip: &[String],
         mutant: Option<&str>,
         limit: Duration,
     ) -> RunOutcome {
@@ -581,8 +581,8 @@ impl Pass<'_> {
         if mutant.is_some() {
             command.arg("-test.failfast");
         }
-        if let Some(names) = names {
-            command.arg(format!("-test.run={}", anchored(names)));
+        if !skip.is_empty() {
+            command.arg(format!("-test.skip={}", anchored(skip)));
         }
         if let Some(mutant) = mutant {
             command.env(ACTIVE_MUTANT_ENV, mutant);
@@ -600,6 +600,7 @@ impl Pass<'_> {
                     timed_out: false,
                     hit_limit: false,
                     failed: Some(format!("<could not start: {error}>")),
+                    failures: Vec::new(),
                     started: Vec::new(),
                     durations: HashMap::new(),
                     elapsed_ms: 0,
@@ -630,13 +631,14 @@ impl Pass<'_> {
             .collect::<Vec<_>>()
             .join("\n");
         let hit_limit = mutant.is_some_and(|mutant| self.timed_out(mutant));
-        let (failed, started_tests, durations) = read_output(&text);
+        let (failures, started_tests, durations) = read_output(&text);
         self.profile.lock().expect("profile").runs += 1;
         RunOutcome {
             passed: !timed_out && status.is_some_and(|status| status.success()),
             timed_out,
             hit_limit,
-            failed,
+            failed: failures.first().cloned(),
+            failures,
             started: started_tests,
             durations,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -834,7 +836,6 @@ pub fn run_go_strong(
         scratch: work.join("scratch"),
         profile: Mutex::new(Profile::default()),
         results: Mutex::new(results),
-        confirmed: Mutex::new(HashMap::new()),
     };
     for directory in [&pass.bins, &pass.scratch] {
         crate::fault_fs::create_dir_all(directory).map_err(|e| e.to_string())?;
@@ -1309,22 +1310,26 @@ fn build_package(
     if overlay.is_some() {
         return package;
     }
-    let names = names.iter().cloned().collect::<Vec<_>>();
+    let _ = names;
     let limit = Duration::from_secs(600);
-    let baseline = pass.run_binary(&binary, directory, Some(&names), None, limit);
+    let baseline = pass.run_binary(&binary, directory, &[], None, limit);
     pass.profile.lock().expect("profile").baselines += 1;
     package.baseline_ms = baseline.elapsed_ms;
     package.passed = baseline.durations.clone();
-    if !baseline.passed {
-        // Alone the candidates fail: a test may need one before it. Whole,
-        // the package ran in the measured run.
-        let whole = pass.run_binary(&binary, directory, None, None, limit);
+    if !baseline.passed && !baseline.failures.is_empty() {
+        // A test that fails as written (one the measured run saw fail, or a
+        // flaky one) is left out of every run of the package, and the
+        // package's baseline is the rest.
+        package.skip = baseline.failures.clone();
+        let rest = pass.run_binary(&binary, directory, &package.skip, None, limit);
         pass.profile.lock().expect("profile").baselines += 1;
-        if whole.passed {
-            package.whole = true;
-            package.baseline_ms = whole.elapsed_ms;
-            package.passed = whole.durations;
+        package.baseline_ms = rest.elapsed_ms;
+        package.passed = rest.durations;
+        if !rest.passed {
+            package.broken = Some("the package's tests do not pass without a mutant".into());
         }
+    } else if !baseline.passed {
+        package.broken = Some("the package's test binary fails without a mutant".into());
     }
     package
 }
@@ -1471,7 +1476,7 @@ fn run_mutant(
     }
     let active = format!("{}#{}", mutant.file, mutant.index);
     let mut tests = 0;
-    for (directory, names) in &order {
+    for (directory, _) in &order {
         let package = &packages[directory];
         if let Some(broken) = &package.broken {
             return Verdict {
@@ -1500,16 +1505,18 @@ fn run_mutant(
                 )
             };
         }
-        let selection = (!package.whole).then_some(names.as_slice());
         let limit = if first {
             first_limit_for(package)
         } else {
             limit_for(package)
         };
+        // The package whole, as `go test` runs it: its tests share the
+        // process, so a test after a candidate can fail on what the mutant
+        // left behind, and one before it set up what the candidate reads.
         let outcome = pass.run_binary(
             binary,
             directory,
-            selection,
+            &package.skip,
             solo.is_none().then_some(active.as_str()),
             limit,
         );
@@ -1545,46 +1552,7 @@ fn run_mutant(
         if outcome.passed {
             continue;
         }
-        // A failure where the selection is not the baseline's: the tests it
-        // ran up to the failing one, again without the mutant.
         let killer = outcome.failed.clone();
-        if !package.whole
-            && let Some(failed) = &killer
-            && !confirmed(pass, directory, package, &outcome, failed)
-        {
-            pass.profile.lock().expect("profile").overturned += 1;
-            let all = package.passed.keys().cloned().collect::<Vec<_>>();
-            let again = pass.run_binary(
-                binary,
-                directory,
-                Some(&all),
-                solo.is_none().then_some(active.as_str()),
-                limit,
-            );
-            tests += again.started.len() as u64;
-            if again.passed {
-                continue;
-            }
-            if first && again.timed_out && !again.hit_limit && again.failed.is_none() {
-                return Verdict::of(RETRY, "past its first limit");
-            }
-            if again.hit_limit || again.timed_out {
-                return Verdict {
-                    status: "timeout",
-                    killed_by: None,
-                    tests,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    reason: Some("timed out with every candidate of its package".into()),
-                };
-            }
-            return Verdict {
-                status: "killed",
-                killed_by: again.failed.map(|name| format!("{directory}::{name}")),
-                tests,
-                duration_ms: started.elapsed().as_millis() as u64,
-                reason: Some("killed with every candidate of its package".into()),
-            };
-        }
         return Verdict {
             status: "killed",
             killed_by: Some(match &killer {
@@ -1605,50 +1573,6 @@ fn run_mutant(
         duration_ms: started.elapsed().as_millis() as u64,
         reason: None,
     }
-}
-
-/// Whether the failure of `failed` in `outcome` is the mutant's: the
-/// tests that ran up to it, run again without the mutant, pass.
-fn confirmed(
-    pass: &Pass,
-    directory: &str,
-    package: &Package,
-    outcome: &RunOutcome,
-    failed: &str,
-) -> bool {
-    let mut ran = Vec::new();
-    for name in &outcome.started {
-        ran.push(name.clone());
-        if name == failed {
-            break;
-        }
-    }
-    let mut sorted = ran.clone();
-    sorted.sort();
-    let all = {
-        let mut all = package.passed.keys().cloned().collect::<Vec<_>>();
-        all.sort();
-        all
-    };
-    // The baseline ran these exactly, in the same order: no question.
-    if sorted == all {
-        return true;
-    }
-    let key = (directory.to_owned(), sorted.join("|"));
-    if let Some(known) = pass.confirmed.lock().expect("confirmed").get(&key) {
-        return *known;
-    }
-    pass.profile.lock().expect("profile").confirmations += 1;
-    let without = pass.run_binary(
-        &package.binary,
-        directory,
-        Some(&ran),
-        None,
-        limit_for(package),
-    );
-    let kill = without.passed;
-    pass.confirmed.lock().expect("confirmed").insert(key, kill);
-    kill
 }
 
 /// A mutant with no switch: its own build of each package it needs, from
@@ -1765,7 +1689,7 @@ mod tests {
     fn verbose_output_says_what_ran_and_what_failed() {
         let text = "=== RUN   TestA\n--- PASS: TestA (0.25s)\n=== RUN   TestB\n=== RUN   TestB/sub\n    --- FAIL: TestB/sub (0.00s)\n--- FAIL: TestB (0.01s)\nFAIL\n";
         let (failed, started, durations) = read_output(text);
-        assert_eq!(failed.as_deref(), Some("TestB"));
+        assert_eq!(failed, ["TestB"]);
         assert_eq!(started, ["TestA", "TestB"]);
         assert_eq!(durations.get("TestA"), Some(&250));
         assert!(!durations.contains_key("TestB"));
