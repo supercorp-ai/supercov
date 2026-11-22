@@ -29,9 +29,9 @@ module Supercov
     SWITCHES_ONLY_ENV = "SUPERCOV_STRONG_SWITCHES_ONLY"
     TIMEOUT_CODE = "SUPERCOV_MUTANT_TIMEOUT"
     MAIN = Ractor.current
-    # The seed a suite in random order runs with in the pass, unless its
-    # command names one: the same order every pass, so an edit that changes
-    # no test does not move a verdict.
+    # The seed a Minitest suite runs with in the pass, unless its command
+    # names one: the same order every pass, so an edit that changes no test
+    # does not move a verdict.
     SEED = 0
     MUTANT = -1
 
@@ -805,8 +805,10 @@ module Supercov
         return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
         Strong.start
-        # A seed given on the command line is forced: this changes nothing.
-        ::RSpec.configuration.seed = SEED
+        # Examples in the order they are defined, whatever `--order` says,
+        # as mutant runs them: the same order every pass. (Registered on the
+        # registry: `register_ordering` does nothing once `--order` is set.)
+        ::RSpec.configuration.ordering_registry.register(:global, ::RSpec::Core::Ordering::Identity.new)
         Pass.new(RSpecRunner.new(self)).run
         0
       end
