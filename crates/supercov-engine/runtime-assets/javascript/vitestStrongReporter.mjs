@@ -357,6 +357,8 @@ function forkThroughSpawner(ahead) {
                         this.relay(run);
                     return;
                 }
+                if (message?.__vitest_worker_response__ && message.type === "testfileFinished")
+                    this.between = true;
                 if (this.copy && message?.__vitest_worker_response__ && message.type === "testfileFinished") {
                     copyReported?.(this.copy, message.error ? "error" : "finished");
                     this.copy = undefined;
@@ -367,6 +369,13 @@ function forkThroughSpawner(ahead) {
         exited(code, signal) {
             if (this.ended)
                 return;
+            // Between its file's end and Vitest's "stop" (a worker the pass
+            // stopped once its mutant was decided), Vitest has nothing that
+            // takes a worker's exit and fails: the exit waits for the "stop".
+            if (this.between && !this.stopping) {
+                this.exitAfterStop = [code, signal];
+                return;
+            }
             this.ended = true;
             if (this.copy) {
                 copyReported?.(this.copy, "exited");
@@ -437,6 +446,19 @@ function forkThroughSpawner(ahead) {
                 this.spawner.process.send({ environment, modulePath: this.modulePath });
             }
             if (this.attached) {
+                if (request === "stop") {
+                    this.stopping = true;
+                    if (this.exitAfterStop) {
+                        const [code, signal] = this.exitAfterStop;
+                        process.nextTick(() => {
+                            this.emit("message", response("stopped"));
+                            this.exited(code, signal);
+                        });
+                        return true;
+                    }
+                }
+                else if (request === "run" || request === "collect")
+                    this.between = false;
                 this.relay(message);
                 return true;
             }
