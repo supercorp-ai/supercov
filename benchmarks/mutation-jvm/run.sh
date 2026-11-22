@@ -157,10 +157,26 @@ run_pit() {
     # more than a launcher for the same.
     # shellcheck disable=SC2086
     ant -noinput -q $flags "$(field antCompile)" >&2
+    # PIT's command line with what it depends on (commons-text writes its
+    # XML report).
     mkdir -p "$work/pit-cli"
-    for artifact in org.pitest:pitest-command-line:1.17.1 org.pitest:pitest-entry:1.17.1 org.pitest:pitest:1.17.1; do
-      mvn -B -q dependency:copy -Dartifact="$artifact" -DoutputDirectory="$work/pit-cli" > /dev/null
-    done
+    cat > "$work/pit-cli/pom.xml" <<'POM'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>benchmark</groupId>
+  <artifactId>pit-cli</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.pitest</groupId>
+      <artifactId>pitest-command-line</artifactId>
+      <version>1.17.1</version>
+    </dependency>
+  </dependencies>
+</project>
+POM
+    (cd "$work/pit-cli" && mvn -B -q dependency:copy-dependencies -DoutputDirectory=jars > /dev/null)
+    mkdir -p build/testcases/tmp
     local classpath
     classpath="$(field antClasspath | tr ',' '\n' | while read -r entry || [ -n "$entry" ]; do
       if [[ "$entry" == *'*'* ]]; then ls "$PWD"/$entry; else echo "$PWD/$entry"; fi
@@ -170,7 +186,7 @@ run_pit() {
     # shellcheck disable=SC2046
     # The project's class path is PIT's own (its JUnit 4 support looks for
     # JUnit there); given again as --classPath, each test would run twice.
-    java -cp "$(ls "$work"/pit-cli/*.jar | paste -sd: -):$(echo "$classpath" | tr , :)" \
+    java -cp "$(ls "$work"/pit-cli/jars/*.jar | paste -sd: -):$(echo "$classpath" | tr , :)" \
       org.pitest.mutationtest.commandline.MutationCoverageReport \
       --reportDir pit-reports --timestampedReports=false --outputFormats XML \
       --targetClasses "$targets" --targetTests "$target_tests" \
