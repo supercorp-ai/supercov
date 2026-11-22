@@ -99,7 +99,15 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
         "unknown"
     );
 
-    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    // Two tests at a time, as `SUPERCOV_STRONG_JOBS` asks, with no limit on
+    // a mutant's evaluations.
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[
+            ("SUPERCOV_STRONG_JOBS", "2"),
+            ("SUPERCOV_MUTANT_HIT_LIMIT", "0"),
+        ],
+    );
     let said = ran.stderr();
     let reply = ran.json();
     let summary = &reply["summary"];

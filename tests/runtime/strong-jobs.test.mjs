@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { spawnSync } from "node:child_process";
+import { delimiter } from "node:path";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -198,4 +200,41 @@ test("a command that starts Jest or Mocha itself names its arguments to them", (
     finally {
         rmSync(root, { recursive: true, force: true });
     }
+});
+
+// The wasm output wrapper (strongWasmOut.cjs, embedded in strongJobs.mjs):
+// the tool writes elsewhere, each file is renamed into place only where it
+// changed, and the wrapper notes that it ran.
+test("a rebuild of the same wasm glue changes nothing in place", () => {
+  assert.equal(WASM_OUT, readFileSync(resolve(import.meta.dirname, "../../runtime/javascript/strongWasmOut.cjs"), "utf8"));
+  const root = mkdtempSync(join(tmpdir(), "supercov-wasm-out-"));
+  try {
+    const real = join(root, "real");
+    const wrappers = join(root, "wrappers");
+    mkdirSync(real);
+    mkdirSync(wrappers);
+    // A stand-in wasm-bindgen: writes its glue, and a snippet, into --out-dir.
+    writeFileSync(join(real, "wasm-bindgen"), `#!/bin/sh\nwhile [ "$1" != "--out-dir" ]; do shift; done\nmkdir -p "$2/snippets"\nprintf "glue $GLUE" > "$2/glue.js"\nprintf snippet > "$2/snippets/a.js"\n`, { mode: 0o755 });
+    writeFileSync(join(wrappers, "wasm-bindgen"), WASM_OUT, { mode: 0o755 });
+    const build = (glue) => spawnSync(join(wrappers, "wasm-bindgen"), ["--target", "nodejs", "--out-dir", "pkg", "a.wasm"], {
+      cwd: root,
+      env: { ...process.env, GLUE: glue, PATH: `${wrappers}${delimiter}${real}${delimiter}${process.env.PATH}` },
+      encoding: "utf8",
+    });
+    assert.equal(build("one").status, 0);
+    assert.equal(readFileSync(join(root, "pkg/glue.js"), "utf8"), "glue one");
+    assert.equal(readFileSync(join(root, "pkg/snippets/a.js"), "utf8"), "snippet");
+    assert.ok(existsSync(join(wrappers, "used")));
+    const before = statSync(join(root, "pkg/glue.js")).ino;
+    // The same glue again: the file in place is the one there before.
+    assert.equal(build("one").status, 0);
+    assert.equal(statSync(join(root, "pkg/glue.js")).ino, before);
+    // Other glue: renamed into place.
+    assert.equal(build("two").status, 0);
+    assert.equal(readFileSync(join(root, "pkg/glue.js"), "utf8"), "glue two");
+    assert.deepEqual(spawnSync("ls", [root], { encoding: "utf8" }).stdout.split("\n").filter((name) => name.includes("supercov")), []);
+  }
+  finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

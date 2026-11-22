@@ -17628,11 +17628,11 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#javascript_run.rs:1366",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1641",
-        "fs.create_dir_all#javascript_run.rs:1643",
+        "fs.create_dir_all#javascript_run.rs:1644",
+        "fs.create_dir_all#javascript_run.rs:1646",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1743",
-        "fs.create_dir_all#javascript_run.rs:1745",
+        "fs.create_dir_all#javascript_run.rs:1746",
+        "fs.create_dir_all#javascript_run.rs:1748",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -20310,7 +20310,7 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
 fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
     for (fault, place) in [
         ("spawn#rust_project.rs:182", "rust_project.rs:182"),
-        ("fs.create_dir_all#rust_wasm.rs:179", "rust_wasm.rs:179"),
+        ("fs.create_dir_all#rust_wasm.rs:185", "rust_wasm.rs:185"),
     ] {
         let project = Project::cart("wasm-library-unprepared");
         project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
@@ -21351,9 +21351,11 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         .supercov(&["runs", "latest", "mutants", "--status", "not-infected"])
         .succeeds();
     contains_all(&listed, &["src/cart.js:2:7", "showing 1-1 of 1"]);
-    project
+    // A strong verdict picks the mutants a strong pass gave it: none ran.
+    let killed = project
         .supercov(&["runs", "latest", "mutants", "--status", "killed"])
-        .exits(2);
+        .succeeds();
+    assert!(killed.contains("No mutants match."), "{killed}");
 
     // Only the tests a title picks: the boundary they never cross.
     let narrowed = project
@@ -22046,6 +22048,66 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
     }
 }
 
+/// What a strong pass let survive is named in every view, not only counted:
+/// the pass's summary ends with the survivors, the text listing shows each
+/// mutant's strong verdict beside its weak status and `--status survived`
+/// picks the survivors, and the markdown for a pull request lists them under
+/// the mutation score.
+#[cfg(unix)]
+#[test]
+fn surviving_mutants_are_named_in_every_view() {
+    let project = job_runner_project(
+        "strong-survivors-named",
+        "module",
+        &[(
+            "test/cart.test.js",
+            "import assert from \"node:assert/strict\";\nimport { it } from \"node:test\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => assert.equal(shipping(80), 0));\nit(\"charges small orders\", () => assert.equal(shipping(10), 5));\nit(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n",
+        )],
+    );
+    project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let pass = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .succeeds();
+    // `sum >= 50` to `sum > 50` changes neither 80 nor 10.
+    let survivors = pass.split("Survived:\n").nth(1).unwrap_or_default();
+    assert!(
+        survivors.contains("src/cart.js:2  EqualityOperator  sum >= 50 → sum > 50"),
+        "{pass}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    assert!(listed.contains("  Strong       score "), "{listed}");
+    let line = listed
+        .lines()
+        .find(|line| line.contains("sum >= 50 → sum > 50"))
+        .unwrap_or_default();
+    assert!(line.contains("survived"), "{listed}");
+    let killed = listed
+        .lines()
+        .find(|line| line.contains("trim() → name"))
+        .unwrap_or_default();
+    assert!(killed.contains("killed"), "{listed}");
+    let only = project
+        .supercov(&["runs", "latest", "mutants", "--status", "survived"])
+        .succeeds();
+    assert!(only.contains("sum >= 50 → sum > 50"), "{only}");
+    assert!(!only.contains("trim() → name"), "{only}");
+    let markdown = project
+        .supercov(&["runs", "latest", "mutants", "--format", "markdown"])
+        .succeeds();
+    assert!(markdown.contains("mutation score **"), "{markdown}");
+    assert!(
+        markdown
+            .lines()
+            .any(|line| line.contains("sum >= 50 → sum > 50") && line.contains("survived (weak: ")),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("trim() → name"), "{markdown}");
+}
+
 /// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
 /// run's command for one test file with the mutant on and only its tests. A
 /// node:test file that asserts at its top level, with no test() in it, is a
@@ -22387,6 +22449,34 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
     assert_eq!(reply["summary"]["killed"], 6, "{reply}");
     assert_eq!(reply["summary"]["survived"], 1, "{reply}");
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    // A pass that cannot switch the crate's mutants in ends, saying why.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../supercov-engine/src/rust_strong.rs"),
+    )
+    .unwrap();
+    let line = source
+        .lines()
+        .position(|line| line.contains("crate::fault_fs::read(plan_path)"))
+        .unwrap()
+        + 1;
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&rust)
+            .join("strong-mutation.json"),
+    )
+    .unwrap();
+    let failed = project.supercov_with(
+        &["runs", &rust, "mutants", "test"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            &format!("fs.read#rust_strong.rs:{line}"),
+        )],
+    );
+    assert_ne!(failed.code(), 0, "{}", failed.stderr());
+    assert!(failed.stderr().contains("plan.json"), "{}", failed.stderr());
 }
 
 /// Two inline snapshots in one file, and a test that fakes the clock: the
@@ -23747,12 +23837,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:833",
+            "fs.write#mutants_test_command.rs:946",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:833"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:946"),
         "{}",
         unwritten.stderr()
     );
@@ -24191,13 +24281,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:672",
+            "coverage-index-read#mutants_query.rs:682",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:682"), "{said}");
 
     // The table of files.
     contains_all(
@@ -24648,8 +24738,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:925",
-        "fs.read_dir entry#public_query.rs:925",
+        "fs.read_dir#public_query.rs:942",
+        "fs.read_dir entry#public_query.rs:942",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24662,7 +24752,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:925"),
+            fired_at(&unlisted, "public_query.rs:942"),
             "{fault}: {unlisted}"
         );
     }

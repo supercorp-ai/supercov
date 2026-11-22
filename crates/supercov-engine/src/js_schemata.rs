@@ -2225,6 +2225,8 @@ mod tests {
         assert!(accepts(&mutant("Regex", "a"), NodeKind::RegExp));
         assert!(accepts(&mutant("Regex", "a"), NodeKind::StringLiteral));
         assert!(!accepts(&mutant("Regex", "a"), NodeKind::Call));
+        // A mutator the schemata do not know is written nowhere.
+        assert!(!accepts(&mutant("Unknown", "a"), NodeKind::Call));
     }
 
     /// Next.js reads `config` from every file under a `pages` directory,

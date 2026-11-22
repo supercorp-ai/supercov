@@ -162,10 +162,9 @@ fn list_rust_mutants(
     root: &std::path::Path,
     recorded: &BTreeMap<String, std::collections::BTreeSet<String>>,
 ) -> ListedMutants {
-    let files = recorded.keys().cloned().collect::<Vec<_>>();
-    let listed = crate::threads::parallel_map(&files, |file| {
+    let files = recorded.iter().collect::<Vec<_>>();
+    let listed = crate::threads::parallel_map(&files, |(file, points)| {
         let source = std::fs::read_to_string(root.join(file)).ok()?;
-        let points = recorded.get(file)?;
         crate::rust_mutants::list(file, &source, points).or_else(|| {
             // A crate in a directory of the project (Rust compiled to wasm
             // that JavaScript tests load) names its points by its files'
@@ -181,7 +180,8 @@ fn list_rust_mutants(
     });
     let mut mutants = BTreeMap::new();
     let mut changed = Vec::new();
-    for (file, listed) in files.into_iter().zip(listed) {
+    for ((file, _), listed) in files.into_iter().zip(listed) {
+        let file = file.clone();
         match listed {
             Some(list) if list.is_empty() => {}
             Some(list) => {
@@ -690,15 +690,24 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("notes.txt"), "a\n").unwrap();
-        let recorded = ["src/a.js", "src/a.py", "src/a.rs", "notes.txt"]
-            .into_iter()
-            .map(|file| (file.to_owned(), std::collections::BTreeSet::new()))
-            .collect::<BTreeMap<_, _>>();
+        std::fs::write(root.join("src/empty.rs"), "// nothing to mutate\n").unwrap();
+        let recorded = [
+            "src/a.js",
+            "src/a.py",
+            "src/a.rs",
+            "src/empty.rs",
+            "src/gone.rs",
+            "notes.txt",
+        ]
+        .into_iter()
+        .map(|file| (file.to_owned(), std::collections::BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
         // The JavaScript file went to its enumerator, which says it is not
         // the file the run measured (no point of it was recorded); the
         // Python and text files to none.
         let listed = list_from_sources(&root, &recorded);
-        assert_eq!(listed.changed, ["src/a.js"]);
+        // A Rust file that is gone changed; one with no mutant lists none.
+        assert_eq!(listed.changed, ["src/a.js", "src/gone.rs"]);
         // cargo-mutants' mutants of the Rust file, under its set.
         assert_eq!(
             listed.mutants.files.keys().collect::<Vec<_>>(),
