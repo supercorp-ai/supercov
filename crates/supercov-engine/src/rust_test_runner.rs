@@ -1385,12 +1385,13 @@ pub(crate) fn snapshot_regions(
                 // A value probe's outcome is a value the weak report reads,
                 // never a point covered.
                 RustProbeObservation::Hit { id } if id.starts_with("rs:value:") => {
-                    if let Some((site, outcome)) = id.split_once('#') {
-                        values
-                            .entry(site.to_owned())
-                            .or_default()
-                            .insert(outcome.to_owned());
-                    }
+                    let (site, outcome) = id
+                        .split_once('#')
+                        .expect("a value probe's id names its outcome");
+                    values
+                        .entry(site.to_owned())
+                        .or_default()
+                        .insert(outcome.to_owned());
                 }
                 RustProbeObservation::Hit { id } => {
                     if !points.contains_key(id.as_str()) && !alternatives.contains(id.as_str()) {
@@ -2738,9 +2739,11 @@ impl ArtifactLauncher {
             Some(runner) if is_wasi_runtime(&runner.program) => {
                 let mut command = Command::new(&runner.program);
                 command.args(&runner.arguments);
-                for (name, value) in variables {
-                    command.arg(format!("--env={name}={value}"));
-                }
+                command.args(
+                    variables
+                        .iter()
+                        .map(|(name, value)| format!("--env={name}={value}")),
+                );
                 command.arg(executable);
                 command.envs(self.environment.iter().map(|(name, value)| (name, value)));
                 command

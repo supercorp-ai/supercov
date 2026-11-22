@@ -824,8 +824,12 @@ fn run_javascript(
     // instruments them.
     let mut wasm_strong = None;
     if serves_rust_wasm && let Some(strong) = &request.strong {
-        wasm_strong =
-            crate::rust_wasm::switch_for_strong_pass(&root, &workspace, strong, diagnostics)?;
+        wasm_strong = Some(crate::rust_wasm::switch_for_strong_pass(
+            &root,
+            &workspace,
+            strong,
+            diagnostics,
+        )?);
     } else if serves_rust_wasm {
         servers.extend(
             crate::rust_wasm::RustWasmServer::prepare(

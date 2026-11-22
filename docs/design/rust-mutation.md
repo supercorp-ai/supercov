@@ -169,6 +169,13 @@ Each is written into a plain copy (`.supercov/strong/rust/plain`) and built
 there on its own, as cargo-mutants builds every mutant: unviable where that
 build fails.
 
+Both copies and their build directories are removed when the pass ends,
+whether it ended well or in an error: they hold no verdict, and a switched
+build is a gigabyte or more (rust-hex's was 1.1 GB). Only the driver's plan
+and results stay. The next pass builds afresh. A JavaScript pass over Rust
+wasm removes its scratch copy (`.supercov/strong/rust-wasm`) the same way
+once it has found which mutants compile.
+
 Lints are capped in both builds (`--cap-lints`), as in a measured run. A
 crate that denies a lint cargo-mutants' build would fail on (an overflowing
 literal after `-` is deleted, a variable left unused) has such a mutant

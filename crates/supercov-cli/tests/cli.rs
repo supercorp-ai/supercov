@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1228")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1232")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1228"),
+        seen.contains("test fault at fs (javascript_run.rs:1232"),
         "{seen}"
     );
 }
@@ -16202,8 +16202,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // The copy's own path, resolved to read its module tree.
             "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1569 => rust_test_runner.rs:1569",
-            "spawn#rust_test_runner.rs:1569@2 => rust_test_runner.rs:1569",
+            "spawn#rust_test_runner.rs:1570 => rust_test_runner.rs:1570",
+            "spawn#rust_test_runner.rs:1570@2 => rust_test_runner.rs:1570",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
             "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
             "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
@@ -16594,7 +16594,7 @@ fn a_go_run_whose_own_step_fails_says_so() {
             // The project's Go listed again as the run prepares it.
             "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
-            "fs.write#go_run.rs:525 => go_run.rs:525",
+            "fs.write#go_run.rs:527 => go_run.rs:527",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -17671,17 +17671,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1369",
         "fs.create_dir_all#javascript_run.rs:752",
-        "fs.write#javascript_run.rs:1093",
+        "fs.write#javascript_run.rs:1097",
         "fs.canonicalize#process_supervision.rs:1796",
-        "fs.create_dir_all#javascript_run.rs:1176",
-        "fs.create_dir_all#javascript_run.rs:1366",
+        "fs.create_dir_all#javascript_run.rs:1180",
+        "fs.create_dir_all#javascript_run.rs:1370",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1644",
-        "fs.create_dir_all#javascript_run.rs:1646",
+        "fs.create_dir_all#javascript_run.rs:1648",
+        "fs.create_dir_all#javascript_run.rs:1650",
         "fs.create_dir_all#lifecycle.rs:1060",
-        "fs.create_dir_all#javascript_run.rs:1746",
-        "fs.create_dir_all#javascript_run.rs:1748",
+        "fs.create_dir_all#javascript_run.rs:1750",
+        "fs.create_dir_all#javascript_run.rs:1752",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18073,9 +18073,9 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
         ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
-        ("fs.create_dir_all#go_run.rs:323", "go_run.rs:323"),
-        ("fs.create_dir_all#go_run.rs:373", "go_run.rs:373"),
-        ("fs.create_dir_all#go_run.rs:412", "go_run.rs:412"),
+        ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
+        ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
+        ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18109,8 +18109,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1216", "go_run.rs:1216"),
-        ("fs.create_dir_all#go_run.rs:1226", "go_run.rs:1226"),
+        ("fs.write#go_run.rs:1232", "go_run.rs:1232"),
+        ("fs.create_dir_all#go_run.rs:1242", "go_run.rs:1242"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19467,7 +19467,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:732", "go_run.rs:732"),
+                ("fs.canonicalize#go_run.rs:746", "go_run.rs:746"),
                 ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
@@ -23252,6 +23252,54 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     assert_eq!(never["strong"]["status"], "killed", "{never}");
 }
 
+/// The same, where no mutant of module-level code has the file run whole
+/// already: a kill a test left out caused is overturned, and the mutant runs
+/// the file whole once its whole baseline, run for it, is known.
+#[cfg(unix)]
+#[test]
+fn an_overturned_kill_runs_its_file_whole_after_its_whole_baseline() {
+    let project = vitest_mutants_project("strong-overturn-whole");
+    project.write(
+        "src/items.js",
+        "const state = {};\nexport function register(item) {\n  if (item) (state.items ??= []).push(item);\n}\nexport function count() {\n  const items = state.items ?? [];\n  return items.length > 0 ? items.length : 0;\n}\n",
+    );
+    project.write(
+        "test/items.test.js",
+        "import { expect, it } from \"vitest\";\nimport { count, register } from \"../src/items.js\";\nit(\"registers\", () => register(\"a\"));\nit(\"counts what was registered\", () => expect(count()).toBe(1));\n",
+    );
+    project.commit("items");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(
+        reply["passes"][0]["overturned"].as_u64().unwrap_or(0) > 0,
+        "{reply}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/items.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let equal = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:7:") && id.contains(":EqualityOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+}
+
 /// A mutant that makes work a test left running loop forever (a timer that
 /// fires after the test passed): its evaluations pass the limit outside any
 /// test, and the mutant is a timeout, not a survivor.
@@ -23471,9 +23519,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
             .all(|mutant| mutant["strong"]["status"] != "survived"),
         "{listed}"
     );
-    assert_eq!(
-        passes[0]["profile"]["mutantCopies"],
-        ran + killed,
+    // One more copy for each kill a confirmation overturned (the mutant
+    // runs its file whole).
+    assert!(
+        passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
+            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
@@ -23648,6 +23698,129 @@ fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
     assert!(ahead.values().any(|status| status == "\"killed\""));
     assert!(ahead.values().any(|status| status == "\"survived\""));
     assert_eq!(ahead, fresh);
+}
+
+/// A mutant that makes a worker drop its channel to Vitest (here it
+/// disconnects): Vitest cannot hear the file finish, so it did not, and the
+/// mutant is killed whatever the copy wrote. Nothing reports a closed
+/// channel as an error of the run, and the pass runs once.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
+    let project = vitest_mutants_project("strong-channel-closed");
+    project.write(
+        "src/bye.js",
+        "export function bye(flag) {\n  if (flag) process.disconnect?.();\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/bye.test.js",
+        "import { expect, it } from \"vitest\";\nimport { bye } from \"../src/bye.js\";\nit(\"stays\", () => expect(bye(false)).toBe(1));\n",
+    );
+    project.commit("bye");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(!said.contains("Channel closed"), "{said}");
+    assert!(!said.contains("Unhandled"), "{said}");
+    assert_eq!(reply["passes"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(
+        said.matches("strong pass: switches in").count(),
+        1,
+        "{said}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/bye.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let disconnects = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/bye.js:2:") && id.ends_with(":ConditionalExpression:true")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
+}
+
+/// A copy that runs none, or only some, of the tests it was to run proves
+/// nothing: here `labels` exists in the measured run only, so the copies of
+/// `label`'s mutants run no test. They are errors that say so, never
+/// survivors, with the stages and without.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_runs_none_of_its_tests_makes_its_mutant_an_error() {
+    let project = vitest_mutants_project("strong-ran-none");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  if (!process.env.SUPERCOV_STRONG) it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("labels in the measured run only");
+    for stages in ["", "1"] {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_STAGES", stages)],
+            )
+            .json();
+        assert!(
+            reply["summary"]["error"].as_u64().unwrap_or(0) > 0,
+            "{reply}"
+        );
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutants = listed["data"]["mutants"].as_array().unwrap();
+        let of_label = mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("src/cart.js:9:")
+            })
+            .collect::<Vec<_>>();
+        assert!(!of_label.is_empty(), "{listed}");
+        for mutant in of_label {
+            if mutant["strong"].is_null() {
+                continue;
+            }
+            assert_ne!(mutant["strong"]["status"], "survived", "{mutant}");
+            if mutant["strong"]["status"] == "error" {
+                assert!(
+                    mutant["strong"]["reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("ran none of the tests it was to run"),
+                    "{mutant}"
+                );
+            }
+        }
+        assert!(
+            mutants
+                .iter()
+                .any(|mutant| mutant["strong"]["status"] == "killed"),
+            "{listed}"
+        );
+    }
 }
 
 /// A test file that does not finish without a mutant (here it throws while
@@ -25292,6 +25465,42 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
             .join(format!(".supercov/runs/{run}/strong-mutation.json"))
             .is_file()
     );
+}
+
+/// A file the command builds only with a tag (`go test -tags tagged`) gets
+/// value probes as any other: the type checker is asked with the tag.
+#[test]
+fn a_go_file_behind_a_build_tag_gets_value_probes() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-probes-tagged");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["--", go, "test", "-tags", "tagged", "./..."],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = &listed["data"]["mutants"][0];
+    assert_eq!(
+        mutant["id"], "double.go:5:35-5:36:ArithmeticOperator:/",
+        "{listed}"
+    );
+    // `3 * 2` and `3 / 2` differ, and the probe saw it.
+    assert_eq!(mutant["status"], "infected", "{listed}");
 }
 
 /// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
