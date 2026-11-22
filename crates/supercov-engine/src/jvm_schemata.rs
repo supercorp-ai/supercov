@@ -200,14 +200,7 @@ impl Writer<'_> {
                     from,
                     to,
                     statement,
-                }
-                | Form::Step {
-                    from,
-                    to,
-                    statement,
-                    prefix: _,
-                } if matches!(form, Form::Compound { .. }) => {
-                    let _ = (from, to);
+                } => {
                     let choice = format!(
                         "({on} ? ({} {to} {}) : ({} {from} {}))",
                         h(0),
@@ -230,7 +223,6 @@ impl Writer<'_> {
                     };
                     statement_or_value(&choice, *statement)
                 }
-                Form::Compound { .. } => unreachable!("matched above"),
                 Form::StepBy { operator } => {
                     let to = if *operator == "+=" { "-=" } else { "+=" };
                     format!(
@@ -540,6 +532,30 @@ mod tests {
             "{}",
             out.source
         );
+    }
+
+    /// Each operator form's switch, as a statement and as a value: Java's
+    /// compound assignment and `++`, prefix and postfix, and Kotlin's.
+    #[test]
+    fn steps_and_compound_assignments_switch_as_statements_and_values() {
+        let java = "class A {\n  int c;\n  int f(int i, long n) {\n    c += i;\n    int d = (c -= 2);\n    ++c;\n    int e = c++ + --c;\n    for (; i < 3; i += 2) {}\n    return d + e;\n  }\n}\n";
+        let (out, _) = switched(java, JvmLanguage::Java);
+        let on = format!("{RUNTIME}.on(3, ");
+        for expected in [
+            "? (c -= i) : (c += i));",
+            "? (c += 2) : (c -= 2)))",
+            "? --c : ++c);",
+            "? c-- : c++)",
+            "? ++c : --c)",
+            &format!("{RUNTIME}.v({on}"),
+        ] {
+            assert!(out.source.contains(expected), "{expected}\n{}", out.source);
+        }
+        let kotlin = "fun f(a: Int): Int {\n    var c = a\n    c += 2\n    ++c\n    val d = c++\n    return d\n}\n";
+        let (out, _) = switched(kotlin, JvmLanguage::Kotlin);
+        for expected in [") c -= 2 else c += 2", ") --c else ++c", "(if ("] {
+            assert!(out.source.contains(expected), "{expected}\n{}", out.source);
+        }
     }
 
     #[test]
