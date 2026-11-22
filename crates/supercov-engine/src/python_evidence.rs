@@ -130,6 +130,14 @@ enum Record {
         v: String,
         o: u8,
     },
+    /// One outcome a mutant's value probe saw in a context, once per site
+    /// and outcome: an operand relation (`lt`, `eq`, `gt`, `unordered`), or
+    /// whether the mutant's value was the original's (`same`, `differs`).
+    Cmp {
+        ctx: u64,
+        id: String,
+        o: String,
+    },
     /// Many decision vectors of one context: (id, digits, outcome).
     Decs {
         ctx: u64,
@@ -302,6 +310,8 @@ struct Observations {
     /// hit was most of reading its evidence.
     slot_hits: Vec<u32>,
     vectors: BTreeMap<String, ObservedVectors>,
+    /// Each mutant probe site's outcomes (`docs/design/python-mutants.md`).
+    comparisons: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1308,6 +1318,20 @@ fn apply_transport(
                     Ok::<_, PythonEvidenceError>(())
                 })?;
             }
+            Record::Cmp { ctx, id, o } => {
+                observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .comparisons
+                .entry(id)
+                .or_default()
+                .insert(o);
+            }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
@@ -1543,7 +1567,16 @@ fn snapshot(
         hits: hits.into_iter().collect(),
         events: Vec::new(),
         logicals: Vec::new(),
-        comparisons: Vec::new(),
+        comparisons: observations
+            .comparisons
+            .iter()
+            .map(
+                |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                    id: id.clone(),
+                    outcomes: outcomes.iter().cloned().collect(),
+                },
+            )
+            .collect(),
         phase_id: Some(phase.into()),
     })
 }
@@ -1602,6 +1635,9 @@ pub struct PythonFrontendRun {
     pub tests: usize,
     pub interpreters: usize,
     pub python_versions: Vec<String>,
+    /// The run's mutants, where it listed them as it measured
+    /// (`SUPERCOV_MUTANTS=1`): archived as `mutants.json`.
+    pub mutants: Option<crate::mutant_list::MutantsFile>,
 }
 
 impl PythonFrontendRun {
@@ -1638,6 +1674,12 @@ impl PythonFrontendRun {
                     contents: serde_json::to_vec(result).expect("plain data serializes"),
                 }),
         );
+        if let Some(mutants) = &self.mutants {
+            entries.push(EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(mutants).expect("plain data serializes"),
+            });
+        }
         entries
     }
 }
@@ -1804,6 +1846,9 @@ fn credit_requests_by_time(
         into.slot_hits.extend(observations.slot_hits);
         for (id, vectors) in observations.vectors {
             into.vectors.entry(id).or_default().extend(vectors);
+        }
+        for (id, outcomes) in observations.comparisons {
+            into.comparisons.entry(id).or_default().extend(outcomes);
         }
     }
     credited
@@ -2339,6 +2384,7 @@ fn build_from_evidence(
         tests,
         interpreters,
         python_versions: python_versions.into_iter().collect(),
+        mutants: None,
     })
 }
 
@@ -2962,6 +3008,7 @@ pub(crate) mod tests {
                     .collect(),
                 slot_hits: Vec::new(),
                 vectors: observations.vectors.clone(),
+                comparisons: observations.comparisons.clone(),
             })
             .unwrap_or_default()
     }
@@ -3232,18 +3279,18 @@ pub(crate) mod tests {
     fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
         let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
         // Listed: layout.json, the slot, the transport.
-        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:382@2", || {
+        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:392@2", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(read.is_ok(), "{:?}", read.err());
         // Gone by the time it is opened: harvested by a process that closed.
-        let opened = crate::fault::during("fs.open:2#python_evidence.rs:437", || {
+        let opened = crate::fault::during("fs.open:2#python_evidence.rs:447", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(opened.is_ok(), "{:?}", opened.err());
         // Opened but no longer readable is refused.
         assert!(
-            crate::fault::during("fs.open:13#python_evidence.rs:437", || {
+            crate::fault::during("fs.open:13#python_evidence.rs:447", || {
                 read_evidence_directory(&directory, "run-1")
             })
             .is_err()

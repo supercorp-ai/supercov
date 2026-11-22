@@ -67,7 +67,7 @@ def _sha256(data: bytes):
     _sha256 = sha256
     return sha256(data)
 
-PROBE_VERSION = 9
+PROBE_VERSION = 10
 # A context's hit array is a slot file mapped into memory. Its first bytes
 # name the context for the reader, so obligations are numbered from here.
 SLOT_HEADER = 16
@@ -98,6 +98,14 @@ boolop_probe: Callable[[int, object], object] = lambda g, value: value  # noqa: 
 iter_probe: Callable[[int, int, object], object] = lambda entered, zero, iterable: iterable  # noqa: E731
 aiter_probe: Callable[[int, int, object], object] = lambda entered, zero, iterable: iterable  # noqa: E731
 site_probe: Callable[[str, int], None] = lambda file, line: None  # noqa: E731
+# Mutants' value probes (`supercov_instrument._MutantProbes`): each returns
+# what the program's own expression gives.
+mutant_compare = lambda site, op, a, b: getattr(__import__("operator"), op)(a, b)  # noqa: E731
+mutant_arith = lambda site, op, mutated, a, b: getattr(__import__("operator"), op)(a, b)  # noqa: E731
+mutant_none = lambda site, value: value  # noqa: E731
+mutant_sign = lambda site, op, mutated, operand: getattr(__import__("operator"), op)(operand)  # noqa: E731
+mutant_method = lambda site, receiver, name, mutated: getattr(receiver, name)  # noqa: E731
+mutant_test = lambda false_site, true_site, value: value  # noqa: E731
 
 
 # -- the plan, indexed for probing -------------------------------------------
@@ -229,6 +237,8 @@ class FileProbes:
                 del self.decisions[span]
                 leaf = next(key for key, (dd, i, inv) in self.leaves.items() if dd == d)
                 del self.leaves[leaf]
+        # Value probes of the file's mutants, where the run lists them.
+        self.mutant_probes = list(file_plan.get("mutantProbes", ()))
         self.digest = ""
 
     def _number(self, identifier: str) -> int:
@@ -253,6 +263,7 @@ class FileProbes:
                     sorted(self.loop_heads.items()),
                     sorted(self.single_heads.items()),
                     sorted(self.value_decisions),
+                    [sorted(probe.items()) for probe in self.mutant_probes],
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -554,6 +565,12 @@ PROBE_NAMES = {
     "iter_probe": "i",
     "aiter_probe": "ai",
     "site_probe": "s",
+    "mutant_compare": "mc",
+    "mutant_arith": "ma",
+    "mutant_none": "mn",
+    "mutant_sign": "ms",
+    "mutant_method": "mm",
+    "mutant_test": "mt",
 }
 
 

@@ -338,6 +338,36 @@ fn archive_python_run(
     })
 }
 
+/// Every planned file's mutants with their value probes, which go into the
+/// file's plan: the list a run measured with `SUPERCOV_MUTANTS=1` archives.
+fn list_probed_mutants(
+    root: &Path,
+    plan: &mut crate::python_instrumenter::PythonProbePlan,
+) -> crate::mutant_list::MutantsFile {
+    let files = plan.files.keys().cloned().collect::<Vec<_>>();
+    let probed = crate::threads::parallel_map(&files, |file| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        crate::python_mutants::probed(file, &source).ok()
+    });
+    let mut listed = BTreeMap::new();
+    for (file, probed) in files.into_iter().zip(probed) {
+        let Some((mutants, probes)) = probed else {
+            continue;
+        };
+        if let Some(file_plan) = plan.files.get_mut(&file) {
+            file_plan.mutant_probes = probes;
+        }
+        if !mutants.is_empty() {
+            listed.insert(file, mutants);
+        }
+    }
+    crate::mutant_list::MutantsFile::listed(
+        crate::python_mutants::PYTHON,
+        crate::python_mutants::MUTANT_SET,
+        listed,
+    )
+}
+
 pub fn run_direct_python(
     request: &DirectPythonRunRequest,
     diagnostics: &mut dyn Write,
@@ -404,10 +434,16 @@ fn run_direct_python_in(
         let plan_path = python_directory.join("plan.json");
         write_runtime(&runtime_directory)?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
-        let plan = crate::python_instrumenter::PythonProbePlan {
+        let mut plan = crate::python_instrumenter::PythonProbePlan {
             assertion_sites: assertion_sites(&source_inputs.files),
             ..project.plan.clone()
         };
+        // With `SUPERCOV_MUTANTS=1` the run lists its mutants as it measures,
+        // and places the value probes that decide their infection.
+        let mutants = ambient
+            .get("SUPERCOV_MUTANTS")
+            .is_some_and(|value| matches!(value.trim(), "1" | "true"))
+            .then(|| list_probed_mutants(&root, &mut plan));
         fs::write(
             &plan_path,
             serde_json::to_vec(&plan).expect("plain data serializes"),
@@ -502,6 +538,7 @@ fn run_direct_python_in(
         };
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
+        run.mutants = mutants;
         let joined_ms = elapsed_ms(publication_started);
         let archive_path = work_directory.join("evidence.raw.gz");
         run.request.integrity = serde_json::to_value(&integrity).ok();

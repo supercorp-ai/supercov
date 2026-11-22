@@ -236,6 +236,25 @@ pub struct PythonFilePlan {
     pub matches: Vec<MatchPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tries: Vec<TryPlan>,
+    /// Value probes of the file's mutants, where the run lists them with
+    /// their values (`SUPERCOV_MUTANTS=1`; `python_mutants::probed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutant_probes: Vec<MutantProbePlan>,
+}
+
+/// One value probe of a mutant: the expression it wraps, what it records
+/// under `site`, and the operators or methods it compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MutantProbePlan {
+    pub site: String,
+    /// `compare`, `arith`, `none`, `sign`, `method`, `iffalse`, `iftrue`.
+    pub kind: String,
+    pub span: PlanSpan,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub original: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mutated: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1174,14 +1193,14 @@ mod tests {
         let tried = "try:\n    g()\nexcept ValueError:\n    pass\nfinally:\n    h()\n";
         let matched = "match a:\n    case 1:\n        pass\n";
         for (source, place) in [
-            (decided, "578"),
-            (decided, "593"),
-            (decided, "619"),
-            (decided, "832"),
-            (tried, "787"),
-            (tried, "793"),
-            (tried, "734@2"),
-            (matched, "915"),
+            (decided, "597"),
+            (decided, "612"),
+            (decided, "638"),
+            (decided, "851"),
+            (tried, "806"),
+            (tried, "812"),
+            (tried, "753@2"),
+            (matched, "934"),
         ] {
             assert!(build_python_obligations("a.py", source).is_ok(), "{place}");
             let fault = format!("python-range#python_instrumenter.rs:{place}");

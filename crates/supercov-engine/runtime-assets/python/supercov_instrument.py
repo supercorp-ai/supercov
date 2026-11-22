@@ -559,6 +559,86 @@ def instrument_sites(tree: ast.Module, sites: SiteProbes, alias: str) -> None:
     walk(tree.body)
 
 
+class _MutantProbes(ast.NodeTransformer):
+    """Wraps each expression a mutant's value probe observes, by its span,
+    in a call that gives the program the expression's own value and records
+    whether the mutant's would have differed (`docs/design/python-mutants.md`).
+
+    Runs before the coverage probes, which find the wrapped expressions by
+    the same spans: the call takes the wrapped expression's position.
+    """
+
+    # The order probes of one span are applied in: the expression's own
+    # operator first, then what is done with its value.
+    ORDER = {"compare": 0, "arith": 0, "sign": 0, "method": 0, "none": 1, "iffalse": 2, "iftrue": 2}
+
+    def __init__(self, plans, names) -> None:
+        self.names = names
+        self.by_span: dict = {}
+        for plan in plans:
+            (line, column), (end_line, end_column) = plan["span"]
+            self.by_span.setdefault((line, column, end_line, end_column), []).append(plan)
+        for probes in self.by_span.values():
+            probes.sort(key=lambda plan: self.ORDER.get(plan["kind"], 3))
+
+    def _call(self, name, arguments, node):
+        # The call takes the expression's span, which the coverage probes
+        # find it by; what it adds -- its name, its constants -- an empty
+        # span at its start, which no probe names.
+        function = _at(ast.Name(id=self.names[name], ctx=ast.Load()), node.lineno, node.col_offset)
+        for argument in arguments:
+            if isinstance(argument, ast.Constant) and not hasattr(argument, "lineno"):
+                _at(argument, node.lineno, node.col_offset)
+        call = ast.Call(func=function, args=arguments, keywords=[])
+        return ast.copy_location(call, node)
+
+    def visit(self, node):
+        node = super().visit(node)
+        if not isinstance(node, ast.expr) or not hasattr(node, "end_col_offset"):
+            return node
+        plans = self.by_span.get((node.lineno, node.col_offset, node.end_lineno, node.end_col_offset))
+        if not plans:
+            return node
+        constant = ast.Constant
+        for plan in plans:
+            kind = plan["kind"]
+            if kind == "compare" and isinstance(node, ast.Compare) and len(node.ops) == 1:
+                node = self._call(
+                    "mutant_compare",
+                    [constant(plan["site"]), constant(plan["original"]), node.left, node.comparators[0]],
+                    node,
+                )
+            elif kind == "arith" and isinstance(node, ast.BinOp):
+                node = self._call(
+                    "mutant_arith",
+                    [constant(plan["site"]), constant(plan["original"]), constant(plan["mutated"]), node.left, node.right],
+                    node,
+                )
+            elif kind == "sign" and isinstance(node, ast.UnaryOp):
+                node = self._call(
+                    "mutant_sign",
+                    [constant(plan["site"]), constant(plan["original"]), constant(plan["mutated"]), node.operand],
+                    node,
+                )
+            elif kind == "method" and isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                node = self._call(
+                    "mutant_method",
+                    [constant(plan["site"]), node.value, constant(node.attr), constant(plan["mutated"])],
+                    node,
+                )
+            elif kind == "none":
+                node = self._call("mutant_none", [constant(plan["site"]), node], node)
+        tests = [plan for plan in plans if plan["kind"] in ("iffalse", "iftrue")]
+        if tests:
+            sites = {plan["kind"]: plan["site"] for plan in tests}
+            node = self._call(
+                "mutant_test",
+                [constant(sites.get("iffalse")), constant(sites.get("iftrue")), node],
+                node,
+            )
+        return node
+
+
 def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
     """Insert the plan's probes into a parsed module, in place."""
     if isinstance(probes, SiteProbes):
@@ -576,6 +656,9 @@ def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
             candidate = f"_scv_{stem}{counter}"
         taken.add(candidate)
         names[attribute] = candidate
+    mutant_probes = getattr(probes, "mutant_probes", None)
+    if mutant_probes:
+        _MutantProbes(mutant_probes, names).visit(tree)
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
     _import_aliases(tree, names)
@@ -612,6 +695,12 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
         "decision_value_probe": "lambda d, value: value",
         "single_probe": "lambda k, value: not not value",
         "site_probe": "lambda file, line: None",
+        "mutant_compare": "lambda site, op, a, b: getattr(__import__('operator'), op)(a, b)",
+        "mutant_arith": "lambda site, op, mutated, a, b: getattr(__import__('operator'), op)(a, b)",
+        "mutant_none": "lambda site, value: value",
+        "mutant_sign": "lambda site, op, mutated, operand: getattr(__import__('operator'), op)(operand)",
+        "mutant_method": "lambda site, receiver, name, mutated: getattr(receiver, name)",
+        "mutant_test": "lambda false_site, true_site, value: value",
     }
     sinks = "\n".join(
         f"    {alias} = {fallbacks.get(attribute, '_scv_sink')}"

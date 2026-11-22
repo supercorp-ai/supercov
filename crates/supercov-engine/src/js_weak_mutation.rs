@@ -206,11 +206,13 @@ fn operands(mutant: &CandidateMutant) -> Option<(&str, String, String)> {
     let operator = mutant.operator.as_ref()?;
     let left = mutant.original.get(..operator.at)?;
     let right = mutant.original.get(operator.at + operator.text.len()..)?;
-    Some((
-        operator.text.as_str(),
-        quoted(left.trim()),
-        quoted(right.trim()),
-    ))
+    // A Python comparison mutant's span starts at its operator
+    // (`python_mutants`): the operand before it is not in its text.
+    let left = match left.trim() {
+        "" => "the operand before it".to_owned(),
+        left => quoted(left),
+    };
+    Some((operator.text.as_str(), left, quoted(right.trim())))
 }
 
 fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
@@ -817,7 +819,7 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
         return verdict_of(
             INFECTED,
             "replacement-differs",
-            "StrykerJS's replacement gave another value",
+            "the mutant's replacement gave another value",
         );
     }
     if outcomes.iter().all(|outcome| outcome == "same") {

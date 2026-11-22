@@ -115,6 +115,25 @@ pub struct PythonMutant {
     pub same_value: bool,
     /// The operator it changes: where it starts, and its text.
     pub operator: Option<(usize, &'static str)>,
+    /// The value probe that decides its infection, where one can.
+    pub probe: Option<ProbeTarget>,
+}
+
+/// What a value probe observes for a mutant: an expression's bytes and how
+/// the mutant's value there relates to the original's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeTarget {
+    /// `compare` (a relational comparison's operands), `arith` (a binary
+    /// operation and its swapped operator), `none` (a value the mutant makes
+    /// `None`), `sign` (a sign swapped), `method` (a string method swapped),
+    /// `iffalse` and `iftrue` (a conditional's test forced).
+    pub kind: &'static str,
+    /// The expression it wraps, in bytes.
+    pub range: (usize, usize),
+    /// The original operator or method, as the runtime names it.
+    pub original: &'static str,
+    /// The mutant's.
+    pub mutated: &'static str,
 }
 
 /// A file's mutants and the functions that hold them.
@@ -657,6 +676,36 @@ fn augmented(operator: Operator) -> &'static str {
     }
 }
 
+/// The probe that sees whether a value the mutant replaces with `None` was
+/// `None`.
+fn none_probe(value: &Expr) -> ProbeTarget {
+    ProbeTarget {
+        kind: "none",
+        range: range_of(value.range()),
+        original: "",
+        mutated: "",
+    }
+}
+
+/// The `operator` module's function for a binary operator.
+fn operator_function(operator: Operator) -> &'static str {
+    match operator {
+        Operator::Add => "add",
+        Operator::Sub => "sub",
+        Operator::Mult => "mul",
+        Operator::MatMult => "matmul",
+        Operator::Div => "truediv",
+        Operator::Mod => "mod",
+        Operator::Pow => "pow",
+        Operator::LShift => "lshift",
+        Operator::RShift => "rshift",
+        Operator::BitOr => "or_",
+        Operator::BitXor => "xor",
+        Operator::BitAnd => "and_",
+        Operator::FloorDiv => "floordiv",
+    }
+}
+
 fn comparison(operator: CmpOp) -> &'static str {
     match operator {
         CmpOp::Eq => "==",
@@ -746,7 +795,16 @@ impl<'t, 'a> Walker<'t, 'a> {
             default_of: None,
             same_value: false,
             operator: None,
+            probe: None,
         });
+    }
+
+    /// The last mutant pushed, if `before` mutants were there, is decided by
+    /// the probe `target`.
+    fn note_probe(&mut self, before: usize, target: ProbeTarget) {
+        if self.mutants.len() > before {
+            self.mutants.last_mut().expect("pushed").probe = Some(target);
+        }
     }
 
     /// The last mutant pushed, if `before` mutants were there: it changes
@@ -915,6 +973,7 @@ impl<'t, 'a> Walker<'t, 'a> {
         } else {
             ("None", "None")
         };
+        let before = self.mutants.len();
         self.push(
             "AssignmentValue",
             descriptor,
@@ -923,6 +982,9 @@ impl<'t, 'a> Walker<'t, 'a> {
             replacement,
             &[value_range],
         );
+        if !value.is_none_literal_expr() {
+            self.note_probe(before, none_probe(value));
+        }
     }
 
     /// The text each `case` of a `match` owns: its comment lines before it,
@@ -1033,6 +1095,20 @@ impl<'t, 'a> Walker<'t, 'a> {
                             &[operator],
                         );
                         self.note_operator(before, range.0, old);
+                        let (original, mutated) = if unary.op == UnaryOp::USub {
+                            ("neg", "pos")
+                        } else {
+                            ("pos", "neg")
+                        };
+                        self.note_probe(
+                            before,
+                            ProbeTarget {
+                                kind: "sign",
+                                range,
+                                original,
+                                mutated,
+                            },
+                        );
                     }
                 }
             }
@@ -1057,6 +1133,15 @@ impl<'t, 'a> Walker<'t, 'a> {
                     &[(operator_start, operator_start + 1)],
                 );
                 self.note_operator(before, operator_start, binary(operation.op));
+                self.note_probe(
+                    before,
+                    ProbeTarget {
+                        kind: "arith",
+                        range,
+                        original: operator_function(operation.op),
+                        mutated: operator_function(new),
+                    },
+                );
             }
             Expr::BoolOp(operation) => {
                 let (old, new) = match operation.op {
@@ -1120,7 +1205,11 @@ impl<'t, 'a> Walker<'t, 'a> {
                         .trim(),
                     test => self.text.slice(test.range()),
                 };
-                for (descriptor, tail) in [("false", "and False"), ("true", "or True")] {
+                for (descriptor, tail, kind) in [
+                    ("false", "and False", "iffalse"),
+                    ("true", "or True", "iftrue"),
+                ] {
+                    let before = self.mutants.len();
                     self.push(
                         "IfExpression",
                         descriptor,
@@ -1128,6 +1217,15 @@ impl<'t, 'a> Walker<'t, 'a> {
                         test,
                         format!("({inner}) {tail}"),
                         &[(test.0, test.0 + 1)],
+                    );
+                    self.note_probe(
+                        before,
+                        ProbeTarget {
+                            kind,
+                            range: range_of(conditional.test.range()),
+                            original: "",
+                            mutated: "",
+                        },
                     );
                 }
             }
@@ -1175,6 +1273,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                 continue;
             }
             let at = self.text.own_parens(value.range(), interior);
+            let before = self.mutants.len();
             self.push(
                 "CallArgument",
                 format!("None@{}", index + 1),
@@ -1183,6 +1282,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                 "None",
                 &[at],
             );
+            self.note_probe(before, none_probe(value));
         }
         if ordered.len() > 1 {
             for index in 0..ordered.len() {
@@ -1203,9 +1303,17 @@ impl<'t, 'a> Walker<'t, 'a> {
         if let Expr::Attribute(attribute) = &*call.func {
             let method = attribute.attr.as_str();
             let at = range_of(attribute.attr.range);
+            let method_probe = |old: &'static str, new: &'static str| ProbeTarget {
+                kind: "method",
+                range: range_of(attribute.range),
+                original: old,
+                mutated: new,
+            };
             for (old, new) in SYMMETRIC_STRING_METHODS {
                 if *old == method {
+                    let before = self.mutants.len();
                     self.push("MethodExpression", *new, range, at, *new, &[at]);
+                    self.note_probe(before, method_probe(old, new));
                 }
             }
             let maxsplit = arguments.keywords.iter().any(|keyword| {
@@ -1216,7 +1324,9 @@ impl<'t, 'a> Walker<'t, 'a> {
             });
             for (old, new) in [("split", "rsplit"), ("rsplit", "split")] {
                 if old == method && (ordered.len() == 2 || maxsplit) {
+                    let before = self.mutants.len();
                     self.push("MethodExpression", new, range, at, new, &[at]);
+                    self.note_probe(before, method_probe(old, new));
                 }
             }
         }
@@ -1274,6 +1384,28 @@ impl<'t, 'a> Walker<'t, 'a> {
                     &[(operator_start, operator_end)],
                 );
                 self.note_operator(before, operator_start, comparison(*operator));
+                let relation = match operator {
+                    CmpOp::Lt => Some("lt"),
+                    CmpOp::LtE => Some("le"),
+                    CmpOp::Gt => Some("gt"),
+                    CmpOp::GtE => Some("ge"),
+                    _ => None,
+                };
+                // One comparison, not a chain: its operands are the two
+                // the probe sees.
+                if let Some(relation) = relation
+                    && compare.ops.len() == 1
+                {
+                    self.note_probe(
+                        before,
+                        ProbeTarget {
+                            kind: "compare",
+                            range,
+                            original: relation,
+                            mutated: "",
+                        },
+                    );
+                }
             }
             let keyword = match operator {
                 CmpOp::Is => Some(CmpOp::IsNot),
@@ -1733,6 +1865,22 @@ pub(crate) fn listed(
     file: &str,
     source: &str,
 ) -> Result<(Vec<crate::mutant_list::CandidateMutant>, BTreeSet<String>), PythonInstrumenterError> {
+    listed_with(file, source).map(|(mutants, points, _)| (mutants, points))
+}
+
+/// `listed`, and the enumeration it lists.
+#[allow(clippy::type_complexity)]
+fn listed_with(
+    file: &str,
+    source: &str,
+) -> Result<
+    (
+        Vec<crate::mutant_list::CandidateMutant>,
+        BTreeSet<String>,
+        Enumeration,
+    ),
+    PythonInstrumenterError,
+> {
     let obligations = crate::python_instrumenter::build_python_obligations(file, source)?;
     let recorded = obligations
         .manifest
@@ -1801,7 +1949,69 @@ pub(crate) fn listed(
             mutant
         })
         .collect();
-    Ok((mutants, recorded))
+    Ok((mutants, recorded, enumeration))
+}
+
+/// A file's mutants listed as a run measures them with their value probes
+/// (`SUPERCOV_MUTANTS=1`): each linked to the probe site that decides it,
+/// and the probes the runtime places, one per site.
+pub(crate) fn probed(
+    file: &str,
+    source: &str,
+) -> Result<
+    (
+        Vec<crate::mutant_list::CandidateMutant>,
+        Vec<crate::python_instrumenter::MutantProbePlan>,
+    ),
+    PythonInstrumenterError,
+> {
+    let (mut mutants, _, enumeration) = listed_with(file, source)?;
+    let text = Text::new(source, &[]);
+    let starts = std::iter::once(0)
+        .chain(
+            source
+                .bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        )
+        .collect::<Vec<_>>();
+    let byte_position = |offset: usize| {
+        let line = starts.partition_point(|start| *start <= offset);
+        [line, offset - starts[line - 1]]
+    };
+    let mut plans = std::collections::BTreeMap::new();
+    for (mutant, listed) in enumeration.mutants.iter().zip(&mut mutants) {
+        let Some(target) = &mutant.probe else {
+            continue;
+        };
+        let (start, end) = (text.position(target.range.0), text.position(target.range.1));
+        let site = if target.kind == "compare" {
+            format!("{file}:{}:{}", start.0, start.1)
+        } else {
+            format!(
+                "{file}:{}:{}-{}:{}#{}",
+                start.0, start.1, end.0, end.1, target.kind
+            )
+        };
+        if target.kind == "compare" {
+            listed.compare = Some(site.clone());
+        } else {
+            listed.probe = Some(site.clone());
+        }
+        plans
+            .entry(site.clone())
+            .or_insert_with(|| crate::python_instrumenter::MutantProbePlan {
+                site,
+                kind: target.kind.to_owned(),
+                span: crate::python_instrumenter::PlanSpan {
+                    start: byte_position(target.range.0),
+                    end: byte_position(target.range.1),
+                },
+                original: target.original.to_owned(),
+                mutated: target.mutated.to_owned(),
+            });
+    }
+    Ok((mutants, plans.into_values().collect()))
 }
 
 /// The static rule of a number literal whose mutant has its value.
