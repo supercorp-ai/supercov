@@ -71,6 +71,10 @@ struct PlanMutant {
 #[derive(Deserialize)]
 struct PlanCandidate {
     test: usize,
+    /// Why the plan took it: `not-exact` and `unattributed` say only that
+    /// its evidence is not its own, not that it ran the mutant's code.
+    #[serde(default)]
+    reason: String,
 }
 
 /// A test's package directory and its name, from its id
@@ -254,6 +258,10 @@ struct Package {
     baseline_ms: u64,
     /// The package's binary did not build.
     broken: Option<String>,
+    /// The directories (from the copy's root) of every package its test
+    /// binary links: a binary that links no package of a mutant's cannot
+    /// run its code.
+    links: Option<HashSet<String>>,
 }
 
 /// What one run of a test binary showed.
@@ -875,7 +883,12 @@ pub fn run_go_strong(
             }
         }
     }
-    let packages = build_and_baseline(&pass, &by_package, diagnostics)?;
+    let mut packages = build_and_baseline(&pass, &by_package, diagnostics)?;
+    for (directory, links) in linked_directories(&pass, by_package.keys()) {
+        if let Some(package) = packages.get_mut(&directory) {
+            package.links = Some(links);
+        }
+    }
 
     // The mutants, a worker each at a time.
     let solo_reasons = solo
@@ -1077,6 +1090,68 @@ fn limit_for(package: &Package) -> Duration {
     Duration::from_millis(package.baseline_ms.saturating_mul(3) + 10_000)
 }
 
+/// Each test package's binary's linked package directories, from `go list
+/// -deps -test`, relative to the copy's root; a package `go list` cannot
+/// say has none.
+fn linked_directories<'d>(
+    pass: &Pass,
+    directories: impl Iterator<Item = &'d String>,
+) -> BTreeMap<String, HashSet<String>> {
+    let patterns = directories
+        .map(|directory| pattern(directory))
+        .collect::<Vec<_>>();
+    let output = Command::new(&pass.flags.program)
+        .args(["list", "-e", "-deps", "-test"])
+        .args(&pass.flags.build)
+        .arg("-f={{.ImportPath}}|{{.Dir}}|{{join .Deps \",\"}}")
+        .args(&patterns)
+        .current_dir(&pass.workspace)
+        .launch_output();
+    let Ok(output) = output else {
+        return BTreeMap::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let root = std::fs::canonicalize(&pass.workspace).unwrap_or_else(|_| pass.workspace.clone());
+    let relative = |directory: &str| -> Option<String> {
+        let path = std::fs::canonicalize(directory).ok()?;
+        let inside = path.strip_prefix(&root).ok()?;
+        let text = inside.to_string_lossy().replace('\\', "/");
+        Some(if text.is_empty() {
+            ".".to_owned()
+        } else {
+            text
+        })
+    };
+    let plain = |path: &str| path.split(" [").next().unwrap_or(path).to_owned();
+    let mut directory_of_import = HashMap::new();
+    let mut binaries = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '|');
+        let (Some(import), Some(directory), Some(deps)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if let Some(directory) = relative(directory) {
+            directory_of_import.insert(plain(import), directory.clone());
+            if import.ends_with(".test") {
+                binaries.push((directory, deps.to_owned()));
+            }
+        }
+    }
+    binaries
+        .into_iter()
+        .map(|(directory, deps)| {
+            let mut links = deps
+                .split(',')
+                .filter_map(|dep| directory_of_import.get(&plain(dep)).cloned())
+                .collect::<HashSet<_>>();
+            links.insert(directory.clone());
+            (directory, links)
+        })
+        .collect()
+}
+
 /// A mutant's candidate tests, by package in the order its cheapest
 /// candidate puts each package, that passed their baseline.
 fn candidate_packages(
@@ -1097,6 +1172,18 @@ fn candidate_packages(
             continue;
         };
         if package.broken.is_none() && !package.passed.contains_key(name) {
+            continue;
+        }
+        // A test the plan took only because its evidence is not its own
+        // (an Example, a parallel test), in a binary that does not link the
+        // mutant's package: it cannot run the mutant's code.
+        let unbounded = matches!(candidate.reason.as_str(), "not-exact" | "unattributed");
+        if unbounded
+            && package
+                .links
+                .as_ref()
+                .is_some_and(|links| !links.contains(&directory_of(&mutant.file)))
+        {
             continue;
         }
         match order.iter_mut().find(|(seen, _)| seen == directory) {
