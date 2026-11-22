@@ -12,6 +12,16 @@ import supercov_strong
 
 
 @pytest.hookimpl(tryfirst=True)
+def pytest_load_initial_conftests(early_config, parser, args):
+    # pytest-cov measures what the tests run, which changes no test's
+    # outcome and costs every fork its tracing: it is off in a pass.
+    if os.environ.get(supercov_strong.PLAN_ENV):
+        namespace = early_config.known_args_namespace
+        if getattr(namespace, "cov_source", None):
+            namespace.cov_source = None
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_cmdline_main(config):
     if os.environ.get(supercov_strong.PLAN_ENV):
         supercov_strong.configure_pytest(config)

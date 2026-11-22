@@ -81,13 +81,15 @@ class Slot:
         self.count = 0
 
     def h(self) -> None:
-        """One evaluation of the active mutant's copy."""
+        """A call of the active mutant's copy."""
         self.count += 1
-        if self.count > _state.limit:
-            mutant = f"{self.file}#{self.a}"
-            if self.count == _state.limit + 1:
-                _state.note_timeout(mutant)
-            raise MutantTimeoutError(mutant)
+
+    def over(self) -> int:
+        """A loop of the active mutant's copy ran past the hit limit in one
+        call: the mutant made it endless."""
+        mutant = f"{self.file}#{self.a}"
+        _state.note_timeout(mutant)
+        raise MutantTimeoutError(mutant)
 
     def defaults(self, function, entries) -> None:
         """Register `function`'s default mutants: `(index, parameter,
@@ -263,17 +265,24 @@ class _Scopes(ast.NodeTransformer):
 
 
 class _Loops(ast.NodeTransformer):
-    """Counts each iteration of a copy's loops against the hit limit."""
+    """Counts each iteration of a copy's loops, in one call of the function,
+    against the hit limit: `<counter> += 1` and the check first in each loop
+    body. Nested functions count their own."""
 
-    def __init__(self, hit) -> None:
-        self.hit = hit
+    def __init__(self, count) -> None:
+        self.count = count
 
     def _count(self, node):
         self.generic_visit(node)
-        node.body.insert(0, self.hit(node))
+        node.body[0:0] = self.count(node)
         return node
 
     visit_For = visit_AsyncFor = visit_While = _count
+
+    def visit_FunctionDef(self, node):
+        return node
+
+    visit_AsyncFunctionDef = visit_Lambda = visit_ClassDef = visit_FunctionDef
 
 
 def _is_docstring(statement) -> bool:
@@ -335,10 +344,29 @@ def instrument(tree: ast.Module, source: bytes, relative: str, plan: dict) -> li
             leading = [original[0]] if original and _is_docstring(original[0]) else []
             rest = [scopes.visit(statement) for statement in original[len(leading) :]]
             branches = {}
-            loops = _Loops(hit)
+            counter = f"{alias}_n"
+
+            def count(node):
+                # `<counter> += 1`, and past the limit the slot's `over()`.
+                increment = ast.AugAssign(
+                    target=ast.Name(id=counter, ctx=ast.Store()), op=ast.Add(), value=ast.Constant(value=1)
+                )
+                check = ast.If(
+                    test=ast.Compare(
+                        left=ast.Name(id=counter, ctx=ast.Load()),
+                        ops=[ast.Gt()],
+                        comparators=[ast.Constant(value=_state.limit)],
+                    ),
+                    body=[ast.Expr(value=ast.Call(func=slot_attribute("over", node), args=[], keywords=[]))],
+                    orelse=[],
+                )
+                return [_locate(node, increment), _locate(node, check)]
+
+            loops = _Loops(count)
             for index, body in copies.items():
                 body = [loops.visit(scopes.visit(statement)) for statement in body]
-                branches[index] = [hit(function)] + body
+                start = ast.Assign(targets=[ast.Name(id=counter, ctx=ast.Store())], value=ast.Constant(value=0))
+                branches[index] = [hit(function), _locate(function, start)] + body
             declared = []
             if scopes.globals:
                 declared.append(ast.copy_location(ast.Global(names=scopes.globals), function))
@@ -629,6 +657,9 @@ class Driver:
         self.results = results
         self.timeouts = results + ".timeouts.jsonl"
         self.position = {runner.test_id(item): at for at, item in enumerate(runner.items)}
+        # Whether a test fails without a mutant after given tests, by the
+        # tests before it and it: what a confirmation found.
+        self.confirmed: dict = {}
         self.summary = {
             "summary": True,
             "runner": runner.name,
@@ -818,6 +849,7 @@ class Driver:
         while pending or running:
             while pending and len(running) < workers:
                 job = pending.pop(0)
+                job.setdefault("began", time.monotonic())
                 if job.get("fresh"):
                     running.append(self._spawn_fresh(job, job["places"], job["limit"]))
                 else:
@@ -842,10 +874,13 @@ class Driver:
         candidates = {}
         for mutant in plan.mutants:
             places = []
+            # A test the measured run skipped or failed runs too: the
+            # baseline says whether it passes without the mutant, and a
+            # mutant can turn a skip into a failure (a subtest skipped
+            # before a failing assertion).
             for candidate in mutant["candidates"]:
-                test = plan.tests[candidate["test"]]
                 place = self._place(candidate["test"])
-                if place is not None and test.get("runnable", True):
+                if place is not None:
                     places.append(place)
             candidates[mutant["id"]] = sorted(set(places))
         if _schemata is not None:
@@ -869,7 +904,6 @@ class Driver:
         failing = {place for place, (outcome, _) in baseline.items() if outcome == "failed"}
         jobs = []
         for mutant in plan.mutants:
-            began = time.monotonic()
             switched = failed_switches.get(mutant["file"])
             if switched == "changed" or (isinstance(switched, list) and mutant["index"] in switched):
                 self._verdict(mutant, "error", reason="its switch could not be placed: the file changed since the run, or its edit does not parse")
@@ -900,7 +934,6 @@ class Driver:
                     "stop": True,
                     "limit": 3 * budget / 1000 + 10 + (5 if fresh else 0),
                     "fresh": fresh,
-                    "began": began,
                 }
             )
 
@@ -920,6 +953,12 @@ class Driver:
                 before = [p for p in job["places"] if p < place]
                 baseline_before = [p for p in union if p < place]
                 if before != baseline_before:
+                    key = (tuple(before), place)
+                    known = self.confirmed.get(key)
+                    if known is not None:
+                        # Another mutant's kill already ran these tests
+                        # without a mutant.
+                        return self._settle(job, place, ran, fails_alone=known)
                     self.summary["confirmations"] += 1
                     return [
                         {
@@ -957,11 +996,19 @@ class Driver:
 
     def _confirmed(self, confirming, child, failure):
         job = confirming["confirming"]
-        mutant = job["mutant"]
         killer = confirming["killer"]
-        fails_alone = any(place == killer and outcome == "failed" for place, outcome, _ in child.events)
-        if not fails_alone and child.ended:
-            self._verdict(mutant, "killed", killed_by=self.runner.test_id(self.runner.items[killer]), tests=len(confirming["places"]), started=job["began"])
+        fails_alone = not child.ended or any(
+            place == killer and outcome == "failed" for place, outcome, _ in child.events
+        )
+        self.confirmed[(tuple(confirming["places"][:-1]), killer)] = fails_alone
+        return self._settle(job, killer, len(confirming["places"]), fails_alone=fails_alone)
+
+    def _settle(self, job, killer, ran, *, fails_alone):
+        """A kill by `killer`, where the same tests before it ran without the
+        mutant: it stands unless the test fails that way too."""
+        mutant = job["mutant"]
+        if not fails_alone:
+            self._verdict(mutant, "killed", killed_by=self.runner.test_id(self.runner.items[killer]), tests=ran, started=job["began"])
             return None
         # The test fails without the mutant after the same tests: no kill.
         # The mutant runs again without it.
@@ -985,9 +1032,17 @@ def run_only(runner) -> None:
     start, and reports each to the driver that started it."""
     only = _only()
     position = {runner.test_id(item): item for item in runner.items}
-    items = [position[test] for test in only["ids"] if test in position]
     writer = only["fd"]
     places = only["places"]
+    missing = [at for at, test in enumerate(only["ids"]) if test not in position]
+    if missing:
+        # A test the driver collected without the mutant is not there with
+        # it: its module failed to load, or its parameters changed. The
+        # suite fails where it ran it.
+        os.write(writer, f"{places[missing[0]]} failed 0\n".encode())
+        os.write(writer, b"end\n")
+        return
+    items = [position[test] for test in only["ids"]]
 
     def report(at, outcome, ms):
         os.write(writer, f"{places[at]} {outcome} {ms}\n".encode())
