@@ -136,6 +136,8 @@
   {"file": "operators.py", "mutator": "NumberLiteral", "start": [62, 14], "end": [62, 15], "replacement": "2", "mutmut": "x_matrices__mutmut_6", "edit": {"start": [62, 14], "end": [62, 15], "text": "2"}},
   {"file": "operators.py", "mutator": "NumberLiteral", "start": [62, 31], "end": [62, 32], "replacement": "3", "mutmut": "x_matrices__mutmut_7", "edit": {"start": [62, 31], "end": [62, 32], "text": "3"}},
   {"file": "operators.py", "mutator": "AssignmentValue", "start": [63, 5], "end": [64, 10], "replacement": "None", "mutmut": "x_matrices__mutmut_8", "edit": {"start": [63, 13], "end": [64, 10], "text": "None"}},
-  {"file": "operators.py", "mutator": "ArithmeticOperator", "start": [63, 13], "end": [64, 10], "replacement": "-", "mutmut": "x_matrices__mutmut_9", "edit": {"start": [63, 15], "end": [64, 8], "text": "-"}}
+  {"file": "operators.py", "mutator": "ArithmeticOperator", "start": [63, 13], "end": [64, 10], "replacement": "-", "mutmut": "x_matrices__mutmut_9", "edit": {"start": [63, 15], "end": [64, 8], "text": "-"}},
+  {"file": "operators.py", "mutator": "AssignmentValue", "start": [69, 5], "end": [69, 22], "replacement": "None", "mutmut": "x_negated_first__mutmut_1", "edit": {"start": [69, 12], "end": [69, 22], "text": "None"}},
+  {"file": "operators.py", "mutator": "BooleanLiteral", "start": [69, 13], "end": [69, 18], "replacement": "removed", "mutmut": "x_negated_first__mutmut_2", "edit": {"start": [69, 13], "end": [69, 17], "text": ""}}
 ]
 }

@@ -63,3 +63,8 @@ def matrices(a, b, flag):
     total = a + \
         b
     return product, picked, total
+
+
+def negated_first(a, b):
+    pair = (not a, b)
+    return pair

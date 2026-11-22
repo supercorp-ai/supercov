@@ -37,4 +37,9 @@ measured=$(best "$supercov" -- "${command[@]}")
 export SUPERCOV_MUTANTS=1
 valued=$(best "$supercov" -- "${command[@]}")
 unset SUPERCOV_MUTANTS
+# Where each kind of run spends its time, as Supercov times its phases.
+{
+  echo "measured: $("$supercov" -- "${command[@]}" 2>&1 | grep -F '[supercov] timings')"
+  echo "values: $(SUPERCOV_MUTANTS=1 "$supercov" -- "${command[@]}" 2>&1 | grep -F '[supercov] timings')"
+} >&2
 echo "{\"project\":\"$project\",\"plain\":$plain,\"measured\":$measured,\"values\":$valued}"
