@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -41,7 +41,7 @@ jobs:
     needs: build
     name: Supercov ${{ matrix.project }} ${{ matrix.runner }} ${{ matrix.values }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +71,7 @@ jobs:
     needs: build
     name: Overhead ${{ matrix.project }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +96,7 @@ jobs:
   mutmut:
     name: mutmut ${{ matrix.project }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -115,7 +115,7 @@ jobs:
   matrix:
     name: Kill matrix ${{ matrix.project }} ${{ matrix.shard }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -124,10 +124,14 @@ jobs:
           - { project: python-slugify, shard: 2/4 }
           - { project: python-slugify, shard: 3/4 }
           - { project: python-slugify, shard: 4/4 }
-          - { project: cachetools, shard: 1/4 }
-          - { project: cachetools, shard: 2/4 }
-          - { project: cachetools, shard: 3/4 }
-          - { project: cachetools, shard: 4/4 }
+          - { project: cachetools, shard: 1/8 }
+          - { project: cachetools, shard: 2/8 }
+          - { project: cachetools, shard: 3/8 }
+          - { project: cachetools, shard: 4/8 }
+          - { project: cachetools, shard: 5/8 }
+          - { project: cachetools, shard: 6/8 }
+          - { project: cachetools, shard: 7/8 }
+          - { project: cachetools, shard: 8/8 }
           - { project: parse, shard: 1/1 }
           - { project: humanize, shard: 1/10 }
           - { project: humanize, shard: 2/10 }
@@ -148,7 +152,7 @@ jobs:
           benchmarks/mutation-python/mutmut-config.sh ${{ matrix.project }} "$corpus/src"
           "$corpus/.venv/bin/python" benchmarks/mutation-python/generate.py "$corpus/src"
           mkdir -p out
-          "$corpus/.venv/bin/python" benchmarks/mutation-python/kill_matrix.py "$corpus" --jobs "$(nproc)" --max-seconds 540 --baseline-runs 2 --shard ${{ matrix.shard }} --out "$PWD/out/kill-matrix.jsonl"
+          "$corpus/.venv/bin/python" benchmarks/mutation-python/kill_matrix.py "$corpus" --jobs "$(nproc)" --max-seconds 450 --baseline-runs 2 --shard ${{ matrix.shard }} --out "$PWD/out/kill-matrix.jsonl"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -159,7 +163,7 @@ jobs:
     needs: [supercov, overhead, mutmut, matrix]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v6

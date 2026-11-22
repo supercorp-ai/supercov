@@ -33,7 +33,7 @@ case "$scenario" in
     "$here/mutmut-config.sh" "$project" "$corpus/src"
     "$corpus/.venv/bin/python" "$here/generate.py" "$corpus/src"
     mkdir -p "$out/matrix-$project-$2"
-    "$corpus/.venv/bin/python" "$here/kill_matrix.py" "$corpus" --jobs "$(nproc)" --max-seconds 540 --baseline-runs 2 \
+    "$corpus/.venv/bin/python" "$here/kill_matrix.py" "$corpus" --jobs "$(nproc)" --max-seconds 450 --baseline-runs 2 \
       --shard "$shard" --out "$out/matrix-$project-$2/kill-matrix.jsonl" ;;
   *) echo "part $2: unknown scenario '$scenario'" >&2; exit 2 ;;
 esac

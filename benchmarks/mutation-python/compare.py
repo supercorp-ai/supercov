@@ -14,6 +14,7 @@ summary.
 """
 
 import json
+import os
 import sys
 from collections import Counter
 
@@ -21,8 +22,9 @@ DETECTED = {"killed", "timeout"}
 UNDETECTED = {"survived", "no-coverage", "equivalent", "no tests"}
 
 ids_path, matrix_path, strong_path = sys.argv[1:4]
-mutmut_path = sys.argv[4] if len(sys.argv) > 4 else None
-weak_path = sys.argv[5] if len(sys.argv) > 5 else None
+# A tool's file that is missing (its job did not finish) is left out.
+mutmut_path = sys.argv[4] if len(sys.argv) > 4 and os.path.exists(sys.argv[4]) else None
+weak_path = sys.argv[5] if len(sys.argv) > 5 and os.path.exists(sys.argv[5]) else None
 weak = {}
 if weak_path:
     for line in open(weak_path, encoding="utf-8"):
