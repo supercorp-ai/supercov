@@ -2,6 +2,7 @@ package com.supercorp.supercov;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.junit.platform.engine.FilterResult;
 import org.junit.platform.engine.TestDescriptor;
 import org.junit.platform.engine.TestExecutionResult;
@@ -100,6 +101,19 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         test.handle = byName.get(invocationKey(test.name));
       }
       if (test.handle == null) {
+        // A JUnit 4 parameter printed by Object's toString names its
+        // identity hash, which differs from JVM to JVM and from one
+        // discovery to the next, unique id and all: the name with every
+        // such hash left out says the same test, unless two of the class's
+        // tests read alike without them. It is run by its class, filtered
+        // to that name.
+        String key = stableKey(test.name);
+        String stable = byName.get(key);
+        if (stable != null && !AMBIGUOUS.equals(stable)) {
+          test.handle = new String[] {test.className, key};
+        }
+      }
+      if (test.handle == null) {
         // A parameterized or dynamic test's invocations are not in a
         // discovered plan: they appear as it runs. The template is, and an
         // invocation is selected by the template's id and its index.
@@ -132,6 +146,17 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
       return template + "/[" + segment + ":#" + index + "]";
     }
 
+    /** A name that two tests share once their identity hashes are left out. */
+    static final String AMBIGUOUS = "\u0003";
+
+    private static final Pattern IDENTITY_HASH = Pattern.compile("([\\w$])@[0-9a-f]{1,8}(?![\\w$])");
+
+    /** A name with each identity hash (`Builder@6c0d7c83`) left out. */
+    static String stableKey(String name) {
+      String stable = IDENTITY_HASH.matcher(name).replaceAll("$1@");
+      return stable.equals(name) ? null : "\u0002" + stable;
+    }
+
     /** A name cut after its last invocation index: `Class#method(..)#[3]`. */
     static String invocationKey(String name) {
       int open = name.lastIndexOf("#[");
@@ -150,6 +175,10 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         if (key != null) {
           byName.put(key, identifier.getUniqueId());
         }
+        String stable = stableKey(name);
+        if (stable != null) {
+          byName.put(stable, byName.containsKey(stable) ? AMBIGUOUS : identifier.getUniqueId());
+        }
       } else if (plan.getParent(identifier).isPresent()) {
         // A container: a template whose invocations appear as it runs.
         byName.put("\u0001" + name(plan, identifier), identifier.getUniqueId());
@@ -161,20 +190,43 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
 
     @Override
     public void execute(SupercovStrongPass.Test test, final SupercovStrongPass.Outcome outcome) {
-      LauncherDiscoveryRequest request =
-          LauncherDiscoveryRequestBuilder.request()
-              .selectors(DiscoverySelectors.selectUniqueId((String) test.handle))
-              .build();
+      LauncherDiscoveryRequest request;
+      if (test.handle instanceof String[]) {
+        final String key = ((String[]) test.handle)[1];
+        request =
+            LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClass(((String[]) test.handle)[0]))
+                .filters(
+                    (PostDiscoveryFilter)
+                        descriptor ->
+                            !descriptor.isTest() || key.equals(stableKey(name(descriptor)))
+                                ? FilterResult.included("the test")
+                                : FilterResult.excluded("another test"))
+                .build();
+      } else {
+        request =
+            LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectUniqueId((String) test.handle))
+                .build();
+      }
+      final boolean[] ran = {false};
       launcher.execute(
           request,
           new TestExecutionListener() {
             @Override
             public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
+              if (identifier.isTest()) {
+                ran[0] = true;
+              }
               if (result.getStatus() == TestExecutionResult.Status.FAILED) {
                 outcome.fail(result.getThrowable().orElse(null));
               }
             }
           });
+      if (!ran[0] && test.handle instanceof String[] && !outcome.failed) {
+        outcome.failed = true;
+        outcome.reason = "the test did not run alone";
+      }
     }
   }
 
@@ -189,6 +241,21 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         break;
       }
       qualified.insert(0, containerName(parent) + "#");
+      current = parent;
+    }
+    return Supercov.printable(qualified.toString());
+  }
+
+  /** A discovered descriptor's name, as `name` gives its identifier's. */
+  static String name(TestDescriptor descriptor) {
+    StringBuilder qualified = new StringBuilder(invocation(TestIdentifier.from(descriptor)));
+    TestDescriptor current = descriptor;
+    while (true) {
+      TestDescriptor parent = current.getParent().orElse(null);
+      if (parent == null || !parent.getParent().isPresent()) {
+        break;
+      }
+      qualified.insert(0, containerName(TestIdentifier.from(parent)) + "#");
       current = parent;
     }
     return Supercov.printable(qualified.toString());

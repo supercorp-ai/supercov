@@ -19360,6 +19360,65 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
     );
 }
 
+/// A JUnit 4 parameterized test whose parameters print as Object's
+/// toString does, an identity hash in each name, is found again in the
+/// strong pass's JVM, where the hashes differ, and decides its mutants. A
+/// random hash stands in for the identity hash, which a small program may
+/// happen to repeat.
+#[test]
+fn a_junit_4_parameter_named_by_its_identity_hash_decides_its_mutants() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-junit4-hash");
+    small_maven_project(&project);
+    let pom = std::fs::read_to_string(project.root.join("pom.xml"))
+        .unwrap()
+        .replace(
+            "<groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>",
+            "<groupId>junit</groupId>\n      <artifactId>junit</artifactId>\n      <version>4.13.2</version>",
+        );
+    project.write("pom.xml", &pom);
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.Assert.assertEquals;\n\nimport java.util.Arrays;\nimport java.util.Collection;\nimport java.util.concurrent.ThreadLocalRandom;\nimport org.junit.Test;\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Parameterized;\n\n@RunWith(Parameterized.class)\npublic class WTest {\n    static class Case {\n        final int n;\n        final int twice;\n        final String hash = Integer.toHexString(ThreadLocalRandom.current().nextInt(1 << 28, Integer.MAX_VALUE));\n\n        Case(int n, int twice) {\n            this.n = n;\n            this.twice = twice;\n        }\n    }\n\n    static class Small extends Case {\n        Small() {\n            super(2, 4);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Small@\" + hash;\n        }\n    }\n\n    static class Large extends Case {\n        Large() {\n            super(5, 10);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Large@\" + hash;\n        }\n    }\n\n    @Parameterized.Parameters(name = \"{0}\")\n    public static Collection<Object[]> cases() {\n        return Arrays.asList(new Object[] {new Small()}, new Object[] {new Large()});\n    }\n\n    private final Case value;\n\n    public WTest(Case value) {\n        this.value = value;\n    }\n\n    @Test\n    public void twice() {\n        assertEquals(value.twice, W.twice(value.n));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let file = "src/main/java/w/W.java";
+    // `n * 2` against `n / 2`: both cases tell them apart.
+    assert_eq!(
+        verdicts["mutants"][format!("{file}:5:29-5:34:Math:/")]["status"],
+        "killed",
+        "{tested}\n{verdicts}"
+    );
+    let errors = verdicts["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, mutant)| mutant["status"] == "error")
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(errors, Vec::<String>::new(), "{verdicts}");
+}
+
 /// A Maven project with one class and its test.
 /// A JVM test whose class is declared in a file of another name has no
 /// file to name, and is listed without evidence all the same.
