@@ -270,6 +270,7 @@ pub(crate) fn list_from_sources(
             RUST => list_rust_mutants(root, &files),
             crate::python_mutants::PYTHON => crate::python_mutants::list_mutants(root, &files),
             crate::go_mutants::GO => crate::go_mutants::list_mutants(root, &files),
+            crate::ruby_mutants::RUBY => crate::ruby_mutants::list_mutants(root, &files),
             _ => continue,
         };
         listed.changed.extend(one.changed);

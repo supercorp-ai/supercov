@@ -904,10 +904,24 @@ fn read_stryker_reports(
         if reports.reports.contains(&path) {
             return Ok(());
         }
-        let text = supercov_engine::fault_fs::read_to_string(&path)
+        let bytes = supercov_engine::fault_fs::read(&path)
             .map_err(|error| format!("Could not read {path}: {error}"))?;
-        let mutants = supercov_engine::mutants_query::parse_stryker_report(&text, path_of)
-            .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
+        let mutants = if supercov_engine::ruby_mutants::is_mutant_session(&bytes) {
+            // The mutant gem's session results, matched by the methods its
+            // mutations make.
+            supercov_engine::ruby_mutants::parse_mutant_session(&bytes, path_of, |file| {
+                std::fs::read(project.join(file)).ok()
+            })
+            .map_err(|reason| {
+                format!("Could not read {path} as mutant's session results: {reason}")
+            })?
+        } else {
+            let text = String::from_utf8(bytes)
+                .map_err(|error| format!("Could not read {path}: {error}"))?;
+            supercov_engine::mutants_query::parse_stryker_report(&text, path_of).map_err(
+                |reason| format!("Could not read {path} as a StrykerJS report: {reason}"),
+            )?
+        };
         reports.reports.push(path);
         reports.mutants.extend(mutants);
         Ok::<(), String>(())
@@ -930,6 +944,7 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
             } else if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                || path.to_string_lossy().ends_with(".json.gz")
             {
                 found.push(path.to_string_lossy().replace('\\', "/"));
             }

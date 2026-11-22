@@ -312,7 +312,11 @@ pub fn command(args: &[String]) -> ExitCode {
 /// verdict, and the pass would read as a score of nothing killed.
 fn refuse_without_a_driver(run: &str, plan: &StrongPlan) -> Result<(), String> {
     use supercov_engine::strong_driver::STRONG_RUNNERS;
-    let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
+    // Mutants of a language with no driver are errors whatever the run's
+    // runners; the refusal is for a pass a driver would run.
+    let runs_any = plan.mutants.iter().any(|mutant| {
+        mutant.decided.is_none() && supercov_engine::strong_driver::has_driver(&mutant.language)
+    });
     let drivable = plan
         .tests
         .iter()

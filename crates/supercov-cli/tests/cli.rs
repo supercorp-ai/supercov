@@ -16648,8 +16648,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
-            "fs.read_dir entry#1 => ruby_project.rs:100",
-            "fs.read_dir entry#2 => ruby_evidence.rs:329",
+            "fs.read_dir entry#1 => ruby_project.rs:102",
+            "fs.read_dir entry#2 => ruby_evidence.rs:338",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -18022,11 +18022,11 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
         ("fs.create_dir_all#python_run.rs:716", "python_run.rs:716"),
         ("fs.create_dir_all#python_run.rs:717", "python_run.rs:717"),
-        ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
-        ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:323", "go_run.rs:323"),
         ("fs.create_dir_all#go_run.rs:373", "go_run.rs:373"),
         ("fs.create_dir_all#go_run.rs:412", "go_run.rs:412"),
+        ("fs.create_dir_all#ruby_run.rs:514", "ruby_run.rs:514"),
+        ("fs.create_dir_all#ruby_run.rs:515", "ruby_run.rs:515"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18236,8 +18236,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#ruby_project.rs:225@1",
-            "ruby_project.rs:225",
+            "fs.read#ruby_project.rs:229@1",
+            "ruby_project.rs:229",
             "web/app.rb",
         ),
         (
@@ -18255,7 +18255,7 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
             "ruby_run.rs:93",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:513@1", "ruby_run.rs:513", "plan.rb"),
+        ("fs.write#ruby_run.rs:519@1", "ruby_run.rs:519", "plan.rb"),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19440,7 +19440,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &project,
             &[
                 ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
-                ("fs.read_dir#ruby_project.rs:100", "ruby_project.rs:100"),
+                ("fs.read_dir#ruby_project.rs:102", "ruby_project.rs:102"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -23888,12 +23888,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:835",
+            "fs.write#mutants_test_command.rs:839",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:835"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:839"),
         "{}",
         unwritten.stderr()
     );
@@ -24332,13 +24332,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:672",
+            "coverage-index-read#mutants_query.rs:687",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:687"), "{said}");
 
     // The table of files.
     contains_all(
@@ -24789,8 +24789,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:926",
-        "fs.read_dir entry#public_query.rs:926",
+        "fs.read_dir#public_query.rs:940",
+        "fs.read_dir entry#public_query.rs:940",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24803,7 +24803,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:926"),
+            fired_at(&unlisted, "public_query.rs:940"),
             "{fault}: {unlisted}"
         );
     }
@@ -24961,5 +24961,166 @@ fn a_go_mutant_vet_rejects_is_unviable() {
             .unwrap()
             .ends_with("odd.go:3:34: suspect or: x != 1 || x != 2"),
         "{verdict}"
+    );
+}
+
+/// A Ruby method's mutants are the mutant gem's, listed from a plain run,
+/// and the strong pass runs them in forks of the loaded Minitest suite: a
+/// boundary the test checks is killed, a literal it cannot tell from 0
+/// survives, and a method no test calls is no coverage.
+#[cfg(unix)]
+/// A Ruby process a test starts with `--disable-gems` (test-unit's
+/// `assert_separately`) loads Supercov's runtime through RUBYOPT without
+/// RubyGems, which loaded `rbconfig` for it: the runtime disabled itself
+/// and said so on the child's error output, which such tests read.
+#[test]
+fn ruby_children_without_rubygems_keep_their_error_output_clean() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-disable-gems");
+    project.write("lib/noop.rb", "def noop\n  1\nend\n");
+    project.write(
+        "test/child_test.rb",
+        "require 'minitest/autorun'\nrequire 'open3'\nrequire 'noop'\n\nclass ChildTest < Minitest::Test\n  def test_child\n    noop\n    out, err, = Open3.capture3(RbConfig.ruby, '--disable-gems', '-e', 'print 1')\n    assert_equal ['1', ''], [out, err]\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/child_test.rb"])
+        .succeeds();
+}
+
+/// A Ruby run measured for mutants records, per test, whether each mutant
+/// a value probe computes would have given the original's value: a call's
+/// other method, its receiver alone, a condition's truth.
+#[test]
+fn ruby_value_probes_tell_which_mutants_no_test_infects() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-values");
+    project.write(
+        "lib/label.rb",
+        "class Label\n  def tidy(s)\n    s.strip\n  end\n\n  def pick(flag)\n    flag ? :on : :off\n  end\n\n  def small?(n)\n    n < 10\n  end\nend\n",
+    );
+    project.write(
+        "test/label_test.rb",
+        "require 'minitest/autorun'\nrequire 'label'\n\nclass LabelTest < Minitest::Test\n  def test_tidy\n    assert_equal 'a', Label.new.tidy('a')\n  end\n\n  def test_pick\n    assert_equal :on, Label.new.pick(true)\n  end\n\n  def test_small\n    assert Label.new.small?(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov_with(
+            &["--", ruby.as_str(), "-Ilib", "test/label_test.rb"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .map(|mutant| mutant["status"].as_str().unwrap_or_default().to_owned())
+            .unwrap_or_else(|| format!("missing: {listed}"))
+    };
+    for (id, expected) in [
+        // `"a".lstrip` and `"a"` are `"a".strip`; `nil` is not.
+        ("lib/label.rb:3:5-3:12:Send:s.lstrip", "not-infected"),
+        ("lib/label.rb:3:5-3:12:Send:s", "not-infected"),
+        ("lib/label.rb:3:5-3:12:Send:nil", "infected"),
+        // The flag was only ever true.
+        ("lib/label.rb:7:5-7:9:NamedValue:true", "not-infected"),
+        ("lib/label.rb:7:5-7:9:NamedValue:false", "infected"),
+        // `3 < 10` is true; `3 == 10`, `10` and `nil` are not.
+        ("lib/label.rb:11:5-11:11:Send:n == 10", "infected"),
+        ("lib/label.rb:11:5-11:11:Send:10", "infected"),
+        ("lib/label.rb:11:5-11:11:Send:nil", "infected"),
+    ] {
+        assert_eq!(status(id), expected, "{id}");
+    }
+}
+
+#[test]
+fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
+    let Some(ruby) = ruby() else {
+        return;
+    };
+    let project = Project::empty("ruby-strong");
+    project.write(
+        "lib/calc.rb",
+        "class Calc\n  def add(a, b)\n    a + b\n  end\n\n  def big?(n)\n    n > 10\n  end\n\n  def unused(x)\n    x * 2\n  end\nend\n",
+    );
+    project.write(
+        "test/calc_test.rb",
+        "require 'minitest/autorun'\nrequire 'calc'\n\nclass CalcTest < Minitest::Test\n  def test_adds\n    assert_equal 3, Calc.new.add(1, 2)\n  end\n\n  def test_big\n    assert Calc.new.big?(20)\n    refute Calc.new.big?(3)\n  end\nend\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    project
+        .supercov(&["--", ruby.as_str(), "-Ilib", "test/calc_test.rb"])
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    assert_eq!(listed["data"]["mutantSet"], "mutant@0.17.1", "{listed}");
+    let ids = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| mutant["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for id in [
+        "lib/calc.rb:7:5-7:11:Send:n == 10",
+        "lib/calc.rb:7:9-7:11:Integer:0",
+        "lib/calc.rb:3:5-3:10:Send:a - b",
+        "lib/calc.rb:11:5-11:10:Send:x / 2",
+    ] {
+        assert!(ids.iter().any(|each| each == id), "{id} in {ids:?}");
+    }
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    let strong = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "500"])
+        .json();
+    let status = |id: &str| {
+        strong["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .map(|mutant| {
+                mutant["strong"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        status("lib/calc.rb:7:5-7:11:Send:n == 10"),
+        "killed",
+        "{strong}\n{said}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:3:5-3:10:Send:a - b"),
+        "killed",
+        "{strong}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:7:9-7:11:Integer:11"),
+        "survived",
+        "{strong}"
+    );
+    assert_eq!(
+        status("lib/calc.rb:11:5-11:10:Send:x / 2"),
+        "no-coverage",
+        "{strong}"
     );
 }

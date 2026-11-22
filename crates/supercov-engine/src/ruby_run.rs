@@ -375,7 +375,13 @@ fn run_direct_ruby_in(
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
-        let entries = run.archive_entries();
+        let mut entries = run.archive_entries();
+        if let Some(mutants) = &project.mutants {
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(mutants).expect("plain data serializes"),
+            });
+        }
         let entries = crate::source_capture::append(entries, &source_inputs);
         let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(&root, &ruby_directory).map_err(|error| error.to_string())?;
@@ -1025,4 +1031,237 @@ mod tests {
         );
         fs::remove_dir_all(&root).ok();
     }
+}
+
+/// The test runners whose tests the Ruby strong driver runs.
+pub const RUBY_STRONG_RUNNERS: [&str; 4] = ["rspec", "minitest", "test-unit", "cucumber"];
+
+/// Ruby's strong pass (`docs/design/mutation-drivers.md`): the plan's Ruby
+/// mutants written into their files behind switches, and the command run
+/// once with `supercov_strong.rb` loaded in place of the coverage runtime.
+/// When the runner is about to run the loaded suite, that runtime
+/// runs the plan instead, one fork per mutant, and appends each verdict to
+/// the results. Mutants it cannot run are given their verdict here.
+pub fn run_strong_ruby(
+    pass: &crate::strong_driver::StrongPass,
+    diagnostics: &mut dyn Write,
+) -> Result<i32, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let root = canonicalize_simplified(&pass.root).map_err(|error| error.to_string())?;
+    let plan: serde_json::Value = serde_json::from_slice(
+        &fs::read(&pass.strong.plan)
+            .map_err(|error| format!("{}: {error}", pass.strong.plan.display()))?,
+    )
+    .map_err(|error| format!("{}: {error}", pass.strong.plan.display()))?;
+    let tests = plan["tests"].as_array().cloned().unwrap_or_default();
+    let mut results = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&pass.strong.results)
+        .map_err(|error| format!("{}: {error}", pass.strong.results.display()))?;
+    let mut verdict = |id: &str, status: &str, reason: &str| -> Result<(), String> {
+        let line = serde_json::json!({ "id": id, "status": status, "killedBy": null, "tests": 0, "durationMs": 0, "reason": reason });
+        writeln!(results, "{line}").map_err(|error| error.to_string())
+    };
+    // The mutants to run, by file, each with its candidate tests.
+    let mut by_file = BTreeMap::<String, Vec<serde_json::Value>>::new();
+    for mutant in plan["mutants"].as_array().into_iter().flatten() {
+        if !mutant["decided"].is_null() {
+            continue;
+        }
+        let (Some(id), Some(file)) = (mutant["id"].as_str(), mutant["file"].as_str()) else {
+            continue;
+        };
+        let candidates = mutant["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| tests.get(candidate["test"].as_u64()? as usize))
+            .filter(|test| {
+                test["runner"]
+                    .as_str()
+                    .is_some_and(|runner| RUBY_STRONG_RUNNERS.contains(&runner))
+            })
+            .filter_map(|test| test["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            verdict(
+                id,
+                "error",
+                "none of its candidate tests ran under RSpec, Minitest, test-unit or Cucumber",
+            )?;
+            continue;
+        }
+        let mut entry = mutant.clone();
+        entry["tests"] = candidates.into();
+        by_file.entry(file.to_owned()).or_default().push(entry);
+    }
+    let directory = pass.strong.results.with_file_name("ruby");
+    let runtime_directory = directory.join("runtime");
+    write_runtime(&runtime_directory)?;
+    fs::write(
+        runtime_directory.join("supercov_strong.rb"),
+        include_bytes!("../runtime-assets/ruby/supercov_strong.rb").as_slice(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut files = serde_json::Map::new();
+    let mut mutants = Vec::new();
+    let mut baseline = BTreeSet::new();
+    let mut candidate_sets = BTreeMap::<Vec<String>, usize>::new();
+    let mut switched_count = 0;
+    for (number, (file, wanted)) in by_file.into_iter().enumerate() {
+        let number = number as u64 + 1;
+        let source = match fs::read(root.join(&file)) {
+            Ok(source) => source,
+            Err(error) => {
+                for mutant in &wanted {
+                    verdict(
+                        mutant["id"].as_str().unwrap_or_default(),
+                        "error",
+                        &format!("{file}: {error}"),
+                    )?;
+                }
+                continue;
+            }
+        };
+        let ids = crate::ruby_mutants::mutant_ids(&file, &source);
+        let mut indexes = BTreeSet::new();
+        let mut runnable = Vec::new();
+        for mutant in wanted {
+            let index = mutant["index"].as_u64().unwrap_or(u64::MAX) as usize;
+            let id = mutant["id"].as_str().unwrap_or_default();
+            if ids.get(index).map(String::as_str) != Some(id) {
+                verdict(
+                    id,
+                    "error",
+                    "its file changed since the run: measure it again",
+                )?;
+                continue;
+            }
+            indexes.insert(index);
+            runnable.push(mutant);
+        }
+        let switches = crate::ruby_mutants::schemata::switches(&source, number, Some(&indexes));
+        for mutant in runnable {
+            let index = mutant["index"].as_u64().unwrap_or_default() as usize;
+            let id = mutant["id"].as_str().unwrap_or_default();
+            if let Some(reason) = switches.unplaceable.get(&index) {
+                verdict(id, "error", &format!("it has no switch ({reason})"))?;
+                continue;
+            }
+            for test in mutant["tests"].as_array().into_iter().flatten() {
+                baseline.insert(test.as_str().unwrap_or_default().to_owned());
+            }
+            // Mutants of one method share their candidates: each list is
+            // written once, and a mutant names it.
+            let list: Vec<String> = mutant["tests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|test| test.as_str().map(str::to_owned))
+                .collect();
+            let next = candidate_sets.len();
+            let set = *candidate_sets.entry(list).or_insert(next);
+            mutants.push(serde_json::json!({
+                "id": id,
+                "file": file,
+                "index": index,
+                "key": number * crate::ruby_mutants::schemata::FILE_KEY + index as u64,
+                "set": set,
+            }));
+        }
+        let switched = directory.join(format!("switched-{number}.rb"));
+        fs::write(
+            &switched,
+            crate::ruby_mutants::schemata::apply(&source, &switches.edits),
+        )
+        .map_err(|error| format!("{}: {error}", switched.display()))?;
+        files.insert(file.clone(), switched.display().to_string().into());
+        switched_count += 1;
+    }
+    drop(results);
+    if mutants.is_empty() {
+        return Ok(0);
+    }
+    // The baseline runs the candidates in the plan's order of tests.
+    let baseline = tests
+        .iter()
+        .filter_map(|test| test["id"].as_str())
+        .filter(|id| baseline.contains(*id))
+        .collect::<Vec<_>>();
+    // Each candidate list as indexes into the baseline's tests.
+    let position = baseline
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut sets = vec![Vec::new(); candidate_sets.len()];
+    for (list, index) in candidate_sets {
+        sets[index] = list
+            .iter()
+            .filter_map(|id| position.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+    }
+    let jobs = std::env::var("SUPERCOV_STRONG_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, usize::from));
+    let ruby_plan = serde_json::json!({
+        "root": root.display().to_string(),
+        "files": files,
+        "mutants": mutants,
+        "baseline": baseline,
+        "sets": sets,
+        "results": pass.strong.results.display().to_string(),
+        "timeouts": pass.strong.timeouts_path().display().to_string(),
+        "hitLimit": crate::strong_driver::DEFAULT_HIT_LIMIT,
+        "jobs": jobs,
+    });
+    let plan_path = directory.join("strong-plan.rb");
+    fs::write(&plan_path, ruby_literal(&ruby_plan).into_bytes())
+        .map_err(|error| format!("{}: {error}", plan_path.display()))?;
+    let _ = writeln!(
+        diagnostics,
+        "[supercov] strong pass: switches in {switched_count} Ruby source file(s), {} mutant(s), {jobs} at a time",
+        mutants.len()
+    );
+    let mut environment = std::env::vars_os().collect::<Vec<_>>();
+    let mut rubyopt = OsString::from("-r");
+    rubyopt.push(runtime_directory.join("supercov_strong.rb"));
+    if let Some(position) = environment.iter().position(|(name, _)| name == "RUBYOPT") {
+        let existing = environment.remove(position).1;
+        if !existing.is_empty() {
+            rubyopt.push(" ");
+            rubyopt.push(existing);
+        }
+    }
+    environment.retain(|(name, _)| name != "SUPERCOV_STRONG_RUBY_PLAN");
+    environment.push(("RUBYOPT".into(), rubyopt));
+    environment.push((
+        "SUPERCOV_STRONG_RUBY_PLAN".into(),
+        plan_path.into_os_string(),
+    ));
+    environment.push((
+        BOOTSNAP_COMPILE_CACHE.0.into(),
+        BOOTSNAP_COMPILE_CACHE.1.into(),
+    ));
+    let execution_plan = ExecutionPlan {
+        preparation: Vec::new(),
+        test: ExecutionPhase {
+            name: "strong".into(),
+            kind: PhaseKind::Test,
+            command: CommandSpec {
+                program: pass.command[0].clone().into(),
+                arguments: pass.command[1..].iter().map(OsString::from).collect(),
+                cwd: root.clone(),
+                environment: Some(environment),
+                captured_output: None,
+                console: None,
+            },
+        },
+    };
+    let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+    let execution = execute_plan(&execution_plan, options, diagnostics, |_, _| Ok(()))
+        .map_err(|error| error.to_string())?;
+    Ok(execution.exit_code)
 }

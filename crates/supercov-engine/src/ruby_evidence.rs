@@ -138,6 +138,15 @@ enum Record {
         v: String,
         o: u8,
     },
+    /// An infection probe's outcomes at mutants' sites
+    /// (`file:L:C-EL:EC#kind`) in one context since the last boundary: the
+    /// ids by number, as `hits` names them, each with its outcomes as bits
+    /// (1 `same`, 2 `differs`, 4 `unknown`).
+    Cmps {
+        ctx: u64,
+        n: Vec<usize>,
+        o: Vec<u8>,
+    },
     /// The first assertion of a call phase: what the context recorded before
     /// this record is the assertion's evidence too.
     Assert {
@@ -288,6 +297,8 @@ fn relative(root: &Path, path: &str) -> Option<String> {
 struct Observations {
     hits: BTreeSet<String>,
     vectors: BTreeMap<String, ObservedVectors>,
+    /// Infection probe outcomes, by site.
+    values: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -712,6 +723,43 @@ fn read_evidence_file(
                 .or_default()
                 .insert((values, outcome));
             }
+            Record::Cmps { ctx, n, o } => {
+                if n.len() != o.len() {
+                    return Err(invalid("value numbers and outcomes differ in length"));
+                }
+                let mut outcomes = Vec::new();
+                for (&number, &bits) in n.iter().zip(&o) {
+                    let id = interned
+                        .get(number)
+                        .ok_or_else(|| invalid("value number has no name"))?;
+                    for (bit, outcome) in [(1, "same"), (2, "differs"), (4, "unknown")] {
+                        if bits & bit != 0 {
+                            outcomes.push((id.clone(), outcome.to_owned()));
+                        }
+                    }
+                }
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    for (id, outcome) in &outcomes {
+                        before
+                            .values
+                            .entry(id.clone())
+                            .or_default()
+                            .insert(outcome.clone());
+                    }
+                }
+                let values = &mut observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .values;
+                for (id, outcome) in outcomes {
+                    values.entry(id).or_default().insert(outcome);
+                }
+            }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
                 // later one, or one outside a call phase, is inert.
@@ -728,6 +776,9 @@ fn read_evidence_file(
                     asserted.hits.extend(before.hits);
                     for (id, vectors) in before.vectors {
                         asserted.vectors.entry(id).or_default().extend(vectors);
+                    }
+                    for (id, outcomes) in before.values {
+                        asserted.values.entry(id).or_default().extend(outcomes);
                     }
                 }
             }
@@ -953,11 +1004,22 @@ fn snapshot(
             vectors: observed,
         });
     }
+    let comparisons = observations
+        .values
+        .iter()
+        .map(
+            |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                id: id.clone(),
+                outcomes: outcomes.iter().cloned().collect(),
+            },
+        )
+        .collect();
     Ok(RuntimeSnapshot {
         decisions,
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
+        comparisons,
         ..Default::default()
     })
 }
@@ -1211,6 +1273,9 @@ fn credit_requests_by_time(
         into.hits.extend(observations.hits);
         for (id, vectors) in observations.vectors {
             into.vectors.entry(id).or_default().extend(vectors);
+        }
+        for (id, outcomes) in observations.values {
+            into.values.entry(id).or_default().extend(outcomes);
         }
     }
     credited
@@ -1522,7 +1587,10 @@ fn build_from_evidence(
         });
     }
     for (worker, observations) in &background {
-        if observations.hits.is_empty() && observations.vectors.is_empty() {
+        if observations.hits.is_empty()
+            && observations.vectors.is_empty()
+            && observations.values.is_empty()
+        {
             continue;
         }
         let test = format!("__supercov_background__:{worker}");
@@ -2020,6 +2088,63 @@ pub(crate) mod tests {
             let said = read(&bytes);
             assert!(said.contains(reason), "{reason}: {said}");
         }
+    }
+
+    /// Value outcomes come a context at a time, numbered as hits are: each
+    /// bit an outcome, credited to the test and to its first assertion's
+    /// evidence while that is still being gathered.
+    #[test]
+    fn value_outcomes_are_read_by_number_and_bit() {
+        let directory = temporary("values");
+        let read = |records: &[serde_json::Value]| {
+            fs::write(directory.join("main.7.a.mmap"), transport(records)).unwrap();
+            read_evidence_directory(&directory, "run-1")
+        };
+        let head = [
+            json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"3.4.1","executable":"ruby","argv":["x.rb"]}),
+            json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"T#test_a","retry":0,"phase":"call"}),
+            json!({"t":"ids","first":0,"names":["a.rb:1:1-1:2#nil","a.rb:1:1-1:2#true"]}),
+        ];
+        let mut records = head.to_vec();
+        records.push(json!({"t":"cmps","ctx":1,"n":[0,1],"o":[1,6]}));
+        records.push(json!({"t":"assert","ctx":1}));
+        records.push(json!({"t":"exit","at":9}));
+        let evidence = read(&records).unwrap();
+        let mut seen = BTreeMap::new();
+        for (identity, observed) in &evidence.per_identity {
+            for (id, outcomes) in &observed.values {
+                seen.insert(
+                    format!("{}/{id}", identity.phase),
+                    outcomes.iter().cloned().collect::<Vec<_>>().join(","),
+                );
+            }
+        }
+        assert_eq!(
+            seen.get("call/a.rb:1:1-1:2#nil").map(String::as_str),
+            Some("same")
+        );
+        assert_eq!(
+            seen.get("call/a.rb:1:1-1:2#true").map(String::as_str),
+            Some("differs,unknown")
+        );
+        assert_eq!(
+            seen.get("assertion/a.rb:1:1-1:2#true").map(String::as_str),
+            Some("differs,unknown"),
+            "{seen:?}"
+        );
+        for (bad, reason) in [
+            (
+                json!({"t":"cmps","ctx":1,"n":[0],"o":[]}),
+                "differ in length",
+            ),
+            (json!({"t":"cmps","ctx":1,"n":[9],"o":[1]}), "has no name"),
+        ] {
+            let mut records = head.to_vec();
+            records.push(bad);
+            let error = format!("{:?}", read(&records).unwrap_err());
+            assert!(error.contains(reason), "{error}");
+        }
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     fn temporary(name: &str) -> std::path::PathBuf {
