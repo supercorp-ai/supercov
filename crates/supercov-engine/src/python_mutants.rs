@@ -2210,4 +2210,289 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         checked
     }
+
+    /// A number literal's mutant is its value plus one, as Python's `repr`
+    /// writes it; a float too large to change is noted, and one that would
+    /// become infinite has none.
+    #[test]
+    fn a_number_s_mutant_is_its_value_plus_one_as_python_writes_it() {
+        for (literal, mutant) in [
+            ("0", Some(("1", false))),
+            ("1_000", Some(("1001", false))),
+            ("0x1F", Some(("32", false))),
+            ("0O17", Some(("16", false))),
+            ("0b11", Some(("4", false))),
+            ("999999999", Some(("1000000000", false))),
+            (
+                "123456789012345678901234567890",
+                Some(("123456789012345678901234567891", false)),
+            ),
+            ("1.5", Some(("2.5", false))),
+            ("1e3", Some(("1001.0", false))),
+            ("2.5e-5", Some(("1.000025", false))),
+            ("1e16", Some(("1e+16", true))),
+            ("1e20", Some(("1e+20", true))),
+            (".5", Some(("1.5", false))),
+            ("1.", Some(("2.0", false))),
+            ("3j", Some(("4j", false))),
+            ("1.5J", Some(("2.5j", false))),
+            ("1e20j", Some(("1e+20j", true))),
+            ("1e999", None),
+            ("1e999j", None),
+            ("0xZZ", None),
+            ("1e", None),
+            ("1ej", None),
+        ] {
+            assert_eq!(
+                number_mutant(literal),
+                mutant.map(|(text, same)| (text.to_owned(), same)),
+                "{literal}"
+            );
+        }
+        for (value, shown) in [
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (-0.5, "-0.5"),
+            (1.0000000000000002e16, "1.0000000000000002e+16"),
+            (123.0, "123.0"),
+            (1e-300, "1e-300"),
+        ] {
+            assert_eq!(python_float_repr(value), shown);
+        }
+    }
+
+    /// A string body lowered or raised run by run, as mutmut's patterns
+    /// pick the runs: escapes kept as written, and in a raw string the
+    /// character after a backslash too.
+    #[test]
+    fn a_string_is_cased_around_its_escapes() {
+        assert_eq!(cased(r"Ab\x4Fc\u00E9D", false, false), r"ab\x4Fc\u00E9d");
+        assert_eq!(cased(r"a\N{BULLET}b", false, true), r"A\N{BULLET}B");
+        // `\N{` with no close and `\x` with too few digits are plain escapes.
+        assert_eq!(cased(r"a\N{b", false, true), r"A\N{B");
+        assert_eq!(cased(r"a\xZb", false, true), r"A\xZB");
+        assert_eq!(cased("a\\\nb", false, true), "A\\\nB");
+        assert_eq!(cased("a\\", false, true), "A\\");
+        assert_eq!(cased(r"a\Bc", true, true), r"A\BC");
+        assert_eq!(cased(r"\\", true, false), r"\\");
+        assert_eq!(cased("Straße", false, true), "STRASSE");
+        assert_eq!(escape_length("\\"), 0);
+        assert_eq!(escape_length("\\N{}"), 2);
+    }
+
+    /// The tokens of a `# pragma: no mutate` comment.
+    #[test]
+    fn a_pragma_comment_says_what_it_keeps() {
+        assert_eq!(pragma_token("# just a comment"), None);
+        assert_eq!(pragma_token("# pragma: no cover"), None);
+        assert_eq!(pragma_token("# pragma: no mutate"), Some("bare"));
+        assert_eq!(pragma_token("# pragma: no mutate block"), Some("block"));
+        assert_eq!(pragma_token("# pragma: no mutate: start"), Some("start"));
+        assert_eq!(pragma_token("# pragma: no mutate end, other"), Some("end"));
+        assert_eq!(pragma_token("# pragma: no mutate other"), Some("bare"));
+    }
+
+    /// Code that does not parse has no mutants: its error says why.
+    #[test]
+    fn a_file_that_does_not_parse_lists_no_mutants() {
+        assert!(matches!(
+            enumerate("def (:\n"),
+            Err(PythonInstrumenterError::Parse(_))
+        ));
+        assert!(listed("a.py", "def (:\n").is_err());
+        assert!(probed("a.py", "def (:\n").is_err());
+    }
+
+    const LINKED: &str = "def f(a, b=1.5, *, c=1e20):\n    \"\"\"Doc.\"\"\"\n    if a < b:\n        return -a + b\n    x = g(a)\n    y = (lambda: a)()\n    return (x or y) if a else ''.lower()\n";
+
+    /// Each listed mutant is linked to the statement and function that
+    /// reach it, as the manifest numbers them: a default's to its function's
+    /// first statement, which runs whenever the function is called.
+    #[test]
+    fn each_mutant_is_linked_to_the_points_that_reach_it() {
+        let obligations =
+            crate::python_instrumenter::build_python_obligations("m.py", LINKED).unwrap();
+        let (mutants, points) = listed("m.py", LINKED).unwrap();
+        assert_eq!(
+            points,
+            obligations
+                .manifest
+                .points
+                .iter()
+                .map(|point| point.id.clone())
+                .collect::<BTreeSet<_>>()
+        );
+        let by_id = |id: &str| {
+            mutants
+                .iter()
+                .find(|mutant| mutant.id == id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id}: {:#?}",
+                        mutants.iter().map(|m| &m.id).collect::<Vec<_>>()
+                    )
+                })
+        };
+        let statement_at = |line: usize| {
+            obligations
+                .manifest
+                .points
+                .iter()
+                .find(|point| {
+                    point.kind == crate::coverage_analysis::PointKind::Statement
+                        && point.line == line
+                })
+                .map(|point| point.id.clone())
+        };
+        let function = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.label.as_deref() == Some("f"))
+            .map(|point| point.id.clone());
+        let lambda = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.label.as_deref() == Some("<lambda>"))
+            .map(|point| point.id.clone());
+        let default = by_id("m.py:1:12-1:15:NumberLiteral:2.5");
+        assert_eq!(default.statement, statement_at(3));
+        assert_eq!(default.function, function);
+        let boundary = by_id("m.py:3:10-3:13:EqualityOperator:<=");
+        assert_eq!(boundary.statement, statement_at(3));
+        assert_eq!(boundary.original, "< b");
+        assert_eq!(
+            boundary.operator,
+            Some(crate::mutant_list::MutantOperator {
+                text: "<".into(),
+                at: 0
+            })
+        );
+        // A lambda's body is reached where the lambda is called.
+        let in_lambda = by_id("m.py:6:10-6:19:Lambda:None");
+        assert_eq!(in_lambda.function, lambda);
+        let arithmetic = by_id("m.py:4:16-4:22:ArithmeticOperator:-");
+        assert_eq!(arithmetic.operator.as_ref().map(|o| o.at), Some(3));
+        let sign = by_id("m.py:4:16-4:18:UnaryOperator:+");
+        assert_eq!(sign.operator.as_ref().map(|o| o.text.as_str()), Some("-"));
+        let logical = by_id("m.py:7:13-7:19:LogicalOperator:and");
+        assert_eq!(
+            logical.operator.as_ref().map(|o| o.text.as_str()),
+            Some("or")
+        );
+        // `1e20 + 1` is `1e20`: no input tells the two apart.
+        let same = by_id("m.py:1:22-1:26:NumberLiteral:1e+20");
+        assert_eq!(
+            same.equivalent.as_ref().map(|note| note.rule.as_str()),
+            Some(SAME_NUMBER)
+        );
+        assert!(lambda.is_some() && lambda != function);
+    }
+
+    /// With the values recorded, each mutant a probe decides is linked to
+    /// its site, and the plan holds one probe per site.
+    #[test]
+    fn a_probed_listing_links_each_mutant_to_its_probe() {
+        let (mutants, probes) = probed("m.py", LINKED).unwrap();
+        let link = |id: &str| {
+            let mutant = mutants.iter().find(|mutant| mutant.id == id).unwrap();
+            (mutant.compare.clone(), mutant.probe.clone())
+        };
+        assert_eq!(
+            link("m.py:3:10-3:13:EqualityOperator:<="),
+            (Some("m.py:3:8".into()), None)
+        );
+        assert_eq!(
+            link("m.py:4:16-4:22:ArithmeticOperator:-"),
+            (None, Some("m.py:4:16-4:22#arith".into()))
+        );
+        assert_eq!(
+            link("m.py:4:16-4:18:UnaryOperator:+"),
+            (None, Some("m.py:4:16-4:18#sign".into()))
+        );
+        assert_eq!(
+            link("m.py:5:5-5:13:AssignmentValue:None"),
+            (None, Some("m.py:5:9-5:13#none".into()))
+        );
+        assert_eq!(
+            link("m.py:5:9-5:13:CallArgument:None@1"),
+            (None, Some("m.py:5:11-5:12#none".into()))
+        );
+        assert_eq!(
+            link("m.py:7:31-7:41:MethodExpression:upper"),
+            (None, Some("m.py:7:31-7:39#method".into()))
+        );
+        assert_eq!(
+            link("m.py:7:12-7:41:IfExpression:false"),
+            (None, Some("m.py:7:24-7:25#iffalse".into()))
+        );
+        assert_eq!(
+            link("m.py:7:12-7:41:IfExpression:true"),
+            (None, Some("m.py:7:24-7:25#iftrue".into()))
+        );
+        // A removal has no probe; neither does a literal.
+        assert_eq!(link("m.py:7:31-7:33:StringLiteral:XX"), (None, None));
+        let arith = probes.iter().find(|probe| probe.kind == "arith").unwrap();
+        assert_eq!(arith.site, "m.py:4:16-4:22#arith");
+        assert_eq!((arith.span.start, arith.span.end), ([4, 15], [4, 21]));
+        assert_eq!(
+            (arith.original.as_str(), arith.mutated.as_str()),
+            ("add", "sub")
+        );
+        let compare = probes.iter().find(|probe| probe.kind == "compare").unwrap();
+        assert_eq!(compare.original, "lt");
+        let sites = probes
+            .iter()
+            .map(|probe| &probe.site)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(sites.len(), probes.len());
+    }
+
+    /// A chain of comparisons gets no comparison probe: its operands are
+    /// not the two a probe of one comparison sees.
+    #[test]
+    fn a_chained_comparison_has_no_probe() {
+        let (mutants, probes) = probed("m.py", "def f(a, b, c):\n    return a < b < c\n").unwrap();
+        assert!(mutants.iter().all(|mutant| mutant.compare.is_none()));
+        assert!(probes.is_empty());
+    }
+
+    /// The files a run measured are listed from its sources, each only
+    /// where its points are those the run recorded.
+    #[test]
+    fn a_run_s_python_files_are_listed_where_they_have_not_changed() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-mutants-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.py"), "def f(x):\n    return x + 1\n").unwrap();
+        std::fs::write(root.join("b.py"), "def g():\n    pass\n").unwrap();
+        std::fs::write(root.join("c.py"), "def h(x):\n    return x - 1\n").unwrap();
+        let points = |file: &str| {
+            listed(file, &std::fs::read_to_string(root.join(file)).unwrap())
+                .unwrap()
+                .1
+        };
+        let recorded = std::collections::BTreeMap::from([
+            ("a.py".to_owned(), points("a.py")),
+            ("b.py".to_owned(), points("b.py")),
+            (
+                "c.py".to_owned(),
+                BTreeSet::from(["py:statement:other".to_owned()]),
+            ),
+            ("gone.py".to_owned(), BTreeSet::new()),
+        ]);
+        let listed = list_mutants(&root, &recorded);
+        assert_eq!(listed.changed, ["c.py", "gone.py"]);
+        assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.py"]);
+        assert_eq!(listed.mutants.language_of("a.py"), PYTHON);
+        assert_eq!(listed.mutants.mutant_set.as_deref(), Some(MUTANT_SET));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

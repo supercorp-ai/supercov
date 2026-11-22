@@ -131,9 +131,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
 pub(crate) const MUTANTS_HELP: &str = "\
 Usage: supercov mutants [options] [-- <test command>]
 
-Mutation-tests the project: lists the mutants of every JavaScript and
-TypeScript source the tests ran, runs each against only the tests that run
-its code, and saves the verdicts (killed, survived, timeout) into the run.
+Mutation-tests the project: lists the mutants of every JavaScript,
+TypeScript and Python source the tests ran, runs each against only the tests
+that run its code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,
 or it is a plain run (supercov -- <tests>), which does nothing for mutants

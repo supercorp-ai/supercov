@@ -7,7 +7,8 @@ mutated code, and did the mutant's value differ there. The report and its JSON
 are shaped so that strong mutation (running the tests against mutants, as
 StrykerJS does) can later fill in the last step without changing either.
 
-This record covers JavaScript and TypeScript.
+This record covers JavaScript and TypeScript. Python's mutants (mutmut's),
+their probes and their strong pass are in `python-mutants.md`.
 
 ## The model: reach, infection, propagation
 

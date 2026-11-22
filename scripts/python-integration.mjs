@@ -763,8 +763,50 @@ try {
     }
   }
 
+  // Strong mutation under pytest (`docs/design/python-mutants.md`): the run
+  // records the mutants' values, and the pass forks each mutant's tests
+  // after collection, even where the command asks pytest-xdist for workers.
+  if (process.platform !== 'win32') {
+    const strong = resolve(temporary, 'strong');
+    mkdirSync(resolve(strong, 'shop'), { recursive: true });
+    mkdirSync(resolve(strong, 'tests'), { recursive: true });
+    writeFileSync(resolve(strong, 'shop/__init__.py'), '');
+    writeFileSync(
+      resolve(strong, 'shop/cart.py'),
+      'def shipping(total, express=False):\n    if total >= 50:\n        return 0\n    fee = 5\n    if express:\n        fee += 10\n    return fee\n\n\ndef label(name):\n    return name.upper() + "!"\n\n\ndef countdown(n):\n    while n > 0:\n        n -= 1\n    return n\n',
+    );
+    writeFileSync(
+      resolve(strong, 'tests/test_cart.py'),
+      'import pytest\nfrom shop.cart import shipping, label, countdown\n\n\n@pytest.fixture\ndef big():\n    return 80\n\n\ndef test_free(big):\n    assert shipping(big) == 0\n\n\n@pytest.mark.parametrize("total, fee", [(10, 5), (20, 5)])\ndef test_paid(total, fee):\n    assert shipping(total) == fee\n\n\ndef test_label():\n    assert label("a").startswith("A")\n\n\ndef test_countdown():\n    assert countdown(3) == 0\n',
+    );
+    writeFileSync(resolve(strong, 'pytest.ini'), '[pytest]\npythonpath = .\n');
+    run('git', ['init', '-q', '.'], { cwd: strong });
+    const strongEnvironment = environmentFor(strong, venv);
+    successfulSupercov(
+      strong,
+      ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2'],
+      { ...strongEnvironment, SUPERCOV_MUTANTS: '1' },
+    );
+    const tested = query(strong, ['runs', 'latest', 'mutants', 'test'], strongEnvironment);
+    assert.equal(tested.summary.error, 0, JSON.stringify(tested));
+    assert.equal(tested.passes[0].runner, 'pytest', JSON.stringify(tested));
+    const listed = query(strong, ['runs', 'latest', 'mutants', '--limit', '0'], strongEnvironment);
+    const verdicts = Object.fromEntries(listed.mutants.map((mutant) => [mutant.id, mutant.strong?.status]));
+    for (const [id, status] of [
+      ['shop/cart.py:1:29-1:34:BooleanLiteral:True', 'killed'],
+      ['shop/cart.py:2:14-2:19:EqualityOperator:>', 'survived'],
+      ['shop/cart.py:6:9-6:18:AugmentedAssignment:=', 'no-coverage'],
+      ['shop/cart.py:11:12-11:24:MethodExpression:lower', 'killed'],
+      ['shop/cart.py:11:12-11:30:ArithmeticOperator:-', 'killed'],
+      ['shop/cart.py:11:27-11:30:StringLiteral:XX', 'survived'],
+      ['shop/cart.py:16:9-16:15:AssignmentOperator:+=', 'timeout'],
+    ]) {
+      assert.equal(verdicts[id], status, `${id}: ${JSON.stringify(verdicts)}`);
+    }
+  }
+
   console.log(
-    `[python] ${basename(python)} (3.${version.minor}) passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children, oracle differentials, cache safety, renumbered rewrites and declared limitations`,
+    `[python] ${basename(python)} (3.${version.minor}) passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children, oracle differentials, cache safety, renumbered rewrites, declared limitations and strong mutation`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

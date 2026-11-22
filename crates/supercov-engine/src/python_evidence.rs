@@ -3403,6 +3403,66 @@ pub(crate) mod tests {
         run
     }
 
+    /// A mutant's value probe writes each outcome once per site and
+    /// context: the phase's snapshot holds them, and a run that listed its
+    /// mutants archives them as `mutants.json`.
+    #[test]
+    fn a_mutant_probe_s_outcomes_are_the_phase_s_and_the_list_is_archived() {
+        let source = "def f(a, b):\n    return a < b\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let statements = &obligations.plan.statements;
+        let test = "tests/test_m.py::test_a";
+        let lines = [
+            json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+            json!({"t":"phase","ctx":1,"at":6,"worker":"main","test":test,"retry":0,"phase":"call"}),
+            json!({"t":"hit","ctx":1,"id":statements[1].id}),
+            json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"lt"}),
+            json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"eq"}),
+            json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
+            json!({"t":"exit","at":9}),
+        ];
+        let directory = temporary("mutant-probes");
+        write_transport(&directory.join("main.1.mmap"), &lines, 0);
+        let mut run = build_python_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        let comparisons = run
+            .request
+            .raw_results
+            .iter()
+            .flat_map(|raw| raw.runtime.iter())
+            .flat_map(|snapshot| snapshot.comparisons.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(comparisons.len(), 1);
+        assert_eq!(comparisons[0].id, "m.py:2:12");
+        assert_eq!(comparisons[0].outcomes, ["eq", "lt"]);
+        assert!(
+            !run.archive_entries()
+                .iter()
+                .any(|entry| entry.path == "mutants.json")
+        );
+        run.mutants = Some(crate::mutant_list::MutantsFile::listed(
+            "python",
+            "mutmut@3.8.1",
+            BTreeMap::new(),
+        ));
+        let entries = run.archive_entries();
+        let listed = entries
+            .iter()
+            .find(|entry| entry.path == "mutants.json")
+            .unwrap();
+        let read: crate::mutant_list::MutantsFile =
+            serde_json::from_slice(&listed.contents).unwrap();
+        assert_eq!(read.mutant_set.as_deref(), Some("mutmut@3.8.1"));
+    }
+
     /// A server that left no interpreter's evidence, or evidence that is no
     /// directory, makes no run.
     #[test]

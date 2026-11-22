@@ -256,3 +256,15 @@ values only take tests away.
 | runtime switch | `runtime/javascript/runtime.mjs` (`strongSlot`, `setActiveMutant`) |
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
+
+## Python
+
+| Contract | Python |
+| --- | --- |
+| enumerator | `python_mutants.rs` (mutmut 3.8.1's operators), parity goldens in `tests/fixtures/mutmut-parity` |
+| schemata | `python_strong.rs` writes each switched function's mutants' edits; `runtime/python/supercov_strong.py` switches the function to mutmut's copy of it |
+| runtime switch | `supercov_strong.py` (`strong_slot`, `activate`), `SUPERCOV_ACTIVE_MUTANT` from a process's start |
+| driver | `supercov_strong.py`: pytest's `pytest_runtestloop`, unittest's `TestProgram.runTests`; a fork per mutant after collection |
+| value probes | `supercov_instrument.py` (`_MutantProbes`) and `supercov_runtime.py`, from the plan's `mutantProbes` |
+
+See `python-mutants.md`.
