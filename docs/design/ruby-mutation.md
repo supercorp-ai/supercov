@@ -157,6 +157,38 @@ then Supercov's measured run and strong pass, and joins the two:
 session results and matches each mutation to Supercov's mutant by the method
 it makes. `summarize.rb` counts every disagreement.
 
+### Results
+
+On SoroCI (16 CPUs, `c8a.4xlarge`, Ruby 3.4.13, 16 jobs for both tools),
+mutant run with every test a candidate for every subject and
+`process_abort` counted as a kill:
+
+| Project (suite) | mutant's mutants | joined | Supercov only | strong disagreements | weak violations | mutant | Supercov (measured + strong) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| dry-rb/dry-inflector 1.3.1 (RSpec, 1,138 examples) | 2,061 | 2,061 | 0 | 0 | 0 | 32.2 s | 1.5 + 51.7 s |
+| bkeepers/dotenv 3.2.0 (RSpec, 195 examples) | 1,345 | 1,345 | 987 | 0 | 0 | 21.4 s | 1.0 + 29.6 s |
+| jeremyevans/erubi 1.13.1 (Minitest, 100 tests) | 1,571 | 1,571 | 84 | 0 | 0 | 13.4 s | 0.5 + 4.1 s |
+
+Every mutation mutant made was matched to one of Supercov's. Supercov's own
+are methods mutant did not load as subjects (dotenv's Rails integration and
+CLI, which `require "dotenv"` does not load; erubi's methods with no test)
+and are not part of the comparison. Per mutant, the strong pass took 25 ms
+on dry-inflector against mutant's 16, 14 ms on dotenv against 16, and 2.6 ms
+on erubi against 8.4.
+
+Disagreements found on the way, each applied by hand and fixed:
+
+- dotenv's `Dotenv.save` runs in a `before(:suite)` hook: the pass skipped
+  suite hooks and missed 127 kills; it now runs RSpec's own `run_specs`.
+- `File.open` made `self.open` was killed by Supercov alone: a switched
+  receiver `(…).open` cannot call the private `Kernel#open`, which `self.`
+  can; the suite as written passes with the mutant (now the switch goes
+  around the call).
+- 38 of erubi's `src << x` made `src` were called not infected: `String#<<`
+  appends to its receiver, which the value comparison did not see.
+- A mutant whose test calls `exit` ends the test process: mutant counts it
+  only with `process_abort` on.
+
 ## Not yet
 
 - Two mutant mutations of a rescue clause's body added to a statement list
