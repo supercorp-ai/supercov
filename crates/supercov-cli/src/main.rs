@@ -1995,6 +1995,15 @@ pub(crate) fn load_run_view_filtered(
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
+    load_run_and_view(root, selector, filter).map(|(_, view)| view)
+}
+
+/// The run `selector` picks, and its view for only the tests `filter` picks.
+fn load_run_and_view(
+    root: &Path,
+    selector: Option<&str>,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<(StoredRun, supercov_engine::run_view::RunView), String> {
     if let Some(filter) = filter {
         eprintln!(
             "[supercov] reading only the tests {} picks",
@@ -2003,7 +2012,7 @@ pub(crate) fn load_run_view_filtered(
     }
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    run_view_of(root, run, filter)
+    run_view_of(root, run, filter).map(|view| (run.clone(), view))
 }
 
 /// The view of `run` in the checkout at `root`, for only the tests `filter`
@@ -2199,8 +2208,8 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
 
     let result = (|| -> Result<(), String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view =
-            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
+        let (run, view) =
+            load_run_and_view(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2242,14 +2251,12 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                 )
             };
             // The run's mutants, of a change alone with `--diff`.
-            let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
-            let run = select_run(&inventory, Some(&view.run)).map_err(|error| error.to_string())?;
             let diff = diff_base
                 .as_deref()
-                .map(|base| mutant_diff(&root, base, run))
+                .map(|base| mutant_diff(&root, base, &run))
                 .transpose()?;
             let mutants =
-                html_report::run_mutants(run, (!filter.is_empty()).then_some(&filter), diff)?;
+                html_report::run_mutants(&run, (!filter.is_empty()).then_some(&filter), diff)?;
             supercov_engine::coverage_html::html(&view, &sources, &reason, mutants.as_ref())
         } else {
             let sources = if supercov_engine::coverage_export::needs_source(&format) {
@@ -4272,7 +4279,7 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2666).
+// Below the lines tests name by number (main.rs:2673).
 mod mutants_export;
 mod mutants_test_command;
 

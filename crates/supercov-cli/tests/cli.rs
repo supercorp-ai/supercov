@@ -16106,7 +16106,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2666 => main.rs:2666",
+            "fs.canonicalize#main.rs:2673 => main.rs:2673",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
         ],
@@ -25170,6 +25170,14 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
         ])
         .exits(2);
     assert!(unknown.contains("nowhere"), "{unknown}");
+    // Mutants the run's index cannot give: the page is refused, and why said.
+    let unread = project
+        .supercov_with(
+            &["runs", "latest", "report", "--format", "html"],
+            &[("SUPERCOV_TEST_FAULT", "coverage-index@2")],
+        )
+        .exits(2);
+    assert!(unread.contains("could not read run "), "{unread}");
     let other = project
         .supercov(&[
             "runs", "latest", "report", "--format", "lcov", "--diff", "base",
