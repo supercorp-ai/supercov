@@ -104,6 +104,8 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "tap",
     "bun:test",
     "vitest-browser",
+    // Go's: `go_strong.rs` builds each package's test binary once.
+    "go-test",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
