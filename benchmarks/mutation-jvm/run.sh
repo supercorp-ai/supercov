@@ -168,7 +168,9 @@ run_pit() {
     local full=false
     [ "$matrix" = 1 ] && full=true
     # shellcheck disable=SC2046
-    java -cp "$(ls "$work"/pit-cli/*.jar | paste -sd: -)" \
+    # The project's class path on PIT's own as well: its JUnit 4 support
+    # looks for JUnit there.
+    java -cp "$(ls "$work"/pit-cli/*.jar | paste -sd: -):$(echo "$classpath" | tr , :)" \
       org.pitest.mutationtest.commandline.MutationCoverageReport \
       --reportDir pit-reports --timestampedReports=false --outputFormats XML \
       --targetClasses "$targets" --targetTests "$target_tests" \
