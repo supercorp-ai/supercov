@@ -3282,6 +3282,504 @@
           "replacement": "(yield)"
         }
       ]
+    },
+    {
+      "subject": "each_file:84",
+      "sexp": "(def :each_file (args (arg :names) (arg :ignore)) (block (send (lvar :names) :reduce (hash)) (args (arg :hash) (arg :name)) (begin (kwbegin (rescue (begin (lvasgn :env (send (const nil :File) :read (lvar :name))) (if (lvar :ignore) (lvasgn :env (send (lvar :env) :strip)) nil)) (resbody (array (const (const nil :Errno) :ENOENT)) nil (if (lvar :ignore) nil (send nil :raise))) nil)) (send (lvar :hash) :merge! (kwargs (pair (lvar :name) (lvar :env)))))))",
+      "mutants": [
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": null
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send (lvar :names) :reduce (hash))"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "block",
+          "replacement": "(lvar :names)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            85,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            85,
+            21
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :names) :reduce)"
+        },
+        {
+          "start": [
+            85,
+            18
+          ],
+          "end": [
+            85,
+            20
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            86,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            86,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            87,
+            15
+          ],
+          "end": [
+            87,
+            30
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            87,
+            15
+          ],
+          "end": [
+            87,
+            30
+          ],
+          "node": "send",
+          "replacement": "(const nil :File)"
+        },
+        {
+          "start": [
+            87,
+            15
+          ],
+          "end": [
+            87,
+            30
+          ],
+          "node": "send",
+          "replacement": "(lvar :name)"
+        },
+        {
+          "start": [
+            87,
+            15
+          ],
+          "end": [
+            87,
+            19
+          ],
+          "node": "const",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            87,
+            15
+          ],
+          "end": [
+            87,
+            30
+          ],
+          "node": "send",
+          "replacement": "(send (const nil :File) :read)"
+        },
+        {
+          "start": [
+            87,
+            25
+          ],
+          "end": [
+            87,
+            29
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            9
+          ],
+          "end": [
+            88,
+            34
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            28
+          ],
+          "end": [
+            88,
+            34
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            28
+          ],
+          "end": [
+            88,
+            34
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            88,
+            28
+          ],
+          "end": [
+            88,
+            34
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            88,
+            9
+          ],
+          "end": [
+            88,
+            34
+          ],
+          "node": "if",
+          "replacement": "(lvasgn :env (send (lvar :env) :strip))"
+        },
+        {
+          "start": [
+            88,
+            15
+          ],
+          "end": [
+            88,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            15
+          ],
+          "end": [
+            88,
+            24
+          ],
+          "node": "send",
+          "replacement": "(lvar :env)"
+        },
+        {
+          "start": [
+            88,
+            15
+          ],
+          "end": [
+            88,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :env) :lstrip)"
+        },
+        {
+          "start": [
+            88,
+            15
+          ],
+          "end": [
+            88,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :env) :rstrip)"
+        },
+        {
+          "start": [
+            88,
+            15
+          ],
+          "end": [
+            88,
+            18
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            90,
+            9
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            90,
+            22
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            90,
+            22
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            90,
+            22
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            90,
+            9
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :ignore) (send nil :raise) nil)"
+        },
+        {
+          "start": [
+            90,
+            9
+          ],
+          "end": [
+            90,
+            28
+          ],
+          "node": "if",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            90,
+            9
+          ],
+          "end": [
+            90,
+            14
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            92,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            92,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "send",
+          "replacement": "(lvar :hash)"
+        },
+        {
+          "start": [
+            92,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :hash) :merge (kwargs (pair (lvar :name) (lvar :env))))"
+        },
+        {
+          "start": [
+            92,
+            7
+          ],
+          "end": [
+            92,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            92,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :hash) :merge!)"
+        },
+        {
+          "start": [
+            92,
+            27
+          ],
+          "end": [
+            92,
+            30
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            86,
+            7
+          ],
+          "end": [
+            92,
+            31
+          ],
+          "node": "begin",
+          "replacement": "(kwbegin (rescue (begin (lvasgn :env (send (const nil :File) :read (lvar :name))) (if (lvar :ignore) (lvasgn :env (send (lvar :env) :strip)) nil)) (resbody (array (const (const nil :Errno) :ENOENT)) nil (if (lvar :ignore) nil (send nil :raise))) nil))"
+        }
+      ]
     }
   ]
 }

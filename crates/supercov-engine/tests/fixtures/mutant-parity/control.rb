@@ -79,3 +79,17 @@ class Control
     yield 1, 2
   end
 end
+
+class RescuedLists
+  def each_file(names, ignore)
+    names.reduce({}) do |hash, name|
+      begin
+        env = File.read(name)
+        env = env.strip if ignore
+      rescue Errno::ENOENT
+        raise unless ignore
+      end
+      hash.merge!(name => env)
+    end
+  end
+end

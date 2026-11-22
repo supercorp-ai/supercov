@@ -476,6 +476,11 @@ fn misplaced(node: &N, parent: Option<&N>) -> bool {
     {
         return true;
     }
+    // `begin (a; b) end` is printed `begin a; b end`, whose statements are
+    // the `begin`'s own once parsed.
+    if node.ty == "kwbegin" && node.children.len() == 1 && node.node(0).is_some_and(|only| only.ty == "begin") {
+        return true;
+    }
     if node.ty == "and"
         && node.node(0).is_some_and(|left| left.ty == "or")
         && parent.is_some_and(|parent| !STATEMENT_PARENTS.contains(&parent.ty))
