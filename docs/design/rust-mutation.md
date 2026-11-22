@@ -145,9 +145,16 @@ switcher recorded each mutant's own code and each switch there.
 - Any other error at a switch may be the switch's doing (two branches of
   different types, a borrow the duplicated code makes): its mutants leave the
   switched build and are built on their own.
-- An error at no switch is found by halving: the switched mutants of its
-  file are added back half by half until the one that breaks the build is
-  found, and it is built on their own.
+- An error at no switch is found by halving: the switched mutants are
+  added back half by half until the one that breaks the build is found, and
+  it is built on its own. One such error: deleting an arm of a `match` whose
+  only `_` arm has a guard (cargo-mutants deletes arms wherever a `_` arm
+  exists) leaves the match without the arm that made it exhaustive, and the
+  compiler's error is at its scrutinee. That error is in the mutant's own
+  file; no error at no switch is known in another file, so the halving does
+  not narrow its suspects to the errors' files. Where the build fails with
+  no mutant switched, the project itself does not build, and the pass ends
+  saying so.
 
 The build is then repeated without them, so a pass costs a handful of
 incremental builds, not one per mutant.

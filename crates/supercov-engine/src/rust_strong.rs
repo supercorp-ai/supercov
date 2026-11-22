@@ -15,9 +15,13 @@
 //! - any other error at a switch (in its original branch, or of another
 //!   kind) may be the switch's doing rather than the mutant's: its mutants
 //!   are built on their own, below;
-//! - an error at no switch is found by halving the switched mutants of its
-//!   file until the build passes, and the mutants it comes down to are built
-//!   on their own.
+//! - an error at no switch is found by halving the switched mutants until
+//!   the build passes, and the mutant it comes down to is built on its own.
+//!   Such an error is one a mutant causes elsewhere in its own file: deleting
+//!   an arm of a `match` whose only `_` arm has a guard leaves the match
+//!   without the arm that made it exhaustive, an error at its scrutinee. No
+//!   error at no switch is known in another file than its mutant's, so the
+//!   halving is over every switched mutant, not those of the errors' files.
 //!
 //! A mutant built on their own, and one `rust_schemata::placeable` refuses,
 //! is written into a plain copy of the project and built there, as
@@ -914,7 +918,6 @@ fn build_switched(
             .map(|at| (key(&jobs[*at]), *at))
             .collect::<HashMap<_, _>>();
         let mut out = BTreeSet::new();
-        let mut unexplained = BTreeSet::new();
         // A failed build has at least one error.
         errors.iter().for_each(|error| {
             let (own, at_switch) = attribute(error, &prepared.switched);
@@ -929,15 +932,13 @@ fn build_switched(
                     .entry(at)
                     .or_insert_with(|| first_line(&error.rendered));
                 out.insert(at);
-            } else if !own.is_empty() || !at_switch.is_empty() {
+            } else {
                 for ordinal in own.iter().chain(&at_switch) {
                     let at = ordinal_of[ordinal];
                     if !unviable.contains_key(&at) && out.insert(at) {
                         alone.push((at, "switch-error"));
                     }
                 }
-            } else {
-                unexplained.extend(error.spans.iter().map(|(file, _)| file.clone()));
             }
         });
         if !out.is_empty() {
@@ -945,47 +946,24 @@ fn build_switched(
             continue;
         }
         // Errors at no switch: the first mutant whose switch breaks the
-        // build, by halving, of those in the errors' files (or of all).
-        let in_files = switchable
-            .iter()
-            .copied()
-            .filter(|at| unexplained.contains(&jobs[*at].file))
-            .collect::<Vec<_>>();
-        let suspects = if in_files.is_empty() {
-            switchable.clone()
-        } else {
-            in_files
-        };
-        let base = switchable
-            .iter()
-            .copied()
-            .filter(|at| !suspects.contains(at))
-            .collect::<Vec<_>>();
-        let (mut low, mut high) = (0usize, suspects.len());
-        // `base` with the first `low` suspects builds; with the first `high`
-        // it does not (it is the build that just failed).
+        // build, by halving.
+        let (mut low, mut high) = (0usize, switchable.len());
+        // The first `low` switched mutants build; the first `high` do not
+        // (it is the build that just failed).
         let fails = |count: usize| -> Result<bool, String> {
-            let mut chosen = base.clone();
-            chosen.extend_from_slice(&suspects[..count]);
-            let (_, built) = switched_build(root, places, jobs, &chosen, invocation)?;
+            let (_, built) = switched_build(root, places, jobs, &switchable[..count], invocation)?;
             Ok(built.is_err())
         };
         builds += 1;
         if fails(0)? {
-            if base.is_empty() {
-                return Err(format!(
-                    "the project does not build without mutants: {}",
-                    errors
-                        .iter()
-                        .map(|error| first_line(&error.rendered))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ));
-            }
-            // The errors are not only these mutants': halve all of them.
-            switchable.retain(|at| base.contains(at));
-            alone.extend(suspects.iter().map(|at| (*at, "switch-error")));
-            continue;
+            return Err(format!(
+                "the project does not build without mutants: {}",
+                errors
+                    .iter()
+                    .map(|error| first_line(&error.rendered))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
         }
         while high - low > 1 {
             let middle = (low + high) / 2;
@@ -996,7 +974,7 @@ fn build_switched(
                 low = middle;
             }
         }
-        let culprit = suspects[high - 1];
+        let culprit = switchable[high - 1];
         switchable.retain(|at| *at != culprit);
         alone.push((culprit, "switch-error"));
     }
@@ -2125,8 +2103,67 @@ mod tests {
             .last()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .unwrap();
-        // Two left in the switched build: `b.rs`' other operator and body.
-        assert_eq!(summary["switched"], 3, "{summary}\n{said}");
+        // Halving over every switched mutant takes out only `b.rs`' culprit:
+        // five are left in the switched build, those no error is traced to.
+        assert_eq!(summary["switched"], 5, "{summary}\n{said}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With the compiler itself: deleting an arm of a `match` whose only `_`
+    /// arm has a guard leaves it without the arm that made it exhaustive.
+    /// The error is at the match's scrutinee, at no switch, so halving finds
+    /// each such mutant, which then fails its own build: unviable, as
+    /// cargo-mutants reports it. The rest stay in the switched build.
+    #[cfg(unix)]
+    #[test]
+    fn an_error_at_no_switch_is_found_by_halving() {
+        let (root, request) = crate_with(
+            "halving",
+            &[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+                ),
+                (
+                    "src/lib.rs",
+                    "pub fn pick(b: bool, c: bool) -> u8 {\n    match b {\n        true => 1,\n        false => 2,\n        _ if c => 3,\n    }\n}\n",
+                ),
+                (
+                    "tests/t.rs",
+                    "#[test] fn pick() { assert_eq!(fixture::pick(true, false), 1); assert_eq!(fixture::pick(false, false), 2); }\n",
+                ),
+            ],
+            &["src/lib.rs"],
+        );
+        let mut said = Vec::new();
+        assert_eq!(run_strong_rust(&request, &mut said), Ok(0));
+        let said = String::from_utf8(said).unwrap();
+        let found = verdicts(&request);
+        let arms = found
+            .iter()
+            .filter(|(id, _)| id.contains(":MatchArm:"))
+            // An arm's id: its start (the line and column), then its end.
+            .map(|(id, record)| {
+                (
+                    id.split('-').next().unwrap(),
+                    record["status"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arms,
+            [
+                ("src/lib.rs:3:9", "unviable"),
+                ("src/lib.rs:4:9", "unviable")
+            ],
+            "{found:?}\n{said}"
+        );
+        // `pick` returning 0 or 1 is caught by the switched build's test.
+        for (id, record) in &found {
+            if id.contains(":FnValue:") {
+                assert_eq!(record["status"], "killed", "{id}\n{said}");
+            }
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2357,11 +2394,13 @@ mod tests {
             .clone()]);
         one["mutants"][0]["candidates"] = json!([{"test": 0}]);
         std::fs::write(&request.plan, serde_json::to_vec(&one).unwrap()).unwrap();
+        // Found in the code before the tests, by the call alone: a measured
+        // build wraps the `?` around it, and the needle is in this test too.
+        let text = include_str!("rust_strong.rs");
+        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
         let place = format!(
             "fs.canonicalize#rust_strong.rs:{}@2",
-            include_str!("rust_strong.rs")[..include_str!("rust_strong.rs")
-                .find("            .get(&crate::fault_fs::canonicalize(executable)")
-                .unwrap()]
+            body[..body.find("fault_fs::canonicalize(executable)").unwrap()]
                 .lines()
                 .count()
                 + 1
@@ -2496,7 +2535,9 @@ mod tests {
         assert!(said.contains("to build on their own"), "{said}");
 
         // Each place the pass reads, writes or starts something, failing:
-        // `sync_project`'s operations fail where it is called from.
+        // `sync_project`'s operations fail where it is called from. Every
+        // needle is a call as written, which a measured build keeps on its
+        // line though it wraps a `?` around it.
         let text = include_str!("rust_strong.rs");
         let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
         let line_of =
@@ -2548,7 +2589,7 @@ mod tests {
         let guard = include_str!("child_signal_guard.rs");
         let output = line_of(guard, "pub fn output(") + 5;
         let runner = include_str!("rust_test_runner.rs");
-        let printed = line_of(runner, "let output = Command::new(\"rustc\")") + 4;
+        let printed = line_of(runner, "Command::new(\"rustc\")") + 4;
         for nth in 1..=8 {
             sites.push(format!("spawn#child_signal_guard.rs:{output}@{nth}"));
         }
