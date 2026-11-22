@@ -766,6 +766,9 @@ fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
         // shards does not have: everything else is the same.
         let without_score = |mut summary: Value| {
             summary["mutationScore"] = Value::Null;
+            if let Some(summary) = summary.as_object_mut() {
+                summary.remove("strong");
+            }
             summary
         };
         assert_eq!(

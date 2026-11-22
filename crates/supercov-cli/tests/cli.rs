@@ -21352,9 +21352,11 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         .supercov(&["runs", "latest", "mutants", "--status", "not-infected"])
         .succeeds();
     contains_all(&listed, &["src/cart.js:2:7", "showing 1-1 of 1"]);
-    project
+    // A strong verdict picks the mutants a strong pass gave it: none ran.
+    let killed = project
         .supercov(&["runs", "latest", "mutants", "--status", "killed"])
-        .exits(2);
+        .succeeds();
+    assert!(killed.contains("No mutants match."), "{killed}");
 
     // Only the tests a title picks: the boundary they never cross.
     let narrowed = project
@@ -23836,12 +23838,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:846",
+            "fs.write#mutants_test_command.rs:946",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:846"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:946"),
         "{}",
         unwritten.stderr()
     );
@@ -24280,13 +24282,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:672",
+            "coverage-index-read#mutants_query.rs:682",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:682"), "{said}");
 
     // The table of files.
     contains_all(
@@ -24737,8 +24739,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:925",
-        "fs.read_dir entry#public_query.rs:925",
+        "fs.read_dir#public_query.rs:942",
+        "fs.read_dir entry#public_query.rs:942",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24751,7 +24753,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:925"),
+            fired_at(&unlisted, "public_query.rs:942"),
             "{fault}: {unlisted}"
         );
     }
