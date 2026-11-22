@@ -1,7 +1,9 @@
 //! The Go strong pass, from a plan, on a module of two packages: every kind
 //! of verdict it gives, and each of its own steps failing.
 //!
-//! Needs `go` on PATH (or Homebrew's) and skips without it.
+//! Needs `go` on PATH (or Homebrew's) and skips without it. Unix: the
+//! copy keeps a symbolic link as one, and a timeout stops a process group.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -349,14 +351,14 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
         (
             at(
                 "fs.read_link",
-                line("let link = fs::read_link(&path).map_err(failed(&path))?;"),
+                line("let link = fs::read_link(path).map_err(failed(path))?;"),
             ),
             true,
         ),
         (
             at(
                 "fs.symlink",
-                line("fs::symlink(&link, &target).map_err(failed(&target))"),
+                line("fs::symlink(&link, target).map_err(failed(target))"),
             ),
             true,
         ),

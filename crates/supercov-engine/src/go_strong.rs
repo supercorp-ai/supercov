@@ -697,12 +697,25 @@ fn copy_project(source: &Path, destination: &Path) -> Result<(), String> {
             if kind.is_dir() {
                 copy_project(&path, &target)
             } else if kind.is_symlink() {
-                let link = fs::read_link(&path).map_err(failed(&path))?;
-                fs::symlink(&link, &target).map_err(failed(&target))
+                copy_link(&path, &target)
             } else {
                 fs::copy(&path, &target).map(drop).map_err(failed(&path))
             }
         })
+}
+
+/// A symbolic link copied as the link it is.
+#[cfg(unix)]
+fn copy_link(path: &Path, target: &Path) -> Result<(), String> {
+    let link = fs::read_link(path).map_err(failed(path))?;
+    fs::symlink(&link, target).map_err(failed(target))
+}
+
+/// A symbolic link copied as what it points at: Windows makes links only
+/// where a developer allowed it.
+#[cfg(not(unix))]
+fn copy_link(path: &Path, target: &Path) -> Result<(), String> {
+    fs::copy(path, target).map(drop).map_err(failed(path))
 }
 
 /// The directory of `file` (`.` for the root), `/`-separated.

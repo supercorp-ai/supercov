@@ -18060,8 +18060,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1131", "go_run.rs:1131"),
-        ("fs.create_dir_all#go_run.rs:1141", "go_run.rs:1141"),
+        ("fs.write#go_run.rs:1223", "go_run.rs:1223"),
+        ("fs.create_dir_all#go_run.rs:1233", "go_run.rs:1233"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19418,7 +19418,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:657", "go_run.rs:657"),
+                ("fs.canonicalize#go_run.rs:736", "go_run.rs:736"),
                 ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
@@ -23625,12 +23625,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:826",
+            "fs.write#mutants_test_command.rs:832",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:832"),
         "{}",
         unwritten.stderr()
     );
