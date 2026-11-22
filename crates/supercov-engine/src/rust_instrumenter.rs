@@ -476,7 +476,7 @@ fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
 }
 
 /// Report whether a probe placed at this node could not run correctly.
-fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
+pub(crate) fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
     in_const_context(node) || in_global_allocator(node)
 }
 
@@ -719,7 +719,7 @@ impl<'a> SourceLocations<'a> {
     }
 }
 
-fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
+pub(crate) fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
     let start = usize::from(range.start()).to_string();
     let end = usize::from(range.end()).to_string();
     let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
@@ -1455,6 +1455,12 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
         });
     }
     Err(newest_errors.unwrap_or_default())
+}
+
+/// The file as written, parsed with the newest edition it parses under: no
+/// macro is read as code. `None` where no edition parses it.
+pub(crate) fn parse_source(source: &str) -> Option<(SourceFile, Edition)> {
+    parse_any_edition(source).ok()
 }
 
 fn expression_view(source: &str, edition: Edition) -> ExpressionView {

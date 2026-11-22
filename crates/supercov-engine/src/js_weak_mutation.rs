@@ -247,10 +247,110 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             probed_operation(mutant, records)
         }
         "ArrowFunction" => arrow_function(mutant, records),
+        "UnaryOperator" if mutant.replacement == "removed" && mutant.original.starts_with('!') => {
+            verdict_of(
+                INFECTED,
+                "reached",
+                "the code ran, and `!x` differs from `x` wherever it is evaluated",
+            )
+        }
+        "UnaryOperator" if mutant.replacement == "removed" && mutant.original.starts_with('-') => {
+            verdict_of(
+                Status::Unknown,
+                "no-operand-probe",
+                "the code ran; `-x` and `x` differ unless `x` is 0, and no probe recorded `x`",
+            )
+        }
+        RUST_FN_VALUE | "BinaryOperator" | "MatchArm" | "MatchArmGuard" | "StructField" => {
+            rust_operator(mutant, records)
+        }
         other => verdict_of(
             Status::Unknown,
             "no-rule",
             format!("no rule decides {other} mutants yet"),
+        ),
+    }
+}
+
+/// cargo-mutants' function body replacement.
+const RUST_FN_VALUE: &str = "FnValue";
+
+/// A cargo-mutants mutant the run reached (`rust_mutants`).
+fn rust_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let replacement = mutant.replacement.as_str();
+    match mutant.mutator.as_str() {
+        RUST_FN_VALUE if replacement == "()" => verdict_of(
+            PROXY,
+            "function-ran",
+            "the function ran (a proxy: emptying it may change nothing)",
+        ),
+        RUST_FN_VALUE => verdict_of(
+            Status::Unknown,
+            "no-return-probe",
+            format!("the function ran, and no probe recorded whether it returned {replacement}"),
+        ),
+        "MatchArm" => verdict_of(
+            PROXY,
+            "arm-selected",
+            "the arm was selected (a proxy: with it deleted the `_` arm runs, which may do the same)",
+        ),
+        "MatchArmGuard" => {
+            let Some(decision) = &mutant.decision else {
+                return verdict_of(
+                    Status::Unknown,
+                    "no-decision",
+                    "the run measured no outcome of the guard",
+                );
+            };
+            let forced = replacement == "true";
+            let vectors = records.vectors(&decision.id);
+            if vectors.is_empty() {
+                return verdict_of(
+                    Status::NotReached,
+                    "guard-not-evaluated",
+                    "the guard never ran",
+                );
+            }
+            if vectors.iter().any(|(_, outcome)| *outcome != forced) {
+                return verdict_of(
+                    INFECTED,
+                    "guard-differs",
+                    format!(
+                        "the guard was {} where the mutant makes it {forced}",
+                        !forced
+                    ),
+                );
+            }
+            verdict_of(
+                Status::NotInfected,
+                "guard-always-same",
+                format!("the guard was {forced} at every evaluation, as the mutant makes it"),
+            )
+        }
+        "BinaryOperator" => {
+            let operator = mutant
+                .operator
+                .as_ref()
+                .map_or("", |operator| operator.text.as_str());
+            if matches!((operator, replacement), ("==", "!=") | ("!=", "==")) {
+                return verdict_of(
+                    INFECTED,
+                    "comparison-evaluated",
+                    "the comparison ran, and its negation differs at every evaluation",
+                );
+            }
+            verdict_of(
+                Status::Unknown,
+                "no-operand-probe",
+                format!(
+                    "the code ran, and no probe recorded whether `{operator}` and `{replacement}` give the same value there"
+                ),
+            )
+        }
+        _ => verdict_of(
+            Status::Unknown,
+            "no-field-probe",
+            "the code ran, and no probe recorded whether the field's value differs from the base's",
         ),
     }
 }
@@ -261,7 +361,7 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
 /// by its function.
 fn reach(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Reason)> {
     let statement = mutant.statement.as_deref();
-    if statement.is_none() && mutant.mutator != BLOCK_STATEMENT {
+    if statement.is_none() && !matches!(mutant.mutator.as_str(), BLOCK_STATEMENT | RUST_FN_VALUE) {
         return Some(verdict_of(
             Status::Unknown,
             "no-statement-point",
@@ -1077,6 +1177,7 @@ const SPLICED: &[&str] = &[
     "UnaryOperator",
     "BooleanLiteral",
     "MethodExpression",
+    "BinaryOperator",
 ];
 
 /// What the mutant changes: the part of the original it replaces and what
@@ -1235,12 +1336,11 @@ fn replaced(mutant: &CandidateMutant) -> String {
         ))
     };
     let text = match mutant.mutator.as_str() {
-        "ArithmeticOperator" | "EqualityOperator" | "LogicalOperator" | "AssignmentOperator" => {
-            mutant
-                .operator
-                .as_ref()
-                .and_then(|operator| spliced(operator.at, operator.text.len(), descriptor))
-        }
+        "ArithmeticOperator" | "EqualityOperator" | "LogicalOperator" | "AssignmentOperator"
+        | "BinaryOperator" => mutant
+            .operator
+            .as_ref()
+            .and_then(|operator| spliced(operator.at, operator.text.len(), descriptor)),
         "UpdateOperator" => ["++", "--"]
             .into_iter()
             .find_map(|operator| original.find(operator))

@@ -629,6 +629,12 @@ pub(crate) fn cargo_invocation(
     })
 }
 
+/// Whether a `cargo test` option takes a value (`Some(true)`), takes none
+/// (`Some(false)`), or is no `cargo test` option.
+pub(crate) fn cargo_option_value(argument: &str) -> Option<bool> {
+    cargo_option_takes_value(argument)
+}
+
 fn cargo_option_takes_value(argument: &str) -> Option<bool> {
     let name = argument.split_once('=').map_or(argument, |(name, _)| name);
     match name {

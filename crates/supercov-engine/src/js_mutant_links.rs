@@ -87,6 +87,12 @@ pub(crate) fn list_mutants(
     root: &std::path::Path,
     recorded: &BTreeMap<String, std::collections::BTreeSet<String>>,
 ) -> ListedMutants {
+    // A Rust run's files have cargo-mutants' mutants; a run is of one
+    // language, and its files say which.
+    let rust = recorded.keys().any(|file| file.ends_with(".rs"));
+    if rust {
+        return list_rust_mutants(root, recorded);
+    }
     // The run's other languages' files have no JavaScript mutants.
     let files = recorded
         .keys()
@@ -137,6 +143,43 @@ pub(crate) fn list_mutants(
         mutants: MutantsFile {
             schema_version: MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.to_owned()),
+            files: mutants,
+            tests_without_values: Vec::new(),
+        },
+        changed,
+    }
+}
+
+/// `list_mutants` for a Rust run: cargo-mutants' mutants of each `.rs`
+/// file it measured (`rust_mutants::list`).
+fn list_rust_mutants(
+    root: &std::path::Path,
+    recorded: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> ListedMutants {
+    let files = recorded
+        .keys()
+        .filter(|file| file.ends_with(".rs"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let listed = crate::threads::parallel_map(&files, |file| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        crate::rust_mutants::list(file, &source, recorded.get(file)?)
+    });
+    let mut mutants = BTreeMap::new();
+    let mut changed = Vec::new();
+    for (file, listed) in files.into_iter().zip(listed) {
+        match listed {
+            Some(list) if list.is_empty() => {}
+            Some(list) => {
+                mutants.insert(file, list);
+            }
+            None => changed.push(file),
+        }
+    }
+    ListedMutants {
+        mutants: MutantsFile {
+            schema_version: MUTANTS_SCHEMA_VERSION,
+            mutant_set: Some(crate::rust_mutants::MUTANT_SET.to_owned()),
             files: mutants,
             tests_without_values: Vec::new(),
         },

@@ -780,15 +780,28 @@ fn execute(
                     .ok()
                     .and_then(|path| std::fs::canonicalize(path).ok()),
                 strong: Some(supercov_engine::javascript_run::StrongRun {
-                    plan: plan_path,
+                    plan: plan_path.clone(),
                     results: results.clone(),
                 }),
             };
             let mut diagnostics = std::io::stderr();
             let progress = Progress::start(results.clone(), remaining.len());
-            exit =
+            // A Rust run's mutants are cargo-mutants', run by the Rust
+            // driver; every other run's by the JavaScript runners'.
+            exit = if plan.mutant_set.starts_with("cargo-mutants@") {
+                supercov_engine::rust_strong::run_strong_rust(
+                    &supercov_engine::rust_strong::StrongRustRequest {
+                        root: root.to_owned(),
+                        command: command.clone(),
+                        plan: plan_path.clone(),
+                        results: results.clone(),
+                    },
+                    &mut diagnostics,
+                )?
+            } else {
                 supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+            };
             drop(progress);
             command_exit = Some(exit);
             let before = remaining.len();
