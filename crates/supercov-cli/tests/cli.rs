@@ -19358,6 +19358,126 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
         Some("killed"),
         "{tested}"
     );
+
+    // PIT's report beside the run's verdicts: `n * 2`'s division both
+    // kill, the boundary PIT kills and Supercov decided survived is a
+    // violation (exit 1), a negation PIT could not start is not compared,
+    // and a call PIT removed that the source does not show is PIT's alone.
+    let mutation = |status: &str, line: u32, mutator: &str, method: &str, description: &str| {
+        format!(
+            "<mutation detected='{}' status='{status}' numberOfTestsRun='1'><sourceFile>W.java</sourceFile><mutatedClass>w.W</mutatedClass><mutatedMethod>{method}</mutatedMethod><methodDescription>(I)I</methodDescription><lineNumber>{line}</lineNumber><mutator>org.pitest.mutationtest.engine.gregor.mutators.{mutator}</mutator><indexes><index>4</index></indexes><killingTests>w.WTest.twice()|w.WTest.small()</killingTests><description>{description}</description></mutation>\n",
+            status == "KILLED"
+        )
+    };
+    let report = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mutations>\n{}{}{}{}</mutations>\n",
+        mutation(
+            "KILLED",
+            5,
+            "MathMutator",
+            "twice",
+            "Replaced integer multiplication with division"
+        ),
+        mutation(
+            "KILLED",
+            9,
+            "ConditionalsBoundaryMutator",
+            "small",
+            "changed conditional boundary"
+        ),
+        mutation(
+            "NON_VIABLE",
+            9,
+            "NegateConditionalsMutator",
+            "small",
+            "negated conditional"
+        ),
+        mutation(
+            "SURVIVED",
+            5,
+            "VoidMethodCallMutator",
+            "twice",
+            "removed call to w/W::log &amp; more"
+        ),
+    );
+    project.write("mutations.xml", &report);
+    let joined = project.supercov(&["runs", "latest", "mutants", "pit", "mutations.xml"]);
+    assert_eq!(joined.code(), 1, "{}{}", joined.stdout(), joined.stderr());
+    let said = joined.stdout();
+    assert!(said.contains("PIT's 4 mutants beside the run's"), "{said}");
+    assert!(said.contains("1 soundness violation(s)"), "{said}");
+    assert!(said.contains("only PIT        1"), "{said}");
+    assert!(said.contains("not compared    1"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "violation  {file}:9:16-9:22:ConditionalsBoundary:<=  supercov survived / pit KILLED"
+        )),
+        "{said}"
+    );
+    let as_json = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "pit",
+            "mutations.xml",
+            "--file",
+            file,
+            "--json",
+        ])
+        .json();
+    assert_eq!(as_json["agree"], 1, "{as_json}");
+    assert_eq!(
+        as_json["soundnessViolations"]["mutants"][0]["pitKillingTests"],
+        serde_json::json!(["w.WTest.twice()", "w.WTest.small()"]),
+        "{as_json}"
+    );
+    assert_eq!(
+        as_json["onlyPit"]["mutants"][0]["description"], "removed call to w/W::log & more",
+        "{as_json}"
+    );
+    assert_eq!(
+        as_json["onlyPit"]["byCategory"]["other"]["VoidMethodCall"],
+        1
+    );
+    // Only another file's mutants: nothing of PIT's is left.
+    let elsewhere = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "pit",
+            "mutations.xml",
+            "--file",
+            "src/main/java/w/Other.java",
+            "--json",
+        ])
+        .json();
+    assert_eq!(elsewhere["pit"], 0, "{elsewhere}");
+    // What it refuses, naming why.
+    for (args, says) in [
+        (vec!["mutations.xml", "--file"], "--file needs a path"),
+        (vec!["mutations.xml", "--fast"], "Unknown option: --fast"),
+        (vec![], "give PIT's mutations.xml"),
+        (vec!["missing.xml"], "missing.xml"),
+    ] {
+        let mut command = vec!["runs", "latest", "mutants", "pit"];
+        command.extend(args);
+        let refused = project.supercov(&command);
+        assert_ne!(refused.code(), 0, "{command:?}");
+        assert!(
+            format!("{}{}", refused.stdout(), refused.stderr()).contains(says),
+            "{command:?}: {}{}",
+            refused.stdout(),
+            refused.stderr()
+        );
+    }
+    let help = project.supercov(&["runs", "latest", "mutants", "pit", "--help"]);
+    assert_eq!(help.code(), 0);
+    assert!(
+        help.stdout()
+            .contains("Usage: supercov runs <run-id> mutants pit")
+    );
 }
 
 /// A JUnit 4 parameterized test whose parameters print as Object's
