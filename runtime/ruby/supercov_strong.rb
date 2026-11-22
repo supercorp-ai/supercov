@@ -242,7 +242,10 @@ module Supercov
           end
         end
         writer.close
-        running[pid] = { mutant: mutant, reader: reader, started: started, deadline: started + limit(ids), ids: ids }
+        # Read as the fork writes: a large outcome would fill the pipe and
+        # hold the fork, which would never be reaped.
+        output = Thread.new { reader.read }
+        running[pid] = { mutant: mutant, reader: reader, output: output, started: started, deadline: started + limit(ids), ids: ids }
       end
 
       def reap(running)
@@ -271,7 +274,7 @@ module Supercov
 
       def finish(job, status)
         mutant = job[:mutant]
-        data = job[:reader].read
+        data = job[:output].value
         job[:reader].close
         duration = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - job[:started]) * 1000).round
         outcome = data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
@@ -339,12 +342,14 @@ module Supercov
           end
         end
         writer.close
+        output = Thread.new { reader.read }
         if deadline
           started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           until Process.waitpid(pid, Process::WNOHANG)
             if Process.clock_gettime(Process::CLOCK_MONOTONIC) - started > deadline
               Process.kill("KILL", pid) rescue nil # rubocop:disable Style/RescueModifier
               Process.waitpid(pid)
+              output.join
               reader.close
               return nil
             end
@@ -353,7 +358,7 @@ module Supercov
         else
           Process.waitpid(pid)
         end
-        data = reader.read
+        data = output.value
         reader.close
         data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
       end
