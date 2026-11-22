@@ -1232,3 +1232,53 @@ fn ruby_destructuring_parameters_drop_an_implicit_rest() {
         sexp(&method)
     );
 }
+
+/// A switch falls back to the node around a mutant where it cannot go at the
+/// mutant: around the call whose `self` receiver the mutant replaced (a
+/// switched receiver would not call a private method), and past a copy that
+/// does not print, to no switch at all.
+#[test]
+fn a_switch_goes_around_a_self_receiver_and_past_a_copy_that_does_not_print() {
+    let source = b"def m\n  self.a\nend\ndef e\nend\n";
+    let methods = defs(source);
+    let mutant = |method: &Rc<N>, mutated: Rc<N>| RubyMutant {
+        start: 0,
+        end: 0,
+        node: "send",
+        mutator: "Send",
+        replacement: None,
+        edit: Edit {
+            start: 0,
+            end: 0,
+            text: String::new(),
+        },
+        method: method.clone(),
+        mutated,
+        descriptor: String::new(),
+    };
+    let with = |node: &Rc<N>, index: usize, child: Rc<N>| {
+        let mut children = node.children.clone();
+        children[index] = Child::Node(child);
+        node.with_children(children)
+    };
+    let def = &methods[0];
+    let call = def.node(2).unwrap();
+    // `self.a` with `nil` for `self`: the switch goes around the call.
+    let receiver_replaced = with(def, 2, with(call, 0, N::new("nil", Vec::new())));
+    let (start, end, _, copy) = schemata::place(source, &mutant(def, receiver_replaced)).unwrap();
+    assert_eq!(&source[start..end], b"self.a");
+    assert_eq!(copy, "nil.a");
+    // A replacement no printer knows: no switch.
+    let unprintable = with(def, 2, with(call, 0, N::new("unknown", Vec::new())));
+    assert_eq!(
+        schemata::place(source, &mutant(def, unprintable)),
+        Err("no-placeable-ancestor".to_owned())
+    );
+    // An empty method given a body that does not print: no switch.
+    let empty = &methods[1];
+    let body = with(empty, 2, N::new("unknown", Vec::new()));
+    assert_eq!(
+        schemata::place(source, &mutant(empty, body)),
+        Err("no-placeable-ancestor".to_owned())
+    );
+}

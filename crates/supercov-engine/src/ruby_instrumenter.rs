@@ -923,11 +923,12 @@ impl<'a> Collector<'a> {
 
     /// The site of a value probe over `start..end`, as the mutant gem's
     /// located node spans it, unless the span is inside a `Ractor.new` block.
+    /// Nodes nest, so a node that starts inside a block ends inside it.
     fn value_site(&self, start: usize, end: usize) -> Option<String> {
         if self
             .ractor_blocks
             .iter()
-            .any(|(from, to)| *from <= start && end <= *to)
+            .any(|&(from, to)| (from..to).contains(&start))
         {
             return None;
         }

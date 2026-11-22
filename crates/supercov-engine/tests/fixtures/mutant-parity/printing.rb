@@ -84,4 +84,12 @@ class Printing
     list.inject { |sum, x| sum + x }
     list.each_with_index.select { |x, i| i.even? }.map(&:first)
   end
+
+  def bare_yield_operand(a)
+    (yield a) + 1
+  end
+
+  def bare_super_operand(a)
+    (super a) * 2
+  end
 end

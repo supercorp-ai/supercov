@@ -38,17 +38,8 @@ pub(crate) struct Switches {
     pub unplaceable: BTreeMap<usize, String>,
 }
 
-/// Where one switch goes and what it switches between.
-struct Placement {
-    start: usize,
-    end: usize,
-    /// The text before the original, after the switch's arms.
-    shape: Shape,
-    arms: Vec<(u64, String)>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Shape {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Shape {
     /// `(if ... else (original) end)`.
     Expression,
     /// Statements: `(if ... else original end)`.
@@ -72,7 +63,10 @@ fn placeable(node: &N) -> Option<Shape> {
 }
 
 /// Where `mutant`'s switch goes, and its copy there.
-fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, String), String> {
+pub(super) fn place(
+    source: &[u8],
+    mutant: &RubyMutant,
+) -> Result<(usize, usize, Shape, String), String> {
     let pairs = path(&mutant.method, &mutant.mutated);
     // An optional parameter made required: its default, evaluated exactly
     // where a call leaves the parameter out, raises what the required one
@@ -176,7 +170,8 @@ pub(crate) fn switches(
     wanted: Option<&std::collections::BTreeSet<usize>>,
 ) -> Switches {
     let enumeration = super::enumerate(source);
-    let mut placements: Vec<Placement> = Vec::new();
+    // Each switch's arms, by where it goes and its shape.
+    let mut placements: BTreeMap<(usize, usize, Shape), Vec<(u64, String)>> = BTreeMap::new();
     let mut unplaceable = BTreeMap::new();
     for (index, mutant) in enumeration.mutants.iter().enumerate() {
         if wanted.is_some_and(|wanted| !wanted.contains(&index)) {
@@ -185,17 +180,10 @@ pub(crate) fn switches(
         match place(source, mutant) {
             Ok((start, end, shape, copy)) => {
                 let key = file * FILE_KEY + index as u64;
-                match placements.iter_mut().find(|placement| {
-                    placement.start == start && placement.end == end && placement.shape == shape
-                }) {
-                    Some(placement) => placement.arms.push((key, copy)),
-                    None => placements.push(Placement {
-                        start,
-                        end,
-                        shape,
-                        arms: vec![(key, copy)],
-                    }),
-                }
+                placements
+                    .entry((start, end, shape))
+                    .or_default()
+                    .push((key, copy));
             }
             Err(reason) => {
                 unplaceable.insert(index, reason);
@@ -204,17 +192,16 @@ pub(crate) fn switches(
     }
     // Openers: outer before inner at one offset; closers: inner before outer.
     let mut edits: Vec<(usize, u8, usize, String)> = Vec::new();
-    for placement in &placements {
+    for (&(start, end, shape), arms) in &placements {
         let mut opener = String::from("(if ");
-        let arms: Vec<String> = placement
-            .arms
+        let arms: Vec<String> = arms
             .iter()
             .map(|(key, copy)| {
                 format!("$__supercov_mutant == {key} then $__supercov_strong.h; ({copy})")
             })
             .collect();
         opener.push_str(&arms.join(" elsif "));
-        let (open_tail, closer) = match placement.shape {
+        let (open_tail, closer) = match shape {
             Shape::Expression => (" else (", ") end)"),
             Shape::Statements => (" else ", " end)"),
             // `;` before the `end`: the body may end in a clause header
@@ -223,12 +210,12 @@ pub(crate) fn switches(
             Shape::Empty => (" end); ", ""),
         };
         opener.push_str(open_tail);
-        let width = placement.end - placement.start;
+        let width = end - start;
         // Closers sort before openers at one offset; among openers the wider
         // first, among closers the narrower first.
-        edits.push((placement.start, 1, usize::MAX - width, opener));
+        edits.push((start, 1, usize::MAX - width, opener));
         if !closer.is_empty() {
-            edits.push((placement.end, 0, width, closer.to_owned()));
+            edits.push((end, 0, width, closer.to_owned()));
         }
     }
     edits.sort_by_key(|edit| (edit.0, edit.1, edit.2));

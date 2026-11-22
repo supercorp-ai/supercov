@@ -4902,6 +4902,378 @@
           "replacement": "(sym :first__mutant__)"
         }
       ]
+    },
+    {
+      "subject": "bare_yield_operand:88",
+      "sexp": "(def :bare_yield_operand (args (arg :a)) (send (begin (yield (lvar :a))) :+ (int 1)))",
+      "mutants": [
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(begin (yield (lvar :a)))"
+        },
+        {
+          "start": [
+            89,
+            12
+          ],
+          "end": [
+            89,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            6
+          ],
+          "end": [
+            89,
+            13
+          ],
+          "node": "yield",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            6
+          ],
+          "end": [
+            89,
+            13
+          ],
+          "node": "yield",
+          "replacement": "(yield)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send (begin (yield (lvar :a))) :- (int 1))"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "send",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            89,
+            17
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            17
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            89,
+            17
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            89,
+            17
+          ],
+          "end": [
+            89,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        }
+      ]
+    },
+    {
+      "subject": "bare_super_operand:92",
+      "sexp": "(def :bare_super_operand (args (arg :a)) (send (begin (super (lvar :a))) :* (int 2)))",
+      "mutants": [
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(begin (super (lvar :a)))"
+        },
+        {
+          "start": [
+            93,
+            6
+          ],
+          "end": [
+            93,
+            13
+          ],
+          "node": "super",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            93,
+            6
+          ],
+          "end": [
+            93,
+            13
+          ],
+          "node": "super",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            93,
+            12
+          ],
+          "end": [
+            93,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            93,
+            6
+          ],
+          "end": [
+            93,
+            13
+          ],
+          "node": "super",
+          "replacement": "(super)"
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send (begin (super (lvar :a))) :/ (int 2))"
+        },
+        {
+          "start": [
+            93,
+            5
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "send",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            93,
+            17
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            93,
+            17
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            93,
+            17
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            93,
+            17
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            93,
+            17
+          ],
+          "end": [
+            93,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        }
+      ]
     }
   ]
 }
