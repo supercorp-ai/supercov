@@ -19,6 +19,8 @@ Encoding.default_external = Encoding::UTF_8
 
 separator = ARGV.index("--") or abort("usage: by-hand.rb <project-dir> <jobs> -- <command...>")
 project, jobs = ARGV[0...separator]
+# Absolute: a Ruby process a test starts elsewhere loads the runtime too.
+project = File.expand_path(project)
 command = ARGV[(separator + 1)..]
 jobs = Integer(jobs)
 pass = Dir[File.join(project, ".supercov/strong/*/ruby/strong-plan.rb")].max_by { |path| File.mtime(path) } or abort("no strong pass")

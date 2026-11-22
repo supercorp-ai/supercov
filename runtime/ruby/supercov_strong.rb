@@ -8,8 +8,10 @@
 #
 # 1. Compiles each file the pass switches from the copy Rust wrote, where
 #    every mutant the pass runs sits behind a switch that reads
-#    `$__supercov_mutant` (a mutant's key) each time it is evaluated.
-# 2. Counts the active mutant's evaluations (`$__supercov_strong.h`) and,
+#    `Supercov::Strong::MUTANT` (a mutant's key) each time it is evaluated:
+#    a constant holding an Integer, which a non-main Ractor can read where
+#    it could not read a global.
+# 2. Counts the active mutant's evaluations (`Supercov::Strong.h`) and,
 #    past the hit limit, raises `Supercov::Strong::MutantTimeout`, an
 #    Exception no `rescue => e` catches, and notes the mutant in the
 #    timeouts file.
@@ -26,6 +28,8 @@ module Supercov
     ACTIVE_ENV = "SUPERCOV_ACTIVE_MUTANT"
     SWITCHES_ONLY_ENV = "SUPERCOV_STRONG_SWITCHES_ONLY"
     TIMEOUT_CODE = "SUPERCOV_MUTANT_TIMEOUT"
+    MAIN = Ractor.current
+    MUTANT = -1
 
     # Raised past the hit limit: an Exception, so code under test that
     # rescues StandardError does not carry on through an endless loop.
@@ -57,7 +61,8 @@ module Supercov
       end
 
       def activate(key)
-        $__supercov_mutant = key
+        remove_const(:MUTANT)
+        const_set(:MUTANT, key)
         @hits = 0
         @timed_out = false
         # A Ruby process a test starts (`assert_separately`, a CLI) loads
@@ -67,7 +72,10 @@ module Supercov
       end
 
       # One evaluation of the active mutant's replacement.
+      # (A non-main Ractor cannot count: its evaluations are not limited.)
       def h
+        return unless MAIN.equal?(Ractor.current)
+
         @hits += 1
         return if @hits <= @limit
 
@@ -103,7 +111,7 @@ module Supercov
       end
 
       def active_name
-        @keys.key($__supercov_mutant) || "-"
+        @keys.key(MUTANT) || "-"
       end
 
       # The switched copy of a file the pass switches, or nil.
@@ -845,10 +853,6 @@ module Supercov
       return if path.empty?
 
       load_plan(path)
-      # `defined?` first: reading a global never set warns under `-W`, and
-      # a child that `assert_separately` runs fails on any warning.
-      $__supercov_mutant = -1 unless defined?($__supercov_mutant) && $__supercov_mutant
-      $__supercov_strong = self
       Loader.install
       attach
     end

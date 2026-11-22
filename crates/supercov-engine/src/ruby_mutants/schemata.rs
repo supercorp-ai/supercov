@@ -8,7 +8,7 @@
 //! a receiver, a value), a method body's statements. It reads
 //!
 //! ```ruby
-//! (if $__supercov_mutant == 3000017 then $__supercov_strong.h; (copy) elsif ... else (original) end)
+//! (if ::Supercov::Strong::MUTANT == 3000017 then ::Supercov::Strong.h; (copy) elsif ... else (original) end)
 //! ```
 //!
 //! where each copy is the node with one mutant applied, printed on one line,
@@ -197,7 +197,7 @@ pub(crate) fn switches(
         let arms: Vec<String> = arms
             .iter()
             .map(|(key, copy)| {
-                format!("$__supercov_mutant == {key} then $__supercov_strong.h; ({copy})")
+                format!("::Supercov::Strong::MUTANT == {key} then ::Supercov::Strong.h; ({copy})")
             })
             .collect();
         opener.push_str(&arms.join(" elsif "));

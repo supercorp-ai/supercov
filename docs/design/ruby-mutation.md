@@ -145,7 +145,7 @@ parentheses, an element), a method body's statements, a body with its rescue
 clauses (inside `begin ... end`), or before the `end` of an empty method:
 
 ```ruby
-(if $__supercov_mutant == 1000017 then $__supercov_strong.h; (copy) elsif ... else (original) end)
+(if ::Supercov::Strong::MUTANT == 1000017 then ::Supercov::Strong.h; (copy) elsif ... else (original) end)
 ```
 
 Each copy is the node with one mutant applied, printed on one line: no line
