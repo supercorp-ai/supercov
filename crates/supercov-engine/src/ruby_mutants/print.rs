@@ -185,11 +185,7 @@ fn escaped(bytes: &[u8], delimiter: u8) -> String {
                 }
             }
         }
-        None => {
-            for byte in bytes {
-                out.push_str(&format!("\\x{byte:02X}"));
-            }
-        }
+        None => out.extend(bytes.iter().map(|byte| format!("\\x{byte:02X}"))),
     }
     out
 }
@@ -235,11 +231,15 @@ fn rational(text: &str) -> Option<String> {
     if denominator == 1 {
         return Some(format!("{numerator}r"));
     }
+    // The power of ten `d` divides (`d` is past 1 here).
     let mut scale: i128 = 1;
     let mut places = 0;
-    while scale % denominator != 0 {
+    loop {
         scale = scale.checked_mul(10)?;
         places += 1;
+        if scale % denominator == 0 {
+            break;
+        }
     }
     let scaled = numerator.unsigned_abs() * (scale / denominator).unsigned_abs();
     let sign = if numerator < 0 { "-" } else { "" };
@@ -261,7 +261,7 @@ impl Printer<'_> {
             return None;
         }
         let (start, end) = node.span?;
-        let text = std::str::from_utf8(self.source.get(start..end)?).ok()?;
+        let text = std::str::from_utf8(&self.source[start..end]).ok()?;
         // A heredoc's opening without its body is no code.
         (!text.contains('\n') && !opens_heredoc(text)).then(|| text.to_owned())
     }
@@ -613,18 +613,16 @@ impl Printer<'_> {
             | "false" | "str" | "dstr" | "sym" | "dsym" | "xstr" | "regexp" | "array" | "index"
             | "nth_ref" | "back_ref" | "zsuper" | "kwbegin" | "defined?" | "lambda"
             | "__FILE__" | "__LINE__" | "__ENCODING__" => true,
-            "int" | "rational" | "complex" => match node.child(0) {
-                Child::Int(value) => *value >= 0,
-                Child::Raw(text) => !text.starts_with("(-") && !text.contains("(0-"),
-                Child::BigInt(digits) => !digits.starts_with('-'),
-                _ => false,
-            },
-            "float" => match node.child(0) {
-                Child::Float(bits) => {
-                    f64::from_bits(*bits) >= 0.0 && f64::from_bits(*bits).is_sign_positive()
-                }
-                _ => false,
-            },
+            // A negative literal is an operator's operand (`-2`, `(-3/2)`,
+            // `(0-2i)` as `inspect` prints their values).
+            "int" | "rational" | "complex" => {
+                let text = node.child(0).text();
+                !(text.starts_with('-') || text.starts_with("(-") || text.contains("(0-"))
+            }
+            // A float literal is never NaN: its sign alone.
+            "float" => {
+                matches!(node.child(0), Child::Float(bits) if f64::from_bits(*bits).is_sign_positive())
+            }
             "begin" => {
                 node.span.is_some() && !node.has(syntax::SYNTHETIC)
                     || node.span.is_none() && node.children.is_empty()
@@ -637,7 +635,8 @@ impl Printer<'_> {
                 {
                     return false;
                 }
-                if selector.ends_with('=') && !node.child(0).is_nil() {
+                // A setter, `a.b = c` (only a receiver's setter is called).
+                if selector.ends_with('=') {
                     return false;
                 }
                 match node.span {
@@ -831,13 +830,6 @@ impl Printer<'_> {
                     _ => {}
                 }
             }
-            if selector == "[]" {
-                return Some(format!(
-                    "{}[{}]",
-                    self.operand(receiver)?,
-                    self.arguments(arguments)?.join(", ")
-                ));
-            }
         }
         let mut head = String::new();
         if let Some(receiver) = receiver {
@@ -888,11 +880,14 @@ impl Printer<'_> {
         if call.ty == "lambda" {
             return Some(format!("->{parameters} {{ {body} }}"));
         }
-        let head = self.expression(call)?;
+        // A command call (`a.b 1 do`) is printed with its arguments in
+        // parentheses: a block cannot follow parentheses around it.
         let head = if self.atomic(call) {
-            head
+            self.expression(call)?
         } else {
-            format!("({head})")
+            let mut bare = (**call).clone();
+            bare.span = None;
+            self.expression(&bare)?
         };
         let parameters = if parameters.is_empty() {
             String::new()
@@ -1303,6 +1298,8 @@ mod tests {
     fn ruby_literals_print_as_ruby_reads_them() {
         assert!(method_name("caf\u{e9}") && method_name("\u{e9}t\u{e9}?") && method_name("_a!"));
         assert!(!method_name("1a") && !method_name("a-b") && !method_name(""));
+        // Ruby reads any non-ASCII character as part of a name.
+        assert!(method_name("\u{1f600}") && method_name("a\u{1f600}"));
         for (name, literal) in [
             ("a", ":a"),
             ("a=", ":a="),

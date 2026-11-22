@@ -71,6 +71,6 @@ class Rules
   end
 
   def imaginary
-    [0i, 1i, -2i]
+    [0i, 1i, -2i, -1.5r, -3]
   end
 end

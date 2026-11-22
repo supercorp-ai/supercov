@@ -466,6 +466,7 @@ fn ruby_mutants_list_again_from_unchanged_files() {
     fs::write(root.join("a.rb"), "def a(x)\n  x + 1\nend\n").unwrap();
     fs::write(root.join("b.rb"), "def b(x)\n  x\nend\n").unwrap();
     fs::write(root.join("c.rb"), "# nothing\n").unwrap();
+    fs::write(root.join("d.rb"), "def broken(\n").unwrap();
     let points = |file: &str| {
         let source = fs::read(root.join(file)).unwrap();
         let mut next = 0;
@@ -481,9 +482,12 @@ fn ruby_mutants_list_again_from_unchanged_files() {
     recorded.insert("a.rb".to_owned(), points("a.rb"));
     recorded.insert("b.rb".to_owned(), std::collections::BTreeSet::new());
     recorded.insert("c.rb".to_owned(), points("c.rb"));
+    recorded.insert("d.rb".to_owned(), std::collections::BTreeSet::new());
     recorded.insert("gone.rb".to_owned(), std::collections::BTreeSet::new());
     let listed = list_mutants(&root, &recorded);
-    assert_eq!(listed.changed, ["b.rb", "gone.rb"]);
+    assert_eq!(listed.changed, ["b.rb", "d.rb", "gone.rb"]);
+    let nothing = list_mutants(&root, &std::collections::BTreeMap::new());
+    assert!(nothing.changed.is_empty());
     let ids = mutant_ids("a.rb", &fs::read(root.join("a.rb")).unwrap());
     assert!(
         ids.iter().any(|id| id == "a.rb:2:3-2:8:Send:x - 1"),
@@ -1018,6 +1022,14 @@ fn ruby_mutant_sessions_keep_what_they_cannot_match() {
                     { "mutation_result": { "mutation_type": "evil", "mutation_source": "def big?(n)\n  n == 10\nend" }, "criteria_result": { "test_result": false } },
                 ],
             },
+            {
+                "source_path": "/lib/calc.rb",
+                "identification": "Calc#big?:/lib/calc.rb:7",
+                "coverage_results": [
+                    { "mutation_result": { "mutation_type": "evil", "mutation_source": "def big?(n)\n  n == 10\nend" }, "criteria_result": {} },
+                    { "mutation_result": { "mutation_type": "evil", "mutation_source": "nil" }, "criteria_result": {} },
+                ],
+            },
             { "source_path": "/lib/calc.rb" },
         ],
     });
@@ -1032,7 +1044,10 @@ fn ruby_mutant_sessions_keep_what_they_cannot_match() {
         [
             ("Unmatched", "Survived"),
             ("Unmatched", "Survived"),
-            ("Send", "Survived")
+            ("Send", "Survived"),
+            // Another line than the method's, and code with no method.
+            ("Unmatched", "Survived"),
+            ("Unmatched", "Survived"),
         ]
     );
 }
@@ -1054,4 +1069,144 @@ fn ruby_mutants_of_every_fixture_link_to_value_probes_or_none() {
             .count();
     }
     assert!(linked > 100, "{linked}");
+}
+
+/// A tree written as `sexp` prints it: `(type child ...)`, `:symbol`, `nil`,
+/// an integer, `s"<hex>"` for a string.
+fn tree(text: &str) -> Rc<N> {
+    fn parse(tokens: &mut std::iter::Peekable<std::vec::IntoIter<String>>) -> Child {
+        let token = tokens.next().expect("a token");
+        if token == "(" {
+            let ty: &'static str = Box::leak(tokens.next().expect("a type").into_boxed_str());
+            let mut children = Vec::new();
+            while tokens.peek().is_some_and(|next| next != ")") {
+                children.push(parse(tokens));
+            }
+            tokens.next();
+            return Child::Node(N::new(ty, children));
+        }
+        if let Some(name) = token.strip_prefix(':') {
+            return Child::Sym(name.to_owned());
+        }
+        if let Some(hex) = token.strip_prefix("s\"") {
+            let hex = hex.trim_end_matches('"');
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            return Child::Str(bytes);
+        }
+        if token == "nil" {
+            return Child::Nil;
+        }
+        Child::Int(token.parse().expect("an integer"))
+    }
+    let spaced = text.replace('(', " ( ").replace(')', " ) ");
+    let tokens: Vec<String> = spaced.split_whitespace().map(str::to_owned).collect();
+    match parse(&mut tokens.into_iter().peekable()) {
+        Child::Node(node) => node,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Unparser's round trip, as emulated: what it prints as another tree
+/// (a regexp as a condition, however wrapped; `(a || b) && c` outside a
+/// statement; a left operand binding as loosely as a non-associative
+/// operator), a jump or `retry` out of place, a local read before it is
+/// assigned, including in a singleton method's receiver or a block's
+/// parameters.
+#[test]
+fn ruby_mutants_unparser_cannot_print_back_are_refused() {
+    let regexp = "(regexp (str s\"61\") (regopt))";
+    let refused = [
+        format!("(def :m (args) (if {regexp} nil nil))"),
+        format!("(def :m (args) (while (begin {regexp}) nil))"),
+        format!("(def :m (args) (if (send {regexp} :!) nil nil))"),
+        format!("(def :m (args) (until (and (true) {regexp}) nil))"),
+        "(def :m (args) (send nil :a (and (or (true) (false)) (true))))".into(),
+        "(def :m (args) (send (send (int 1) :== (int 2)) :== (int 3)))".into(),
+        "(def :m (args) (send (send (int 1) :** (int 2)) :** (int 3)))".into(),
+        "(def :m (args) (break))".into(),
+        "(def :m (args) (retry))".into(),
+        "(def :m (args) (lvar :x))".into(),
+        "(def :m (args) (defs (lvar :x) :n (args) nil))".into(),
+        "(def :m (args) (block (send nil :a) (args (optarg :x (lvar :y))) nil))".into(),
+        "(def :m (args) (block (lvar :y) (args) nil))".into(),
+    ];
+    for text in &refused {
+        assert!(!validates(&tree(text)), "{text}");
+    }
+    let kept = [
+        format!("(def :m (args) (if (send {regexp} :=~ (int 1)) nil nil))"),
+        format!("(def :m (args) (if (begin {regexp} {regexp}) nil nil))"),
+        format!("(def :m (args) (if (send {regexp} :! (int 1)) nil nil))"),
+        "(def :m (args) (and (or (true) (false)) (true)))".into(),
+        "(def :m (args) (send (send (int 1) :- (int 2)) :- (int 3)))".into(),
+        "(def :m (args) (while (true) (break)))".into(),
+        "(def :m (args) (defs (self) :n (args) nil))".into(),
+        "(def :m (args) (numblock (send nil :a) 0 nil))".into(),
+        "(def :m (args) (numblock (send nil :a) 2 (lvar :_2)))".into(),
+        "(def :m (args) (block (send nil :a) (args (arg :x)) (lvar :x)))".into(),
+    ];
+    for text in &kept {
+        assert!(validates(&tree(text)), "{text}");
+    }
+}
+
+/// A statement list that lost one statement locates the statement removed;
+/// one that lost one and changed another, or lost a slot that holds no
+/// node, is located at the list itself, as `scripts/mutant-parity.rb` does.
+#[test]
+fn ruby_mutants_locate_a_removed_statement_only_where_it_is_one() {
+    let method = tree("(def :m (args) (begin (int 1) (int 2) (int 3)))");
+    let cases = [
+        ("(def :m (args) (begin (int 1) (int 3)))", "(int 2)", None),
+        (
+            "(def :m (args) (begin (int 1) (int 4)))",
+            "(begin (int 1) (int 2) (int 3))",
+            Some("(begin (int 1) (int 4))"),
+        ),
+    ];
+    for (mutated, located, replacement) in cases {
+        let mutated = tree(mutated);
+        let (found, by) = localize(&method, &mutated);
+        assert_eq!(sexp(&found), located);
+        assert_eq!(by.map(|by| sexp(&by)), replacement.map(str::to_owned));
+        let last = path(&method, &mutated).pop().unwrap();
+        assert_eq!(sexp(&last.0), located);
+    }
+    let holding_nil = tree("(def :m (args) (begin (int 1) nil (int 3)))");
+    let mutated = tree("(def :m (args) (begin (int 1) (int 3)))");
+    assert_eq!(
+        sexp(&localize(&holding_nil, &mutated).0),
+        "(begin (int 1) nil (int 3))"
+    );
+    assert_eq!(
+        sexp(&path(&holding_nil, &mutated).pop().unwrap().0),
+        "(begin (int 1) nil (int 3))"
+    );
+}
+
+/// A block whose call is written without parentheses (`a.b 1 do`) is
+/// printed with them when the block is printed from its parts; source text
+/// that is not UTF-8 is printed from its node's parts instead.
+#[test]
+fn ruby_blocks_and_odd_source_print_from_their_parts() {
+    let source = b"def m(list)\n  list.each_slice 2 do |a|\n    a\n  end\nend\n";
+    let method = defs(source).remove(0);
+    let block = method.node(2).unwrap();
+    let mut changed = (**block).clone();
+    changed.span = None;
+    assert_eq!(
+        print::one_line(source, &method, &changed).as_deref(),
+        Some("list.each_slice(2) { |a| a }")
+    );
+    let odd = b"\xff";
+    let literal = Rc::new(N {
+        ty: "int",
+        children: vec![Child::Int(1)],
+        span: Some((0, 1)),
+        syntax: 0,
+    });
+    assert_eq!(print::one_line(odd, &literal, &literal).as_deref(), Some("1"));
 }

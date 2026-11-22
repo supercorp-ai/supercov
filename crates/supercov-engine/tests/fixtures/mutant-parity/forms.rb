@@ -113,6 +113,7 @@ class Forms
   def index_writes(list, value)
     list[0] = value
     list.[]=(0, value)
+    list.[](0)
     list[] = value
     self[0] = value
   end

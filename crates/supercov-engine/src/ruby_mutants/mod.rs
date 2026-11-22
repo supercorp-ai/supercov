@@ -189,10 +189,11 @@ pub(crate) fn position(source: &[u8], offset: usize) -> (u32, u32) {
 }
 
 fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
-    for mutated in mutators::mutate(tree, None) {
-        if !validates(&mutated) {
-            continue;
-        }
+    // A method has mutants always (`raise` for its body at least).
+    let mutants = mutators::mutate(tree, None)
+        .into_iter()
+        .filter(|mutated| validates(mutated));
+    mutants.for_each(|mutated| {
         let (located, replacement) = localize(tree, &mutated);
         let (start, end) = located.span.expect("a node of the method has its span");
         // A mutant whose code cannot be written in place (one in a line
@@ -204,10 +205,10 @@ fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
             (Some(_), Some(edit)) if edit.start == start && edit.end == end => {
                 descriptor(&edit.text)
             }
-            (Some(replacement), _) => descriptor(
-                &print::one_line(source, tree, replacement)
-                    .unwrap_or_else(|| tree::sexp(replacement)),
-            ),
+            (Some(replacement), _) => {
+                let unprintable = tree::sexp(replacement);
+                descriptor(&print::one_line(source, tree, replacement).unwrap_or(unprintable))
+            }
         };
         if edit.is_none() {
             into.unprintable += 1;
@@ -228,7 +229,7 @@ fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
             method: tree.clone(),
             mutated: mutated.clone(),
         });
-    }
+    });
 }
 
 /// The change to the source that makes a mutant: its span's code replaced.
@@ -307,14 +308,15 @@ pub(crate) fn path(tree: &Rc<N>, mutated: &Rc<N>) -> Vec<(Rc<N>, Option<Rc<N>>)>
 /// ternary's branch removed), at the nearest node around it that can.
 pub(crate) fn edit(source: &[u8], tree: &Rc<N>, mutated: &Rc<N>) -> Option<Edit> {
     let mut path = path(tree, mutated);
-    while let Some((original, mutated)) = path.pop() {
-        let Some((start, end)) = original.span else {
-            continue;
-        };
+    loop {
+        // Past the method: no code in place.
+        let (original, mutated) = path.pop()?;
+        let (start, end) = original.span.expect("a node of the method has its span");
         let text = match &mutated {
             None if print::holds_heredoc(source, &original) => continue,
             None => {
-                let parent = &path.last()?.0;
+                // The method itself is never removed.
+                let parent = &path.last().expect("a removed node's parent").0;
                 if may_be_empty(parent) {
                     String::new()
                 } else {
@@ -328,7 +330,6 @@ pub(crate) fn edit(source: &[u8], tree: &Rc<N>, mutated: &Rc<N>) -> Option<Edit>
         };
         return Some(Edit { start, end, text });
     }
-    None
 }
 
 /// The replacement as a descriptor: on one line, and past 40 characters,
@@ -1029,21 +1030,22 @@ pub(crate) fn operator_kinds(operator: &str) -> Vec<String> {
 fn probe_kind(mutant: &RubyMutant) -> Option<String> {
     let replacement = mutant.replacement.as_ref()?;
     let located = path(&mutant.method, &mutant.mutated)
-        .last()
-        .map(|(original, _)| original.clone())?;
-    if matches!(replacement.ty, "true" | "false" | "nil") && replacement.children.is_empty() {
+        .pop()
+        .map(|(original, _)| original)
+        .expect("the located node");
+    if matches!(replacement.ty, "true" | "false" | "nil") {
         return Some(replacement.ty.to_owned());
     }
-    if located.ty != "send" || located.children.len() < 2 || located.child(0).is_nil() {
+    if located.ty != "send" || located.child(0).is_nil() {
         return None;
     }
-    let selector = located.child(1).sym()?;
+    let selector = located.child(1).sym().expect("a call's name");
     if replacement.ty == "send"
         && replacement.children.len() == located.children.len()
         && replacement.child(0) == located.child(0)
         && replacement.children[2..] == located.children[2..]
     {
-        let other = replacement.child(1).sym()?;
+        let other = replacement.child(1).sym().expect("a call's name");
         return selector_replacements(selector)
             .contains(&other)
             .then(|| other.to_owned());
@@ -1055,12 +1057,10 @@ fn probe_kind(mutant: &RubyMutant) -> Option<String> {
     if binary && Some(replacement) == located.node(2) {
         return Some("right".into());
     }
-    if selector == "!=" && replacement.ty == "send" && replacement.child(1).sym() == Some("!") {
-        let inner = replacement.node(0)?;
-        let name = inner.child(1).sym()?;
-        if inner.child(0) == located.child(0) && inner.child(2) == located.child(2) {
-            return Some(format!("not:{name}"));
-        }
+    // `!=`'s negations, `!a.eql?(b)` and `!a.equal?(b)`, over its operands.
+    if selector == "!=" && replacement.child(1).sym() == Some("!") {
+        let inner = replacement.node(0).expect("`!`'s operand");
+        return inner.child(1).sym().map(|name| format!("not:{name}"));
     }
     None
 }

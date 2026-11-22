@@ -5997,7 +5997,7 @@
     },
     {
       "subject": "imaginary:73",
-      "sexp": "(def :imaginary (args) (array (complex (0+0i)) (complex (0+1i)) (complex (0-2i))))",
+      "sexp": "(def :imaginary (args) (array (complex (0+0i)) (complex (0+1i)) (complex (0-2i)) (rational (-3/2)) (int -3)))",
       "mutants": [
         {
           "start": [
@@ -6006,7 +6006,7 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
           "replacement": "(send nil :raise)"
@@ -6018,7 +6018,7 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
           "replacement": "(zsuper)"
@@ -6030,7 +6030,7 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
           "replacement": "(array)"
@@ -6042,7 +6042,7 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
           "replacement": null
@@ -6054,7 +6054,7 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
           "replacement": "(nil)"
@@ -6066,10 +6066,10 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
-          "replacement": "(array (complex (0+1i)) (complex (0-2i)))"
+          "replacement": "(array (complex (0+1i)) (complex (0-2i)) (rational (-3/2)) (int -3))"
         },
         {
           "start": [
@@ -6114,10 +6114,10 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
-          "replacement": "(array (complex (0+0i)) (complex (0-2i)))"
+          "replacement": "(array (complex (0+0i)) (complex (0-2i)) (rational (-3/2)) (int -3))"
         },
         {
           "start": [
@@ -6162,10 +6162,10 @@
           ],
           "end": [
             74,
-            18
+            29
           ],
           "node": "array",
-          "replacement": "(array (complex (0+0i)) (complex (0+1i)))"
+          "replacement": "(array (complex (0+0i)) (complex (0+1i)) (rational (-3/2)) (int -3))"
         },
         {
           "start": [
@@ -6226,6 +6226,162 @@
           ],
           "node": "complex",
           "replacement": "(complex (0-3i))"
+        },
+        {
+          "start": [
+            74,
+            5
+          ],
+          "end": [
+            74,
+            29
+          ],
+          "node": "array",
+          "replacement": "(array (complex (0+0i)) (complex (0+1i)) (complex (0-2i)) (int -3))"
+        },
+        {
+          "start": [
+            74,
+            19
+          ],
+          "end": [
+            74,
+            24
+          ],
+          "node": "rational",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            74,
+            19
+          ],
+          "end": [
+            74,
+            24
+          ],
+          "node": "rational",
+          "replacement": "(rational (0/1))"
+        },
+        {
+          "start": [
+            74,
+            19
+          ],
+          "end": [
+            74,
+            24
+          ],
+          "node": "rational",
+          "replacement": "(rational (1/1))"
+        },
+        {
+          "start": [
+            74,
+            19
+          ],
+          "end": [
+            74,
+            24
+          ],
+          "node": "rational",
+          "replacement": "(rational (-1/2))"
+        },
+        {
+          "start": [
+            74,
+            19
+          ],
+          "end": [
+            74,
+            24
+          ],
+          "node": "rational",
+          "replacement": "(rational (-5/2))"
+        },
+        {
+          "start": [
+            74,
+            5
+          ],
+          "end": [
+            74,
+            29
+          ],
+          "node": "array",
+          "replacement": "(array (complex (0+0i)) (complex (0+1i)) (complex (0-2i)) (rational (-3/2)))"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(int -2)"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(int -4)"
+        },
+        {
+          "start": [
+            74,
+            26
+          ],
+          "end": [
+            74,
+            28
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
         }
       ]
     }
