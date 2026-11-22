@@ -71,9 +71,19 @@ if [ -n "${SHARD:-}" ] || [ -n "$sources" ]; then
     # mutates only the module's classes.
     mapfile -t all < <(cd "$source" && find "${module:-.}" -path '*/src/main/*' \( -name '*.java' -o -name '*.kt' \) | sed 's|^\./||' | sort)
   fi
-  for i in "${!all[@]}"; do
-    if [ $((i % n)) -eq $((k - 1)) ]; then shard_files+=("${all[$i]}"); fi
-  done
+  # Shares of about equal size: the largest file first, each to the share
+  # with the least so far (a file's mutants go with its size).
+  mapfile -t shard_files < <(cd "$source" && python3 - "$k" "$n" "${all[@]}" <<'PY'
+import os, sys
+k, n, files = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
+shares = [[0, []] for _ in range(n)]
+for f in sorted(files, key=lambda f: (-os.path.getsize(f), f)):
+    share = min(shares, key=lambda s: s[0])
+    share[0] += os.path.getsize(f)
+    share[1].append(f)
+print("\n".join(sorted(shares[k - 1][1])))
+PY
+)
   targets="$(for f in "${shard_files[@]}"; do
     rel="${f#*/src/main/java/}"; rel="${rel#*/src/main/kotlin/}"; rel="${rel#src/main/java/}"; rel="${rel#src/main/kotlin/}"; rel="${rel#src/main/}"
     class="$(echo "${rel%.*}" | tr / .)"
