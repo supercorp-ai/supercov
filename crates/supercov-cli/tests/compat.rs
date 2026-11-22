@@ -149,12 +149,39 @@ static RECORDINGS: LazyLock<Vec<Recording>> = LazyLock::new(|| {
     recordings
 });
 
-/// Runs `check` on every recording at once, and reports every one that
-/// failed rather than the first.
+/// The releases on either side of each change in what runs hold, and the
+/// oldest and newest. Reading a run is the same on every platform; Linux
+/// reads every recording, and Windows and macOS, where starting a process
+/// costs ten times as much, read these.
+const ACROSS_PLATFORMS: [&str; 8] = [
+    "1.0.1", "1.2.0", "2.0.1", "3.0.5", "4.13.0", "4.14.0", "4.23.0", "4.24.8",
+];
+
+fn checked_here(recording: &Recording) -> bool {
+    cfg!(target_os = "linux")
+        || ACROSS_PLATFORMS.contains(&recording.release.as_str())
+        || newest_of(&recording.fixture).release == recording.release
+}
+
+fn newest_of(fixture: &str) -> &'static Recording {
+    RECORDINGS
+        .iter()
+        .rev()
+        .find(|recording| recording.fixture == fixture)
+        .unwrap()
+}
+
+/// Runs `check` on every recording checked here at once, and reports every
+/// one that failed rather than the first.
 fn each_recording(check: impl Fn(&Recording) + Sync) {
+    let checked = RECORDINGS
+        .iter()
+        .filter(|recording| checked_here(recording))
+        .collect::<Vec<_>>();
     let failures = std::thread::scope(|scope| {
-        let handles = RECORDINGS
+        let handles = checked
             .iter()
+            .copied()
             .map(|recording| (recording, scope.spawn(|| check(recording))))
             .collect::<Vec<_>>();
         handles
@@ -175,7 +202,7 @@ fn each_recording(check: impl Fn(&Recording) + Sync) {
         failures.is_empty(),
         "{} of {} recordings failed:\n{}",
         failures.len(),
-        RECORDINGS.len(),
+        checked.len(),
         failures.join("\n\n")
     );
 }
@@ -267,10 +294,10 @@ fn the_corpus_holds_runs_of_every_minor_release() {
     );
 }
 
-#[test]
-fn every_recorded_run_reads_with_the_numbers_its_release_gave() {
-    each_recording(|recording| {
-        let installed = recording.install();
+/// Every run is listed, and reads with the lines, branches and MC/DC its
+/// release gave it.
+fn reads_with_the_numbers_its_release_gave(recording: &Recording, installed: &Installed) {
+    {
         let listed = installed.answers("runs", &["runs", "--json"]);
         let listed: Value = serde_json::from_str(&listed).unwrap();
         assert_eq!(
@@ -285,7 +312,7 @@ fn every_recorded_run_reads_with_the_numbers_its_release_gave() {
             let mut read =
                 summary_counts(&summary).unwrap_or_else(|| panic!("{run}: no counts\n{summary}"));
             if changes::branches_counted_once(recording) {
-                // Read once each; every_release_s_run_answers_as_the_newest
+                // Read once each; answers_as_the_newest_release_s_run
                 // checks the count.
                 assert!(read[1].1 < expected[1].1, "{run}: {read:?} {expected:?}");
                 read[1] = expected[1];
@@ -295,16 +322,15 @@ fn every_recorded_run_reads_with_the_numbers_its_release_gave() {
                 "{run}: lines, branches and MC/DC as the release gave them\n{summary}"
             );
         }
-    });
+    }
 }
 
-#[test]
-fn every_query_answers_on_every_recorded_run() {
-    each_recording(|recording| {
+/// Every query and report format answers on the run.
+fn every_query_answers(recording: &Recording, installed: &Installed) {
+    {
         let spec = recording.spec();
         let file = spec["file"].as_str().unwrap();
         let test = spec["test"].as_str().unwrap();
-        let installed = recording.install();
         let id = installed.id("full").to_owned();
         let line = format!("{file}:3");
         let output = installed.project.root.join("exported");
@@ -390,16 +416,15 @@ fn every_query_answers_on_every_recorded_run() {
         );
         let shard = installed.id("shard-1").to_owned();
         installed.answers("diff", &["diff", &shard, &id]);
-    });
+    }
 }
 
 /// What a run answers, the run's own ids taken out: what the fixture's
 /// newest recording must answer too.
-fn comparable_answers(recording: &Recording) -> BTreeMap<String, String> {
+fn comparable_answers(recording: &Recording, installed: &Installed) -> BTreeMap<String, String> {
     let spec = recording.spec();
     let file = spec["file"].as_str().unwrap();
     let test = spec["test"].as_str().unwrap();
-    let installed = recording.install();
     let id = installed.id("full").to_owned();
     let mut answers = BTreeMap::new();
     for query in [
@@ -449,36 +474,24 @@ fn comparable_answers(recording: &Recording) -> BTreeMap<String, String> {
     answers
 }
 
-#[test]
-fn every_release_s_run_answers_as_the_newest_release_s_run_does() {
-    let newest = RECORDINGS
-        .iter()
-        .fold(
-            BTreeMap::<&str, &Recording>::new(),
-            |mut newest, recording| {
-                newest.insert(&recording.fixture, recording);
-                newest
-            },
-        )
-        .into_iter()
-        .map(|(fixture, recording)| (fixture.to_owned(), comparable_answers(recording)))
-        .collect::<BTreeMap<_, _>>();
-    each_recording(|recording| {
-        let expected = &newest[&recording.fixture];
-        let answers = comparable_answers(recording);
-        for (query, answer) in &answers {
-            assert_eq!(
-                answer, &expected[query],
-                "{query}: answered otherwise than for the newest release's run"
-            );
-        }
-    });
+/// The run answers as the newest release's run of the same fixture does.
+fn answers_as_the_newest_release_s_run(
+    recording: &Recording,
+    installed: &Installed,
+    expected: &BTreeMap<String, String>,
+) {
+    let answers = comparable_answers(recording, installed);
+    for (query, answer) in &answers {
+        assert_eq!(
+            answer, &expected[query],
+            "{query}: answered otherwise than for the newest release's run"
+        );
+    }
 }
 
-#[test]
-fn shards_any_release_recorded_merge_into_its_whole_suite() {
-    each_recording(|recording| {
-        let installed = recording.install();
+/// The two shards merge into a run that covers what the whole suite does.
+fn shards_merge_into_the_whole_suite(installed: &Installed) {
+    {
         let merged = installed.answers(
             "merge",
             &["merge", installed.id("shard-1"), installed.id("shard-2")],
@@ -502,13 +515,12 @@ fn shards_any_release_recorded_merge_into_its_whole_suite() {
             diff.contains("gained: 0 lines, 0 branches, 0 MC/DC conditions"),
             "{diff}"
         );
-    });
+    }
 }
 
-#[test]
-fn runs_clean_removes_every_recorded_run() {
-    each_recording(|recording| {
-        let installed = recording.install();
+/// `runs clean` removes the recorded runs.
+fn runs_clean_removes_them(installed: &Installed) {
+    {
         installed.answers("clean", &["runs", "clean"]);
         let listed: Value =
             serde_json::from_str(&installed.answers("runs", &["runs", "--json"])).unwrap();
@@ -517,24 +529,20 @@ fn runs_clean_removes_every_recorded_run() {
             Some(0),
             "{listed:#}"
         );
-    });
+    }
 }
 
-#[test]
-fn a_run_of_any_release_diffs_with_the_newest_and_merges_only_with_its_own_release() {
-    let newest = RECORDINGS.iter().fold(
-        BTreeMap::<&str, &Recording>::new(),
-        |mut newest, recording| {
-            newest.insert(&recording.fixture, recording);
-            newest
-        },
-    );
-    each_recording(|recording| {
-        let newest = newest[recording.fixture.as_str()];
+/// A run diffs against the newest release's run of the same fixture with
+/// nothing changed, and is refused, with its reason, in a merge with it.
+fn diffs_with_the_newest_and_merges_only_with_its_own_release(
+    recording: &Recording,
+    installed: &Installed,
+    newest: &Recording,
+) {
+    {
         if newest.release == recording.release {
             return;
         }
-        let installed = recording.install();
         let stored = newest.directory.join("runs/full");
         let metadata: Value =
             serde_json::from_str(&fs::read_to_string(stored.join("run.json")).unwrap()).unwrap();
@@ -562,5 +570,40 @@ fn a_run_of_any_release_diffs_with_the_newest_and_merges_only_with_its_own_relea
             refused.contains("instruments differently") && refused.contains("Measure it again"),
             "{refused}"
         );
+    }
+}
+
+/// Each recording is installed once and every check reads that one copy, in
+/// an order where each leaves the store as the next expects: reads, then the
+/// newest release's run beside it, then merges, then `runs clean`.
+#[test]
+fn every_run_any_release_recorded_still_reads() {
+    let newest_answers = RECORDINGS
+        .iter()
+        .map(|recording| recording.fixture.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|fixture| {
+            let newest = newest_of(fixture);
+            let installed = newest.install();
+            (fixture, comparable_answers(newest, &installed))
+        })
+        .collect::<BTreeMap<_, _>>();
+    each_recording(|recording| {
+        let installed = recording.install();
+        reads_with_the_numbers_its_release_gave(recording, &installed);
+        every_query_answers(recording, &installed);
+        answers_as_the_newest_release_s_run(
+            recording,
+            &installed,
+            &newest_answers[recording.fixture.as_str()],
+        );
+        diffs_with_the_newest_and_merges_only_with_its_own_release(
+            recording,
+            &installed,
+            newest_of(&recording.fixture),
+        );
+        shards_merge_into_the_whole_suite(&installed);
+        runs_clean_removes_them(&installed);
     });
 }

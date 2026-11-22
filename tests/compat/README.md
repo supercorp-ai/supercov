@@ -22,8 +22,8 @@ keep reading all of them.
 
 ## What the suite checks
 
-`crates/supercov-cli/tests/compat.rs` installs each recording into a fresh
-checkout of its fixture and checks five things:
+`crates/supercov-cli/tests/compat.rs` installs each recording once into a fresh
+checkout of its fixture and checks five things against it:
 
 - **Numbers:** every run is listed, and its lines, branches and MC/DC read
   exactly as the recording release reported them.
@@ -39,7 +39,10 @@ checkout of its fixture and checks five things:
   covers, and diffs against it with nothing gained.
 - **Clean:** `runs clean` removes every recorded run.
 
-A further test fails when a minor release is missing from the corpus.
+Linux checks every recording. Windows and macOS, where starting a process
+costs far more, check the releases on either side of each change in what runs
+hold, plus the oldest and the newest. A further test fails when a minor release
+is missing from the corpus.
 
 ## Recording a release
 
