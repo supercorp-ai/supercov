@@ -311,6 +311,29 @@ pub fn run_strong_rust(
     let invocation = crate::rust_test_runner::cargo_invocation(&root, &request.command)
         .map_err(|error| error.to_string())?;
     let build_invocation = build_invocation(&invocation);
+    // A wasm module has no environment to read the active mutant from: its
+    // tests would pass with every mutant, and read as survivors.
+    let wasm =
+        crate::rust_cargo_configuration::resolve_cargo_runner_plan(&root, &root, &invocation)
+            .is_ok_and(|plan| {
+                plan.targets
+                    .iter()
+                    .any(|target| target.target.starts_with("wasm"))
+            });
+    if wasm {
+        for job in &jobs {
+            results.verdict(
+                &job.id,
+                "error",
+                None,
+                0,
+                started,
+                Some("a strong pass cannot switch mutants in wasm tests yet".into()),
+            );
+        }
+        results.write(&json!({"summary": true, "mutants": jobs.len(), "wasm": true}));
+        return Ok(0);
+    }
 
     // Which mutants a run-time switch can hold.
     let mut switchable = Vec::new();
