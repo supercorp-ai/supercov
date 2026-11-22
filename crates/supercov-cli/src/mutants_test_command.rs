@@ -279,6 +279,7 @@ pub fn command(args: &[String]) -> ExitCode {
         let mut data = execute(&root, run, plan, saved, &options)?;
         let verdicts = read_saved(run);
         data["gate"] = gate(&root, &asked, &verdicts, &options)?;
+        data["survivors"] = survivors(run, &asked, &verdicts);
         Ok(data)
     })();
     match result {
@@ -287,6 +288,10 @@ pub fn command(args: &[String]) -> ExitCode {
                 println!("{}", serde_json::to_string(&data).expect("JSON"));
             } else {
                 print!("{}", plan_text(&data));
+                print!(
+                    "{}",
+                    survivors_text(data["run"].as_str().unwrap_or("latest"), &data["survivors"])
+                );
                 print!("{}", gate_text(&data["gate"]));
             }
             if data["gate"]["failed"].as_bool() == Some(true) {
@@ -594,6 +599,101 @@ pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, 
 
 /// The mutation score StrykerJS reports: killed and timed out over all
 /// that are not equivalent or errors.
+/// How many surviving mutants the pass summary names.
+const SURVIVORS_SHOWN: usize = 10;
+
+/// The asked mutants the tests let survive, as the weak listing shows them
+/// (`file:line`, the change), the first `SURVIVORS_SHOWN`, and how many in
+/// all. Empty where the run's index cannot be read.
+fn survivors(
+    run: &StoredRun,
+    asked: &[(String, String)],
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+) -> Value {
+    let survived = asked
+        .iter()
+        .filter(|(id, _)| {
+            verdicts
+                .get(id)
+                .is_some_and(|verdict| verdict.status == "survived")
+        })
+        .map(|(id, _)| id.as_str())
+        .collect::<BTreeSet<_>>();
+    let shown = (|| {
+        let container = crate::open_query_index_for(run, None).ok()?;
+        let index = supercov_engine::coverage_index::CoverageIndex::new(&container).ok()?;
+        let options = supercov_engine::mutants_query::MutantsOptions {
+            strong_statuses: vec!["survived".into()],
+            strong: Some(
+                verdicts
+                    .iter()
+                    .map(|(id, verdict)| {
+                        (
+                            id.clone(),
+                            serde_json::to_value(verdict).expect("plain data"),
+                        )
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let (data, _) = supercov_engine::mutants_query::coverage_mutants_query(
+            &index,
+            supercov_engine::mutants_query::CoverageMutantsQueryOptions {
+                run: &run.id,
+                file: None,
+                line: None,
+                options: &options,
+                offset: 0,
+                limit: usize::MAX,
+            },
+        )
+        .ok()?;
+        Some(
+            data.mutants
+                .iter()
+                .filter(|mutant| survived.contains(mutant.id.as_str()))
+                .take(SURVIVORS_SHOWN)
+                .map(|mutant| {
+                    json!({
+                        "id": mutant.id,
+                        "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
+                        "mutator": mutant.mutator,
+                        "change": crate::human_query::mutant_change(mutant),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    })()
+    .unwrap_or_default();
+    json!({"total": survived.len(), "shown": shown})
+}
+
+/// The pass summary's last lines: the survivors, capped.
+fn survivors_text(run: &str, survivors: &Value) -> String {
+    let shown = survivors["shown"].as_array().cloned().unwrap_or_default();
+    if shown.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("Survived:\n");
+    for mutant in &shown {
+        text.push_str(&format!(
+            "  {}  {}  {}\n",
+            mutant["place"].as_str().unwrap_or(""),
+            mutant["mutator"].as_str().unwrap_or(""),
+            mutant["change"].as_str().unwrap_or("")
+        ));
+    }
+    let total = survivors["total"].as_u64().unwrap_or(0) as usize;
+    if total > shown.len() {
+        text.push_str(&format!(
+            "  and {} more: supercov runs {run} mutants --status survived\n",
+            total - shown.len()
+        ));
+    }
+    text
+}
+
 /// The mutants a pass could not run because no driver runs their tests, by
 /// the runners they ran under: an `error` none of whose candidates' runners
 /// its driver runs.

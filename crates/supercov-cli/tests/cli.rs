@@ -22047,6 +22047,66 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
     }
 }
 
+/// What a strong pass let survive is named in every view, not only counted:
+/// the pass's summary ends with the survivors, the text listing shows each
+/// mutant's strong verdict beside its weak status and `--status survived`
+/// picks the survivors, and the markdown for a pull request lists them under
+/// the mutation score.
+#[cfg(unix)]
+#[test]
+fn surviving_mutants_are_named_in_every_view() {
+    let project = job_runner_project(
+        "strong-survivors-named",
+        "module",
+        &[(
+            "test/cart.test.js",
+            "import assert from \"node:assert/strict\";\nimport { it } from \"node:test\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => assert.equal(shipping(80), 0));\nit(\"charges small orders\", () => assert.equal(shipping(10), 5));\nit(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n",
+        )],
+    );
+    project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let pass = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .succeeds();
+    // `sum >= 50` to `sum > 50` changes neither 80 nor 10.
+    let survivors = pass.split("Survived:\n").nth(1).unwrap_or_default();
+    assert!(
+        survivors.contains("src/cart.js:2  EqualityOperator  sum >= 50 → sum > 50"),
+        "{pass}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    assert!(listed.contains("  Strong       score "), "{listed}");
+    let line = listed
+        .lines()
+        .find(|line| line.contains("sum >= 50 → sum > 50"))
+        .unwrap_or_default();
+    assert!(line.contains("survived"), "{listed}");
+    let killed = listed
+        .lines()
+        .find(|line| line.contains("trim() → name"))
+        .unwrap_or_default();
+    assert!(killed.contains("killed"), "{listed}");
+    let only = project
+        .supercov(&["runs", "latest", "mutants", "--status", "survived"])
+        .succeeds();
+    assert!(only.contains("sum >= 50 → sum > 50"), "{only}");
+    assert!(!only.contains("trim() → name"), "{only}");
+    let markdown = project
+        .supercov(&["runs", "latest", "mutants", "--format", "markdown"])
+        .succeeds();
+    assert!(markdown.contains("mutation score **"), "{markdown}");
+    assert!(
+        markdown
+            .lines()
+            .any(|line| line.contains("sum >= 50 → sum > 50") && line.contains("survived (weak: ")),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("trim() → name"), "{markdown}");
+}
+
 /// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
 /// run's command for one test file with the mutant on and only its tests. A
 /// node:test file that asserts at its top level, with no test() in it, is a
