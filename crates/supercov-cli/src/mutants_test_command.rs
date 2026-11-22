@@ -14,8 +14,8 @@ use std::{
 use serde_json::{Value, json};
 use supercov_engine::{
     coverage_report::{ArchiveReportRequest, ExitCodeInput},
-    js_strong::{StrongPlan, StrongVerdicts, Verdict, plan_for_archive},
     run_store::{StoredRun, discover_runs, select_run},
+    strong_plan::{StrongPlan, StrongVerdicts, Verdict, plan_for_archive},
 };
 
 pub(crate) const HELP: &str = "\
@@ -183,7 +183,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         .is_none_or(|run| crate::checkout_comparison(&root, run).stale);
     let valued = !stale
         && latest.as_ref().is_some_and(|run| {
-            supercov_engine::js_strong::run_recorded_mutant_values(&run.evidence_path)
+            supercov_engine::strong_plan::run_recorded_mutant_values(&run.evidence_path)
         });
     if !valued {
         let Some(command) = given
@@ -311,7 +311,7 @@ pub fn command(args: &[String]) -> ExitCode {
 /// strong driver drives. Without one every mutant would end without a
 /// verdict, and the pass would read as a score of nothing killed.
 fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), String> {
-    use supercov_engine::js_strong::STRONG_RUNNERS;
+    use supercov_engine::strong_plan::STRONG_RUNNERS;
     let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
     let drivable = plan
         .tests
@@ -358,9 +358,12 @@ fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
             planned.changed.join(", ")
         );
     }
-    planned
-        .plan
-        .ok_or_else(|| format!("run {} measured no JavaScript or TypeScript source", run.id))
+    planned.plan.ok_or_else(|| {
+        format!(
+            "run {} listed no mutants and measured no source to list them from",
+            run.id
+        )
+    })
 }
 
 /// Keeps the mutants `--file` and `--diff` ask about.
@@ -416,9 +419,9 @@ fn plan_json(run: &StoredRun, plan: &StrongPlan) -> Value {
                 runs += mutant.candidates.len() as u64;
                 "run"
             }
-            Some(supercov_engine::js_strong::Decided::Survived) => "survived",
-            Some(supercov_engine::js_strong::Decided::NoCoverage) => "noCoverage",
-            Some(supercov_engine::js_strong::Decided::Equivalent) => "equivalent",
+            Some(supercov_engine::strong_plan::Decided::Survived) => "survived",
+            Some(supercov_engine::strong_plan::Decided::NoCoverage) => "noCoverage",
+            Some(supercov_engine::strong_plan::Decided::Equivalent) => "equivalent",
         };
         counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
     }
@@ -597,7 +600,7 @@ fn gate_text(gate: &Value) -> String {
 /// Where a run's strong verdicts are saved.
 pub(crate) fn results_path(run: &StoredRun) -> PathBuf {
     run.directory
-        .join(supercov_engine::js_strong::STRONG_VERDICTS_FILE)
+        .join(supercov_engine::strong_plan::STRONG_VERDICTS_FILE)
 }
 
 /// The run's saved verdicts, by mutant id; empty when none were saved.
@@ -700,7 +703,7 @@ fn save(
     saved: &std::collections::BTreeMap<String, Verdict>,
 ) -> Result<(), String> {
     let document = StrongVerdicts {
-        schema_version: supercov_engine::js_strong::STRONG_VERDICTS_SCHEMA_VERSION,
+        schema_version: supercov_engine::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: run.id.clone(),
         mutant_set: mutant_set.to_owned(),
         mutants: saved.clone(),
@@ -721,7 +724,7 @@ fn execute(
     mut saved: std::collections::BTreeMap<String, Verdict>,
     options: &Options,
 ) -> Result<Value, String> {
-    use supercov_engine::js_strong::Decided;
+    use supercov_engine::strong_plan::Decided;
     let started = std::time::Instant::now();
     // Decided without running.
     for mutant in &plan.mutants {
@@ -761,6 +764,33 @@ fn execute(
             .filter(|m| m.decided.is_none())
             .cloned()
             .collect::<Vec<_>>();
+        // A language no driver runs yet: its mutants are errors, said once.
+        let mut undriven = BTreeSet::new();
+        remaining.retain(|mutant| {
+            if supercov_engine::strong_driver::has_driver(&mutant.language) {
+                return true;
+            }
+            undriven.insert(mutant.language.clone());
+            saved.insert(
+                mutant.id.clone(),
+                Verdict {
+                    status: "error".into(),
+                    killed_by: None,
+                    tests: 0,
+                    duration_ms: 0,
+                    reason: Some(format!(
+                        "no strong mutation driver for {} yet",
+                        mutant.language
+                    )),
+                },
+            );
+            false
+        });
+        for language in undriven {
+            eprintln!(
+                "[supercov] no strong mutation driver for {language} yet: its mutants are errors"
+            );
+        }
         // A pass that stops before its end (a test worker that would not
         // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
@@ -769,64 +799,75 @@ fn execute(
             if remaining.is_empty() {
                 break;
             }
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let work = root
-                .join(".supercov/strong")
-                .join(format!("{}-{nonce}", run.id));
-            std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
-            let plan_path = work.join("plan.json");
-            let results = work.join("results.jsonl");
-            let pass_plan = StrongPlan {
-                mutant_set: plan.mutant_set.clone(),
-                tests: plan.tests.clone(),
-                mutants: remaining.clone(),
-            };
-            supercov_engine::fault_fs::write(
-                &plan_path,
-                serde_json::to_vec(&pass_plan).expect("plain data serializes"),
-            )
-            .map_err(|e| format!("{}: {e}", plan_path.display()))?;
-            let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
-                root: root.to_owned(),
-                command: command.clone(),
-                run_id: Some(format!("strong-{nonce}")),
-                started_at: None,
-                watchdog_program: std::env::current_exe()
-                    .ok()
-                    .and_then(|path| std::fs::canonicalize(path).ok()),
-                strong: Some(supercov_engine::javascript_run::StrongRun {
-                    plan: plan_path,
-                    results: results.clone(),
-                }),
-            };
-            let mut diagnostics = std::io::stderr();
-            let progress = Progress::start(results.clone(), remaining.len());
-            exit =
-                supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
-                    .map_err(|error| error.to_string())?;
-            drop(progress);
-            command_exit = Some(exit);
             let before = remaining.len();
-            let text = std::fs::read_to_string(&results).unwrap_or_default();
-            for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                let Ok(record) = serde_json::from_str::<Value>(line) else {
-                    continue;
+            // Each language's mutants go to its own driver, one after another.
+            let languages = remaining
+                .iter()
+                .map(|mutant| mutant.language.clone())
+                .collect::<BTreeSet<_>>();
+            for language in languages {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
+                std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+                let plan_path = work.join("plan.json");
+                let results = work.join("results.jsonl");
+                let mutants = remaining
+                    .iter()
+                    .filter(|mutant| mutant.language == language)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let pass_plan = StrongPlan {
+                    mutant_set: plan.mutant_set.clone(),
+                    tests: plan.tests.clone(),
+                    mutants,
                 };
-                if record["summary"] == true {
-                    passes.push(record);
-                    continue;
-                }
-                let Some(id) = record["id"].as_str() else {
-                    continue;
+                supercov_engine::fault_fs::write(
+                    &plan_path,
+                    serde_json::to_vec(&pass_plan).expect("plain data serializes"),
+                )
+                .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+                let pass = supercov_engine::strong_driver::StrongPass {
+                    root: root.to_owned(),
+                    command: command.clone(),
+                    run_id: format!("strong-{nonce}"),
+                    watchdog_program: std::env::current_exe()
+                        .ok()
+                        .and_then(|path| std::fs::canonicalize(path).ok()),
+                    strong: supercov_engine::strong_driver::StrongRun {
+                        plan: plan_path,
+                        results: results.clone(),
+                    },
                 };
-                if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
-                    saved.insert(id.to_owned(), verdict);
+                let mut diagnostics = std::io::stderr();
+                let progress = Progress::start(results.clone(), pass_plan.mutants.len());
+                exit = supercov_engine::strong_driver::run_strong_pass(
+                    &language,
+                    &pass,
+                    &mut diagnostics,
+                )?;
+                drop(progress);
+                command_exit = Some(exit);
+                let text = std::fs::read_to_string(&results).unwrap_or_default();
+                for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                    let Ok(record) = serde_json::from_str::<Value>(line) else {
+                        continue;
+                    };
+                    if record["summary"] == true {
+                        passes.push(record);
+                        continue;
+                    }
+                    let Some(id) = record["id"].as_str() else {
+                        continue;
+                    };
+                    if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
+                        saved.insert(id.to_owned(), verdict);
+                    }
                 }
+                remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+                save(run, &plan.mutant_set, &saved)?;
             }
-            remaining.retain(|mutant| !saved.contains_key(&mutant.id));
-            save(run, &plan.mutant_set, &saved)?;
             if remaining.len() == before {
                 break;
             }

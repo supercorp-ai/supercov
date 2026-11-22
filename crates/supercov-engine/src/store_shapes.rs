@@ -145,10 +145,10 @@ fn stored() -> Vec<Stored> {
         Stored {
             file: "evidence.raw.gz: mutants.json; mutants-listed.json beside it",
             version: Some((
-                "js_mutant_links::MUTANTS_SCHEMA_VERSION",
-                crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
+                "mutant_list::MUTANTS_SCHEMA_VERSION",
+                crate::mutant_list::MUTANTS_SCHEMA_VERSION,
             )),
-            shape: shape::<crate::js_mutant_links::MutantsFile>,
+            shape: shape::<crate::mutant_list::MutantsFile>,
             read_only: false,
         },
         Stored {
@@ -178,10 +178,10 @@ fn stored() -> Vec<Stored> {
         Stored {
             file: "strong-mutation.json",
             version: Some((
-                "js_strong::STRONG_VERDICTS_SCHEMA_VERSION",
-                crate::js_strong::STRONG_VERDICTS_SCHEMA_VERSION,
+                "strong_plan::STRONG_VERDICTS_SCHEMA_VERSION",
+                crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
             )),
-            shape: shape::<crate::js_strong::StrongVerdicts>,
+            shape: shape::<crate::strong_plan::StrongVerdicts>,
             read_only: false,
         },
         Stored {

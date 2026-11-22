@@ -247,6 +247,10 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             probed_operation(mutant, records)
         }
         "ArrowFunction" => arrow_function(mutant, records),
+        // Another language's mutator whose probe evaluated the original and
+        // the replacement side by side: `differs` or `same` at each
+        // evaluation (`docs/design/mutation-drivers.md`).
+        _ if mutant.probe.is_some() => probed_operation(mutant, records),
         other => verdict_of(
             Status::Unknown,
             "no-rule",
@@ -1676,6 +1680,31 @@ mod tests {
             UNKNOWN,
             "no-rule",
         );
+        // Another language's mutator with no rule of its own is decided by
+        // its probe, where it has one: the values it saw side by side.
+        let probed = CandidateMutant {
+            probe: Some("src/a.py:1:5-1:10#value".into()),
+            ..mutant("AugmentedAssignment", "-=", "x += 1")
+        };
+        let saw = |outcomes: &[&str]| {
+            let mut seen = ran();
+            seen.comparisons.insert(
+                "src/a.py:1:5-1:10#value".into(),
+                outcomes
+                    .iter()
+                    .map(|outcome| (*outcome).to_owned())
+                    .collect(),
+            );
+            seen
+        };
+        expect(
+            &probed,
+            &saw(&["same", "differs"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        expect(&probed, &saw(&["same"]), NOT_INFECTED, "replacement-same");
+        expect(&probed, &ran(), NOT_REACHED, "not-evaluated");
     }
 
     #[test]
@@ -2610,6 +2639,8 @@ mod tests {
         let listed = |files: Vec<(&str, Vec<CandidateMutant>)>| MutantsFile {
             schema_version: 1,
             mutant_set: Some("stryker-js@10.1.1".into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: files
                 .into_iter()
                 .map(|(file, mutants)| (file.to_owned(), mutants))
@@ -2636,6 +2667,8 @@ mod tests {
         // A list that names no mutant set lists none.
         let unnamed = MutantsFile {
             mutant_set: None,
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             ..listed(vec![])
         };
         assert!(super::results(&[], Some(unnamed)).is_none());

@@ -21826,6 +21826,42 @@ fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it(
     assert_eq!(reply["summary"]["mutants"], 15);
 }
 
+/// A run whose mutants are of a language no strong driver runs yet: the
+/// plan still decides them, and each it would run is an error that says so.
+#[cfg(unix)]
+#[test]
+fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
+    let project = mutants_project("strong-undriven");
+    project.supercov(&["--", "npx", "mocha"]).succeeds();
+    let run = project.latest();
+    // Listed beside the run, as `supercov mutants` lists a plain run's.
+    project.write(
+        &format!(".supercov/runs/{run}/mutants-listed.json"),
+        r#"{"schemaVersion": 1, "mutantSet": "cobol-mutants@1",
+            "mutantSets": {"cobol": "cobol-mutants@1"},
+            "languages": {"src/cart.js": "cobol"},
+            "files": {"src/cart.js": [{"mutator": "BooleanLiteral", "replacement": "false",
+                "start": [2, 7], "end": [2, 16], "original": "sum >= 50"}]}}"#,
+    );
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 1, "{reply}\n{said}");
+    assert!(
+        said.contains("no strong mutation driver for cobol yet: its mutants are errors"),
+        "{said}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let strong = &listed["data"]["mutants"][0]["strong"];
+    assert_eq!(strong["status"], "error", "{listed}");
+    assert_eq!(
+        strong["reason"], "no strong mutation driver for cobol yet",
+        "{listed}"
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -23201,12 +23237,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:786",
+            "fs.write#mutants_test_command.rs:826",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:786"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
         "{}",
         unwritten.stderr()
     );
@@ -23480,7 +23516,7 @@ fn a_run_whose_source_holds_no_code_has_no_mutants_to_test() {
         .exits(1);
     assert!(
         none.contains(&format!(
-            "run {run} measured no JavaScript or TypeScript source"
+            "run {run} listed no mutants and measured no source to list them from"
         )),
         "{none}"
     );

@@ -51,7 +51,7 @@ file evidence.raw.gz: support-reach.json
   written and read: SupportReach
 
 file evidence.raw.gz: mutants.json; mutants-listed.json beside it
-  version: js_mutant_links::MUTANTS_SCHEMA_VERSION = 1
+  version: mutant_list::MUTANTS_SCHEMA_VERSION = 1
   written and read: MutantsFile
 
 file source-manifest.cache.json
@@ -71,7 +71,7 @@ file assessment-input.json.gz
   written and read: AssessmentInput
 
 file strong-mutation.json
-  version: js_strong::STRONG_VERDICTS_SCHEMA_VERSION = 1
+  version: strong_plan::STRONG_VERDICTS_SCHEMA_VERSION = 1
   written and read: StrongVerdicts
 
 file query-index.v1.bin: the identity in its header
@@ -450,6 +450,8 @@ type MutantOperator, written and read = closed {
 type MutantsFile, written = closed {
   schemaVersion: uint
   mutantSet: string | null
+  mutantSets?: {string: string}
+  languages?: {string: string}
   files: {string: [CandidateMutant]}
   testsWithoutValues?: [string]
 }
@@ -457,6 +459,8 @@ type MutantsFile, written = closed {
 type MutantsFile, read = closed {
   schemaVersion: uint
   mutantSet?: string | null
+  mutantSets?: {string: string}
+  languages?: {string: string}
   files: {string: [CandidateMutant]}
   testsWithoutValues?: [string]
 }

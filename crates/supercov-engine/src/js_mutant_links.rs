@@ -27,61 +27,17 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
-use serde::{Deserialize, Serialize};
 
 use crate::js_instrumenter::{
     CandidateBranch, CandidateDecision, CandidatePoint, expression_has_effects,
     infection_probe_site,
 };
 use crate::js_mutants::LedgerMutant;
-
-/// The version of `mutants.json`. It leaves out what a reader works out
-/// again: a mutant's `id`, from its file, span, mutator and descriptor, and
-/// of a long `original` all but what is shown of it (see
-/// `js_weak_mutation::abbreviated`).
-pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 1;
-
-/// `.supercov/frontend-evidence/mutants.json`: every instrumented file's
-/// mutants, or none when the run did not enumerate them (`mutantSet` null).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(from = "StoredMutants", into = "StoredMutants")]
-pub struct MutantsFile {
-    pub schema_version: u32,
-    pub mutant_set: Option<String>,
-    pub files: BTreeMap<String, Vec<CandidateMutant>>,
-    /// Of a merged run: the tests of the runs merged into it that listed no
-    /// mutants. Their hits say what ran; they recorded no values.
-    pub tests_without_values: Vec<String>,
-}
-
-/// `mutants.json` as it is stored: each mutant without what is worked out
-/// again when it is read. An `id` is left out (empty) where it is the one its
-/// file, span, mutator and descriptor make, a probe or comparison site in the
-/// mutant's own file is written from its line (`:L:C`, which no file name
-/// starts), and a long original is cut to what is shown of it where that
-/// shows exactly the same.
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoredMutants {
-    schema_version: u32,
-    mutant_set: Option<String>,
-    files: BTreeMap<String, Vec<CandidateMutant>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    tests_without_values: Vec<String>,
-}
-
-/// A run's mutants listed from its sources after the run, as
-/// `supercov mutants` asks for them: each file the run measured is
-/// instrumented again, with its mutants listed and linked and no probe
-/// placed, and its code thrown away. A file whose points are not the ones
-/// the run recorded changed since the run: it is left out, and named in
-/// `changed`.
-pub(crate) struct ListedMutants {
-    pub(crate) mutants: MutantsFile,
-    pub(crate) changed: Vec<String>,
-}
+use crate::mutant_list::ListedMutants;
+pub use crate::mutant_list::{
+    ArrowLink, BranchLink, BranchRole, CandidateMutant, ChainLink, DecisionLink, MutantOperator,
+    MutantsFile, StaticNote,
+};
 
 /// The mutants of the files in `recorded` (each file's point ids, as the
 /// run's manifest has them), read from under `root`.
@@ -93,15 +49,7 @@ pub(crate) fn list_mutants(
     let files = recorded
         .keys()
         .filter(|file| {
-            std::path::Path::new(file.as_str())
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    matches!(
-                        extension,
-                        "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx"
-                    )
-                })
+            crate::mutant_list::language_of_path(file) == Some(crate::mutant_list::JAVASCRIPT)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -136,237 +84,13 @@ pub(crate) fn list_mutants(
         }
     }
     ListedMutants {
-        mutants: MutantsFile {
-            schema_version: MUTANTS_SCHEMA_VERSION,
-            mutant_set: Some(crate::js_mutants::MUTANT_SET.to_owned()),
-            files: mutants,
-            tests_without_values: Vec::new(),
-        },
+        mutants: MutantsFile::listed(
+            crate::mutant_list::JAVASCRIPT,
+            crate::js_mutants::MUTANT_SET,
+            mutants,
+        ),
         changed,
     }
-}
-
-/// The id a mutant of `file` has from its span, mutator and descriptor.
-fn mutant_id(file: &str, mutant: &CandidateMutant) -> String {
-    format!(
-        "{file}:{}:{}-{}:{}:{}:{}",
-        mutant.start.0,
-        mutant.start.1,
-        mutant.end.0,
-        mutant.end.1,
-        mutant.mutator,
-        mutant.replacement
-    )
-}
-
-impl From<MutantsFile> for StoredMutants {
-    fn from(file: MutantsFile) -> Self {
-        let files = file
-            .files
-            .into_iter()
-            .map(|(path, mutants)| {
-                let stored = mutants
-                    .into_iter()
-                    .map(|mutant| {
-                        let mut stored =
-                            crate::js_weak_mutation::abbreviated(&mutant).unwrap_or(mutant);
-                        if stored.id == mutant_id(&path, &stored) {
-                            stored.id.clear();
-                        }
-                        for site in [&mut stored.compare, &mut stored.probe]
-                            .into_iter()
-                            .flatten()
-                        {
-                            if let Some(local) = site
-                                .strip_prefix(path.as_str())
-                                .filter(|local| local.starts_with(':'))
-                            {
-                                *site = local.to_owned();
-                            }
-                        }
-                        stored
-                    })
-                    .collect();
-                (path, stored)
-            })
-            .collect();
-        Self {
-            schema_version: MUTANTS_SCHEMA_VERSION,
-            mutant_set: file.mutant_set,
-            files,
-            tests_without_values: file.tests_without_values,
-        }
-    }
-}
-
-impl From<StoredMutants> for MutantsFile {
-    fn from(stored: StoredMutants) -> Self {
-        let mut files = stored.files;
-        for (path, mutants) in &mut files {
-            for mutant in mutants.iter_mut() {
-                if mutant.id.is_empty() {
-                    mutant.id = mutant_id(path, mutant);
-                }
-                for site in [&mut mutant.compare, &mut mutant.probe]
-                    .into_iter()
-                    .flatten()
-                {
-                    if site.starts_with(':') {
-                        site.insert_str(0, path);
-                    }
-                }
-            }
-        }
-        Self {
-            schema_version: stored.schema_version,
-            mutant_set: stored.mutant_set,
-            files,
-            tests_without_values: stored.tests_without_values,
-        }
-    }
-}
-
-/// One StrykerJS mutant and the evidence that decides it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CandidateMutant {
-    /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`. Left
-    /// out of `mutants.json` where it is exactly that.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub id: String,
-    pub mutator: String,
-    /// The descriptor (see `js_mutants`).
-    pub replacement: String,
-    /// 1-based line and 1-based UTF-16 column, as StrykerJS reports them.
-    pub start: (u32, u32),
-    pub end: (u32, u32),
-    /// The mutated span's source text. In `mutants.json`, of a long span
-    /// only what is shown of it: the start of each operand around an
-    /// operator, or of the whole, with `operator.at` where it is there.
-    pub original: String,
-    /// The operator of a binary, logical or assignment expression mutated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator: Option<MutantOperator>,
-    /// A `ConditionalExpression` or `LogicalOperator` mutant whose value, not
-    /// only its truthiness, can reach the program: the original agreeing in
-    /// truthiness with the mutant does not show their values were equal.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub value_used: bool,
-    /// The innermost statement point containing the mutant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub statement: Option<String>,
-    /// The innermost function point containing the mutant (an arrow's own).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub function: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<DecisionLink>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<BranchLink>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain: Option<ChainLink>,
-    /// The comparison probe's site (`file:L:C`), when one was placed on the
-    /// mutated comparison.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compare: Option<String>,
-    /// The infection probe's site (`file:L:C-EL:EC#kind`), when one was
-    /// placed on the mutated expression.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe: Option<String>,
-    /// What the source says of a concise arrow's body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arrow: Option<ArrowLink>,
-    /// The static rule that shows no input can make the mutant differ
-    /// (`js_static_mutants`): its status is then `equivalent`, whatever the
-    /// tests did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub equivalent: Option<StaticNote>,
-    /// Why the input that would make it differ is practically out of a
-    /// test's reach (`clock`, `random`): a hint that changes no status.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub untestable: Option<StaticNote>,
-    /// Strong mode (`js_schemata`): its switch is evaluated while the module
-    /// loads, so a strong pass runs whole files for it.
-    #[serde(default, rename = "static", skip_serializing_if = "std::ops::Not::not")]
-    pub is_static: bool,
-    /// Strong mode: why the mutant has no switch (`no-placeable-ancestor`,
-    /// `function-source`, `with-statement`, `node-not-found`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unplaceable: Option<String>,
-}
-
-/// A rule's stable code and the sentence that says why it applies.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StaticNote {
-    pub rule: String,
-    pub reason: String,
-}
-
-/// An operator and where it is: a byte offset into the mutant's `original`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MutantOperator {
-    pub text: String,
-    pub at: usize,
-}
-
-/// The decision the mutant is: all of it (no index), exactly one of its
-/// conditions, or exactly its first `prefix` conditions (two or more, made
-/// only of `&&` and `||`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DecisionLink {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<usize>,
-}
-
-/// A logical selection (`a && b`, `a ?? b`, `x ||= y`) the mutant is, or is
-/// an operand of.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BranchLink {
-    pub id: String,
-    pub role: BranchRole,
-    /// `&&`, `||`, `??`, or a logical assignment's `&&=`, `||=`, `??=`.
-    pub operator: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum BranchRole {
-    Value,
-    Left,
-    Right,
-}
-
-/// The optional link the mutant removes, and the optional links of the same
-/// chain evaluated before it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ChainLink {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub earlier: Vec<String>,
-}
-
-/// A concise arrow's body: whether evaluating it has effects (which the
-/// mutant's `undefined` removes), and whether it can never be `undefined`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ArrowLink {
-    pub effects: bool,
-    pub never_undefined: bool,
 }
 
 type SpanKey = (u32, u32);
@@ -1557,8 +1281,10 @@ mod tests {
         let source = "export const h = (o: any, a: number) => o?.a ?? a > 1;\n";
         let output = instrumented(source, true);
         let file = MutantsFile {
-            schema_version: MUTANTS_SCHEMA_VERSION,
+            schema_version: crate::mutant_list::MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: BTreeMap::from([("src/links.ts".to_owned(), output.mutants.clone())]),
             tests_without_values: Vec::new(),
         };
@@ -1602,8 +1328,10 @@ mod tests {
         let plain = mutant(&output, "a > 0", "EqualityOperator", ">=");
         assert_eq!((&plain.equivalent, &plain.untestable), (&None, &None));
         let file = MutantsFile {
-            schema_version: MUTANTS_SCHEMA_VERSION,
+            schema_version: crate::mutant_list::MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: BTreeMap::from([("src/links.ts".to_owned(), output.mutants.clone())]),
             tests_without_values: Vec::new(),
         };
@@ -1945,8 +1673,10 @@ mod tests {
         moved.id = "src/old.ts:1:1-1:6:EqualityOperator:<=".into();
         moved.compare = Some("src/other.ts:3:7".into());
         let file = MutantsFile {
-            schema_version: MUTANTS_SCHEMA_VERSION,
+            schema_version: crate::mutant_list::MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: BTreeMap::from([
                 ("src/empty.ts".to_owned(), Vec::new()),
                 ("src/links.ts".to_owned(), vec![moved.clone()]),
@@ -2079,8 +1809,10 @@ mod tests {
         }
         MUTANTS_FOR_TEST.with(|flag| flag.set(None));
         let file = MutantsFile {
-            schema_version: MUTANTS_SCHEMA_VERSION,
+            schema_version: crate::mutant_list::MUTANTS_SCHEMA_VERSION,
             mutant_set: Some(crate::js_mutants::MUTANT_SET.into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files,
             tests_without_values: Vec::new(),
         };
