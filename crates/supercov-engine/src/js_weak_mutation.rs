@@ -271,6 +271,20 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
         RUST_FN_VALUE | "BinaryOperator" | "MatchArm" | "MatchArmGuard" | "StructField" => {
             rust_operator(mutant, records)
         }
+        // Go's (`go_mutants`): a value probe decides an operation's mutant
+        // where the run put one, as it does an arithmetic one's.
+        "UnaryOperator" | "INVERT_NEGATIVES" | "INVERT_BITWISE" | "INVERT_BWASSIGN"
+            if mutant.probe.is_some() =>
+        {
+            probed_operation(mutant, records)
+        }
+        // `break` to `continue` differs where the loop has more to run: the
+        // statement having run says only that it might.
+        "INVERT_LOOPCTRL" => verdict_of(
+            PROXY,
+            "statement-ran",
+            "the statement ran (a proxy: at a loop's last turn the two may do the same)",
+        ),
         // Another language's mutator whose probe evaluated the original and
         // the replacement side by side: `differs` or `same` at each
         // evaluation (`docs/design/mutation-drivers.md`).
