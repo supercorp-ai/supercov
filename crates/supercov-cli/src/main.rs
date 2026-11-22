@@ -3581,6 +3581,12 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         return mutants_test_command::command(&arguments);
     }
     if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.get(2).is_some_and(|a| a == "pit")
+    {
+        return mutants_pit_command::command(&arguments);
+    }
+    if command == "runs"
         && arguments.get(1).is_some_and(|a| a == "gaps")
         && arguments.iter().any(|a| a == "--format")
     {
@@ -4227,6 +4233,7 @@ fn instrument_js() -> ExitCode {
 
 // Below the lines tests name by number (main.rs:2481).
 mod mutants_export;
+mod mutants_pit_command;
 mod mutants_test_command;
 
 #[cfg(test)]

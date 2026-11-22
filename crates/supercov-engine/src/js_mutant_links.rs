@@ -122,8 +122,18 @@ pub(crate) fn list_mutants(
             .collect::<std::collections::BTreeSet<_>>();
         (Some(&points) == recorded.get(file)).then_some(output.mutants)
     });
+    let has_javascript = !files.is_empty();
+    // Java and Kotlin files have PIT's mutants (`jvm_strong`).
+    let (jvm, jvm_changed) = crate::jvm_strong::list_mutants(root, recorded);
     let mut mutants = BTreeMap::new();
     let mut changed = Vec::new();
+    let mutant_set = if !has_javascript && (!jvm.is_empty() || !jvm_changed.is_empty()) {
+        crate::jvm_mutants::MUTANT_SET
+    } else {
+        crate::js_mutants::MUTANT_SET
+    };
+    mutants.extend(jvm);
+    changed.extend(jvm_changed);
     for (file, listed) in files.into_iter().zip(listed) {
         match listed {
             Some(list) if list.is_empty() => {}
@@ -136,7 +146,7 @@ pub(crate) fn list_mutants(
     ListedMutants {
         mutants: MutantsFile {
             schema_version: MUTANTS_SCHEMA_VERSION,
-            mutant_set: Some(crate::js_mutants::MUTANT_SET.to_owned()),
+            mutant_set: Some(mutant_set.to_owned()),
             files: mutants,
             tests_without_values: Vec::new(),
         },

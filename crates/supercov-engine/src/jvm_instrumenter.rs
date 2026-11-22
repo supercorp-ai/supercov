@@ -72,6 +72,9 @@ pub struct JvmFileObligations {
     pub probes: BTreeMap<u64, GoProbe>,
     pub edits: Vec<GoEdit>,
     pub decision_widths: Vec<u8>,
+    /// Each statement and function point's id, kind and byte range: what a
+    /// mutant is linked to (`jvm_mutants`).
+    pub point_spans: Vec<(String, PointKind, usize, usize)>,
 }
 
 /// Statements Java nests directly inside a block. A declaration that cannot
@@ -139,6 +142,7 @@ struct Collector<'a> {
     probes: BTreeMap<u64, GoProbe>,
     limitations: Vec<serde_json::Value>,
     widths: Vec<u8>,
+    point_spans: Vec<(String, PointKind, usize, usize)>,
     /// How many decisions the project already numbered before this file. The
     /// runtime holds one decision-state array for the whole run, so an index
     /// that meant "the first decision in this file" would land on every other
@@ -242,6 +246,8 @@ impl Collector<'_> {
         } else {
             self.store(at, probe);
         }
+        self.point_spans
+            .push((id.clone(), kind.clone(), node.start_byte(), node.end_byte()));
         self.points.push(PointMeta {
             id,
             kind,
@@ -654,6 +660,7 @@ pub fn build_jvm_obligations(
         probes: BTreeMap::new(),
         limitations: Vec::new(),
         widths: Vec::new(),
+        point_spans: Vec::new(),
     };
     walk(&mut collector, tree.root_node());
     *next_decision += collector.widths.len() as u32;
@@ -671,6 +678,7 @@ pub fn build_jvm_obligations(
         probes: collector.probes,
         edits: collector.edits,
         decision_widths: collector.widths,
+        point_spans: collector.point_spans,
     })
 }
 

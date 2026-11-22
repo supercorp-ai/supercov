@@ -306,6 +306,11 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 
+/// The run's plan, as `mutants test` makes it.
+pub(crate) fn plan_of(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
+    run_plan(root, run)
+}
+
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
     let planned = plan_for_archive(
         &ArchiveReportRequest {
@@ -327,9 +332,12 @@ fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
             planned.changed.join(", ")
         );
     }
-    planned
-        .plan
-        .ok_or_else(|| format!("run {} measured no JavaScript or TypeScript source", run.id))
+    planned.plan.ok_or_else(|| {
+        format!(
+            "run {} measured no source Supercov lists mutants of",
+            run.id
+        )
+    })
 }
 
 /// Keeps the mutants `--file` and `--diff` ask about.
@@ -771,25 +779,45 @@ fn execute(
                 serde_json::to_vec(&pass_plan).expect("plain data serializes"),
             )
             .map_err(|e| format!("{}: {e}", plan_path.display()))?;
-            let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
-                root: root.to_owned(),
-                command: command.clone(),
-                run_id: Some(format!("strong-{nonce}")),
-                started_at: None,
-                watchdog_program: std::env::current_exe()
-                    .ok()
-                    .and_then(|path| std::fs::canonicalize(path).ok()),
-                strong: Some(supercov_engine::javascript_run::StrongRun {
-                    plan: plan_path,
-                    results: results.clone(),
-                }),
-            };
-            let mut diagnostics = std::io::stderr();
             let progress = Progress::start(results.clone(), remaining.len());
-            exit =
-                supercov_engine::javascript_run::run_strong_javascript(&request, &mut diagnostics)
-                    .map_err(|error| error.to_string())?;
-            drop(progress);
+            if plan.mutant_set == supercov_engine::jvm_mutants::MUTANT_SET {
+                // Java and Kotlin: the build's own test JVM runs the pass.
+                exit = supercov_engine::jvm_run::run_strong_jvm(
+                    &supercov_engine::jvm_run::StrongJvmRequest {
+                        root: root.to_owned(),
+                        command: command.clone(),
+                        run_id: format!("strong-{nonce}"),
+                        started_at: run.metadata.started_at.clone(),
+                        plan: plan_path.clone(),
+                        results: results.clone(),
+                    },
+                    &mut std::io::stderr(),
+                )?;
+                drop(progress);
+            } else {
+                drop(progress);
+                let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
+                    root: root.to_owned(),
+                    command: command.clone(),
+                    run_id: Some(format!("strong-{nonce}")),
+                    started_at: None,
+                    watchdog_program: std::env::current_exe()
+                        .ok()
+                        .and_then(|path| std::fs::canonicalize(path).ok()),
+                    strong: Some(supercov_engine::javascript_run::StrongRun {
+                        plan: plan_path,
+                        results: results.clone(),
+                    }),
+                };
+                let mut diagnostics = std::io::stderr();
+                let progress = Progress::start(results.clone(), remaining.len());
+                exit = supercov_engine::javascript_run::run_strong_javascript(
+                    &request,
+                    &mut diagnostics,
+                )
+                .map_err(|error| error.to_string())?;
+                drop(progress);
+            }
             command_exit = Some(exit);
             let before = remaining.len();
             let text = std::fs::read_to_string(&results).unwrap_or_default();

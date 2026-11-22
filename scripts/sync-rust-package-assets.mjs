@@ -104,6 +104,8 @@ const mappings = [
     "com/supercorp/supercov/SupercovListener.java",
     "com/supercorp/supercov/SupercovTestNGListener.java",
     "com/supercorp/supercov/SupercovAntFormatter.java",
+    "com/supercorp/supercov/SupercovStrong.java",
+    "com/supercorp/supercov/SupercovSwitch.kt",
   ]),
   ...runtimeFiles("ruby", [
     "supercov_cucumber.rb",

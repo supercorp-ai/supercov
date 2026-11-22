@@ -521,6 +521,463 @@ public final class Supercov {
     }
   }
 
+  // --- Strong mutation: the mutant switches ---------------------------------
+  //
+  // A strong copy calls these where it holds a mutant (`jvm_schemata.rs`):
+  // `on(file, index)` says whether that mutant is the active one, and each
+  // helper applies its operator or the mutant's replacement. One mutant is
+  // active at a time, for the whole JVM; none while the file is -1.
+
+  private static int activeFile = -1;
+  private static int activeIndex = -1;
+  private static long mutantHits = 0;
+  private static long mutantHitLimit = 1_000_000L;
+  private static boolean mutantHitLimitReached = false;
+
+  /** Thrown once the active mutant has been evaluated past its limit. */
+  public static final class MutantTimeoutError extends Error {
+    private static final long serialVersionUID = 1L;
+
+    public MutantTimeoutError() {
+      super("SUPERCOV_MUTANT_TIMEOUT: the active mutant passed its evaluation limit");
+    }
+  }
+
+  /** Switches one mutant on: every switch of it reads true until cleared. */
+  public static void setActiveMutant(int file, int index) {
+    activeFile = file;
+    activeIndex = index;
+    mutantHits = 0;
+    mutantHitLimitReached = false;
+  }
+
+  public static void clearActiveMutant() {
+    activeFile = -1;
+    activeIndex = -1;
+    mutantHits = 0;
+  }
+
+  public static void setMutantHitLimit(long limit) {
+    mutantHitLimit = limit;
+  }
+
+  public static long mutantHitCount() {
+    return mutantHits;
+  }
+
+  /** Whether the limit was passed since the mutant was switched on. */
+  public static boolean mutantHitLimitReached() {
+    return mutantHitLimitReached;
+  }
+
+  public static boolean isMutantTimeout(Throwable error) {
+    for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+      if (cause instanceof MutantTimeoutError) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  /** Whether mutant {@code index} of file {@code file} is on; counts it if so. */
+  public static boolean on(int file, int index) {
+    if (index != activeIndex || file != activeFile) {
+      return false;
+    }
+    if (++mutantHits > mutantHitLimit) {
+      mutantHitLimitReached = true;
+      throw new MutantTimeoutError();
+    }
+    return true;
+  }
+
+  /** A condition, negated while its mutant is on. */
+  public static boolean n(int file, int index, boolean value) {
+    return on(file, index) ? !value : value;
+  }
+
+  /** Evaluates a choice made as a statement. */
+  public static void v(boolean value) {}
+
+  public static void v(char value) {}
+
+  public static void v(byte value) {}
+
+  public static void v(short value) {}
+
+  public static void v(int value) {}
+
+  public static void v(long value) {}
+
+  public static void v(float value) {}
+
+  public static void v(double value) {}
+
+  public static void v(Object value) {}
+
+  public static boolean lt(int file, int index, int a, int b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, long a, long b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, float a, float b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean lt(int file, int index, double a, double b) {
+    return on(file, index) ? a <= b : a < b;
+  }
+
+  public static boolean le(int file, int index, int a, int b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, long a, long b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, float a, float b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean le(int file, int index, double a, double b) {
+    return on(file, index) ? a < b : a <= b;
+  }
+
+  public static boolean gt(int file, int index, int a, int b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, long a, long b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, float a, float b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean gt(int file, int index, double a, double b) {
+    return on(file, index) ? a >= b : a > b;
+  }
+
+  public static boolean ge(int file, int index, int a, int b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, long a, long b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, float a, float b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static boolean ge(int file, int index, double a, double b) {
+    return on(file, index) ? a > b : a >= b;
+  }
+
+  public static int add(int file, int index, int a, int b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static long add(int file, int index, long a, long b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static float add(int file, int index, float a, float b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static double add(int file, int index, double a, double b) {
+    return on(file, index) ? a - b : a + b;
+  }
+
+  public static int sub(int file, int index, int a, int b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static long sub(int file, int index, long a, long b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static float sub(int file, int index, float a, float b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static double sub(int file, int index, double a, double b) {
+    return on(file, index) ? a + b : a - b;
+  }
+
+  public static int mul(int file, int index, int a, int b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static long mul(int file, int index, long a, long b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static float mul(int file, int index, float a, float b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static double mul(int file, int index, double a, double b) {
+    return on(file, index) ? a / b : a * b;
+  }
+
+  public static int div(int file, int index, int a, int b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static long div(int file, int index, long a, long b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static float div(int file, int index, float a, float b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static double div(int file, int index, double a, double b) {
+    return on(file, index) ? a * b : a / b;
+  }
+
+  public static int rem(int file, int index, int a, int b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static long rem(int file, int index, long a, long b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static float rem(int file, int index, float a, float b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static double rem(int file, int index, double a, double b) {
+    return on(file, index) ? a * b : a % b;
+  }
+
+  public static boolean and(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static int and(int file, int index, int a, int b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static long and(int file, int index, long a, long b) {
+    return on(file, index) ? a | b : a & b;
+  }
+
+  public static boolean or(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static int or(int file, int index, int a, int b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static long or(int file, int index, long a, long b) {
+    return on(file, index) ? a & b : a | b;
+  }
+
+  public static boolean xor(int file, int index, boolean a, boolean b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static int xor(int file, int index, int a, int b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static long xor(int file, int index, long a, long b) {
+    return on(file, index) ? a & b : a ^ b;
+  }
+
+  public static int shl(int file, int index, int a, int b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static int shl(int file, int index, int a, long b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static long shl(int file, int index, long a, int b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static long shl(int file, int index, long a, long b) {
+    return on(file, index) ? a >> b : a << b;
+  }
+
+  public static int shr(int file, int index, int a, int b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static int shr(int file, int index, int a, long b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static long shr(int file, int index, long a, int b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static long shr(int file, int index, long a, long b) {
+    return on(file, index) ? a << b : a >> b;
+  }
+
+  public static int ushr(int file, int index, int a, int b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static int ushr(int file, int index, int a, long b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static long ushr(int file, int index, long a, int b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static long ushr(int file, int index, long a, long b) {
+    return on(file, index) ? a << b : a >>> b;
+  }
+
+  public static int inv(int file, int index, int a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static long inv(int file, int index, long a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static float inv(int file, int index, float a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static double inv(int file, int index, double a) {
+    return on(file, index) ? a : -a;
+  }
+
+  public static int rZ(int file, int index, int value) {
+    return on(file, index) ? (int) 0 : value;
+  }
+
+  public static long rZ(int file, int index, long value) {
+    return on(file, index) ? (long) 0 : value;
+  }
+
+  public static float rZ(int file, int index, float value) {
+    return on(file, index) ? (float) 0 : value;
+  }
+
+  public static double rZ(int file, int index, double value) {
+    return on(file, index) ? (double) 0 : value;
+  }
+
+  public static byte rZ(int file, int index, byte value) {
+    return on(file, index) ? (byte) 0 : value;
+  }
+
+  public static short rZ(int file, int index, short value) {
+    return on(file, index) ? (short) 0 : value;
+  }
+
+  public static char rZ(int file, int index, char value) {
+    return on(file, index) ? (char) 0 : value;
+  }
+
+  public static boolean rT(int file, int index, boolean value) {
+    return on(file, index) ? true : value;
+  }
+
+  public static boolean rF(int file, int index, boolean value) {
+    return on(file, index) ? false : value;
+  }
+
+  // The object returns are generic so that one helper serves every declared
+  // type: the caller casts the replacement to the type it returns, which the
+  // replacement has (an empty list is a Collection and an Iterable).
+
+  @SuppressWarnings("unchecked")
+  private static <T> T as(Object value) {
+    return (T) value;
+  }
+
+  public static <T> T rBT(int file, int index, T value) {
+    return on(file, index) ? as(Boolean.TRUE) : value;
+  }
+
+  public static <T> T rBF(int file, int index, T value) {
+    return on(file, index) ? as(Boolean.FALSE) : value;
+  }
+
+  public static <T> T rN(int file, int index, T value) {
+    return on(file, index) ? null : value;
+  }
+
+  public static <T> T rBI(int file, int index, T value) {
+    return on(file, index) ? as(Integer.valueOf(0)) : value;
+  }
+
+  public static <T> T rBS(int file, int index, T value) {
+    return on(file, index) ? as(Short.valueOf((short) 0)) : value;
+  }
+
+  public static <T> T rBC(int file, int index, T value) {
+    return on(file, index) ? as(Character.valueOf((char) 0)) : value;
+  }
+
+  public static <T> T rBL(int file, int index, T value) {
+    return on(file, index) ? as(Long.valueOf(0L)) : value;
+  }
+
+  public static <T> T rBF0(int file, int index, T value) {
+    return on(file, index) ? as(Float.valueOf(0f)) : value;
+  }
+
+  public static <T> T rBD(int file, int index, T value) {
+    return on(file, index) ? as(Double.valueOf(0d)) : value;
+  }
+
+  public static String rS(int file, int index, String value) {
+    return on(file, index) ? "" : value;
+  }
+
+  public static <T> T rList(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptyList()) : value;
+  }
+
+  public static <T> T rSet(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptySet()) : value;
+  }
+
+  public static <T> T rMap(int file, int index, T value) {
+    return on(file, index) ? as(java.util.Collections.emptyMap()) : value;
+  }
+
+  // Optional and Stream by name, so that the runtime still compiles where a
+  // project's main source is Java 7.
+  public static <T> T rOpt(int file, int index, T value) {
+    return on(file, index) ? as(empty("java.util.Optional")) : value;
+  }
+
+  public static <T> T rStream(int file, int index, T value) {
+    return on(file, index) ? as(empty("java.util.stream.Stream")) : value;
+  }
+
+  private static Object empty(String type) {
+    try {
+      return Class.forName(type).getMethod("empty").invoke(null);
+    } catch (ReflectiveOperationException error) {
+      throw new IllegalStateException(error);
+    }
+  }
+
+
   /** Little-endian, matching every other Supercov transport. */
   private static void putLong(DataOutputStream out, long value) throws IOException {
     for (int shift = 0; shift < 64; shift += 8) {
