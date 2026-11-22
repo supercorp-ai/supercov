@@ -162,7 +162,7 @@ run_pit() {
       mvn -B -q dependency:copy -Dartifact="$artifact" -DoutputDirectory="$work/pit-cli" > /dev/null
     done
     local classpath
-    classpath="$(field antClasspath | tr ',' '\n' | while read -r entry; do
+    classpath="$(field antClasspath | tr ',' '\n' | while read -r entry || [ -n "$entry" ]; do
       if [[ "$entry" == *'*'* ]]; then ls "$PWD"/$entry; else echo "$PWD/$entry"; fi
     done | paste -sd, -)"
     local full=false
@@ -176,7 +176,7 @@ run_pit() {
       --targetClasses "$targets" --targetTests "$target_tests" \
       --sourceDirs "$(field antSourceDir)" --classPath "$classpath" \
       --threads "$threads" --fullMutationMatrix="$full" \
-      --timeoutConst 10000 \
+      --timeoutConst 10000 --verbose \
       --jvmArgs "$(field antJvmArgs | sed "s|ROOT|$PWD|g; s|ANTHOME|${ANT_HOME:-}|g")" >&2
     echo pit-reports/mutations.xml
   elif [ "$build" = maven ]; then
