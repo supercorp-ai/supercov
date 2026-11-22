@@ -287,6 +287,57 @@ mod tests {
         assert!(source.is_char_boundary(start) && source.is_char_boundary(end));
     }
 
+    /// A pass writes the runtime, the switched files' list and their
+    /// schemata beside its results, and returns the command's exit code; an
+    /// empty command is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_runs_its_command_beside_the_schemata() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-strong-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work = root.join(".supercov/strong/r-1");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(root.join("a.py"), "def f(x):\n    return x + 1\n").unwrap();
+        std::fs::write(
+            work.join("plan.json"),
+            r#"{"mutants": [{"file": "a.py"}, {"file": "b.js"}, {"file": "c.py", "decided": "survived"}]}"#,
+        )
+        .unwrap();
+        let mut pass = StrongPass {
+            root: root.clone(),
+            command: vec!["sh".into(), "-c".into(), "exit 3".into()],
+            run_id: "r".into(),
+            watchdog_program: None,
+            strong: crate::strong_driver::StrongRun {
+                plan: work.join("plan.json"),
+                results: work.join("results.jsonl"),
+            },
+        };
+        let mut said = Vec::new();
+        assert_eq!(run_strong_python(&pass, &mut said), Ok(3));
+        assert!(String::from_utf8_lossy(&said).contains("switches in 1 Python source file(s)"));
+        assert!(work.join("python-runtime/supercov_strong.py").exists());
+        let listed: Vec<String> =
+            serde_json::from_slice(&std::fs::read(work.join("strong-files.json")).unwrap())
+                .unwrap();
+        assert_eq!(listed, ["a.py"]);
+        let schemata: Value =
+            serde_json::from_slice(&std::fs::read(work.join("schemata.json")).unwrap()).unwrap();
+        assert!(schemata["files"]["a.py"]["units"].is_array());
+        pass.command.clear();
+        assert_eq!(
+            run_strong_python(&pass, &mut Vec::new()),
+            Err("test command must not be empty".into())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A file that cannot be read or parsed gets no switches.
     #[test]
     fn a_file_that_cannot_be_enumerated_gets_no_schemata() {

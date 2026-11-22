@@ -708,9 +708,16 @@ class Driver:
             os.close(reader)
             code = 0
             try:
+                # Its own process group: a timeout stops what its tests
+                # started too.
+                os.setpgid(0, 0)
                 devnull = os.open(os.devnull, os.O_RDWR)
                 os.dup2(devnull, 1)
                 os.dup2(devnull, 2)
+                # A test's own `pytest` or `unittest` subprocess runs its
+                # tests, not the pass.
+                os.environ.pop(PLAN_ENV, None)
+                os.environ.pop(ONLY_ENV, None)
                 if job["mutant"] is not None:
                     activate(job["mutant"]["file"], job["mutant"]["index"])
                 items = [self.runner.items[place] for place in places]
@@ -744,6 +751,7 @@ class Driver:
             arguments,
             env=environment,
             pass_fds=(writer,),
+            start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -809,9 +817,12 @@ class Driver:
         import signal
 
         try:
-            os.kill(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+            os.killpg(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         process = getattr(child, "process", None)
         if process is not None:
             process.wait()
@@ -922,6 +933,12 @@ class Driver:
                 self._verdict(mutant, "survived", reason="every test that reaches it fails without it too")
                 continue
             places = [place for place in places if place not in failing and (not baseline or place in baseline)]
+            # Cheapest first, as the baseline timed them, and in collection
+            # order among equals: most kills come from the first tests
+            # tried, and a slow test runs only for a mutant the cheap ones
+            # let live. A kill after other tests than the baseline ran
+            # before it is confirmed (below).
+            places.sort(key=lambda place: (baseline.get(place, ("passed", 0))[1], place))
             if baseline and not places:
                 self._verdict(mutant, "error", reason="its tests did not finish without the mutant")
                 continue
@@ -950,7 +967,7 @@ class Driver:
                 place = failure[0]
                 # A kill counts at once where the baseline ran the same tests
                 # before the killing one; otherwise it is confirmed.
-                before = [p for p in job["places"] if p < place]
+                before = job["places"][: job["places"].index(place)]
                 baseline_before = [p for p in union if p < place]
                 if before != baseline_before:
                     key = (tuple(before), place)
@@ -1031,6 +1048,8 @@ def run_only(runner) -> None:
     """Runs one mutant's tests in this interpreter, the mutant on from its
     start, and reports each to the driver that started it."""
     only = _only()
+    os.environ.pop(PLAN_ENV, None)
+    os.environ.pop(ONLY_ENV, None)
     position = {runner.test_id(item): item for item in runner.items}
     writer = only["fd"]
     places = only["places"]
