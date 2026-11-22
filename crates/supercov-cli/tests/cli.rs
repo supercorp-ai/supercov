@@ -16644,8 +16644,8 @@ fn a_ruby_run_whose_own_step_fails_says_so() {
             "fs.read@7",
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
-            "fs.read_dir entry#1 => ruby_project.rs:100",
-            "fs.read_dir entry#2 => ruby_evidence.rs:329",
+            "fs.read_dir entry#1 => ruby_project.rs:102",
+            "fs.read_dir entry#2 => ruby_evidence.rs:338",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -18018,8 +18018,8 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
         ("fs.create_dir_all#python_run.rs:671", "python_run.rs:671"),
         ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
-        ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
-        ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
+        ("fs.create_dir_all#ruby_run.rs:514", "ruby_run.rs:514"),
+        ("fs.create_dir_all#ruby_run.rs:515", "ruby_run.rs:515"),
         ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
         ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
         ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
@@ -18233,8 +18233,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
 fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
     for (fault, place, file) in [
         (
-            "fs.read#ruby_project.rs:225@1",
-            "ruby_project.rs:225",
+            "fs.read#ruby_project.rs:229@1",
+            "ruby_project.rs:229",
             "web/app.rb",
         ),
         (
@@ -18252,7 +18252,7 @@ fn a_browser_suite_whose_ruby_server_cannot_read_its_project_says_so() {
             "ruby_run.rs:93",
             "supercov_runtime.rb",
         ),
-        ("fs.write#ruby_run.rs:513@1", "ruby_run.rs:513", "plan.rb"),
+        ("fs.write#ruby_run.rs:519@1", "ruby_run.rs:519", "plan.rb"),
     ] {
         let project = Project::cart("browser-ruby");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19437,7 +19437,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
             &project,
             &[
                 ("fs.canonicalize#ruby_run.rs:182", "ruby_run.rs:182"),
-                ("fs.read_dir#ruby_project.rs:100", "ruby_project.rs:100"),
+                ("fs.read_dir#ruby_project.rs:102", "ruby_project.rs:102"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -23681,13 +23681,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:672",
+            "coverage-index-read#mutants_query.rs:687",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:687"), "{said}");
 
     // The table of files.
     contains_all(
@@ -24138,8 +24138,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:925",
-        "fs.read_dir entry#public_query.rs:925",
+        "fs.read_dir#public_query.rs:939",
+        "fs.read_dir entry#public_query.rs:939",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24152,7 +24152,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:925"),
+            fired_at(&unlisted, "public_query.rs:939"),
             "{fault}: {unlisted}"
         );
     }
