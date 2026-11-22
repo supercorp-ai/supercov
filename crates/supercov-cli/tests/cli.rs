@@ -6319,6 +6319,47 @@ fn strict_sources_stay_strict_once_instrumented() {
     }
 }
 
+/// A second run of the same suite restores the instrumented copy from the
+/// cache, and with it the one browser runtime the modules Next.js bundles
+/// import: 4.28.0 left it out of the cache, and every test importing such a
+/// module failed on the second run ("Cannot find module
+/// .../browser-runtime.mjs").
+#[cfg(unix)]
+#[test]
+fn a_second_run_restores_the_browser_runtime_the_bundled_modules_import() {
+    let project = linked_project(
+        "next-runtime-cache",
+        &[
+            (
+                "package.json",
+                r#"{ "name": "next-runtime-cache", "type": "module", "dependencies": { "next": "*" }, "scripts": { "test": "vitest run" } }"#,
+            ),
+            ("playwright.config.js", "export default {};\n"),
+            (
+                "app/price.mjs",
+                "export function price(n) {\n  return n > 10 ? n - 1 : n;\n}\n",
+            ),
+            (
+                "test/price.test.js",
+                "import { expect, it } from 'vitest';\nimport { price } from '../app/price.mjs';\nit('discounts', () => expect(price(20)).toBe(19));\n",
+            ),
+        ],
+    );
+    for run in 1..=2 {
+        let ran = project.supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_SOURCE_ROOTS", "app")],
+        );
+        let said = ran.stdout() + &ran.stderr();
+        assert_eq!(ran.code(), 0, "run {run}\n{said}");
+        assert!(!said.contains("browser-runtime.mjs"), "run {run}\n{said}");
+    }
+    let file = project
+        .supercov(&["runs", "latest", "file", "app/price.mjs"])
+        .succeeds();
+    assert!(file.contains("Tests touching this file: 1"), "{file}");
+}
+
 /// Vitest reads `@vitest-environment` (and `@jest-environment`) anywhere in
 /// a test file; a rewritten file keeps each where the file had it, and each
 /// test runs where it asks to, the project's default a browser-like
@@ -15989,7 +16030,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2522 => main.rs:2522",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2001 => javascript_frontend.rs:2001",
+            "fs.read_to_string#javascript_frontend.rs:2005 => javascript_frontend.rs:2005",
         ],
     );
 }
@@ -18096,12 +18137,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1789@2",
+            "fs.read_to_string#javascript_frontend.rs:1793@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1789"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1793"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
