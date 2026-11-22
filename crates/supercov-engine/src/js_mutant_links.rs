@@ -264,6 +264,11 @@ pub(crate) struct MutantFacts {
     /// Each optional link and the optional links of its chain before it.
     chains: HashMap<SpanKey, Vec<Span>>,
     arrows: HashMap<SpanKey, ArrowLink>,
+    /// Expressions whose evaluation runs code or changes state (as
+    /// `expression_has_effects` counts it), outside functions they define.
+    effects: HashSet<SpanKey>,
+    /// Per expression being visited, whether one inside it has effects.
+    effect_stack: Vec<bool>,
     /// Equivalent mutants and untestable boundaries, from the program alone.
     statics: crate::js_static_mutants::StaticFacts,
 }
@@ -430,7 +435,41 @@ impl<'a> Visit<'a> for FactCollector<'_> {
                 });
             }
         }
+        self.facts.effect_stack.push(false);
         walk::walk_expression(self, expression);
+        let inside = self.facts.effect_stack.pop().unwrap_or(false);
+        let own = inside
+            || match expression {
+                Expression::CallExpression(_)
+                | Expression::NewExpression(_)
+                | Expression::AssignmentExpression(_)
+                | Expression::UpdateExpression(_)
+                | Expression::AwaitExpression(_)
+                | Expression::YieldExpression(_)
+                | Expression::TaggedTemplateExpression(_)
+                | Expression::ImportExpression(_)
+                | Expression::ClassExpression(_) => true,
+                Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Delete,
+                _ => false,
+            };
+        if own {
+            self.facts.effects.insert(key(expression.span()));
+            if let Some(outer) = self.facts.effect_stack.last_mut() {
+                *outer = true;
+            }
+        }
+    }
+
+    // What a function defines runs when it is called, not when the
+    // expression that defines it is evaluated.
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        let outer = std::mem::take(&mut self.facts.effect_stack);
+        walk::walk_function(self, function, flags);
+        self.facts.effect_stack = outer;
     }
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
@@ -551,6 +590,14 @@ impl<'a> Visit<'a> for FactCollector<'_> {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let outer = std::mem::take(&mut self.facts.effect_stack);
+        self.visit_arrow_body(arrow);
+        self.facts.effect_stack = outer;
+    }
+}
+
+impl<'a> FactCollector<'_> {
+    fn visit_arrow_body(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         if let Some(body) = arrow.get_expression() {
             self.facts.arrows.insert(
                 key(arrow.span),
@@ -826,6 +873,8 @@ pub(crate) fn link(
                 ),
                 mutator: mutant.mutator.to_owned(),
                 value_used: facts.value_used(&mutant),
+                effects: mutant.mutator == "ConditionalExpression"
+                    && facts.effects.contains(&key(mutant.span)),
                 replacement: mutant.replacement,
                 start: mutant.start,
                 end: mutant.end,
@@ -1146,8 +1195,23 @@ mod tests {
         let kept = mutant(&output, "(a < b) || x", "ConditionalExpression", "true");
         assert!(kept.value_used);
         assert!(!mutant(&output, "a < b", "ConditionalExpression", "false").value_used);
+        assert!(!mutant(&output, "a < b", "ConditionalExpression", "false").effects);
         assert!(mutant(&output, "x && y", "LogicalOperator", "||").value_used);
         assert!(!mutant(&output, "x || y", "LogicalOperator", "&&").value_used);
+    }
+
+    /// A condition that calls something has effects the literal replacing it
+    /// skips; one that only defines a function that would does not.
+    #[test]
+    fn a_condition_s_effects_are_known_from_the_source() {
+        let source = "export function t(a, f) {\n  if (a > 0 && !f(a)) return 1;\n  const g = () => a > 1 && f(a);\n  if (g && a > 2) return 2;\n  if ((() => f(a)) && a > 3) return 3;\n  return 0;\n}\n";
+        let output = instrumented(source, false);
+        let effects =
+            |original: &str| mutant(&output, original, "ConditionalExpression", "false").effects;
+        assert!(effects("a > 0 && !f(a)"));
+        assert!(effects("a > 1 && f(a)"));
+        assert!(!effects("g && a > 2"));
+        assert!(!effects("(() => f(a)) && a > 3"));
     }
 
     #[test]

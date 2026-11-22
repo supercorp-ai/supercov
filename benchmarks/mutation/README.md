@@ -199,6 +199,35 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
 
+## Results of 2026-11-22: workers started ahead, a process only once the file is known
+
+Supercov's cold rows again (`results/2026-11-22/summary.md`; every other row is 2026-11-20's), on
+the binary of `e19bd687` (key `7bde1dc6674d633b`; CI runs 4633090738757946, 5286085914853970 and
+4678410489961734), against the spawner binary of the rows before, on the same 16-vCPU machine type:
+
+| project | strong pass s, spawner | strong pass s, now | ms per mutant run (StrykerJS's mutant phase) | soundness violations | extra kills |
+|---|---:|---:|---|---:|---:|
+| defu, scule, cookie-es, pathe, ufo | 2-18 | 2-16 | 14-26 (12-17) | 0 | 0 |
+| hono (6 shards) | 339 | 301 | 73 (51) | the same 10 diagnosed ground-truth artifacts | 0 |
+| tRPC (32 shards) | 3,774 | 2,912 | 1,190 (755) | the same 2 diagnosed ones | 0 |
+
+No mutant changed between detected and not against the spawner binary (a few between Killed and
+Timeout). Paired on the same day and machines (hono's 6 shards, tRPC's 1-12), with
+`SUPERCOV_STRONG_WORKERS_AHEAD=0` as the control: hono 81 to 73 ms a mutant, tRPC 1,443 to 1,142.
+
+Where the time goes now:
+
+- **tRPC.** 24 copies a mutant, of which 11 had nothing left to run and now cost no process; the
+  other 13 hold a worker 650 ms each: 200 ms from the worker's handover to its claim (Vitest's
+  start, the jsdom instance, setup files) and 450 ms of the copy itself (its test file's imports,
+  about 130 ms, and its tests). Workers are busy 92% of the pass but the machine's CPUs only 54%:
+  copies wait on their tests' servers and timers and on Vitest's process. 24 or 32 workers instead
+  of 15 gave 2-7% (`w24`, `w32`), within the spread between shards.
+- **hono.** 3 copies a mutant at 26 + 138 ms; workers busy 61%, CPUs 51%: what is left is each
+  stage's end, where a mutant's next files wait for the stage before.
+- **Tried and dropped:** Node's compile cache in the workers started ahead (no change on hono, 4% on
+  tRPC), and more workers (above).
+
 ## Results of 2026-11-21: the strong pass in stages
 
 Supercov's cold rows again (`results/2026-11-21/summary.md`), on the binary of the strong pass in

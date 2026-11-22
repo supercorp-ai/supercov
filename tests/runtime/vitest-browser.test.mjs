@@ -23,7 +23,7 @@ test('Vitest browser module setup survives reset without being assigned to a tes
  const context=createContext({console,crypto:webcrypto,TextEncoder});
  function mock(values){return new SyntheticModule(Object.keys(values),function(){for(const [k,v] of Object.entries(values))this.setExport(k,v)},{context});}
  const vitest=mock({beforeEach:fn=>hooks.before=fn,afterEach:fn=>hooks.after=fn});
- const runtime=mock({coverageSnapshot:()=>({hits:[...hits],decisions:[]}),activateCoverageScope:s=>scope=s,enableRuntimeSnapshotEvidence:()=>{},resetCoverage:()=>{hits=[]},takeNodeAssertionPhases:()=>[]});
+ const runtime=mock({coverageSnapshot:()=>({hits:[...hits],decisions:[]}),activateCoverageScope:s=>scope=s,enableRuntimeSnapshotEvidence:()=>{},resetCoverage:()=>{hits=[]},setActiveMutant:()=>{},takeNodeAssertionPhases:()=>[]});
  const channel=mock({commands:{__supercovEvidence:async(payload,suffix)=>{payloads.push({payload,suffix});}}});
  await channel.link(()=>{});await channel.evaluate();
  const module=new SourceTextModule(readFileSync(${JSON.stringify(adapter)},'utf8'),{context,importModuleDynamically:async()=>channel});

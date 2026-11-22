@@ -27,7 +27,7 @@ mkdirSync(work, { recursive: true });
 
 function run(name, command, options = {}) {
     const started = Date.now();
-    const result = spawnSync(command[0], command.slice(1), { encoding: "utf8", maxBuffer: 1 << 30, ...options, env: { ...process.env, ...options.env } });
+    const result = spawnSync(command[0], command.slice(1), { encoding: "utf8", maxBuffer: 1 << 30, ...options, env: { ...process.env, ...project.env, ...options.env } });
     const seconds = (Date.now() - started) / 1000;
     writeFileSync(join(out, `${name}.log`), `$ ${command.join(" ")}\n${result.stdout ?? ""}\n${result.stderr ?? ""}\nexit ${result.status}\n`);
     console.log(`[${project.name}] ${name}: exit ${result.status} in ${seconds.toFixed(1)} s`);
@@ -39,7 +39,8 @@ const tools = join(work, "stryker-tools");
 if (!existsSync(join(tools, "node_modules/.bin/stryker"))) {
     mkdirSync(tools, { recursive: true });
     writeFileSync(join(tools, "package.json"), '{"private":true}');
-    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", ...["core", "mocha-runner", "jest-runner", "tap-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
+    // StrykerJS reads a project's tsconfig.json with TypeScript.
+    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", "typescript@5", ...["core", "mocha-runner", "jest-runner", "tap-runner", "vitest-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
 }
 
 const directory = join(work, project.name);
@@ -53,13 +54,14 @@ const install = run("install", project.install, { cwd: directory });
 if (install.status !== 0)
     process.exit(1);
 if (project.browsers)
-    run("browsers", ["npx", "playwright", "install", "--with-deps", "chromium", "chromium-headless-shell"], { cwd: directory });
+    // A Playwright older than the runner's system knows no browser build for
+    // it; the latest Ubuntu's it knows runs there.
+    run("browsers", ["npx", "playwright", "install", "chromium", "chromium-headless-shell"], { cwd: directory, env: { PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: "ubuntu24.04-x64" } });
 const plain = run("plain-tests", project.test, { cwd: directory });
 
 // StrykerJS: every killer of every mutant.
 const include = project.mutate.filter((glob) => !glob.startsWith("!"));
 const exclude = project.mutate.filter((glob) => glob.startsWith("!")).map((glob) => glob.slice(1));
-const runnerPlugin = { mocha: "mocha-runner", jest: "jest-runner", tap: "tap-runner" }[project.stryker.testRunner];
 writeFileSync(join(directory, "stryker.supercov-bench.json"), JSON.stringify({
     disableBail: true,
     incremental: false,
@@ -67,7 +69,7 @@ writeFileSync(join(directory, "stryker.supercov-bench.json"), JSON.stringify({
     mutate: project.mutate,
     ignorePatterns: [".supercov"],
     tempDirName: ".stryker-tmp",
-    plugins: runnerPlugin ? [join(tools, "node_modules/@stryker-mutator", runnerPlugin)] : [],
+    // StrykerJS finds its runners beside itself, in the tools' packages.
     ...project.stryker,
 }, null, 2));
 const stryker = args["skip-stryker"] ? null : run("stryker", [join(tools, "node_modules/.bin/stryker"), "run", "stryker.supercov-bench.json"], { cwd: directory });
@@ -77,7 +79,9 @@ if (existsSync(reportPath))
 
 // Supercov: measure with the mutants' values, then the strong pass.
 const environment = { SUPERCOV_SOURCE_ROOTS: project.sources };
-const measure = run("supercov-measure", [supercov, "--", ...project.test], { cwd: directory, env: { ...environment, SUPERCOV_MUTANTS: "1" } });
+// A project marked `values: false` is measured as a plain run: its mutants are
+// listed after it, and planned from reach alone.
+const measure = run("supercov-measure", [supercov, "--", ...project.test], { cwd: directory, env: { ...environment, ...(project.values === false ? {} : { SUPERCOV_MUTANTS: "1" }) } });
 const strong = run("supercov-strong", [supercov, "runs", "latest", "mutants", "test", "--json"], { cwd: directory, env: environment });
 run("supercov-export", [supercov, "runs", "latest", "mutants", "--format", "jsonl", "--output", join(out, "supercov-mutants.jsonl")], { cwd: directory, env: environment });
 let pass = {};

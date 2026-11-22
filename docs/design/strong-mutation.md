@@ -173,6 +173,47 @@ spawners sharing the workers were no faster than one. Vitest 1-3 fork
 through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
 from Vitest's process. The pass summary counts `spawnedWorkers`.
 
+A copy's worker spends its first few hundred milliseconds before it can
+claim anything: Node starting, Vitest's worker loading, and in a DOM
+environment that environment's package (jsdom took 300 ms on tRPC, where every
+file runs in jsdom). On the public benchmark that was 75 ms of a hono copy's
+205 and 430 ms of a tRPC copy's 860, and tRPC listed 46% of its copies for
+mutants another copy had decided by the time they started: each paid the
+whole start and then ended in its setup file. Two changes take that cost off
+the copies without sharing anything between them:
+
+- **Workers started ahead.** The spawner keeps one worker per Vitest worker
+  started ahead of Vitest's requests, with the entry, arguments and options
+  Vitest gives every worker of the project. Each loads what a fresh worker
+  loads before Vitest tells it anything, in the order it would: Vitest's
+  worker entry, then the package of the built-in environment Vitest named in
+  its first message to a worker (`jsdom`, `happy-dom`), resolved as Vitest
+  resolves it. Then it waits. Its script (`process.argv[1]`) is Vitest's
+  entry and Supercov's variable is gone from its environment before the entry
+  loads, so a test sees the process a fresh worker is; the spawner's own
+  argument list stays in the operating system's view of the process only.
+  Workers started before Vitest named the environment are stopped and
+  started again with it. `SUPERCOV_STRONG_WORKERS_AHEAD=<n>` sets how many
+  (0: each worker starts when Vitest asks). The profile counts
+  `startedAhead` and `usedAhead`.
+- **A process only once the file is known.** A stand-in answers Vitest's
+  first message ("start") itself and keeps it. Vitest's next message ("run")
+  names the test file; the strong reporter then gives the copy its file's
+  next assignment, in the order Vitest starts them, and tells it which
+  through the run's provided context (the setup file's claims race stays for
+  Vitest 1-3 and direct forks). A copy whose mutant was decided meanwhile, or
+  that is beyond its file's assignments, ends there with no process: the
+  reporter records it as its setup file would have. Any other copy takes a
+  worker, which gets the kept "start", answers it, and then gets the "run":
+  the same messages in the same order as a worker forked for it.
+
+Paired on the same machines (hono's six shards, tRPC's shards 1-12), with
+nothing else changed: hono 81 to 73 ms a mutant, tRPC 1,443 to 1,142 ms; a
+copy's start (handover to claim) 76 to 26 ms on hono and 411 to 201 ms on
+tRPC; no mutant changed between detected and not (one hono and one tRPC
+mutant went from timeout to killed, which flips between runs). The five
+libraries took the same time (14-26 ms a mutant) with the same verdicts.
+
 Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
 between test files (`isolate: false` for the pass), and the copy's setup file
 reset the modules and mocks Vitest had evaluated, so only the packages Node
@@ -188,16 +229,33 @@ used 2.3-2.6× less CPU on hono and tRPC, but hono's and tRPC's wall time did
 not drop, because their copies wait on their tests' own timers, not on
 starting.
 
+Nor does the pass choose warm workers per suite. What a run knows of a suite
+(its module graph's size, each file's setup time, its isolation settings, a
+first stage timed cold and warm) says how much warm workers would save, not
+whether a suite's files leave nothing behind in their process: pathe's,
+hono's and tRPC's leaks came from ordinary test files with nothing in their
+configuration to tell them apart, and one leak changes a verdict. A rule that
+picks warm workers where they pay would pick them where they are wrong. The
+sound part of what they saved, a worker's start, is what workers started
+ahead save.
+
 Node's compile cache (`NODE_COMPILE_CACHE`, which Vitest does not turn on) was
 tried as a sound way to start copies faster, and also dropped: the strong pass
 was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
 the measured run the same everywhere. What warm workers saved is starting a
 process and Vitest for each copy, not compiling.
 
+The last version with warm workers (`SUPERCOV_STRONG_WARM=1`) is kept on the
+branch `archive/strong-warm-workers`, for a later attempt to make them exact:
+resetting what a test file leaves behind in its process, or proving per file
+that it leaves nothing.
+
 The pass summary's `profile` records its copies (of mutants, confirmations,
 and those that skipped), the copies stopped and hung, and for each stage its
-copies, its wall time, the copies' own time (claim to end), and when its last
-copy started. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
+copies, its wall time, the copies' own time (claim to end), when its last
+copy started and, on Linux, the share of the machine's CPU time that was busy
+(`cpuBusy`, also for the whole pass). A copy's start (`startMs`) counts from
+when its worker was handed to Vitest. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
 Vitest's own process for the whole pass.
 
 ## Baselines
@@ -571,9 +629,22 @@ runner allows:
 | Mocha | `Mocha#files` filtered before loading | tests removed from their suites (a suite left empty runs no hook) | `Runner#abort` |
 | node:test | a child of another file ends before it loads | registered as skipped | `t.skip()` |
 | AVA | (each worker loads its file) | `runTest` not run | later tests not run |
-| tap | a child of another file ends before it loads | top-level subtests `skip` | later subtests `skip` |
+| tap | the file run by itself | top-level subtests `skip` | later subtests `skip` |
 | bun:test | the file named on the command line | registered through `test.skip` | later tests return |
 | Vitest Browser Mode | the file as a CLI filter | `context.skip()` | `context.skip()` |
+
+tap and node:test count a test file as a test of its own: assertions at its
+top level, outside any subtest, pass or fail it, and StrykerJS's tap runner
+kills a mutant on them. So the adapters record a file's top level as a test,
+`(top level)`, where it asserts there (tap) or has no `test()` (node:test),
+with what ran there; in a file with subtests it is the file's module setup
+(tap) or counts for the run (node:test). Before, what such a file ran was in
+no test's evidence, and a mutant only its top-level assertions caught was
+never run against it (ini: 14 mutants StrykerJS killed through `win32.js`
+and `proto.js`). A tap job runs its JavaScript file by itself, `node <file>`,
+as tap's runner and StrykerJS's do: tap's command keeps its working files in
+the project, and two of them side by side broke each other's (`External ID
+used by multiple processes`).
 
 A subtest runs with its parent. A job's outcomes are the adapter's ordinary
 evidence records, in the job's own evidence directory: nothing new is
@@ -622,7 +693,63 @@ projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
 command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
 its own), then Supercov, and joins every mutant's verdicts.
 
-RESULTS
+Measured on SoroCI, one project per 16-CPU machine (c8a/m8a.4xlarge), both
+tools with 15 workers. Times in seconds; Supercov's are its measured run
+(with the mutants' values) and its strong pass. "Joined" counts the mutants
+both list: StrykerJS's `Regex` mutants are not listed by Supercov (see
+`mutants.md`), and are left out.
+
+| project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| bytes.js | Mocha | mocha | 126 | 0 | 2.7 | 1.0 + 1.7 |
+| negotiator | Mocha | mocha | 544 | 0 | 2.9 | 1.1 + 5.9 |
+| ms | Jest | jest | 204 | 0 | 4.9 | 2.0 + 21.8 |
+| cron-parser | Jest | jest | 429 | 1 (error) | 33.6 | 2.8 + 37.3 |
+| classnames | node:test | command | 159 | 0 | 7.8 | 0.7 + 2.5 |
+| camelcase | node:test | command | 217 | 0 | 10.5 | 1.3 + 3.6 |
+| dot-prop | AVA | command | 584 | 0 | 50.1 | 1.4 + 28.5 |
+| p-map | AVA | command | 512 | 1 | 347.8 | 23.4 + 110.7 |
+| ini | tap | tap | 389 | 0 (28 StrykerJS errors) | 13.4 | 1.6 + 5.9 |
+| remix-auth | bun:test | command | 625 | 0 | 7.2 | 0.8 + 2.0 |
+| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.3 | 9.0 + 27.9 |
+
+No mutant StrykerJS detected (killed or timed out) is `survived` or
+`no-coverage` in Supercov, and none it let live is detected by Supercov but
+the ones explained here, each applied by hand:
+
+- p-map, `index.js:426` `preserveOrder` to `true`: Supercov kills it with
+  "with `preserveOrder: false`, a mapper error drops pending input while the
+  consumer is busy". Applied by hand, that test fails run alone (`ava --match`)
+  and passes in the whole suite, where AVA runs every test of the file at
+  once and the consumer is never busy at that moment. StrykerJS's command
+  runner runs the whole suite. A kill of the subset, as on hono.
+- ini: StrykerJS's tap runner ended 28 mutants in `RuntimeError`, which its
+  score leaves out; Supercov kills 22 and times out 6. Applied by hand
+  (`ini.js:52` `&&` to `||`), `bar.js`, `foo.js` and `win32.js` fail.
+- cron-parser `CronExpressionParser.ts:454` and mini-throttle `index.ts:25`,
+  a function body emptied: no switch could be placed
+  (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
+  An error is no verdict either way.
+- Verdicts StrykerJS and Supercov both detect differ in kind 48 times
+  (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
+  wrong is whichever the runner sees first.
+
+The validation found three soundness bugs, fixed before these numbers:
+assertions at a tap or node:test file's top level belonged to no test (ini:
+14 mutants only `win32.js` and `proto.js` killed survived); a condition that
+calls something was decided `survived` from its value alone (dot-prop
+`index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
+no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
+runs the whole command per mutant, and Supercov's jobs of one file and its
+candidates are 3-4 times faster (p-map 348 s against 134 s). Against
+StrykerJS's in-process Mocha runner a job's process start costs more: bytes.js
+about even, negotiator 2.4 times slower. Jest is slowest: each job starts Jest
+(about 1 s), where StrykerJS's runner keeps it resident; ms takes 4.9 s under
+StrykerJS and 23.8 s under Supercov, cron-parser 33.6 s and 40.1 s. Under tap,
+a job runs its file with `node` alone, as StrykerJS's runner does: ini 13.4 s
+against 7.5 s.
 
 ## Not yet
 

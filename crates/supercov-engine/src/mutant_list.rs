@@ -334,6 +334,12 @@ pub struct CandidateMutant {
     /// truthiness with the mutant does not show their values were equal.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub value_used: bool,
+    /// A `ConditionalExpression` mutant whose original runs code or changes
+    /// state as it is evaluated (a call in a condition): the literal that
+    /// replaces it skips that, so the condition's value alone cannot show
+    /// the mutant changes nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effects: bool,
     /// The innermost statement point containing the mutant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
