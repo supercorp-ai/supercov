@@ -140,12 +140,18 @@ Overview's first card gains a **Mutants** figure: the mutation score once
 mutants the tests leave alive. Below it, a **Mutation testing** card holds the
 rest:
 
-- **Weak mutation**: its score, the share of mutants a test infects, and the
+- **Weak mutation**: its score, the share of mutants a test infects, with how
+  many mutants it is over and how many unknown or equivalent ones it leaves
+  out, and the
   mutants by weak status (infected, not infected with any at a clock or random
   boundary, not reached, unknown, equivalent), with the score over the
   mutants a test reaches.
 - **Strong mutation**: the mutation score, killed and timed-out over those and
-  the survivors and uncovered, and every verdict counted: killed, timed out,
+  the survivors and uncovered, with how many mutants it is over (`of 12 of 40
+  mutants`): a score of a few mutants is not the run's. Where no mutant got a
+  verdict the score counts, the card says so and what they got instead (`No
+  mutation score: none of the 28 mutants was killed, timed out, survived or
+  left uncovered (28 errors)`). Every verdict is counted: killed, timed out,
   survived, no coverage, equivalent, unviable (does not compile), error, and
   not run for a language no driver runs yet (`not run: no driver for cobol`).
   Mutants with no verdict, after a pass narrowed by `--diff`, `--file` or

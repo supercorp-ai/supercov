@@ -267,10 +267,22 @@ pub(crate) fn markdown(
         .map(|(count, name)| format!("{count} {name}"))
         .collect::<Vec<_>>()
         .join(" · ");
-        let mutation = tally
-            .mutation_score
-            .map_or_else(|| "—".to_owned(), |score| format!("{:.1}%", score * 100.0));
-        counts = format!("{counts}\n\nMutation score **{mutation}** · {verdicts}");
+        // The score with what it is over: a score of a few mutants is not
+        // the run's, and no score says why.
+        let strong = &tally.strong;
+        let basis = strong.killed + strong.timeout + strong.survived + strong.no_coverage;
+        let mutation = match tally.mutation_score {
+            Some(score) => format!(
+                "Mutation score **{:.1}%** (of {basis} of {})",
+                score * 100.0,
+                plural(tally.mutants, "mutant")
+            ),
+            None => {
+                "No mutation score: no mutant was killed, timed out, survived or left uncovered"
+                    .to_owned()
+            }
+        };
+        counts = format!("{counts}\n\n{mutation} · {verdicts}");
     }
     let mut text = String::new();
     match &data.diff {
@@ -305,7 +317,13 @@ pub(crate) fn markdown(
             .join(" or ")
     };
     if rows.is_empty() {
-        text.push_str(&format!("\nNo mutant is {names}.\n"));
+        // Nothing the tests leave alive, in the words a comment's reader uses.
+        let said = if asked_statuses || strong {
+            format!("No mutant is {names}.")
+        } else {
+            "No mutant is left alive: none is not infected or not reached.".to_owned()
+        };
+        text.push_str(&format!("\n{said}\n"));
         return text;
     }
     let weak_status = |mutant: &supercov_engine::mutants_query::MutantEntry| {
@@ -528,7 +546,7 @@ mod tests {
         mutants.push(mutant(36, Infected, None));
         let text = markdown(&request(), &data(mutants.clone()));
         assert!(
-            text.contains("\n\nMutation score **6.5%** · 1 killed · 1 timed out · 28 survived · 1 no coverage · 1 unviable · 1 error · 1 not run (no driver) · 2 no strong verdict\n"),
+            text.contains("\n\nMutation score **6.5%** (of 31 of 36 mutants) · 1 killed · 1 timed out · 28 survived · 1 no coverage · 1 unviable · 1 error · 1 not run (no driver) · 2 no strong verdict\n"),
             "{text}"
         );
         assert!(
@@ -560,7 +578,7 @@ mod tests {
             &data(vec![mutant(1, Infected, Some(json!({"status": "killed"})))]),
         );
         assert!(
-            text.contains("Mutation score **100.0%** · 1 killed\n"),
+            text.contains("Mutation score **100.0%** (of 1 of 1 mutant) · 1 killed\n"),
             "{text}"
         );
         assert!(
@@ -572,7 +590,7 @@ mod tests {
             &request(),
             &data(vec![mutant(1, Infected, Some(json!({"status": "error"})))]),
         );
-        assert!(text.contains("Mutation score **—** · 1 error\n"), "{text}");
+        assert!(text.contains("No mutation score: no mutant was killed, timed out, survived or left uncovered · 1 error\n"), "{text}");
     }
 
     #[test]

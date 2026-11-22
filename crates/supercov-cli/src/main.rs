@@ -2227,6 +2227,17 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             };
             supercov_engine::coverage_export::export(&view, &format, timestamp, &root, &sources)?
         };
+        // An HTML document is not for a terminal: without `--output` it goes
+        // beside the store's other reports, whose `.gitignore` keeps it out
+        // of a commit, and the path is said. A pipe or a redirect still gets
+        // the document.
+        let to_terminal = output.is_none()
+            && format == "html"
+            && std::io::IsTerminal::is_terminal(&std::io::stdout());
+        // The store's own report is replaced each time, as `report`'s is.
+        let force = force || to_terminal;
+        let output = output
+            .or_else(|| to_terminal.then(|| root.join(".supercov/reports/coverage-report.html")));
         match output {
             Some(path) => {
                 // `--output coverage/report` names a directory for the HTML

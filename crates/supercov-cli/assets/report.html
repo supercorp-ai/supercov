@@ -1457,7 +1457,9 @@
       head.append(markCoverage(score, 62, tally.survivors));
       const stack = node("div", "figure-stack");
       const figure = node("div", "figure"); figure.append(node("span", "figure-number", score == null ? "\u2014" : pct(score)));
-      stack.append(figure, node("div", "figure-unit", data.strong ? "mutation score" : "weak mutation score")); head.append(stack); metric.append(head);
+      const basis = data.strong ? strongBasis(tally) : weakBasis(tally);
+      stack.append(figure, node("div", "figure-unit", `${data.strong ? "mutation score" : "weak mutation score"} \u00b7 ${basisLabel(basis, tally.mutants)}`)); head.append(stack); metric.append(head);
+      if (score == null && data.strong) metric.title = noScoreReason(tally);
       const counts = node("ul", "mutant-counts"); counts.setAttribute("aria-label", "Mutants by status");
       const count = (value, label, open) => { const item = node("li", open && value ? "open" : ""); item.append(node("strong", "", integer(value)), document.createTextNode(` ${label}`)); counts.append(item); };
       count(tally.survivors, "left alive", true);
@@ -1499,7 +1501,8 @@
         stack.append(figure, node("div", "figure-unit", unit)); top.append(stack); block.append(top); return block;
       };
       const list = (rows) => { const counts = node("ul", "mutant-counts"); rows.filter(([value, , always]) => value || always).forEach(([value, label, , open]) => { const item = node("li", open && value ? "open" : ""); item.append(node("strong", "", integer(value)), document.createTextNode(` ${label}`)); counts.append(item); }); return counts; };
-      const weakBlock = level("Weak mutation", tally.weakScore == null ? null : tally.weakScore * 100, "of mutants a test infects");
+      const weakBlock = level("Weak mutation", tally.weakScore == null ? null : tally.weakScore * 100, `infected, ${basisLabel(weakBasis(tally), tally.mutants)}`);
+      if ((weak.unknown || 0) + (weak.equivalent || 0)) weakBlock.append(node("p", "", `The score leaves out ${integer((weak.unknown || 0) + (weak.equivalent || 0))} unknown or equivalent ${(weak.unknown || 0) + (weak.equivalent || 0) === 1 ? "mutant" : "mutants"}.`));
       weakBlock.append(list([
         [weak.infected || 0, "infected: a test changed the mutant's value", true],
         [weak["not-infected"] || 0, data.summary.untestable ? `not infected (${integer(data.summary.untestable)} at a clock or random boundary)` : "not infected: reached, its value never changed", true, true],
@@ -1508,7 +1511,8 @@
         [weak.equivalent || 0, "equivalent: no input can tell it apart"]
       ]));
       if (data.summary.weakScoreReached != null) weakBlock.append(node("p", "", `${pct(data.summary.weakScoreReached * 100)} of the mutants a test reaches.`));
-      const strongBlock = level("Strong mutation", data.strong && tally.mutationScore != null ? tally.mutationScore * 100 : null, "killed of mutants with a verdict");
+      const strongBlock = level("Strong mutation", data.strong && tally.mutationScore != null ? tally.mutationScore * 100 : null, data.strong ? `killed or timed out, ${basisLabel(strongBasis(tally), tally.mutants)}` : "no strong pass yet");
+      if (data.strong && tally.mutationScore == null) strongBlock.append(node("p", "", noScoreReason(tally)));
       if (!data.strong) {
         const copy = node("p", ""); copy.append(document.createTextNode("No strong pass has run: no test was run against a mutant yet. "), node("code", "", `npx supercov runs ${run.id} mutants test`), document.createTextNode(" runs each infected mutant against the tests that infected it."));
         strongBlock.append(copy);
@@ -1914,6 +1918,17 @@
       if (tally.weakScore != null) parts.push(`weak score ${pct(tally.weakScore * 100)}`);
       if (mutantData(run)?.strong) parts.push(tally.mutationScore == null ? "no mutation score yet" : `mutation score ${pct(tally.mutationScore * 100)}`);
       return parts.join(" \u00b7 ");
+    }
+    // How many mutants each score is over: a score of a few decided mutants
+    // is not a score of the run.
+    function weakBasis(tally) { const weak = tally.weak || {}; return (weak.infected || 0) + (weak["not-infected"] || 0) + (weak["not-reached"] || 0); }
+    function strongBasis(tally) { const strong = tally.strong || {}; return (strong.killed || 0) + (strong.timeout || 0) + (strong.survived || 0) + (strong.noCoverage || 0); }
+    function basisLabel(count, total) { return `of ${integer(count)}${count === total ? "" : ` of ${integer(total)}`} ${total === 1 ? "mutant" : "mutants"}`; }
+    // Why there is no mutation score, from what the mutants did get.
+    function noScoreReason(tally) {
+      const strong = tally.strong || {};
+      const parts = [[strong.error, "errors"], [strong.notRun, "not run for want of a driver"], [strong.unviable, "unviable"], [strong.equivalent, "equivalent"], [strong.pending, "without a verdict yet"]].filter(([value]) => value).map(([value, label]) => `${integer(value)} ${label}`);
+      return `No mutation score: none of the ${integer(tally.mutants)} ${tally.mutants === 1 ? "mutant was" : "mutants was"} killed, timed out, survived or left uncovered${parts.length ? ` (${parts.join(", ")})` : ""}.`;
     }
     function mutantHint(mutant) { return mutant.untestable ? `At a ${mutant.untestable} boundary: only one exact ${mutant.untestable === "clock" ? "millisecond" : "random value"} tells it apart` : ""; }
     function mutantLine(mutant) { return `${mutantHeadline(mutant)}: ${mutant.change} \u2014 ${mutant.why}`; }

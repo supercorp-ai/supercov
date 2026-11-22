@@ -423,7 +423,8 @@ in one line. `--json` lists every mutant of the change, survivors first, with
 one line, then up to 25 not-infected and not-reached mutants (or those
 `--status` names) with where they are (`file:line:column`), what they change,
 their status and why, and the command that lists the rest. Once `mutants test`
-gave verdicts, a second line has the mutation score and every verdict counted
+gave verdicts, a second line has the mutation score, with how many mutants it
+is over (or, with none, why there is no score), and every verdict counted
 (killed, timed out, survived, no coverage, unviable, error, not run for want
 of a driver, and those with none yet), and the table lists the survivors: the
 mutants that survived or that no test covers, then those weak mutation shows
@@ -712,7 +713,9 @@ npx supercov runs report --format lcov --kind e2e --output coverage/e2e.info
 repository-relative with forward slashes, ordering is stable, and the file is
 written atomically; an existing file is kept unless you pass `--force`. Without
 `--output` the report goes to stdout and diagnostics to stderr, so a redirect
-captures only the report.
+captures only the report; an HTML report asked for in a terminal is written to
+`.supercov/reports/coverage-report.html` instead, replaced each time, and its
+path said.
 
 Supercov records that a line ran, not how many times, so `DA:`, `hits`,
 Istanbul's counts and Clover's `count` state `1` or `0`. They are not execution

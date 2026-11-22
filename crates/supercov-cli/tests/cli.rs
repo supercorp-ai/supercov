@@ -24544,7 +24544,7 @@ fn mutants_export_as_lines_or_a_table_and_says_what_it_cannot_write() {
         &empty,
         &[
             "**0 mutants**: weak score **—**\n",
-            "No mutant is not infected or not reached.",
+            "No mutant is left alive: none is not infected or not reached.",
         ],
     );
     let clock = export(&["src/clock.js", "--format", "markdown"]).succeeds();
@@ -24769,7 +24769,8 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
     contains_all(
         &markdown,
         &[
-            "Mutation score **66.7%** · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
+            "Mutation score **66.7%** (of 3 of ",
+            " mutants) · 1 killed · 1 timed out · 1 survived · 1 not run (no driver)",
             "| Where | Mutant | Weak | Strong | Why |",
             " | survived | every test that reached it passed with it in place (2 tests ran) |",
         ],
@@ -24817,6 +24818,21 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
     assert!(kept["files"].get("src/tax.py").is_none());
     let bogus = export(&["--format", "bogus"]).exits(2);
     assert!(bogus.contains("jsonl, markdown, stryker or pit"), "{bogus}");
+    // The static HTML export is not printed into a terminal: it is written
+    // beside the store's reports, again each time, and the path said.
+    for _ in 0..2 {
+        let mut terminal =
+            common::OnTerminal::start(&project, &["runs", "latest", "report", "--format", "html"]);
+        terminal.wait_for("coverage-report.html (html)");
+        let (code, seen) = terminal.finish();
+        assert_eq!(code, 0, "{seen}");
+        assert!(!seen.contains("<!doctype"), "{seen}");
+    }
+    assert!(
+        project
+            .read(".supercov/reports/coverage-report.html")
+            .starts_with("<!doctype html>")
+    );
     // A change with no mutant on its lines still says what it was narrowed to.
     repository.commit("everything");
     let unchanged = report("unchanged.html", &["--diff", "HEAD"]);
