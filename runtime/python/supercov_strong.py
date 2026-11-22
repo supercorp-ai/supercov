@@ -888,6 +888,16 @@ class Driver:
         workers = _workers()
         pending = list(jobs)
         running: list = []
+        try:
+            self._loop(pending, running, workers, on_done)
+        except KeyboardInterrupt:
+            # The forks are process groups of their own, which the
+            # interrupt did not reach.
+            for child in running:
+                self._kill(child)
+            raise
+
+    def _loop(self, pending, running, workers, on_done) -> None:
         while pending or running:
             while pending and len(running) < workers:
                 job = pending.pop(0)
@@ -908,7 +918,7 @@ class Driver:
                     pending[0:0] = more or []
                 else:
                     still.append(child)
-            running = still
+            running[:] = still
 
     def run(self) -> None:
         started = time.monotonic()
@@ -1116,6 +1126,13 @@ class _PytestRunner:
         return item.nodeid
 
     def run(self, items, report, stop_at_failure) -> None:
+        # Only a fork or a fresh interpreter runs tests: pytest's report of
+        # them is noise beside the pass's own, and its terminal writer keeps
+        # a stream of its own that the fork's redirection does not reach.
+        manager = self.session.config.pluginmanager
+        terminal = manager.get_plugin("terminalreporter")
+        if terminal is not None:
+            manager.unregister(terminal)
         for at, item in enumerate(items):
             nextitem = items[at + 1] if at + 1 < len(items) else None
             _reports.clear()
@@ -1145,8 +1162,17 @@ def run_pytest(session) -> bool:
     if _only() is not None:
         run_only(runner)
         return True
-    Driver(Plan(os.environ[PLAN_ENV]), runner, os.environ[RESULTS_ENV]).run()
+    _drive(runner)
     return True
+
+
+def _drive(runner) -> None:
+    """The pass; an interrupt ends the process at once, with no runner's
+    report of it, as Supercov says the pass was interrupted."""
+    try:
+        Driver(Plan(os.environ[PLAN_ENV]), runner, os.environ[RESULTS_ENV]).run()
+    except KeyboardInterrupt:
+        os._exit(130)
 
 
 # -- unittest ----------------------------------------------------------------------
@@ -1272,7 +1298,7 @@ def _patch_unittest() -> None:
         if _only() is not None:
             run_only(runner)
         else:
-            Driver(Plan(os.environ[PLAN_ENV]), runner, os.environ[RESULTS_ENV]).run()
+            _drive(runner)
         import unittest
 
         self.result = unittest.TestResult()

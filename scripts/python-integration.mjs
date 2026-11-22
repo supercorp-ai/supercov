@@ -788,9 +788,10 @@ try {
       { ...strongEnvironment, SUPERCOV_MUTANTS: '1' },
     );
     // `mutants test --json` answers with its reply alone, no envelope.
-    const tested = JSON.parse(
-      successfulSupercov(strong, ['runs', 'latest', 'mutants', 'test', '--json'], strongEnvironment).stdout,
-    );
+    const pass = successfulSupercov(strong, ['runs', 'latest', 'mutants', 'test', '--json'], strongEnvironment);
+    const tested = JSON.parse(pass.stdout);
+    // pytest's report of each fork's tests stays out of what Supercov says.
+    assert.doesNotMatch(pass.stderr, /\[\s*\d+%\]|passed in|failed in/u, pass.stderr);
     assert.equal(tested.summary.error, 0, JSON.stringify(tested));
     assert.equal(tested.passes[0].runner, 'pytest', JSON.stringify(tested));
     const listed = query(strong, ['runs', 'latest', 'mutants', '--limit', '0'], strongEnvironment);
