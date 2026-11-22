@@ -624,10 +624,9 @@ impl Printer<'_> {
             "float" => {
                 matches!(node.child(0), Child::Float(bits) if f64::from_bits(*bits).is_sign_positive())
             }
-            "begin" => {
-                node.span.is_some() && !node.has(syntax::SYNTHETIC)
-                    || node.span.is_none() && node.children.is_empty()
-            }
+            // Parentheses as written, or none (no statement list is an
+            // operand).
+            "begin" => node.span.is_some() || node.children.is_empty(),
             "hash" => !node.has(syntax::SYNTHETIC),
             "send" | "csend" => {
                 let selector = node.child(1).sym().unwrap_or_default();
@@ -652,12 +651,9 @@ impl Printer<'_> {
                     },
                 }
             }
-            "block" | "numblock" | "itblock" => {
-                node.has(syntax::BRACES)
-                    && node
-                        .node(0)
-                        .is_some_and(|call| call.ty == "lambda" || self.atomic(call))
-            }
+            // A `{ }` block's call is a lambda or atomic: `a.b 1 { }` does
+            // not parse.
+            "block" | "numblock" | "itblock" => node.has(syntax::BRACES),
             "super" | "yield" => {
                 node.span.is_none() || self.slice(node).is_some_and(|text| text.ends_with(')'))
             }
@@ -668,11 +664,16 @@ impl Printer<'_> {
     /// `node` as a receiver or operand.
     fn operand(&self, node: &N) -> Option<String> {
         let text = self.expression(node)?;
-        Some(if self.atomic(node) {
+        Some(self.wrapped(node, text))
+    }
+
+    /// `text`, `node`'s code, in parentheses unless `node` is atomic.
+    fn wrapped(&self, node: &N, text: String) -> String {
+        if self.atomic(node) {
             text
         } else {
             format!("({text})")
-        })
+        }
     }
 
     /// `node` as an argument of a call, an element of a literal, a value.
@@ -1114,7 +1115,7 @@ impl Printer<'_> {
                     {
                         format!(
                             "{} ? {} : {}",
-                            self.operand(node.node(0).expect("a condition"))?,
+                            self.wrapped(node.node(0).expect("a condition"), condition),
                             self.operand(then_branch)?,
                             self.operand(else_branch)?
                         )

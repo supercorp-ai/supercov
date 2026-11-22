@@ -194,6 +194,8 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
     a ? b : nil
     a ? nil : b
     a ? (b; a.call) : nil
+    a ? nil : (b; a.call)
+    if a then (b; a.call) else b end
     if a
     elsif b
       1
