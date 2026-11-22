@@ -174,10 +174,18 @@ fn newest_of(fixture: &str) -> &'static Recording {
 /// Runs `check` on every recording checked here at once, and reports every
 /// one that failed rather than the first.
 fn each_recording(check: impl Fn(&Recording) + Sync) {
-    let checked = RECORDINGS
-        .iter()
-        .filter(|recording| checked_here(recording))
-        .collect::<Vec<_>>();
+    each_of(
+        RECORDINGS
+            .iter()
+            .filter(|recording| checked_here(recording))
+            .collect(),
+        check,
+    );
+}
+
+/// Runs `check` on each of `checked` at once, and reports every one that
+/// failed rather than the first.
+fn each_of(checked: Vec<&'static Recording>, check: impl Fn(&Recording) + Sync) {
     let failures = std::thread::scope(|scope| {
         let handles = checked
             .iter()
@@ -248,14 +256,16 @@ fn the_corpus_holds_runs_of_every_minor_release() {
         serde_json::from_str(&fs::read_to_string(corpus().join("../../package.json")).unwrap())
             .unwrap();
     let current = release_key(package["version"].as_str().unwrap());
-    // Each minor release before the one this checkout is or prepares; the
-    // release prepared is recorded once it is published.
+    // Each minor release the changelog has, up to the one this checkout
+    // carries: a release commit, which gives its version a section, records
+    // itself before it is published (`scripts/compat-record.sh <fixture>
+    // checkout`).
     let mut minors = changelog
         .lines()
         .filter_map(|line| line.strip_prefix("## "))
         .filter(|heading| heading.split('.').count() == 3)
         .map(release_key)
-        .filter(|release| *release < current && release.0 >= 1)
+        .filter(|release| *release <= current && release.0 >= 1)
         .map(|(major, minor, _)| (major, minor))
         .collect::<Vec<_>>();
     minors.dedup();
@@ -290,7 +300,8 @@ fn the_corpus_holds_runs_of_every_minor_release() {
     }
     assert!(
         missing.is_empty(),
-        "record them with scripts/compat-record.sh: {missing:?}"
+        "record them with scripts/compat-record.sh <fixture> <version>, and this checkout's \
+         own release with scripts/compat-record.sh <fixture> checkout: {missing:?}"
     );
 }
 
@@ -605,5 +616,162 @@ fn every_run_any_release_recorded_still_reads() {
         );
         shards_merge_into_the_whole_suite(&installed);
         runs_clean_removes_them(&installed);
+    });
+}
+
+/// The oldest and the newest recording of each JavaScript fixture: the
+/// releases furthest from this one in what a run holds, and the one nearest.
+fn oldest_and_newest_javascript() -> Vec<&'static Recording> {
+    let fixtures = RECORDINGS
+        .iter()
+        .map(|recording| recording.fixture.as_str())
+        .filter(|fixture| fixture.starts_with("javascript"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut chosen = Vec::new();
+    for fixture in fixtures {
+        let oldest = RECORDINGS
+            .iter()
+            .find(|recording| recording.fixture == fixture)
+            .unwrap();
+        chosen.push(oldest);
+        let newest = newest_of(fixture);
+        if newest.release != oldest.release {
+            chosen.push(newest);
+        }
+    }
+    chosen
+}
+
+/// A run any release recorded, then given `supercov runs <id> mutants`: its
+/// mutants are listed from the checkout's sources (it was measured without
+/// them, as every release before 4.29.0 measured) and kept beside it, with
+/// the same answers whichever release measured it. Every query still
+/// answers with the list beside the run, and its shards still merge, the
+/// merge listing what the whole suite does. A strong pass then runs and
+/// saves a verdict for each mutant into the run, or is refused with the
+/// reason where no driver runs the fixtures' runner.
+#[test]
+fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
+    let summary = |installed: &Installed, id: &str| {
+        let reply: Value = serde_json::from_str(&installed.answers(
+            "mutants",
+            &["runs", id, "mutants", "--json", "--limit", "0"],
+        ))
+        .unwrap();
+        reply["data"]["summary"].clone()
+    };
+    let newest_summaries = oldest_and_newest_javascript()
+        .into_iter()
+        .map(|recording| newest_of(&recording.fixture))
+        .map(|newest| {
+            let installed = newest.install();
+            (
+                newest.fixture.as_str(),
+                summary(&installed, installed.id("full")),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    each_of(oldest_and_newest_javascript(), |recording| {
+        let installed = recording.install();
+        let file = recording.spec()["file"].as_str().unwrap().to_owned();
+        for run in RUNS {
+            let id = installed.id(run);
+            let listed = summary(&installed, id);
+            assert!(
+                listed["mutants"].as_u64().unwrap_or(0) > 0,
+                "{run}: no mutants listed: {listed}"
+            );
+            assert!(
+                installed
+                    .project
+                    .root
+                    .join(".supercov/runs")
+                    .join(id)
+                    .join("mutants-listed.json")
+                    .is_file(),
+                "{run}: the list is kept beside the run"
+            );
+        }
+        let id = installed.id("full").to_owned();
+        assert_eq!(
+            summary(&installed, &id),
+            newest_summaries[recording.fixture.as_str()],
+            "the mutants and their weak verdicts are those of the newest release's run"
+        );
+        installed.answers("mutants of a file", &["runs", &id, "mutants", &file]);
+        installed.answers(
+            "mutants as markdown",
+            &["runs", &id, "mutants", "--format", "markdown"],
+        );
+        // The list is part of what the query index is built from: the
+        // queries answer from an index built again with it.
+        installed.answers("files", &["runs", &id, "files"]);
+        installed.answers("file", &["runs", &id, "file", &file]);
+        let html = installed.project.root.join("html");
+        installed.answers(
+            "html",
+            &[
+                "runs",
+                &id,
+                "report",
+                "--format",
+                "html",
+                "--output",
+                html.to_str().unwrap(),
+            ],
+        );
+
+        let saved = installed
+            .project
+            .root
+            .join(".supercov/runs")
+            .join(&id)
+            .join("strong-mutation.json");
+        let strong = installed.supercov(&["runs", &id, "mutants", "test", "--json"]);
+        if strong.code() == 0 {
+            let verdicts: Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+            let verdicts = verdicts["mutants"].as_object().unwrap();
+            assert_eq!(
+                verdicts.len() as u64,
+                summary(&installed, &id)["mutants"].as_u64().unwrap(),
+                "a verdict for every mutant"
+            );
+            assert!(
+                verdicts
+                    .values()
+                    .all(|verdict| verdict["status"] != "error"),
+                "{verdicts:?}"
+            );
+        } else {
+            let refused = strong.exits(2);
+            assert!(
+                refused.contains("The strong pass runs tests under vitest, playwright")
+                    && refused.contains("ran under node:test")
+                    && refused.contains("cannot run their mutants"),
+                "{refused}"
+            );
+            assert!(!saved.exists(), "a refused pass saves nothing");
+        }
+
+        let merged = installed.answers(
+            "merge",
+            &["merge", installed.id("shard-1"), installed.id("shard-2")],
+        );
+        let merged_id = merged
+            .split_whitespace()
+            .find(|word| word.starts_with("run_"))
+            .unwrap_or_else(|| panic!("no merged run named\n{merged}"))
+            .to_owned();
+        // The strong verdicts are the whole run's, which the merge of its
+        // shards does not have: everything else is the same.
+        let without_score = |mut summary: Value| {
+            summary["mutationScore"] = Value::Null;
+            summary
+        };
+        assert_eq!(
+            summary(&installed, &merged_id),
+            without_score(summary(&installed, &id)),
+            "the shards merged list the whole suite's mutants"
+        );
     });
 }

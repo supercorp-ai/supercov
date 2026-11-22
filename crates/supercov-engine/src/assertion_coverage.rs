@@ -343,6 +343,7 @@ impl FileView {
 /// them. Publication stores it, so an assessment does not analyse the run's
 /// evidence again (4.4 s of supergateway's 7.6 s of planning).
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct AssessmentInput {
     pub tests: Vec<InputTest>,
     pub points: Vec<InputPoint>,
@@ -386,6 +387,7 @@ impl AssessmentInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct InputTest {
     pub id: String,
     pub file: Option<String>,
@@ -397,6 +399,7 @@ pub struct InputTest {
 /// A statement or decision, with the tests that ran it as indexes into
 /// `AssessmentInput::tests`.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct InputPoint {
     pub file: String,
     pub line: usize,

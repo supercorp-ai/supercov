@@ -2633,10 +2633,20 @@ class MutantTimeoutError extends Error {
   }
 }
 const strongStateKey = Symbol.for("supercov.strongMutation");
+// SUPERCOV_MUTANT_HIT_LIMIT: how often the active mutant may be evaluated in
+// a process before its switch throws (docs/design/mutation-drivers.md).
+function environmentHitLimit() {
+  try {
+    const given = typeof process !== "undefined" && process.env ? Number(process.env["SUPERCOV_MUTANT_HIT_LIMIT"]) : NaN;
+    return Number.isSafeInteger(given) && given > 0 ? given : 1e6;
+  } catch (e) {
+    return 1e6;
+  }
+}
 function strongState() {
   let strong = globalThis[strongStateKey];
   if (strong === void 0) {
-    strong = { slots: /* @__PURE__ */ new Map(), file: void 0, index: -1, hits: 0, limit: 1e6 };
+    strong = { slots: /* @__PURE__ */ new Map(), file: void 0, index: -1, hits: 0, limit: environmentHitLimit() };
     Object.defineProperty(globalThis, strongStateKey, { value: strong, configurable: true });
   }
   return strong;

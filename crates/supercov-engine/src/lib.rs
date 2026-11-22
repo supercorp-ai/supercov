@@ -54,7 +54,6 @@ mod js_mutant_links;
 mod js_mutants;
 mod js_schemata;
 mod js_static_mutants;
-pub mod js_strong;
 mod js_weak_mutation;
 pub mod jvm_instrumenter;
 pub mod jvm_mutants;
@@ -64,6 +63,7 @@ pub mod jvm_schemata;
 pub mod jvm_strong;
 mod kotlin_grammar;
 pub mod lifecycle;
+pub mod mutant_list;
 pub mod mutants_query;
 pub mod orchestration;
 pub mod outside_evidence;
@@ -116,6 +116,10 @@ pub mod source_manifest;
 pub mod source_tools;
 pub mod source_units;
 mod stable_ids;
+#[cfg(test)]
+mod store_shapes;
+pub mod strong_driver;
+pub mod strong_plan;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;

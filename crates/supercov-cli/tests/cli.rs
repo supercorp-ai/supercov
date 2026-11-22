@@ -232,7 +232,7 @@ fn a_measured_suite_reads_back_through_every_query() {
             ],
             &[(
                 "SUPERCOV_TEST_FAULT",
-                "fs.read_from#evidence_archive.rs:676",
+                "fs.read_from#evidence_archive.rs:677",
             )],
         )
         .exits(2);
@@ -1012,12 +1012,12 @@ fn tests_affected_by_a_run_whose_recorded_source_cannot_be_read_are_refused() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_from#evidence_archive.rs:676",
+            "fs.read_from#evidence_archive.rs:677",
         )],
     );
     let said = refused.stderr();
     assert_eq!(refused.code(), 2, "{said}");
-    assert!(fired_at(&said, "evidence_archive.rs:676"), "{said}");
+    assert!(fired_at(&said, "evidence_archive.rs:677"), "{said}");
 }
 
 /// Quality snapshots are read as far as they hold: a catalog entry or finding
@@ -1143,23 +1143,23 @@ fn query_options_and_runs_are_read_or_refused_by_name() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "tests", "affected"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
     // So is a file's source asked of a store that cannot be listed.
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "source", "src/cart.js"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
         )
         .exits(2);
-    assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
     // A run whose entry in the store cannot be read is left out of the list.
     let rejected = project
         .supercov_with(
             &["runs"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:673")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir entry#run_store.rs:681")],
         )
         .succeeds();
     assert!(rejected.contains("showing 0-0 of 0"), "{rejected}");
@@ -1385,11 +1385,11 @@ fn a_merge_of_two_shards_whose_read_or_release_fails_says_so() {
     let second = project.measure(&["--test-name-pattern=shipping"]);
     for (fault, said) in [
         (
-            "fs.read_dir#run_store.rs:673",
+            "fs.read_dir#run_store.rs:681",
             "Cannot read local coverage runs",
         ),
         (
-            "fs.read_from#evidence_archive.rs:676",
+            "fs.read_from#evidence_archive.rs:677",
             "Cannot merge coverage run",
         ),
         ("copy-release", "Could not release merge lock"),
@@ -7267,7 +7267,7 @@ fn tests_that_recorded_no_coverage_can_be_listed() {
     let unread = project
         .supercov_with(
             &["runs", "latest", "tests", "without-evidence", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696=50")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697=50")],
         )
         .json();
     assert_eq!(unread["data"]["tests"][0]["name"], "names are strings");
@@ -8582,7 +8582,7 @@ fn runs_of_two_languages_are_refused_for_what_they_are() {
     let unread = project
         .supercov_with(
             &["merge", &javascript, &python],
-            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:696")],
+            &[("SUPERCOV_TEST_FAULT", "fs.open#evidence_archive.rs:697")],
         )
         .exits(2);
     assert!(unread.contains("recorded by another build"), "{unread}");
@@ -11526,11 +11526,11 @@ fn tests_affected_on_a_merge_counts_a_test_both_parents_ran_once() {
     // a store that cannot be listed cannot answer.
     let unlisted = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
     );
     let said = format!("{}{}", unlisted.stdout(), unlisted.stderr());
     assert_eq!(unlisted.code(), 2, "{said}");
-    assert!(fired_at(&said, "run_store.rs:673"), "{said}");
+    assert!(fired_at(&said, "run_store.rs:681"), "{said}");
     // A run it was merged from that is no longer stored cannot answer.
     std::fs::remove_dir_all(project.root.join(".supercov/runs").join(&first)).unwrap();
     let gone = project
@@ -14014,8 +14014,8 @@ fn a_configuration_added_since_the_run_affects_the_tests_of_its_runner() {
     // With no record of the runners the run used, or of its files, the
     // change cannot be put on other runners: it reaches every test.
     for fault in [
-        "fs.open#evidence_archive.rs:696=50",
-        "fs.open#source_manifest.rs:359@2",
+        "fs.open#evidence_archive.rs:697=50",
+        "fs.open#source_manifest.rs:365@2",
     ] {
         let unjudged = project
             .supercov_with(
@@ -14685,7 +14685,7 @@ fn a_query_whose_own_index_read_fails_is_refused() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "files", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
         )
         .exits(2);
     assert!(
@@ -14750,12 +14750,12 @@ fn an_index_that_cannot_be_opened_is_built_again() {
     let project = Project::cart("index-reopened");
     project.measure(&[]);
     for (fault, place) in [
-        ("fs.open#query_index.rs:336", "query_index.rs:336"),
+        ("fs.open#query_index.rs:337", "query_index.rs:337"),
         (
-            "fs.read_exact_from#query_index.rs:336",
-            "query_index.rs:336",
+            "fs.read_exact_from#query_index.rs:337",
+            "query_index.rs:337",
         ),
-        ("fs.open#query_index.rs:353", "query_index.rs:353"),
+        ("fs.open#query_index.rs:354", "query_index.rs:354"),
     ] {
         let ran = project.supercov_with(
             &["runs", "latest", "files"],
@@ -14818,7 +14818,7 @@ fn an_index_that_cannot_be_read_mid_command_is_named() {
     // Nor whose published run cannot be found again to read.
     for (fault, place) in [
         ("coverage-index@2", "coverage-index"),
-        ("fs.symlink_metadata#run_store.rs:619", "run_store.rs:619"),
+        ("fs.symlink_metadata#run_store.rs:627", "run_store.rs:627"),
     ] {
         let project = Project::cart("index-failed-run");
         project.edit("test/cart.test.js", "20);", "21);");
@@ -17119,7 +17119,7 @@ fn an_import_whose_step_fails_says_so() {
         "fs.rename@3",
         "fs.rename@4",
         // The store of runs listed, and the lock released after importing.
-        "fs.read_dir#run_store.rs:673",
+        "fs.read_dir#run_store.rs:681",
         "copy-release",
     ] {
         let project = Project::cart("import-steps");
@@ -17622,8 +17622,8 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.canonicalize#process_supervision.rs:1796",
         "fs.create_dir_all#javascript_run.rs:1171",
         "fs.create_dir_all#javascript_run.rs:1361",
-        "fs.read_dir#evidence_archive.rs:262",
-        "fs.create_dir_all#evidence_archive.rs:483",
+        "fs.read_dir#evidence_archive.rs:263",
+        "fs.create_dir_all#evidence_archive.rs:484",
         "fs.create_dir_all#javascript_run.rs:1636",
         "fs.create_dir_all#javascript_run.rs:1638",
         "fs.create_dir_all#lifecycle.rs:1055",
@@ -17871,9 +17871,9 @@ fn a_gaps_export_that_cannot_read_file_details_is_refused() {
         "coverage-index-read#3",
         // The index opened again for the details, and rebuilt from evidence
         // that cannot be read.
-        "fs.open#query_index.rs:353@2,fs.open#query_index.rs:353@3,fs.read_from#evidence_archive.rs:676",
+        "fs.open#query_index.rs:354@2,fs.open#query_index.rs:354@3,fs.read_from#evidence_archive.rs:677",
         // The runs listed again for the details.
-        "fs.read_dir#run_store.rs:673@2",
+        "fs.read_dir#run_store.rs:681@2",
     ] {
         let refused = project
             .supercov_with(
@@ -17934,11 +17934,11 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
         &["report", "--no-open", "--output", "spanless.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read#run_store.rs:1334,fs.read_from#evidence_archive.rs:676",
+            "fs.read#run_store.rs:1356,fs.read_from#evidence_archive.rs:677",
         )],
     );
     assert!(
-        fired_at(&spanless.stderr(), "evidence_archive.rs:676"),
+        fired_at(&spanless.stderr(), "evidence_archive.rs:677"),
         "{}",
         spanless.stderr()
     );
@@ -20252,10 +20252,10 @@ fn a_report_of_runs_it_cannot_find_is_refused_and_odd_snapshots_are_shown() {
     assert!(missing.contains("coverage run not found"), "{missing}");
     let unlisted = project.supercov_with(
         &report,
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
     );
     assert_eq!(unlisted.code(), 2, "{}", unlisted.stderr());
-    assert!(fired_at(&unlisted.stderr(), "run_store.rs:673"));
+    assert!(fired_at(&unlisted.stderr(), "run_store.rs:681"));
     snapshot(&project, "q_0000000000000001", serde_json::json!([]));
     snapshot(
         &project,
@@ -20283,21 +20283,21 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.canonicalize#source_manifest.rs:780",
+            "fs.canonicalize#source_manifest.rs:786",
         )],
     );
     assert_ne!(unresolved.code(), 0, "{}", unresolved.stderr());
-    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:780"));
+    assert!(fired_at(&unresolved.stderr(), "source_manifest.rs:786"));
     let unread = project.supercov_with(
         &["runs", "latest", "tests", "affected"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#source_manifest.rs:791",
+            "fs.read_to_string#source_manifest.rs:797",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert!(!said.contains("panicked"), "{said}");
-    assert!(fired_at(&said, "source_manifest.rs:791"), "{said}");
+    assert!(fired_at(&said, "source_manifest.rs:797"), "{said}");
 }
 
 /// A JavaScript run beside a wasm library prepares the library in the copy:
@@ -20363,7 +20363,7 @@ fn a_run_whose_execution_record_cannot_be_written_is_not_published() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.create_dir_all#source_manifest.rs:443",
+            "fs.create_dir_all#source_manifest.rs:449",
         )],
     );
     assert_eq!(ran.code(), 1, "{}", ran.stderr());
@@ -20388,12 +20388,12 @@ fn a_run_whose_index_cannot_be_written_is_still_published() {
     let project = Project::cart("index-unwritten");
     let ran = project.supercov_with(
         &["--", "node", "--test"],
-        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:322")],
+        &[("SUPERCOV_TEST_FAULT", "fs.rename#query_index.rs:323")],
     );
     assert_eq!(ran.code(), 0, "{}", ran.stderr());
     assert!(
         ran.stderr()
-            .contains("test fault at fs (query_index.rs:322 rename)"),
+            .contains("test fault at fs (query_index.rs:323 rename)"),
         "{}",
         ran.stderr()
     );
@@ -20458,11 +20458,11 @@ fn a_stale_query_whose_record_cannot_be_read_still_answers() {
     project.edit("src/cart.js", "let sum = 0;", "let sum = 0; // edited");
     let ran = project.supercov_with(
         &["runs", "latest", "files", "--json"],
-        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:359")],
+        &[("SUPERCOV_TEST_FAULT", "fs.open#source_manifest.rs:365")],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (source_manifest.rs:359 open)"),
+            .contains("test fault at fs (source_manifest.rs:365 open)"),
         "{}",
         ran.stderr()
     );
@@ -20481,11 +20481,11 @@ fn a_merged_run_whose_parents_cannot_be_listed_is_judged_by_its_own_command() {
     project.supercov(&["merge", &first, &second]).succeeds();
     let ran = project.supercov_with(
         &["runs", "latest", "files"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673@2")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681@2")],
     );
     assert!(
         ran.stderr()
-            .contains("test fault at fs (run_store.rs:673 read_dir)"),
+            .contains("test fault at fs (run_store.rs:681 read_dir)"),
         "{}",
         ran.stderr()
     );
@@ -20583,7 +20583,7 @@ fn a_line_read_from_the_working_tree_is_stale_only_by_the_runs_record() {
     };
     assert_eq!(origin(""), "working-tree-stale");
     assert_eq!(
-        origin("fs.open#source_manifest.rs:359=10"),
+        origin("fs.open#source_manifest.rs:365=10"),
         "working-tree-current"
     );
 }
@@ -21826,6 +21826,42 @@ fn the_strong_plan_runs_each_infected_mutant_against_the_tests_that_infected_it(
     assert_eq!(reply["summary"]["mutants"], 15);
 }
 
+/// A run whose mutants are of a language no strong driver runs yet: the
+/// plan still decides them, and each it would run is an error that says so.
+#[cfg(unix)]
+#[test]
+fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
+    let project = vitest_mutants_project("strong-undriven");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let run = project.latest();
+    // Listed beside the run, as `supercov mutants` lists a plain run's.
+    project.write(
+        &format!(".supercov/runs/{run}/mutants-listed.json"),
+        r#"{"schemaVersion": 1, "mutantSet": "cobol-mutants@1",
+            "mutantSets": {"cobol": "cobol-mutants@1"},
+            "languages": {"src/cart.js": "cobol"},
+            "files": {"src/cart.js": [{"mutator": "BooleanLiteral", "replacement": "false",
+                "start": [2, 7], "end": [2, 16], "original": "sum >= 50"}]}}"#,
+    );
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 1, "{reply}\n{said}");
+    assert!(
+        said.contains("no strong mutation driver for cobol yet: its mutants are errors"),
+        "{said}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let strong = &listed["data"]["mutants"][0]["strong"];
+    assert_eq!(strong["status"], "error", "{listed}");
+    assert_eq!(
+        strong["reason"], "no strong mutation driver for cobol yet",
+        "{listed}"
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -23035,10 +23071,10 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     let unlisted = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan"],
-            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:673")],
+            &[("SUPERCOV_TEST_FAULT", "fs.read_dir#run_store.rs:681")],
         )
         .exits(1);
-    assert!(unlisted.contains("run_store.rs:673"), "{unlisted}");
+    assert!(unlisted.contains("run_store.rs:681"), "{unlisted}");
     // A run whose evidence is cut short after its header, its size as
     // recorded, has no plan. Where the cut lands (a section's header or its
     // compressed body) depends on the run's sizes, so the reason may be either.
@@ -23201,12 +23237,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:769",
+            "fs.write#mutants_test_command.rs:826",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:769"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
         "{}",
         unwritten.stderr()
     );
@@ -23480,7 +23516,7 @@ fn a_run_whose_source_holds_no_code_has_no_mutants_to_test() {
         .exits(1);
     assert!(
         none.contains(&format!(
-            "run {run} measured no JavaScript or TypeScript source"
+            "run {run} listed no mutants and measured no source to list them from"
         )),
         "{none}"
     );

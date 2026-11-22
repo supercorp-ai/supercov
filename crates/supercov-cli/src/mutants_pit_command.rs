@@ -103,9 +103,9 @@ fn compare(run_id: &str, reports: &[String]) -> Result<Value, String> {
         }
         let planned = plan.mutants.iter().find(|mutant| mutant.id == id);
         match planned.and_then(|mutant| mutant.decided) {
-            Some(supercov_engine::js_strong::Decided::NoCoverage) => "no-coverage".into(),
-            Some(supercov_engine::js_strong::Decided::Survived) => "survived".into(),
-            Some(supercov_engine::js_strong::Decided::Equivalent) => "equivalent".into(),
+            Some(supercov_engine::strong_plan::Decided::NoCoverage) => "no-coverage".into(),
+            Some(supercov_engine::strong_plan::Decided::Survived) => "survived".into(),
+            Some(supercov_engine::strong_plan::Decided::Equivalent) => "equivalent".into(),
             None => "not-run".into(),
         }
     };

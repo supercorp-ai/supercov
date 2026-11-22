@@ -4,7 +4,7 @@
 // Jest accepts, or the "jest" key of package.json -- and adds the adapter
 // (jest.cjs) and the reporter (jestReporter.mjs). Nothing of the user's is
 // replaced: their setup files and reporters keep running.
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,25 @@ function jestConfig() {
     throw first;
 }
 
+// A strong pass's job (strongJob.mjs) runs one of the run's test files: the
+// run's others are left out as Jest finds them.
+function strongJobFiles(config) {
+    const path = process.env["SUPERCOV_STRONG_JOB"];
+    if (!path)
+        return {};
+    let spec;
+    try {
+        spec = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+        return {};
+    }
+    const running = new Set(Object.keys(spec.files ?? {}));
+    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const left = (spec.known ?? []).filter((file) => !running.has(file))
+        .map((file) => `^${escape(resolve(process.cwd(), file))}$`);
+    return { testPathIgnorePatterns: [...asList(config.testPathIgnorePatterns ?? "/node_modules/"), ...left] };
+}
+
 export default async function supercovJestConfig() {
     let config = { rootDir: process.cwd() };
     try {
@@ -63,6 +82,7 @@ export default async function supercovJestConfig() {
         process.__SUPERCOV_SKIPPED_COVERAGE_THRESHOLDS__?.("Jest");
     return {
         ...own,
+        ...strongJobFiles(own),
         // Concurrent tests in one file would share the worker's scope.
         maxConcurrency: 1,
         setupFiles: [here("jestRuntime.cjs"), ...asList(config.setupFiles)],

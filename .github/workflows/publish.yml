@@ -74,6 +74,21 @@ jobs:
       - name: Publish the primary package only after every native package exists
         run: npm publish --ignore-scripts --access public
 
+  # Every published release records its runs of each compatibility fixture,
+  # so later releases are held to reading them (tests/compat/README.md). The
+  # recordings come back as a pull request; nothing is pushed to the default
+  # branch, and a failure here leaves the release as it is.
+  compat-record:
+    needs: publish
+    uses: ./.github/workflows/compat-record.yml
+    with:
+      version: ${{ inputs.version }}
+    permissions:
+      contents: write
+      pull-requests: write
+    secrets:
+      COMPAT_PR_TOKEN: ${{ secrets.COMPAT_PR_TOKEN }}
+
   # PyPI, RubyGems and crates.io publish from the same verified release set,
   # each through its registry's trusted publishing, so one tag releases every
   # channel at one version. Each job skips what its registry already has, so a

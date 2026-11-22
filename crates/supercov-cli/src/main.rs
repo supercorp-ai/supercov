@@ -3249,7 +3249,7 @@ fn execute_coverage_query(
     }
     if request.command == "mutants" {
         // A plain run lists its mutants the first time they are asked for.
-        let changed = supercov_engine::js_strong::list_run_mutants(
+        let changed = supercov_engine::strong_plan::list_run_mutants(
             &supercov_engine::coverage_report::ArchiveReportRequest {
                 archive_path: run.evidence_path.clone(),
                 run_id: run.id.clone(),

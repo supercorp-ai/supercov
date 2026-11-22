@@ -58,13 +58,7 @@ pub struct DirectJavascriptRunRequest {
     pub strong: Option<StrongRun>,
 }
 
-/// What a strong pass hands the command: the plan the driver runs, and where
-/// it writes each mutant's verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrongRun {
-    pub plan: PathBuf,
-    pub results: PathBuf,
-}
+pub use crate::strong_driver::StrongRun;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -987,10 +981,10 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
-        if let Some(files) = strong_files(strong) {
+        if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
-            let path = strong_files_path(strong);
+            let path = strong.switched_files_path();
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&files).expect("plain data serializes"),
@@ -1101,14 +1095,18 @@ fn run_javascript(
     // alone (`run_strong_restarts`), with these settings and its own.
     let strong_overrides = request.strong.as_ref().map(|_| overrides.clone());
     // The command, and nothing before it.
+    let command = match &request.strong {
+        Some(strong) => strong_command(strong, &request.command, &workspace),
+        None => request.command.clone(),
+    };
     let plan = ExecutionPlan {
         preparation: Vec::new(),
         test: ExecutionPhase {
             name: "test".into(),
             kind: PhaseKind::Test,
             command: CommandSpec {
-                program: request.command[0].clone().into(),
-                arguments: request.command[1..].iter().map(OsString::from).collect(),
+                program: command[0].clone().into(),
+                arguments: command[1..].iter().map(OsString::from).collect(),
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
                 // A strong pass's command prints its stages: they go to a
@@ -2345,11 +2343,11 @@ mod tests {
             plan: root.join("plan.json"),
             results: root.join("results.jsonl"),
         };
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(&strong.plan, "not json").unwrap();
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(&strong.plan, r#"{"mutants": {}}"#).unwrap();
-        assert_eq!(strong_files(&strong), None);
+        assert_eq!(strong.switched_files(), None);
         std::fs::write(
             &strong.plan,
             r#"{"mutants": [
@@ -2360,7 +2358,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            strong_files(&strong),
+            strong.switched_files(),
             Some(["src/run.js".to_owned(), "src/null.js".to_owned()].into())
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -2895,6 +2893,54 @@ fn run_strong_restarts(
     }
 }
 
+/// What a strong pass starts: the command itself, which Vitest's and
+/// Playwright's configurations turn into their drivers, or, where a mutant's
+/// candidates ran under a runner of `JAVASCRIPT_JOB_RUNNERS`, the jobs driver with the
+/// command after `--`. It runs on Bun where the command is Bun's.
+fn strong_command(strong: &StrongRun, command: &[String], workspace: &Path) -> Vec<String> {
+    let Some(plan) = std::fs::read(&strong.plan)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return command.to_vec();
+    };
+    let tests = plan["tests"].as_array().cloned().unwrap_or_default();
+    let jobs = plan["mutants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
+        .flat_map(|mutant| mutant["candidates"].as_array().cloned().unwrap_or_default())
+        .filter_map(|candidate| candidate["test"].as_u64())
+        .filter_map(|test| tests.get(usize::try_from(test).ok()?))
+        .any(|test| {
+            crate::strong_driver::JAVASCRIPT_JOB_RUNNERS
+                .contains(&test["runner"].as_str().unwrap_or_default())
+        });
+    if !jobs {
+        return command.to_vec();
+    }
+    let on_bun = command.first().is_some_and(|program| {
+        Path::new(program)
+            .file_stem()
+            .is_some_and(|stem| stem == "bun")
+    });
+    let mut driver = vec![
+        if on_bun {
+            command[0].clone()
+        } else {
+            "node".to_owned()
+        },
+        workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string(),
+        "--".to_owned(),
+    ];
+    driver.extend(command.iter().cloned());
+    driver
+}
+
 /// Strong mode for the run's own instrumentation, set back when it ends.
 /// Only the files the plan has a mutant to run in get switches: written
 /// for the processes that instrument on their own beside the results
@@ -2905,7 +2951,7 @@ impl StrongModeGuard {
     fn set(strong: Option<&StrongRun>) -> Self {
         if let Some(strong) = strong {
             crate::js_instrumenter::set_strong_mode(Some(true));
-            crate::js_instrumenter::set_strong_files(strong_files(strong));
+            crate::js_instrumenter::set_strong_files(strong.switched_files());
         }
         Self(strong.is_some())
     }
@@ -2918,24 +2964,4 @@ impl Drop for StrongModeGuard {
             crate::js_instrumenter::set_strong_files(None);
         }
     }
-}
-
-/// The files of the plan's mutants that run: `None` when the plan cannot
-/// be read, which switches every file.
-fn strong_files(strong: &StrongRun) -> Option<std::collections::HashSet<String>> {
-    let plan =
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&strong.plan).ok()?).ok()?;
-    Some(
-        plan["mutants"]
-            .as_array()?
-            .iter()
-            .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
-            .filter_map(|mutant| mutant["file"].as_str().map(str::to_owned))
-            .collect(),
-    )
-}
-
-/// Where a strong pass lists its files for other processes.
-fn strong_files_path(strong: &StrongRun) -> PathBuf {
-    strong.results.with_file_name("strong-files.json")
 }
