@@ -428,6 +428,16 @@ impl Pass<'_> {
     }
 }
 
+/// How many test binaries the pass runs at once: `SUPERCOV_STRONG_WORKERS`,
+/// or every CPU.
+pub fn workers() -> usize {
+    std::env::var("SUPERCOV_STRONG_WORKERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get))
+}
+
 /// The variable the runtime reads its active mutant from.
 pub const ACTIVE_MUTANT_ENV: &str = "SUPERCOV_ACTIVE_MUTANT";
 /// The file the runtime writes when the active mutant passes its hit limit.

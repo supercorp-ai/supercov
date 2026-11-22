@@ -9,7 +9,8 @@
 //! order. This module keeps that table and that order over tree-sitter's
 //! tree, so the list compares with Gremlins' own: a mutant's id carries the
 //! token's position as Gremlins reports it (1-based line, 1-based byte
-//! column) and Gremlins' mutator name, and `scripts/gremlins-parity.mjs`
+//! column) and its mutator (Gremlins' name, or StrykerJS's where the mutation is one of
+//! StrykerJS's: `gremlins_name` maps back), and `scripts/gremlins-parity.mjs`
 //! writes the goldens the tests below compare against.
 //!
 //! Gremlins also has `INVERT_BITWISE` and `INVERT_BWASSIGN`, off by
@@ -25,34 +26,69 @@ use crate::js_mutant_links::{CandidateMutant, MutantOperator};
 /// mutators listed.
 pub const MUTANT_SET: &str = "gremlins@0.6.0";
 
-/// The mutators listed, by Gremlins' names. Gremlins' own flags turn on the
-/// same set: `--invert-assignments --invert-logical --invert-loopctrl
+/// The mutators listed. Where a Gremlins mutator makes the mutation a
+/// StrykerJS mutator makes, the mutant carries StrykerJS's name, which the
+/// weak rules are keyed by (`docs/design/mutation-drivers.md`); Gremlins'
+/// own name is `gremlins_name`'s. Two have no StrykerJS twin and keep
+/// Gremlins' names: `INVERT_NEGATIVES` (whose `+` for `-` is also
+/// `ARITHMETIC_BASE`'s, so the two cannot share a name) and
+/// `INVERT_LOOPCTRL`. Gremlins' flags list the same set:
+/// `--invert-assignments --invert-logical --invert-loopctrl
 /// --remove-self-assignments` beside its defaults.
 pub const MUTATORS: &[&str] = &[
-    ARITHMETIC_BASE,
-    CONDITIONALS_BOUNDARY,
-    CONDITIONALS_NEGATION,
-    INCREMENT_DECREMENT,
-    INVERT_ASSIGNMENTS,
-    INVERT_LOGICAL,
+    ARITHMETIC_OPERATOR,
+    ASSIGNMENT_OPERATOR,
+    EQUALITY_OPERATOR,
     INVERT_LOOPCTRL,
     INVERT_NEGATIVES,
-    REMOVE_SELF_ASSIGNMENTS,
+    LOGICAL_OPERATOR,
+    UNARY_OPERATOR,
+    UPDATE_OPERATOR,
 ];
 
-pub const ARITHMETIC_BASE: &str = "ARITHMETIC_BASE";
-pub const CONDITIONALS_BOUNDARY: &str = "CONDITIONALS_BOUNDARY";
-pub const CONDITIONALS_NEGATION: &str = "CONDITIONALS_NEGATION";
-pub const INCREMENT_DECREMENT: &str = "INCREMENT_DECREMENT";
-pub const INVERT_ASSIGNMENTS: &str = "INVERT_ASSIGNMENTS";
-pub const INVERT_LOGICAL: &str = "INVERT_LOGICAL";
+/// `ARITHMETIC_BASE` of a binary operator.
+pub const ARITHMETIC_OPERATOR: &str = "ArithmeticOperator";
+/// `INVERT_ASSIGNMENTS` and `REMOVE_SELF_ASSIGNMENTS`.
+pub const ASSIGNMENT_OPERATOR: &str = "AssignmentOperator";
+/// `CONDITIONALS_BOUNDARY` and `CONDITIONALS_NEGATION`.
+pub const EQUALITY_OPERATOR: &str = "EqualityOperator";
+/// `INVERT_LOGICAL`.
+pub const LOGICAL_OPERATOR: &str = "LogicalOperator";
+/// `ARITHMETIC_BASE` of a unary `-` or `+`.
+pub const UNARY_OPERATOR: &str = "UnaryOperator";
+/// `INCREMENT_DECREMENT`.
+pub const UPDATE_OPERATOR: &str = "UpdateOperator";
 pub const INVERT_LOOPCTRL: &str = "INVERT_LOOPCTRL";
 pub const INVERT_NEGATIVES: &str = "INVERT_NEGATIVES";
-pub const REMOVE_SELF_ASSIGNMENTS: &str = "REMOVE_SELF_ASSIGNMENTS";
 
-/// Whether `mutator` is one of Gremlins' (and so a Go mutant's).
+/// Whether `mutator` is one a Go mutant can carry.
 pub fn is_go_mutator(mutator: &str) -> bool {
     MUTATORS.contains(&mutator)
+}
+
+/// The Gremlins mutator a Go mutant is: from its mutator, the token as
+/// written (`operator`) and what it becomes.
+pub fn gremlins_name(mutator: &str, operator: &str, replacement: &str) -> &'static str {
+    match mutator {
+        ARITHMETIC_OPERATOR | UNARY_OPERATOR => "ARITHMETIC_BASE",
+        ASSIGNMENT_OPERATOR if replacement == "=" => "REMOVE_SELF_ASSIGNMENTS",
+        ASSIGNMENT_OPERATOR => "INVERT_ASSIGNMENTS",
+        EQUALITY_OPERATOR => {
+            let boundary = matches!(
+                (operator, replacement),
+                ("<", "<=") | ("<=", "<") | (">", ">=") | (">=", ">")
+            );
+            if boundary {
+                "CONDITIONALS_BOUNDARY"
+            } else {
+                "CONDITIONALS_NEGATION"
+            }
+        }
+        LOGICAL_OPERATOR => "INVERT_LOGICAL",
+        UPDATE_OPERATOR => "INCREMENT_DECREMENT",
+        INVERT_NEGATIVES => "INVERT_NEGATIVES",
+        _ => "INVERT_LOOPCTRL",
+    }
 }
 
 /// Each mutator Gremlins applies to `token`, in its table's order, with
@@ -63,29 +99,29 @@ pub fn is_go_mutator(mutator: &str) -> bool {
 /// lists it; it is equivalent by construction (`identical-token`).
 fn mutations(token: &str) -> &'static [(&'static str, &'static str)] {
     match token {
-        "+" => &[(ARITHMETIC_BASE, "-")],
-        "+=" => &[(INVERT_ASSIGNMENTS, "-="), (REMOVE_SELF_ASSIGNMENTS, "=")],
-        "&=" | "&^=" | "|=" | "<<=" | ">>=" | "^=" => &[(REMOVE_SELF_ASSIGNMENTS, "=")],
+        "+" => &[(ARITHMETIC_OPERATOR, "-")],
+        "+=" => &[(ASSIGNMENT_OPERATOR, "-="), (ASSIGNMENT_OPERATOR, "=")],
+        "&=" | "&^=" | "|=" | "<<=" | ">>=" | "^=" => &[(ASSIGNMENT_OPERATOR, "=")],
         "break" => &[(INVERT_LOOPCTRL, "continue")],
         "continue" => &[(INVERT_LOOPCTRL, "break")],
-        "--" => &[(INCREMENT_DECREMENT, "++")],
-        "++" => &[(INCREMENT_DECREMENT, "--")],
-        "==" => &[(CONDITIONALS_NEGATION, "!=")],
-        "!=" => &[(CONDITIONALS_NEGATION, "==")],
-        ">=" => &[(CONDITIONALS_BOUNDARY, ">"), (CONDITIONALS_NEGATION, "<")],
-        ">" => &[(CONDITIONALS_BOUNDARY, ">="), (CONDITIONALS_NEGATION, "<=")],
-        "<=" => &[(CONDITIONALS_BOUNDARY, "<"), (CONDITIONALS_NEGATION, ">")],
-        "<" => &[(CONDITIONALS_BOUNDARY, "<="), (CONDITIONALS_NEGATION, ">=")],
-        "&&" => &[(INVERT_LOGICAL, "||")],
-        "||" => &[(INVERT_LOGICAL, "&&")],
-        "*" => &[(ARITHMETIC_BASE, "/")],
-        "*=" => &[(INVERT_ASSIGNMENTS, "/="), (REMOVE_SELF_ASSIGNMENTS, "=")],
-        "/" => &[(ARITHMETIC_BASE, "*")],
-        "/=" => &[(INVERT_ASSIGNMENTS, "*="), (REMOVE_SELF_ASSIGNMENTS, "=")],
-        "%" => &[(ARITHMETIC_BASE, "*")],
-        "%=" => &[(INVERT_ASSIGNMENTS, "%="), (REMOVE_SELF_ASSIGNMENTS, "=")],
-        "-" => &[(INVERT_NEGATIVES, "+"), (ARITHMETIC_BASE, "+")],
-        "-=" => &[(INVERT_ASSIGNMENTS, "+="), (REMOVE_SELF_ASSIGNMENTS, "=")],
+        "--" => &[(UPDATE_OPERATOR, "++")],
+        "++" => &[(UPDATE_OPERATOR, "--")],
+        "==" => &[(EQUALITY_OPERATOR, "!=")],
+        "!=" => &[(EQUALITY_OPERATOR, "==")],
+        ">=" => &[(EQUALITY_OPERATOR, ">"), (EQUALITY_OPERATOR, "<")],
+        ">" => &[(EQUALITY_OPERATOR, ">="), (EQUALITY_OPERATOR, "<=")],
+        "<=" => &[(EQUALITY_OPERATOR, "<"), (EQUALITY_OPERATOR, ">")],
+        "<" => &[(EQUALITY_OPERATOR, "<="), (EQUALITY_OPERATOR, ">=")],
+        "&&" => &[(LOGICAL_OPERATOR, "||")],
+        "||" => &[(LOGICAL_OPERATOR, "&&")],
+        "*" => &[(ARITHMETIC_OPERATOR, "/")],
+        "*=" => &[(ASSIGNMENT_OPERATOR, "/="), (ASSIGNMENT_OPERATOR, "=")],
+        "/" => &[(ARITHMETIC_OPERATOR, "*")],
+        "/=" => &[(ASSIGNMENT_OPERATOR, "*="), (ASSIGNMENT_OPERATOR, "=")],
+        "%" => &[(ARITHMETIC_OPERATOR, "*")],
+        "%=" => &[(ASSIGNMENT_OPERATOR, "%="), (ASSIGNMENT_OPERATOR, "=")],
+        "-" => &[(INVERT_NEGATIVES, "+"), (ARITHMETIC_OPERATOR, "+")],
+        "-=" => &[(ASSIGNMENT_OPERATOR, "+="), (ASSIGNMENT_OPERATOR, "=")],
         _ => &[],
     }
 }
@@ -145,8 +181,8 @@ fn site(node: Node, source: &str) -> Option<GoSite> {
     let mutants = match (kind, operator.as_str()) {
         // A unary expression's own table: `-x` and `+x` only (`!`, `^`,
         // `&`, `*`, `<-` have no listed mutator).
-        (SiteKind::Unary, "-") => mutations("-").to_vec(),
-        (SiteKind::Unary, "+") => mutations("+").to_vec(),
+        (SiteKind::Unary, "-") => vec![(INVERT_NEGATIVES, "+"), (UNARY_OPERATOR, "+")],
+        (SiteKind::Unary, "+") => vec![(UNARY_OPERATOR, "-")],
         (SiteKind::Unary, _) => Vec::new(),
         (_, operator) => mutations(operator).to_vec(),
     };
@@ -318,6 +354,46 @@ pub(crate) fn candidates_of(
     listed
 }
 
+/// A run's Go mutants listed from its sources after the run: each file in
+/// `recorded` whose statement and function points, instrumented again, are
+/// the ones the run recorded (else it changed since, and is named so).
+pub(crate) fn list_mutants(
+    root: &std::path::Path,
+    recorded: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> crate::mutant_list::ListedMutants {
+    let files = recorded.keys().cloned().collect::<Vec<_>>();
+    let listed = crate::threads::parallel_map(&files, |file| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        let obligations =
+            crate::go_instrumenter::build_go_obligations(file, &source, &mut 0, &mut 0).ok()?;
+        let points = obligations
+            .manifest
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        (Some(&points) == recorded.get(file)).then(|| candidate_mutants(file, &source).ok())?
+    });
+    let mut mutants = std::collections::BTreeMap::new();
+    let mut changed = Vec::new();
+    for (file, listed) in files.into_iter().zip(listed) {
+        match listed {
+            Some(list) if list.is_empty() => {}
+            Some(list) => {
+                mutants.insert(file, list);
+            }
+            None => changed.push(file),
+        }
+    }
+    crate::mutant_list::ListedMutants {
+        mutants: crate::mutant_list::MutantsFile::listed(GO, MUTANT_SET, mutants),
+        changed,
+    }
+}
+
+/// The language name a list gives Go files.
+pub const GO: &str = "go";
+
 /// The static rule for a mutant whose token Gremlins replaces with itself
 /// (`%=` under `INVERT_ASSIGNMENTS`).
 pub const IDENTICAL_TOKEN: &str = "identical-token";
@@ -330,7 +406,15 @@ mod tests {
         candidate_mutants("a.go", source)
             .unwrap()
             .into_iter()
-            .map(|m| (m.start.0, m.start.1, m.mutator, m.replacement))
+            .map(|m| {
+                let operator = m.operator.as_ref().unwrap().text.clone();
+                (
+                    m.start.0,
+                    m.start.1,
+                    gremlins_name(&m.mutator, &operator, &m.replacement).to_owned(),
+                    m.replacement,
+                )
+            })
             .collect()
     }
 
@@ -390,7 +474,7 @@ mod tests {
     #[test]
     fn the_token_gremlins_maps_to_itself_is_equivalent() {
         let mutants = candidate_mutants("a.go", "package p\n\nfunc f(a int) { a %= 2 }\n").unwrap();
-        assert_eq!(mutants[0].mutator, INVERT_ASSIGNMENTS);
+        assert_eq!(mutants[0].mutator, ASSIGNMENT_OPERATOR);
         assert_eq!(mutants[0].replacement, "%=");
         assert_eq!(
             mutants[0]
@@ -407,7 +491,7 @@ mod tests {
         assert!(listed("package p\n\nfunc f(a *int, b bool, c chan int) { _ = *a; _ = !b; _ = <-c; _ = ^*a }\n").is_empty());
         assert_eq!(
             listed("package p\n\nfunc f(a int) int { return +a }\n"),
-            [(3, 28, ARITHMETIC_BASE.to_owned(), "-".to_owned())]
+            [(3, 28, "ARITHMETIC_BASE".to_owned(), "-".to_owned())]
         );
     }
 
@@ -441,9 +525,12 @@ mod tests {
                     .replace('\\', "/");
                 let source = std::fs::read_to_string(&path).unwrap();
                 for mutant in candidate_mutants(&relative, &source).unwrap() {
+                    let operator = &mutant.operator.as_ref().unwrap().text;
                     listed.push(format!(
                         "{relative}:{}:{} {}",
-                        mutant.start.0, mutant.start.1, mutant.mutator
+                        mutant.start.0,
+                        mutant.start.1,
+                        gremlins_name(&mutant.mutator, operator, &mutant.replacement)
                     ));
                 }
             }

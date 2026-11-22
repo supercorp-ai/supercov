@@ -91,7 +91,10 @@ pub struct StrongPass {
 
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
-    matches!(language, crate::mutant_list::JAVASCRIPT)
+    matches!(
+        language,
+        crate::mutant_list::JAVASCRIPT | crate::go_mutants::GO
+    )
 }
 
 /// Runs `language`'s share of a plan through that language's driver, and
@@ -113,6 +116,16 @@ pub fn run_strong_pass(
             };
             crate::javascript_run::run_strong_javascript(&request, diagnostics)
                 .map_err(|error| error.to_string())
+        }
+        crate::go_mutants::GO => {
+            let request = crate::go_strong::GoStrongRequest {
+                root: &pass.root,
+                command: &pass.command,
+                plan: &pass.strong.plan,
+                results: &pass.strong.results,
+                workers: crate::go_strong::workers(),
+            };
+            crate::go_strong::run_go_strong(&request, diagnostics).map(|_| 0)
         }
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
@@ -167,6 +180,7 @@ mod tests {
     #[test]
     fn only_a_language_with_a_driver_runs() {
         assert!(has_driver("javascript"));
+        assert!(has_driver("go"));
         assert!(!has_driver("cobol"));
         let pass = StrongPass {
             root: PathBuf::from("."),
