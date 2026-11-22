@@ -86,9 +86,13 @@ function assertStrongPass(runner, killed, killer, environment) {
   const reply = JSON.parse(ran.stdout);
   assert.equal(reply.summary.error, 0, `${runner}: ${ran.stdout}\n${ran.stderr}`);
   assert.ok(reply.summary.killed > 0 && reply.summary.survived > 0, `${runner}: ${ran.stdout}`);
-  const listed = query(['runs', 'latest', 'mutants', '--limit', '0'], environment);
-  const mutant = listed.mutants.find((each) => each.id === killed);
-  assert.equal(mutant?.strong?.status, 'killed', `${runner}: ${JSON.stringify(mutant)}`);
+  // Every mutant, written whole: a reply holds only as many as fit.
+  const output = resolve(temporary, `${runner}-mutants.jsonl`);
+  const written = supercov(['runs', 'latest', 'mutants', '--format', 'jsonl', '--output', output], environment);
+  assert.equal(written.status, 0, written.stderr);
+  const listed = readFileSync(output, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const mutant = listed.find((each) => each.id === killed);
+  assert.equal(mutant?.strong?.status, 'killed', `${runner}: ${JSON.stringify(mutant ?? listed.length)}`);
   assert.equal(mutant.strong.killedBy, killer, `${runner}: ${JSON.stringify(mutant)}`);
 }
 

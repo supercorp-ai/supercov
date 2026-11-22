@@ -223,7 +223,7 @@ value probes and Supercov with them, and take the medians.
 
 ### Results
 
-On SoroCI (16 CPUs, `c8a.4xlarge`, Ruby 3.4.13, 16 jobs for both tools),
+On a 16-CPU Linux runner (`c8a.4xlarge`, Ruby 3.4.13, 16 jobs for both tools),
 mutant run with every test a candidate for every subject and
 `process_abort` counted as a kill:
 

@@ -23,6 +23,8 @@
 module Supercov
   module Strong
     PLAN_ENV = "SUPERCOV_STRONG_RUBY_PLAN"
+    ACTIVE_ENV = "SUPERCOV_ACTIVE_MUTANT"
+    SWITCHES_ONLY_ENV = "SUPERCOV_STRONG_SWITCHES_ONLY"
     TIMEOUT_CODE = "SUPERCOV_MUTANT_TIMEOUT"
 
     # Raised past the hit limit: an Exception, so code under test that
@@ -50,7 +52,7 @@ module Supercov
         @limit = Integer(ENV["SUPERCOV_MUTANT_HIT_LIMIT"] || @plan["hitLimit"] || 1_000_000)
         @keys = {}
         @plan["mutants"].each { |mutant| @keys["#{mutant['file']}##{mutant['index']}"] = mutant["key"] }
-        active = ENV["SUPERCOV_ACTIVE_MUTANT"].to_s
+        active = ENV[ACTIVE_ENV].to_s
         activate(@keys.fetch(active, -1)) unless active.empty? || active == "-"
       end
 
@@ -58,6 +60,10 @@ module Supercov
         $__supercov_mutant = key
         @hits = 0
         @timed_out = false
+        # A Ruby process a test starts (`assert_separately`, a CLI) loads
+        # this runtime through RUBYOPT: it switches the same mutant on, as
+        # it would load the mutated file from disk.
+        ENV[ACTIVE_ENV] = active_name if Strong.ran
       end
 
       # One evaluation of the active mutant's replacement.
@@ -73,6 +79,13 @@ module Supercov
       end
 
       def timed_out? = @timed_out
+
+      # The pass begins: a Ruby process its tests start switches mutants on
+      # and runs its own tests, never a pass of its own.
+      def start
+        @ran = true
+        ENV[SWITCHES_ONLY_ENV] = "1"
+      end
 
       # Whether a switched file was compiled with its switches: one loaded
       # before this runtime (by a gemspec Bundler evaluates, say) was not.
@@ -777,9 +790,9 @@ module Supercov
 
     module RSpecHook
       def run_specs(example_groups)
-        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+        return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
-        Strong.ran = true
+        Strong.start
         Pass.new(RSpecRunner.new(self)).run
         0
       end
@@ -787,9 +800,9 @@ module Supercov
 
     module MinitestHook
       def run(args = [])
-        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+        return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
-        Strong.ran = true
+        Strong.start
         # What `Minitest.run` sets before it runs anything.
         options = respond_to?(:process_args) ? process_args(args) : {}
         self.seed ||= options[:seed] || (Random.new_seed % 0xFFFF)
@@ -804,9 +817,9 @@ module Supercov
     # sets: its collector gives the suite it would run.
     module TestUnitHook
       def run
-        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+        return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
-        Strong.ran = true
+        Strong.start
         self.class.need_auto_run = false
         suite = @collector[self]
         Pass.new(TestUnitRunner.new(suite)).run if suite
@@ -818,9 +831,9 @@ module Supercov
     # loaded.
     module CucumberHook
       def run!
-        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
+        return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
-        Strong.ran = true
+        Strong.start
         load_step_definitions
         fire_install_plugin_hook
         Pass.new(CucumberRunner.new(self)).run
@@ -832,7 +845,9 @@ module Supercov
       return if path.empty?
 
       load_plan(path)
-      $__supercov_mutant = -1 if $__supercov_mutant.nil?
+      # `defined?` first: reading a global never set warns under `-W`, and
+      # a child that `assert_separately` runs fails on any warning.
+      $__supercov_mutant = -1 unless defined?($__supercov_mutant) && $__supercov_mutant
       $__supercov_strong = self
       Loader.install
       attach
