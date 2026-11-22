@@ -132,6 +132,20 @@ value, and are left to the strong pass.
 Every other mutant is `unknown` once reached: the plan takes every test
 that reached it.
 
+### What the probes cost
+
+A probe compares at most 8 evaluations per test (`VALUE_TURNS`); past them,
+or once every kind it records has differed or met a value it cannot
+compare, it is done for that test. A done probe, and a condition's probe
+given a truth it has already recorded in the test, is handed back by the
+receiver (`Probe#bo`, `mc`, `cv`) from one array read, without a call into
+the runtime. The array is filled only while every thread runs in one test,
+and emptied at each test's start and end. Outcomes are kept as bits per test
+and written with the test's hits, one record per test (`cmps`, ids
+numbered as `hits` numbers them): a record per outcome had cost
+dry-inflector's suite a third of its time. The mutants themselves are
+listed on a thread of their own while the tests run.
+
 ## Strong mutation
 
 ### Schemata
@@ -166,7 +180,10 @@ coverage runtime. It compiles each switched file from its copy through the
 `load_iseq` hook, counts the active mutant's evaluations (`h`) and past the
 hit limit raises `Supercov::Strong::MutantTimeout`, an `Exception` that a
 `rescue => e` does not catch, noting the mutant in the timeouts file. It
-reads `SUPERCOV_ACTIVE_MUTANT` at start.
+reads `SUPERCOV_ACTIVE_MUTANT` at start. A switch reads the active mutant
+from a constant, `Supercov::Strong::MUTANT`, which code running in a Ractor
+can read (a global it cannot: ostruct's Ractor tests failed under every
+mutant); a Ractor's evaluations are not counted against the hit limit.
 
 When the suite has loaded and RSpec (`Runner#run_specs`), Minitest
 (`Minitest.run`), test-unit (`AutoRunner#run`) or Cucumber (`Runtime#run!`,
@@ -202,6 +219,12 @@ many at once as `SUPERCOV_STRONG_JOBS` (default: the machine's CPUs).
   `exit!`, so the suite's `at_exit` hooks (an autorun) do not run in it, and
   its outcome is read while it runs, so a large one cannot fill the pipe and
   hold it.
+- A Ruby process a test starts (`assert_separately`, a CLI it runs)
+  inherits `RUBYOPT`: the pass sets `SUPERCOV_ACTIVE_MUTANT` as it switches
+  a mutant on, so that process runs the same mutant, as it would load the
+  mutated file from disk, and `SUPERCOV_STRONG_SWITCHES_ONLY`, so it runs
+  its own tests and never a pass. mutant's mutations live in its own
+  process only; the validation against it found no disagreement from this.
 - A switched file that was loaded before the runtime (a gemspec that
   requires the library, which `bundle exec` loads before `RUBYOPT`'s own
   files) has no switches: its mutants are `error`, never `survived`.

@@ -317,7 +317,12 @@ module Supercov
     # the two writes happen under one lock; a torn frame would otherwise be
     # read back as corruption.
     def write(record)
-      payload = Encode.json(record).b
+      write_json(Encode.json(record))
+    end
+
+    # A record already written as JSON.
+    def write_json(json)
+      payload = json.b
       @lock.synchronize do
         if payload.bytesize > TRANSPORT_MAX_RECORD_SIZE
           drop
@@ -423,6 +428,10 @@ module Supercov
       # Per context, the value outcomes not written yet, as bits by id:
       # written at the next boundary with the hits (see flush_hits).
       @pending_values = {}
+      # Value ids that have differed in any test, and the probes all of
+      # whose ids have.
+      @differed = {}
+      @everywhere = {}
       # By probe key, true where the probe has nothing left to find in the
       # one context every thread runs in: `Probe` then gives the value back
       # without a call here. Emptied whenever a context starts or ends.
@@ -1201,7 +1210,8 @@ module Supercov
           end
         end
         record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
-        record("t" => "hits", "ctx" => context, "n" => numbers)
+        # Integers only: written without the encoder, as each test has one.
+        record_json(%({"t":"hits","ctx":#{Integer(context)},"n":[#{numbers.join(',')}]}))
       end
       # Value outcomes the same way: a record apiece cost a suite that runs
       # value probes in every test a third of its time.
@@ -1214,7 +1224,7 @@ module Supercov
           end
         end
         record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
-        record("t" => "cmps", "ctx" => context, "n" => numbers, "o" => bits.values)
+        record_json(%({"t":"cmps","ctx":#{Integer(context)},"n":[#{numbers.join(',')}],"o":[#{bits.values.join(',')}]}))
       end
     end
 
@@ -1363,7 +1373,7 @@ module Supercov
 
     def probe_operand(key, left)
       context = current_context
-      return left if values_done?(context, key) || !value_turn(context, key)
+      return left if values_done?(context, key) || differed_everywhere?(context, key) || !value_turn(context, key)
 
       Operand.new(self, key, left)
     end
@@ -1456,7 +1466,7 @@ module Supercov
     # mutant gem's `true` and `false` in its place.
     def probe_truth(key, value)
       context = current_context
-      return value if values_done?(context, key) || !value_turn(context, key)
+      return value if values_done?(context, key) || differed_everywhere?(context, key) || !value_turn(context, key)
 
       target = @probes[key]
       truth = value ? true : false
@@ -1477,7 +1487,7 @@ module Supercov
     # itself, and its call is not measured.
     def probe_call(key, receiver)
       context = current_context
-      return receiver if values_done?(context, key) || !value_turn(context, key)
+      return receiver if values_done?(context, key) || differed_everywhere?(context, key) || !value_turn(context, key)
       return Call.new(self, key, receiver) if plain_value?(receiver)
 
       # Nothing more is learnt here in this test: a later plain receiver
@@ -1567,6 +1577,7 @@ module Supercov
         return if bits & bit != 0
 
         seen[id] = bits | bit
+        @differed[id] = true if bit == DIFFERS
         pending = (@pending_values[context] ||= {})
         pending[id] = (pending[id] || 0) | bit
       end
@@ -1579,6 +1590,19 @@ module Supercov
     def values_done?(context, key)
       done = @values_done[context]
       !done.nil? && done.key?(key)
+    end
+
+    # A probe every kind of which has differed in some test of this process:
+    # the mutants it links are infected whatever it records here, so it
+    # records `unknown` for this test, which keeps the test a candidate of
+    # each, and steps aside for the rest of the test without comparing.
+    def differed_everywhere?(context, key)
+      @everywhere[key] ||= value_ids(@probes[key]).each_value.all? { |id| @differed[id] }
+      return false unless @everywhere[key]
+
+      note_unknown(@probes[key], context)
+      note_values_done(context, key)
+      true
     end
 
     # How many evaluations of one probe a test compares: past them, what has
@@ -1775,6 +1799,11 @@ module Supercov
     def record(entry)
       ensure_transport
       @transport.write(entry)
+    end
+
+    def record_json(json)
+      ensure_transport
+      @transport.write_json(json)
     end
 
     def ensure_transport
