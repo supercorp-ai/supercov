@@ -358,6 +358,11 @@ fn kotlin_return(
     // are the JVM's, and has no literal to cast back from `int`. Its type
     // argument follows the name.
     match (value, witness) {
+        // A Kotlin `Char`, `Byte` or `Short` is exactly the JVM's, so the
+        // helper's overload of that type applies without Java's cast.
+        (ReturnValue::Zero(Prim::Byte | Prim::Short | Prim::Char), _) => {
+            format!("{RUNTIME}.rZ({f}, {k}, {hole})")
+        }
         (ReturnValue::Zero(_), _) | (ReturnValue::EmptyString, _) | (_, None) => {
             java_return(value, f, k, hole, None)
         }
@@ -515,6 +520,18 @@ mod tests {
         assert!(out.source.contains("else -supercovV3_"), "{}", out.source);
         assert!(
             out.source.contains(&format!("{RUNTIME}.rZ(3, ")),
+            "{}",
+            out.source
+        );
+    }
+
+    #[test]
+    fn a_kotlin_char_return_has_no_java_cast() {
+        let source = "fun f(s: String, i: Int): Char {\n    return s[i]\n}\n";
+        let (out, _) = switched(source, JvmLanguage::Kotlin);
+        assert!(
+            out.source
+                .contains(&format!("return {RUNTIME}.rZ(3, 0, s[i])")),
             "{}",
             out.source
         );

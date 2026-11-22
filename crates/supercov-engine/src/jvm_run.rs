@@ -5216,6 +5216,12 @@ pub fn run_strong_jvm(
                                 crate::jvm_schemata::mutant_at(switched_file, offset)
                             });
                     match mutant {
+                        // A refused switch often has several errors: its
+                        // mutant is unviable once.
+                        Some(index)
+                            if refused.iter().any(|(f, i, _): &(String, usize, String)| {
+                                f == file && *i == index
+                            }) => {}
                         Some(index) => refused.push((file.clone(), index, message.clone())),
                         None => unexplained.push(format!("{file}:{line}:{column}: {message}")),
                     }
