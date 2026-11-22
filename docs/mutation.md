@@ -259,8 +259,11 @@ and the suite run as written.
   runners do; ES module Mocha suites, `node:test`, AVA, node-tap, `bun:test`
   and Vitest Browser Mode run one test file per start of the command, with the
   mutant on from its start.
-- Limits: Rust compiled to wasm and loaded in a browser page (Playwright,
-  Vitest Browser Mode) has its mutants recorded `error`; under Node they run.
+- Rust compiled to wasm and loaded by these tests is mutated too: the command
+  builds the wasm with the mutants switched in, and each wasm instance, in
+  Node or in a Playwright page, runs the test's mutant.
+- Limits: wasm loaded in Vitest Browser Mode's pages is not measured, so its
+  mutants are not planned.
   A function body StrykerJS empties where no switch can be placed is `error`.
   A runner with no driver (another Node-based runner) is refused rather than
   reported as a score of nothing killed.
@@ -289,7 +292,8 @@ reports it; a mutant in code the compiler evaluates (`const`, `static`,
 
 Limits: tests built for wasm run against mutants in Node, under WASI and in
 Chrome; tests run in Firefox, Safari or Edge have their mutants recorded
-`error`. Value probes do not cover `&&`, `||`, struct fields and returns that
+`error`. A crate loaded by JavaScript tests is mutated through them (see
+JavaScript and TypeScript above). Value probes do not cover `&&`, `||`, struct fields and returns that
 are not numbers or booleans: those mutants stay `unknown` where they ran, and
 the strong pass decides them.
 
@@ -417,23 +421,28 @@ one tool kills and the other calls survived.
 
 ### Go, against Gremlins 0.6.0
 
-On 16-CPU CI machines, 2026-11-22, Gremlins with every test per mutant
-(`--integration`, `-count=1`). Supercov's time is the whole of `supercov
-mutants -- go test ./...`:
+Five modules at their tags, Gremlins with every test per mutant
+(`--integration`, `-count=1`), each tool on its own machine of the same type,
+2026-11-22: 16 CPUs (AWS c8a.4xlarge) and 4 CPUs (GitHub's `ubuntu-latest`).
+Supercov's time is the whole of `supercov mutants -- go test ./...`, its
+measured run and builds included:
 
-| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | Gremlins | Supercov |
+| Module | Mutants | Killed (Gremlins / Supercov) | Unviable | 16 CPUs: Gremlins / Supercov | 4 CPUs: Gremlins / Supercov |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| go-humanize 1.0.1 | 301 | 224 / 214 | 50 | 15.2 s | 15.4 s |
-| btree 1.1.3 | 343 | 134 / 134 | 3 | 11.0 s | 8.0 s |
-| golang-lru 2.0.7 | 154 | 111 / 107 | 0 | 31.1 s | 16.5 s |
-| uuid 1.6.0 | 146 | 88 / 101 | 0 | 13.5 s | 15.9 s |
-| cast 1.7.1 | 184 | 123 / 122 | 1 | 8.9 s | 6.3 s |
+| go-humanize 1.0.1 | 332 | 234 / 211 | 84 | 14.6 / 19.1 s | 61.2 / 24.7 s |
+| btree 1.1.3 | 367 | 140 / 134 | 21 | 11.1 / 10.2 s | 41.1 / 29.0 s |
+| golang-lru 2.0.7 | 165 | 119 / 107 | 11 | 31.9 / 21.2 s | 165.3 / 59.3 s |
+| uuid 1.6.0 | 205 | 127 / 143 | 1 | 15.0 / 21.0 s | 90.0 / 43.7 s |
+| cast 1.7.1 | 190 | 129 / 122 | 7 | 9.0 / 8.4 s | 59.4 / 22.9 s |
 
 Gremlins counts mutants that do not compile as killed; Supercov counts them
-unviable. Supercov kills 16 mutants of go-humanize's and 13 of uuid's constant
-declarations, which Gremlins never runs. The remaining differences are a nested module and a
-`//go:build ignore` file Gremlins mutates and `go test ./...` never builds,
-two time-dependent kills, and a flaky Example; none is a soundness violation.
+unviable. Supercov kills 16 mutants of go-humanize's and 16 of uuid's constant
+declarations, which Gremlins never runs. Gremlins runs one `go test` per
+mutant; Supercov builds each package's test binary once, so it gains most on
+fewer CPUs, and on 16 its fixed costs are most of its time. The remaining
+differences are a nested module and a `//go:build ignore` file Gremlins
+mutates and `go test ./...` never builds, time-dependent kills of clock
+arithmetic, and a flaky Example; none is a soundness violation.
 
 ### Ruby, against mutant 0.17.1
 
@@ -476,8 +485,10 @@ What costs time:
   decided without running. Measured on Rust crates (16-CPU machines,
   2026-11-22, warm builds): 4-11% over a measured run without them. On a Ruby
   suite (dry-inflector): 1.1 times a measured run without them
-  (TBD(machine and date of the Ruby probe measurement)).
-  TBD(value-probe cost for JavaScript, Python, Go, Java and Kotlin runs).
+  (TBD(machine and date of the Ruby probe measurement)). On Go modules
+  (16 CPUs, AWS c8a.4xlarge, 2026-11-22): about a quarter of a second a
+  measured run, most of it the type checker's facts the probes need.
+  TBD(value-probe cost for JavaScript, Python, Java and Kotlin runs).
 - **The strong pass** reruns tests, so it takes about as long as the
   established tool on the same project: the tables above. Use `--diff` on a
   pull request to run only the change's mutants, and `--shard` to split a
