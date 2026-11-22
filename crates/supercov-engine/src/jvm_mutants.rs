@@ -5123,6 +5123,10 @@ impl Enumerator<'_> {
         let not_null = method.not_null;
         let tail = self.kotlin_tail(value);
         let value = strip_parens(value);
+        // `get() = throw E()` returns nothing: the throw is all there is.
+        if text(value, self.source).starts_with("throw ") {
+            return;
+        }
         let range = (value.start_byte(), value.end_byte());
         // The compiler puts a function's return on the line its value ends.
         let lines = (
@@ -5876,5 +5880,17 @@ class K(var count: Int) {
         );
         assert_eq!(sorted(33), ["Math:shr"]);
         assert_eq!(sorted(36).len(), 8, "{listed:?}");
+    }
+
+    /// A body that is a `throw` (`get() = throw E()`) returns nothing: no
+    /// return mutant, and no value probe around a value of no type.
+    #[test]
+    fn a_kotlin_body_that_throws_returns_nothing() {
+        let file = "a/T.kt";
+        let source = "interface T {\n    var border: Boolean\n        get() = throw UnsupportedOperationException()\n        set(value) {}\n    fun size(): Int = throw IllegalStateException()\n    fun count(): Int = 1 + 2 * size()\n}\n";
+        let listed = ids(file, source);
+        assert!(on_line(&listed, file, 3).is_empty(), "{listed:?}");
+        assert!(on_line(&listed, file, 5).is_empty(), "{listed:?}");
+        assert!(!on_line(&listed, file, 6).is_empty(), "{listed:?}");
     }
 }

@@ -4565,7 +4565,7 @@ mod tests {
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1863, 1883, 1889, 1893, 1899, 1905, 1911, 2028] {
+        for line in [1895, 1915, 1921, 1925, 1931, 1937, 1943, 2060] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
