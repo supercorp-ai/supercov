@@ -111,7 +111,7 @@ public final class SupercovStrongPass {
     /** Records a failure, keeping the first one's reason. */
     public void fail(Throwable error) {
       failed = true;
-      if (error != null && Supercov.isMutantTimeout(error)) {
+      if (error != null && isMutantTimeout(error)) {
         mutantTimeout = true;
       }
       if (reason == null && error != null) {
@@ -119,6 +119,19 @@ public final class SupercovStrongPass {
         reason = message.length() > 300 ? message.substring(0, 300) : message;
       }
     }
+  }
+
+  /** A mutant's timeout thrown by any loader's copy of the runtime. */
+  static boolean isMutantTimeout(Throwable error) {
+    for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+      if (cause.getClass().getName().equals("com.supercorp.supercov.Supercov$MutantTimeoutError")) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
   }
 
   private final Map<Integer, Test> tests = new HashMap<>();
@@ -333,6 +346,7 @@ public final class SupercovStrongPass {
   private boolean runMutant(Mutant mutant, List<Test> candidates, List<String> missing)
       throws IOException {
     long started = System.nanoTime();
+    ClassLoader mutated = fresh();
     int ran = 0;
     for (Test test : candidates) {
       if (test.baseline == null) {
@@ -350,7 +364,7 @@ public final class SupercovStrongPass {
         continue;
       }
       ran++;
-      Outcome outcome = execute(test, true, mutant.file, mutant.index);
+      Outcome outcome = execute(test, true, mutant.file, mutant.index, mutated);
       if (outcome.timedOut) {
         write(mutant, "timeout", test.name, ran, started, "ran past its time limit");
         return false;
@@ -382,11 +396,23 @@ public final class SupercovStrongPass {
   }
 
   private Outcome execute(final Test test, boolean mutated, int file, int index) {
+    return execute(test, mutated, file, index, fresh());
+  }
+
+  /**
+   * Runs one test in {@code loader}, the mutant on in that loader's copy of
+   * the runtime. A loader of its own for each mutant gives the project's
+   * classes fresh static state, as a fresh JVM would: a cache a test filled
+   * without the mutant (or with another) no longer hides the mutant's code.
+   */
+  private Outcome execute(
+      final Test test, boolean mutated, int file, int index, final ClassLoader loader) {
     final Outcome outcome = new Outcome();
+    Switches switches = Switches.of(loader);
     if (mutated) {
-      Supercov.setActiveMutant(file, index);
+      switches.on(file, index);
     } else {
-      Supercov.clearActiveMutant();
+      switches.off();
     }
     Thread worker =
         new Thread(
@@ -399,7 +425,7 @@ public final class SupercovStrongPass {
             },
             "supercov-strong-" + test.index);
     worker.setDaemon(true);
-    worker.setContextClassLoader(Thread.currentThread().getContextClassLoader());
+    worker.setContextClassLoader(loader);
     worker.start();
     try {
       // A baseline gets a minute more: nothing has measured it yet.
@@ -410,11 +436,174 @@ public final class SupercovStrongPass {
     if (worker.isAlive()) {
       outcome.timedOut = true;
     }
-    if (mutated && Supercov.mutantHitLimitReached()) {
+    if (mutated && switches.limitReached()) {
       outcome.mutantTimeout = true;
     }
-    Supercov.clearActiveMutant();
+    switches.off();
     return outcome;
+  }
+
+  /** A loader's copy of the runtime's switches, reached reflectively. */
+  static final class Switches {
+    private final Class<?> runtime;
+
+    private Switches(Class<?> runtime) {
+      this.runtime = runtime;
+    }
+
+    static Switches of(ClassLoader loader) {
+      try {
+        return new Switches(Class.forName("com.supercorp.supercov.Supercov", true, loader));
+      } catch (ClassNotFoundException e) {
+        return new Switches(Supercov.class);
+      }
+    }
+
+    // The JVM's own copy is switched too: code loaded from a jar (another
+    // module's, packaged) is not reloaded, and calls that copy.
+    void on(int file, int index) {
+      call("setActiveMutant", file, index);
+      if (runtime != Supercov.class) {
+        Supercov.setActiveMutant(file, index);
+      }
+    }
+
+    void off() {
+      call("clearActiveMutant");
+      if (runtime != Supercov.class) {
+        Supercov.clearActiveMutant();
+      }
+    }
+
+    boolean limitReached() {
+      Object reached = call("mutantHitLimitReached");
+      return Boolean.TRUE.equals(reached) || Supercov.mutantHitLimitReached();
+    }
+
+    private Object call(String name, int... arguments) {
+      try {
+        Class<?>[] types = new Class<?>[arguments.length];
+        Object[] values = new Object[arguments.length];
+        for (int i = 0; i < arguments.length; i++) {
+          types[i] = int.class;
+          values[i] = arguments[i];
+        }
+        return runtime.getMethod(name, types).invoke(null, values);
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+  }
+
+  /** The directories the project's own classes load from: reloaded per mutant. */
+  private static java.net.URL[] roots;
+
+  private static synchronized java.net.URL[] roots() {
+    if (roots != null) {
+      return roots;
+    }
+    // Every directory on the class path: the project's compiled classes
+    // (Gradle keeps Java's and Kotlin's apart, and a reactor's other
+    // modules are directories too); jars are libraries, loaded once. A
+    // surefire fork's class path is the manifest of its booter jar.
+    List<java.net.URL> found = new ArrayList<>();
+    String path = System.getProperty("java.class.path", "");
+    for (String entry : path.split(java.io.File.pathSeparator)) {
+      if (entry.isEmpty()) {
+        continue;
+      }
+      File file = new File(entry);
+      if (file.isDirectory()) {
+        add(found, file);
+      } else if (file.getName().startsWith("surefirebooter") && file.isFile()) {
+        try (java.util.jar.JarFile jar = new java.util.jar.JarFile(file)) {
+          java.util.jar.Manifest manifest = jar.getManifest();
+          String classPath =
+              manifest == null ? null : manifest.getMainAttributes().getValue("Class-Path");
+          if (classPath != null) {
+            for (String url : classPath.trim().split("\\s+")) {
+              try {
+                File listed = new File(new java.net.URI(url));
+                if (listed.isDirectory()) {
+                  add(found, listed);
+                }
+              } catch (java.net.URISyntaxException | IllegalArgumentException e) {
+                // Not a file URL.
+              }
+            }
+          }
+        } catch (IOException e) {
+          // No manifest to read.
+        }
+      }
+    }
+    // Where the runtime and the configuration were loaded from, whatever
+    // the class path says.
+    for (String name :
+        new String[] {"com.supercorp.supercov.Supercov", "com.supercorp.supercov.SupercovConfig"}) {
+      try {
+        java.net.URL location =
+            Class.forName(name, false, SupercovStrongPass.class.getClassLoader())
+                .getProtectionDomain()
+                .getCodeSource()
+                .getLocation();
+        if (location != null) {
+          File file = new File(location.toURI());
+          if (file.isDirectory()) {
+            add(found, file);
+          }
+        }
+      } catch (ClassNotFoundException | SecurityException | NullPointerException
+          | java.net.URISyntaxException | IllegalArgumentException e) {
+        // That half of the project has no root of its own here.
+      }
+    }
+    roots = found.toArray(new java.net.URL[0]);
+    return roots;
+  }
+
+  private static void add(List<java.net.URL> found, File directory) {
+    try {
+      java.net.URL url = directory.getAbsoluteFile().toURI().toURL();
+      if (!found.contains(url)) {
+        found.add(url);
+      }
+    } catch (java.net.MalformedURLException e) {
+      // A directory always has a URL.
+    }
+  }
+
+  /** A loader that loads the project's classes afresh, and the rest as the JVM does. */
+  static ClassLoader fresh() {
+    return new Fresh(roots(), SupercovStrongPass.class.getClassLoader());
+  }
+
+  private static final class Fresh extends java.net.URLClassLoader {
+    Fresh(java.net.URL[] roots, ClassLoader parent) {
+      super(roots, parent);
+    }
+
+    @Override
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+      synchronized (getClassLoadingLock(name)) {
+        Class<?> loaded = findLoadedClass(name);
+        // The drivers stay the JVM's own: they hold the pass.
+        if (loaded == null && !name.startsWith("com.supercorp.supercov.SupercovStrong")) {
+          try {
+            loaded = findClass(name);
+          } catch (ClassNotFoundException notTheProjects) {
+            loaded = null;
+          }
+        }
+        if (loaded == null) {
+          return super.loadClass(name, resolve);
+        }
+        if (resolve) {
+          resolveClass(loaded);
+        }
+        return loaded;
+      }
+    }
   }
 
   private void write(Mutant mutant, String status, String killedBy, int ran, long started, String reason)

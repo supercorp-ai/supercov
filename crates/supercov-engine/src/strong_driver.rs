@@ -105,9 +105,10 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "bun:test",
     "vitest-browser",
     // Java and Kotlin: the build's test JVM drives itself through the JUnit
-    // Platform (`SupercovStrong.java`).
+    // Platform, TestNG or Ant's `<junit>` (`SupercovStrongPass.java`).
     "junit-platform",
     "testng",
+    "ant-junit",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job

@@ -228,8 +228,20 @@ fn frameworks(build_file: &str) -> Frameworks {
     // by what is on the classpath -- so adding the launcher to a JUnit 4
     // project makes surefire switch to the platform provider, find no engine
     // there, and fail the suite outright.
+    // `kotlin-test-junit` (Kotlin's assertions on JUnit 4) brings JUnit 4;
+    // `kotlin-test-junit5` brings Jupiter.
+    let kotlin_junit4 = ["kotlin-test-junit", "kotlin(\"test-junit\")"]
+        .iter()
+        .any(|name| {
+            build_file.match_indices(name).any(|(at, _)| {
+                !build_file[at + name.len()..].starts_with('5')
+                    && !build_file[at + name.len()..].starts_with("5\"")
+            })
+        });
     let junit4 = !platform
-        && (build_file.contains("<groupId>junit</groupId>") || build_file.contains("'junit:junit"))
+        && (build_file.contains("<groupId>junit</groupId>")
+            || build_file.contains("'junit:junit")
+            || kotlin_junit4)
         || build_file.contains("\"junit:junit");
     Frameworks {
         // A TestNG-only or JUnit-4-only project would fail on a platform
@@ -2786,6 +2798,16 @@ mod strong_tests {
     use super::*;
 
     #[test]
+    fn kotlin_s_junit_4_assertions_bring_junit_4() {
+        let catalog = "kotlin-junit = { module = \"org.jetbrains.kotlin:kotlin-test-junit\", version.ref = \"kotlin\" }";
+        assert!(frameworks(catalog).junit4);
+        assert!(frameworks("testImplementation(kotlin(\"test-junit\"))").junit4);
+        let jupiter = "testImplementation(\"org.jetbrains.kotlin:kotlin-test-junit5\")";
+        assert!(!frameworks(jupiter).junit4);
+        assert!(!frameworks("testImplementation(kotlin(\"test-junit5\"))").junit4);
+    }
+
+    #[test]
     fn a_build_s_compiler_errors_are_read_in_every_format() {
         let workspace = Path::new("/w/copy");
         let output = "\
@@ -4280,7 +4302,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1377, 1397, 1486, 1530, 1541] {
+        for line in [1389, 1409, 1498, 1542, 1553] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4347,13 +4369,13 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1834@2", || {
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1846@2", || {
             instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1851, 1871, 1877, 1881, 1887, 1893, 1899, 2016] {
+        for line in [1863, 1883, 1889, 1893, 1899, 1905, 1911, 2028] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4453,13 +4475,13 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1985", || {
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1997", || {
             instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1962",
+            "fs.read_dir#jvm_run.rs:1974",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {

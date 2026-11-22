@@ -26,9 +26,8 @@ public final class SupercovStrongJUnit4 implements SupercovStrongPass.Executor {
       method = method.substring(0, bracket).trim();
     }
     try {
-      Class<?> type =
-          Class.forName(className, false, Thread.currentThread().getContextClassLoader());
-      test.handle = new Object[] {type, method};
+      Class.forName(className, false, Thread.currentThread().getContextClassLoader());
+      test.handle = new Object[] {className, method};
       return true;
     } catch (ClassNotFoundException | LinkageError e) {
       return false;
@@ -38,7 +37,14 @@ public final class SupercovStrongJUnit4 implements SupercovStrongPass.Executor {
   @Override
   public void execute(SupercovStrongPass.Test test, SupercovStrongPass.Outcome outcome) {
     Object[] handle = (Object[]) test.handle;
-    Result result = new JUnitCore().run(Request.method((Class<?>) handle[0], (String) handle[1]));
+    Class<?> type;
+    try {
+      type = Class.forName((String) handle[0], true, Thread.currentThread().getContextClassLoader());
+    } catch (ClassNotFoundException e) {
+      outcome.fail(e);
+      return;
+    }
+    Result result = new JUnitCore().run(Request.method(type, (String) handle[1]));
     for (Failure failure : result.getFailures()) {
       outcome.fail(failure.getException());
     }

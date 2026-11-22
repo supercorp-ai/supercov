@@ -72,7 +72,7 @@ public final class SupercovStrongTestNG implements IExecutionListener, IMethodIn
         method = method.substring(0, paren);
       }
       try {
-        Class.forName(test.className, false, Thread.currentThread().getContextClassLoader());
+        Class.forName(test.className, false, SupercovStrongPass.fresh());
       } catch (ClassNotFoundException | LinkageError e) {
         return false;
       }

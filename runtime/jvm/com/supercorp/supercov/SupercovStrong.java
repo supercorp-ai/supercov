@@ -73,8 +73,11 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
       if (byName == null) {
         byName = new HashMap<>();
         discovered.put(test.className, byName);
+        ClassLoader saved = Thread.currentThread().getContextClassLoader();
+        ClassLoader loader = SupercovStrongPass.fresh();
         try {
-          Class.forName(test.className, false, Thread.currentThread().getContextClassLoader());
+          Thread.currentThread().setContextClassLoader(loader);
+          Class.forName(test.className, false, loader);
           LauncherDiscoveryRequest request =
               LauncherDiscoveryRequestBuilder.request()
                   .selectors(DiscoverySelectors.selectClass(test.className))
@@ -85,6 +88,8 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
           }
         } catch (ClassNotFoundException | LinkageError e) {
           // Another module's test.
+        } finally {
+          Thread.currentThread().setContextClassLoader(saved);
         }
       }
       test.handle = byName.get(test.name);
@@ -94,7 +99,37 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         // index says the same invocation.
         test.handle = byName.get(invocationKey(test.name));
       }
+      if (test.handle == null) {
+        // A parameterized or dynamic test's invocations are not in a
+        // discovered plan: they appear as it runs. The template is, and an
+        // invocation is selected by the template's id and its index.
+        test.handle = invocationId(test.name, byName);
+      }
       return test.handle != null;
+    }
+
+    /** `Class#template(..)#[3] display`: the template's id with invocation #3. */
+    static String invocationId(String name, Map<String, String> byName) {
+      int open = name.lastIndexOf("#[");
+      if (open < 0) {
+        return null;
+      }
+      int close = name.indexOf(']', open);
+      if (close < 0) {
+        return null;
+      }
+      String index = name.substring(open + 2, close);
+      for (int i = 0; i < index.length(); i++) {
+        if (!Character.isDigit(index.charAt(i))) {
+          return null;
+        }
+      }
+      String template = byName.get("\u0001" + name.substring(0, open));
+      if (template == null) {
+        return null;
+      }
+      String segment = template.contains("[test-factory:") ? "dynamic-test" : "test-template-invocation";
+      return template + "/[" + segment + ":#" + index + "]";
     }
 
     /** A name cut after its last invocation index: `Class#method(..)#[3]`. */
@@ -115,6 +150,9 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         if (key != null) {
           byName.put(key, identifier.getUniqueId());
         }
+      } else if (plan.getParent(identifier).isPresent()) {
+        // A container: a template whose invocations appear as it runs.
+        byName.put("\u0001" + name(plan, identifier), identifier.getUniqueId());
       }
       for (TestIdentifier child : plan.getChildren(identifier)) {
         collect(plan, child, byName);

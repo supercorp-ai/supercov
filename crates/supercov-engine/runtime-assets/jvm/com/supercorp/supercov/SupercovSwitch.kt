@@ -1,4 +1,12 @@
 @file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+// Kotlin before 1.7 honours @OptIn only under -opt-in flags a build may not
+// pass; the use is suppressed by name there, and opted in everywhere else.
+@file:Suppress(
+    "EXPERIMENTAL_API_USAGE_ERROR",
+    "EXPERIMENTAL_IS_NOT_ENABLED",
+    "OPT_IN_IS_NOT_ENABLED",
+    "EXPERIMENTAL_ANNOTATION_ON_WRONG_TARGET",
+)
 @file:JvmName("SupercovSwitch")
 
 package com.supercorp.supercov

@@ -501,7 +501,7 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
     // Three passes, each taking what the one before left: the exact line,
     // then any line of the mutant's statement, then (for a return) any line
     // of its method.
-    for pass in 0..3 {
+    for pass in 0..4 {
         let mut left = Vec::new();
         for (file, mutant, key) in unmatched {
             let group =
@@ -517,6 +517,9 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                             1 => (mutant.lines.0.saturating_sub(3)
                                 ..=mutant.lines.1.max(mutant.end.0))
                                 .contains(&pit[*at].line),
+                            // kotlinc puts a condition's jumps on its last
+                            // line: the statement's every line.
+                            2 => (mutant.lines.0..=mutant.statement_end).contains(&pit[*at].line),
                             _ => is_return(mutant.mutator),
                         }
                 })

@@ -204,6 +204,9 @@ pub struct JvmMutant {
     /// instruction on the line of the statement or call it belongs to, which
     /// need not be the operator's.
     pub lines: (u32, u32),
+    /// The last line of the statement around the mutant: kotlinc may put a
+    /// multi-line condition's jumps on its last line.
+    pub statement_end: u32,
     /// The weak-mutation probe that records what decides whether the
     /// mutant's value differs, where one can be placed without changing
     /// what compiles (`jvm_strong::probe_edits`).
@@ -598,6 +601,8 @@ struct Declared {
     arity: Option<usize>,
     void: bool,
     parameters: Vec<String>,
+    /// A Kotlin `inline` function: its call is its body, not a call.
+    inline: bool,
 }
 
 /// JDK types a call's receiver may be declared as, whose methods' results
@@ -721,6 +726,14 @@ impl ProjectIndex {
             }
             _ => None,
         };
+        let inline = language == JvmLanguage::Kotlin
+            && named_children(node)
+                .filter(|child| child.kind() == "modifiers")
+                .any(|modifiers| {
+                    text(modifiers, source)
+                        .split_whitespace()
+                        .any(|word| word == "inline")
+                });
         if let Some((name, arity, ty, parameters)) = declaration {
             let name = name.to_owned();
             self.methods
@@ -731,6 +744,7 @@ impl ProjectIndex {
                     arity,
                     void: ty == Ty::Void,
                     parameters,
+                    inline,
                 });
             match self.returns.get(&name) {
                 None => {
@@ -821,6 +835,14 @@ impl ProjectIndex {
             }
         }
         found
+    }
+
+    /// Whether every project declaration of `name` is a Kotlin `inline`
+    /// function.
+    fn inline(&self, name: &str) -> bool {
+        self.methods
+            .get(name)
+            .is_some_and(|declarations| declarations.iter().all(|declared| declared.inline))
     }
 
     fn return_type(&self, name: &str) -> Option<&Ty> {
@@ -1172,6 +1194,7 @@ pub fn enumerate(
         logging_lines: BTreeSet::new(),
         package: String::new(),
         deferred: Vec::new(),
+        root: Some(tree.root_node()),
     };
     enumerator.loggers = logger_names(tree.root_node(), source, language);
     match language {
@@ -1227,6 +1250,8 @@ struct Enumerator<'a> {
     package: String,
     /// The lambdas being walked whose code runs later (`JvmMutant::deferred`).
     deferred: Vec<Range>,
+    /// The file's tree, for the statement around a mutant.
+    root: Option<Node<'a>>,
 }
 
 /// The logging packages PIT's `LoggingCallsFilter` knows by default.
@@ -1369,6 +1394,10 @@ impl<'a> Enumerator<'a> {
             return;
         }
         let method = self.method().expect("not suppressed").name.clone();
+        // PIT's line is the compiler's: kotlinc and javac give an operand on
+        // a continuation line its statement's first line.
+        let (statement_start, statement_end) = self.statement_lines(range);
+        let lines = (lines.0.min(statement_start), lines.1);
         let start = position(self.source, range.0);
         let end = position(self.source, range.1);
         self.mutants.push(JvmMutant {
@@ -1385,6 +1414,7 @@ impl<'a> Enumerator<'a> {
             class: self.class_name(),
             key,
             lines,
+            statement_end,
             probe: None,
             deferred: self.deferred.last().copied(),
         });
@@ -1392,6 +1422,38 @@ impl<'a> Enumerator<'a> {
 
     fn line(&self, at: usize) -> u32 {
         position(self.source, at).0
+    }
+
+    /// The first line of the statement around `range`: the node whose
+    /// parent is a block, a body or a switch group.
+    fn statement_lines(&self, range: Range) -> (u32, u32) {
+        let Some(root) = self.root else {
+            return (self.line(range.0), self.line(range.1));
+        };
+        let mut node = root.descendant_for_byte_range(range.0, range.1);
+        while let Some(at) = node {
+            let parent = at.parent();
+            if parent.is_none_or(|parent| {
+                matches!(
+                    parent.kind(),
+                    "block"
+                        | "statements"
+                        | "class_body"
+                        | "function_body"
+                        | "switch_block"
+                        | "switch_block_statement_group"
+                        | "switch_rule"
+                        | "lambda_literal"
+                        | "enum_class_body"
+                        | "program"
+                        | "source_file"
+                )
+            }) {
+                return (self.line(at.start_byte()), self.line(at.end_byte()));
+            }
+            node = parent;
+        }
+        (self.line(range.0), self.line(range.1))
     }
 
     /// The code of `range` with `[from, to)` replaced by `with`.
@@ -4178,7 +4240,7 @@ impl Enumerator<'_> {
             }
             _ => return,
         };
-        if name.is_empty() || KOTLIN_INLINE.contains(&name.as_str()) {
+        if name.is_empty() || KOTLIN_INLINE.contains(&name.as_str()) || self.index.inline(&name) {
             return;
         }
         // A constructor call is not a method call.
@@ -4420,13 +4482,27 @@ impl Enumerator<'_> {
                 for child in named_children(node) {
                     match child.kind() {
                         "variable_declaration" | "multi_variable_declaration" => {
+                            // A loop over an `Int` range (`0 until n`, `a..b`,
+                            // `n downTo 0`) counts in `Int`s.
+                            let over_range = named_children(node).any(|part| {
+                                part.kind() == "range_expression"
+                                    || (part.kind() == "infix_expression"
+                                        && named_children(part).any(|word| {
+                                            matches!(text(word, self.source), "until" | "downTo")
+                                        }))
+                            });
                             for name in named_children(child).filter(|n| n.kind() == "identifier") {
                                 let name = text(name, self.source).to_owned();
                                 self.declare(
                                     &name,
                                     Var {
-                                        ty: Ty::Unknown,
-                                        local: true,
+                                        ty: if over_range && child.kind() == "variable_declaration"
+                                        {
+                                            Ty::Prim(Prim::Int)
+                                        } else {
+                                            Ty::Unknown
+                                        },
+                                        local: false,
                                         constant: None,
                                     },
                                 );
@@ -4673,10 +4749,12 @@ impl Enumerator<'_> {
         if operator == "+" && (left_ty == Ty::Str || matches!(left.kind(), "string_literal")) {
             return true;
         }
+        // A side known to be a reference: Kotlin's operators are functions
+        // any type may declare (`a + b` of two styles), which PIT does not
+        // mutate. Where neither side's type is known the mutant is listed;
+        // one whose type has no replacement operator is unviable.
         let reference = |ty: &Ty| matches!(ty, Ty::Str | Ty::Object(_));
-        reference(&left_ty)
-            || (reference(&right_ty) && operator != "+")
-            || (operator == "+" && reference(&right_ty) && left_ty == Ty::Unknown)
+        reference(&left_ty) || reference(&right_ty)
     }
 
     fn kotlin_primitive_equality(&self, left: Node, right: Node) -> bool {
