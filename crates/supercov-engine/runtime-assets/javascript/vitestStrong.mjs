@@ -226,7 +226,9 @@ afterAll(async () => {
                 message: `the mutant was evaluated ${evaluations} times in ${LEFT_RUNNING_WINDOW_MS} ms after the tests ended`,
             });
     }
-    report({ done: true, at: realNow() });
+    // A worker process whose channel to Vitest closed (the mutant
+    // disconnected it) cannot tell Vitest its file ended: it did not.
+    report({ done: true, at: realNow(), channelLost: Boolean(process.send) && !process.connected && isMainThread });
     if (assignment.mutant)
         runtime.clearActiveMutant();
 });
