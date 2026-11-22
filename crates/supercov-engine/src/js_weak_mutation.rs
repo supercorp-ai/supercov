@@ -1526,12 +1526,15 @@ fn replaced(mutant: &CandidateMutant) -> String {
         "ArrayDeclaration" => Some(descriptor.to_owned()),
         // The literal with the mutated pattern and its own flags, or the
         // string `new RegExp` is given.
-        "Regex" => match original.rfind('/') {
-            Some(end) if original.starts_with('/') && end > 0 => {
-                Some(format!("/{descriptor}{}", &original[end..]))
-            }
-            _ => Some(format!("{descriptor:?}")),
-        },
+        "Regex" => Some(
+            match original
+                .strip_prefix('/')
+                .and_then(|literal| literal.rfind('/'))
+            {
+                Some(end) => format!("/{descriptor}{}", &original[end + 1..]),
+                None => format!("{descriptor:?}"),
+            },
+        ),
         _ => None,
     };
     text.unwrap_or_else(|| descriptor.to_owned())

@@ -205,7 +205,9 @@ pub(crate) fn markdown(
     use supercov_engine::mutation_report::{self as report, Outcome};
     let summary = &data.summary;
     let strong = data.mutants.iter().any(|mutant| mutant.strong.is_some());
-    let asked_statuses = !request.mutants.statuses.is_empty();
+    // `--status survived` and the other verdicts pick by strong verdict.
+    let asked_verdicts = &request.mutants.strong_statuses;
+    let asked_statuses = !request.mutants.statuses.is_empty() || !asked_verdicts.is_empty();
     let wanted = if asked_statuses {
         request.mutants.statuses.clone()
     } else {
@@ -215,7 +217,10 @@ pub(crate) fn markdown(
         .mutants
         .iter()
         .filter(|mutant| {
-            if strong && !asked_statuses {
+            if !asked_verdicts.is_empty() {
+                report::verdict(mutant)
+                    .is_some_and(|verdict| asked_verdicts.contains(&verdict.status))
+            } else if strong && !asked_statuses {
                 report::alive(mutant)
             } else {
                 wanted.contains(&mutant.status)
@@ -307,7 +312,13 @@ pub(crate) fn markdown(
             ));
         }
     }
-    let names = if strong && !asked_statuses {
+    let names = if !asked_verdicts.is_empty() {
+        asked_verdicts
+            .iter()
+            .map(|status| status.replace('-', " "))
+            .collect::<Vec<_>>()
+            .join(" or ")
+    } else if strong && !asked_statuses {
         "left alive by the tests".to_owned()
     } else {
         wanted
@@ -566,12 +577,32 @@ mod tests {
         // Asked by weak status: those, with their verdicts.
         let mut asked = request();
         asked.mutants.statuses = vec![NotInfected];
-        let text = markdown(&asked, &data(mutants));
+        let text = markdown(&asked, &data(mutants.clone()));
         assert!(
             text.contains("| `src/a.py:30:3` | `a + b → a - b` | not infected | — | weak reason |"),
             "{text}"
         );
         assert_eq!(text.matches("| `src/a.py:").count(), 1, "{text}");
+        // Asked by verdict: those alone, and a verdict none has said so.
+        let mut survived = request();
+        survived.mutants.strong_statuses = vec!["survived".into()];
+        let text = markdown(&survived, &data(mutants.clone()));
+        assert_eq!(text.matches(" | survived | ").count(), 25, "{text}");
+        assert!(!text.contains("| no-coverage |"), "{text}");
+        let mut none = request();
+        none.mutants.strong_statuses = vec!["no-coverage".into(), "killed".into()];
+        let text = markdown(
+            &none,
+            &data(vec![mutant(
+                1,
+                Infected,
+                Some(json!({"status": "survived"})),
+            )]),
+        );
+        assert!(
+            text.ends_with("\nNo mutant is no coverage or killed.\n"),
+            "{text}"
+        );
         // Nothing left alive.
         let text = markdown(
             &request(),

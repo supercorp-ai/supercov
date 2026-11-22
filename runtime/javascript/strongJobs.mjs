@@ -24,7 +24,7 @@
 import { fork, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // A file whose baseline job took at most this long, the start of the command
@@ -34,6 +34,11 @@ const UNION_MS = 1_500;
 // Vitest's node tests run here where the run also had browser tests, which
 // Vitest's own driver cannot run beside them.
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser", "vitest"]);
+
+// The wasm output wrapper's source (strongWasmOut.cjs), written beside a
+// pass's jobs as `wasm-bindgen` and `wasm-pack` where the pass switches Rust
+// compiled to wasm.
+export const WASM_OUT = "#!/usr/bin/env node\n// A strong pass over Rust compiled to wasm (strongJobs.mjs): each job that\n// starts the command builds the wasm again, and wasm-bindgen (or wasm-pack\n// build) writes its glue where every other job's tests load it. This stands\n// in for the tool on the jobs' PATH: the tool writes into a fresh directory\n// beside its output directory, and each file is then renamed into place, and\n// only where its bytes changed. A rebuild of the same wasm changes nothing,\n// and a test never reads a file half written. It notes that it ran (`used`\n// beside it), so the driver knows the wasm is built this way.\n// CommonJS, as Node loads a file without an extension.\nconst { spawnSync } = require(\"node:child_process\");\nconst { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = require(\"node:fs\");\nconst { basename, delimiter, dirname, join, resolve } = require(\"node:path\");\n\nconst here = dirname(process.argv[1]);\nconst tool = basename(process.argv[1]);\nconst real = (process.env.PATH ?? \"\")\n    .split(delimiter)\n    .filter((directory) => directory && resolve(directory) !== here)\n    .map((directory) => join(directory, tool))\n    .find((candidate) => {\n        try {\n            accessSync(candidate, constants.X_OK);\n            return true;\n        }\n        catch {\n            return false;\n        }\n    });\nif (!real) {\n    console.error(`supercov: no ${tool} on PATH`);\n    process.exit(127);\n}\nconst args = process.argv.slice(2);\nconst passThrough = () => process.exit(spawnSync(real, args, { stdio: \"inherit\" }).status ?? 1);\n\n// The output directory the tool was asked for, and where it is in `args`.\nlet output;\nlet at = -1;\nfor (let index = 0; index < args.length; index += 1) {\n    const argument = args[index];\n    if (argument === \"--out-dir\" || (tool === \"wasm-pack\" && argument === \"-d\")) {\n        output = args[index + 1];\n        at = index + 1;\n        break;\n    }\n    if (argument.startsWith(\"--out-dir=\")) {\n        output = argument.slice(\"--out-dir=\".length);\n        at = index;\n        break;\n    }\n}\nlet base = process.cwd();\nif (tool === \"wasm-pack\") {\n    if (args[0] !== \"build\")\n        passThrough();\n    // wasm-pack reads its output directory against the crate's, `pkg`\n    // where none is given.\n    const crate = args.slice(1).find((argument, index, rest) => !argument.startsWith(\"-\") && ![\"-d\", \"--out-dir\", \"-t\", \"--target\", \"--scope\", \"--mode\", \"--out-name\", \"--profile\"].includes(rest[index - 1]));\n    base = resolve(crate ?? \".\");\n    output ??= \"pkg\";\n}\nif (output === undefined)\n    passThrough();\nconst target = resolve(base, output);\nconst fresh = `${target}.supercov-${process.pid}`;\nrmSync(fresh, { recursive: true, force: true });\nconst changed = [...args];\nif (at < 0)\n    changed.push(\"--out-dir\", fresh);\nelse if (changed[at].startsWith(\"--out-dir=\"))\n    changed[at] = `--out-dir=${fresh}`;\nelse\n    changed[at] = fresh;\nconst ran = spawnSync(real, changed, { stdio: \"inherit\" });\nif (ran.status === 0) {\n    const move = (from, to) => {\n        for (const name of readdirSync(from)) {\n            const source = join(from, name);\n            const destination = join(to, name);\n            if (statSync(source).isDirectory()) {\n                mkdirSync(destination, { recursive: true });\n                move(source, destination);\n                continue;\n            }\n            const same = existsSync(destination) && readFileSync(destination).equals(readFileSync(source));\n            if (!same)\n                renameSync(source, destination);\n        }\n    };\n    mkdirSync(target, { recursive: true });\n    move(fresh, target);\n    writeFileSync(join(here, \"used\"), \"\");\n}\nrmSync(fresh, { recursive: true, force: true });\nprocess.exit(ran.status ?? 1);\n";
 
 function parallelism() {
     const given = Number(process.env.SUPERCOV_STRONG_WORKERS);
@@ -341,7 +346,6 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     for (const [file, entries] of Object.entries(listed))
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
 
-    const run = slots(workers);
     // A command that starts Jest or Mocha itself: its jobs run in resident
     // runners, one per worker, rather than start the command each.
     const residentAllowed = environment.SUPERCOV_STRONG_RESIDENT !== "0";
@@ -367,6 +371,38 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         if (runner === "mocha" && mochaArgs && esmResident)
             return esmHosts;
         return undefined;
+    };
+    // Rust compiled to wasm (SUPERCOV_WASM_STRONG): a job that starts the
+    // command builds the wasm again, writing it where every other job's
+    // tests load it, so where any file's jobs start the command, one job
+    // runs at a time.
+    const rebuilds = Boolean(process.env.SUPERCOV_WASM_STRONG) && known.some((file) => !residentFor(file));
+    // wasm-bindgen and wasm-pack build, first on the jobs' PATH, write the
+    // glue so that a rebuild of the same wasm changes nothing in place
+    // (strongWasmOut.cjs). Jobs start one at a time until one of them ran
+    // (it notes that it did): a build that writes its wasm another way
+    // keeps them so.
+    const wasmTools = join(work, "wasm-tools");
+    if (rebuilds) {
+        mkdirSync(wasmTools, { recursive: true });
+        for (const name of ["wasm-bindgen", "wasm-pack"])
+            writeFileSync(join(wasmTools, name), WASM_OUT, { mode: 0o755 });
+    }
+    const wasmOutUsed = () => existsSync(join(wasmTools, "used"));
+    const parallel = slots(workers);
+    const serial = slots(1);
+    const run = !rebuilds ? parallel : async (work) => {
+        if (wasmOutUsed())
+            return parallel(work);
+        let handed = false;
+        const result = await serial(async () => {
+            if (wasmOutUsed()) {
+                handed = true;
+                return undefined;
+            }
+            return work();
+        });
+        return handed ? parallel(work) : result;
     };
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
@@ -402,6 +438,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                         // Only this driver reads the plan: Vitest's and
                         // Playwright's configurations would drive their own.
                         SUPERCOV_STRONG_PLAN: "",
+                        ...(rebuilds ? { PATH: `${wasmTools}${delimiter}${environment.PATH ?? ""}` } : {}),
                     };
                     // Supercov's preload, in this process too, gives every child
                     // this process's own Supercov settings over the ones it is

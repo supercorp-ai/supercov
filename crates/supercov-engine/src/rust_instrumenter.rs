@@ -368,15 +368,22 @@ fn constant_bodies(node: &ast::Expr, name: &ast::NameRef) -> impl Iterator<Item 
     })
 }
 
-/// A `const` or `static` item's name and value. A file is instrumented only
-/// where it parses, and there each has a name.
+/// A `const` or `static` item a bare name can refer to: its name and
+/// value. `const _` has no name, and an associated one (in an `impl` or a
+/// `trait`) is reached only through a path. A `static` of a file that parses
+/// is named.
 fn match_constant(item: ra_ap_syntax::SyntaxNode) -> Option<(ast::Name, Option<ast::Expr>)> {
-    const NAMED: &str = "a constant of a file that parses is named";
+    if item
+        .parent()
+        .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
+    {
+        return None;
+    }
     if let Some(constant) = ast::Const::cast(item.clone()) {
-        return Some((constant.name().expect(NAMED), constant.body()));
+        return Some((constant.name()?, constant.body()));
     }
     let item = ast::Static::cast(item)?;
-    Some((item.name().expect(NAMED), item.body()))
+    Some((item.name().expect("a static is named"), item.body()))
 }
 
 /// [`never_empty`], following a constant's name when `constants` is set: a
@@ -5134,7 +5141,8 @@ fn main() {
     /// A loop that cannot be empty -- over a non-empty array literal, or a
     /// range between integer literals that holds a value, through the
     /// adapters that keep every item -- has only its entry to observe; one
-    /// that may be empty keeps both outcomes.
+    /// that may be empty keeps both outcomes. A bare name is a constant of
+    /// the file's own, never `const _` or one in an `impl` or a `trait`.
     #[test]
     fn a_loop_that_cannot_be_empty_records_only_its_entry() {
         for (iterable, never_empty) in [
@@ -5191,7 +5199,7 @@ fn main() {
             ("repeat_n(1, n)", false),
         ] {
             let source = format!(
-                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
+                "const _: () = ();\nstruct S;\nimpl S {{ const COUNT: usize = 0; const KINDS: &'static [&'static str] = &[]; }}\ntrait T {{ const COUNT: usize; const ORDER: [u8; 0] = []; }}\nconst KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
             );
             let transformed =
                 instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")
@@ -5216,6 +5224,38 @@ fn main() {
             // The adapter is given an ordinal for each outcome it may report.
             assert!(transformed.code.contains("::for_loop(("), "{iterable}");
         }
+    }
+
+    /// `bytes` 1.9.0 asserts at compile time with `const _: () = ..;` and
+    /// keeps constants in its impls: a file with both and a loop over a
+    /// range bounded by a constant of its own is instrumented, the bound read
+    /// from that constant, and runs as written.
+    #[test]
+    fn unnamed_and_associated_constants_are_instrumented_and_run_as_written() {
+        let source = "const _: () = assert!(LIMIT > 0);\nconst LIMIT: usize = 3;\nstruct Buffer;\nimpl Buffer {\n    const LIMIT: usize = 0;\n    fn empty() -> usize {\n        Self::LIMIT\n    }\n}\nfn main() {\n    let mut seen = 0;\n    for _ in 0..LIMIT {\n        seen += 1;\n    }\n    println!(\"{seen} {}\", Buffer::empty());\n}\n";
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // `0..LIMIT` is the file's own `LIMIT`, 3, not the impl's 0.
+        let loop_branch = transformed
+            .manifest
+            .branches
+            .iter()
+            .find(|branch| branch.kind == "for-loop")
+            .unwrap();
+        let labels = loop_branch
+            .alternatives
+            .iter()
+            .map(|alternative| alternative.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["entered"]);
+        let original = compile_and_run(source, "original-constants");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-constants",
+        );
+        assert_eq!(String::from_utf8_lossy(&original.stdout), "3 0\n");
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
     }
 
     #[test]

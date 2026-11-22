@@ -499,8 +499,13 @@ npx supercov runs latest mutants test --critical "src/auth/**" --fail-on survive
 `mutants test` reruns the measured run's command (or the one after `--`) with
 every mutant behind a switch and saves StrykerJS's verdicts into the run:
 `killed`, `survived`, `timeout`, `no-coverage`, and `error` for a mutant that
-could not be switched on. `mutants` then shows them beside the weak statuses,
-and the mutation score appears.
+could not be switched on. The pass's summary ends with the mutants the tests
+let survive (`file:line`, the mutator and the change, the first ten and how
+many more). `mutants` then shows each mutant's verdict beside its weak status,
+and the mutation score with the verdicts' counts; `mutants --status survived`
+(or `killed`, `timeout`, `no-coverage`, `error`, `unviable`) lists the mutants
+with that verdict, and `--format markdown` lists the survivors under the
+mutation score.
 
 It runs far less than StrykerJS: no dry run (the measured run is one), no
 mutant no test infected (decided `survived`) or reached (`no-coverage`), and
@@ -514,8 +519,11 @@ start-up run with the server restarted for them. Jest, node:test, Mocha, AVA,
 node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
 command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
-the first failure. Mutants of languages other than JavaScript and TypeScript
-are listed `error` until their language has a driver. See
+the first failure; Jest and Mocha keep resident runners for it. Rust mutants
+run through cargo's tests, or through the JavaScript tests that load the
+crate compiled to wasm. A mutant no driver runs the tests of is an `error`,
+which the score leaves out as every error, and the summary says how many in a
+line per runner (`12 mutant(s) not run: no strong driver for pytest`). See
 `docs/design/strong-mutation.md` and `docs/design/mutation-drivers.md`.
 
 - `--shard k/n` runs one of n shares of the mutants, for parallel jobs.

@@ -2,9 +2,10 @@
 //
 //   node scripts/rust-wasm-js.mjs
 //
-// Two suites build a wasm-bindgen crate in their own test command and load
-// it: node:test, through the `nodejs` glue, and Playwright, from a web page
-// that loads the `web` glue. Supercov instruments the crate in the copy; the
+// Suites build a wasm-bindgen crate in their own test command and load it:
+// node:test, Vitest and Jest through the `nodejs` glue (node:test also in a
+// project with JavaScript of its own), and Playwright, from a web page that
+// loads the `web` glue. Supercov instruments the crate in the copy; the
 // JavaScript runtime remembers each wasm instance, in the test process and
 // in each page, and takes what the module ran at every test's end. Each test
 // must be credited exactly its own lines and decision vectors, the run must
@@ -69,6 +70,21 @@ const suites = [
       'package.json': '{ "name": "grades-node", "private": true, "scripts": { "test": "sh build.sh && node --test" } }\n',
       'build.sh': build('nodejs', '../pkg'),
       'test/grades.test.mjs': 'import test from "node:test";\nimport assert from "node:assert/strict";\nimport { createRequire } from "node:module";\nconst { grade } = createRequire(import.meta.url)("../pkg/grades.js");\n\ntest("a curved score is an A", () => {\n  assert.equal(grade(87, true), "A");\n});\n\ntest("a low score fails", () => {\n  assert.equal(grade(10, false), "fail");\n});\n',
+    },
+    command: ['npm', 'test'],
+    generated: 'pkg',
+  },
+  {
+    // A project with JavaScript of its own beside the crate: the
+    // JavaScript run is published first, and the run archives the tests'
+    // evidence before it builds the crate's run beside it.
+    suite: 'node:test with JavaScript',
+    files: {
+      ...crate,
+      'package.json': '{ "name": "grades-mixed", "private": true, "scripts": { "test": "sh build.sh && node --test" } }\n',
+      'build.sh': build('nodejs', '../pkg'),
+      'lib/curve.js': 'exports.curved = (score) => score + 5;\n',
+      'test/grades.test.js': 'const test = require("node:test");\nconst assert = require("node:assert/strict");\nconst { grade } = require("../pkg/grades.js");\nconst { curved } = require("../lib/curve.js");\n\ntest("a curved score is an A", () => {\n  assert.equal(grade(curved(82), true), "A");\n});\n\ntest("a low score fails", () => {\n  assert.equal(grade(10, false), "fail");\n});\n',
     },
     command: ['npm', 'test'],
     generated: 'pkg',
@@ -207,7 +223,7 @@ try {
         ['fs.read_dir#rust_run.rs:88', 'rust_run.rs:88'],
         ['fs.canonicalize#source_capture.rs:25@2', 'source_capture.rs:25'],
         ['fs.open#integrity.rs:427@3', 'integrity.rs:427'],
-        ['fs.read_to_string#rust_wasm.rs:291', 'rust_wasm.rs:291'],
+        ['fs.read_to_string#rust_wasm.rs:309', 'rust_wasm.rs:309'],
         // The wasm run's own publication: its work directory.
         ['fs.create_dir_all#rust_wasm_evidence.rs:377', 'rust_wasm_evidence.rs:377'],
       ]) {
@@ -218,7 +234,7 @@ try {
       }
     }
   }
-  console.log('[rust-wasm-js] Rust wasm loaded by node:test, Vitest, Jest and a Playwright page is measured, each test credited exactly, and its build kept out of the project');
+  console.log('[rust-wasm-js] Rust wasm loaded by node:test (with and without JavaScript of the project\'s own), Vitest, Jest and a Playwright page is measured, each test credited exactly, and its build kept out of the project');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'rust-wasm-js-')))
     rmSync(root, { recursive: true, force: true });
