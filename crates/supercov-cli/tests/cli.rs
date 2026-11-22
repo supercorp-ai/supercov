@@ -23844,6 +23844,89 @@ fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
     assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
 }
 
+/// Under Vitest 3 the workers are tinypool's processes. A worker that loses
+/// its channel (one the pass stops once a failed test decided its copy, or
+/// one a mutant disconnects or ends) made tinypool 1.1's next write to it
+/// fail with "Channel closed", which ended Vitest 3.2's run and left most
+/// mutants errors in every pass. Its exit tells tinypool it is gone: the pass
+/// runs once, with no error, and those mutants are killed.
+#[cfg(unix)]
+#[test]
+fn a_vitest_3_worker_that_loses_its_channel_ends_no_pass() {
+    let project = Project::empty("strong-vitest-3-channel");
+    project.write(
+        "package.json",
+        r#"{ "name": "mutants", "type": "module", "scripts": { "test": "vitest run" } }"#,
+    );
+    let installed = std::process::Command::new("npm")
+        .args([
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--silent",
+            "vitest@3.2.4",
+        ])
+        .current_dir(&project.root)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !installed {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_VITEST_3").is_none(),
+            "Vitest 3 could not be installed"
+        );
+        eprintln!("skipping: Vitest 3 could not be installed");
+        return;
+    }
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/cart.js",
+        "export function shipping(sum) {\n  if (sum >= 50) {\n    return 0;\n  }\n  return 5;\n}\n\nexport function label(name) {\n  return name.trim().toUpperCase();\n}\n\nexport function bye(flag) {\n  if (flag) process.disconnect?.();\n  return 1;\n}\n\nexport function quit(flag) {\n  if (flag) process.exit(3);\n  return 2;\n}\n",
+    );
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label, bye, quit } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n  it(\"stays\", () => expect(bye(false)).toBe(1));\n  it(\"keeps going\", () => expect(quit(false)).toBe(2));\n  for (let i = 0; i < 20; i++) it(`waits ${i}`, async () => { await new Promise((done) => setTimeout(done, 20)); expect(shipping(10)).toBe(5); });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("mutants");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(!said.contains("Unhandled"), "{said}");
+    assert_eq!(reply["passes"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/cart.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    for line in ["src/cart.js:13:", "src/cart.js:18:"] {
+        let dropping = mutants
+            .iter()
+            .find(|mutant| {
+                let id = mutant["id"].as_str().unwrap_or_default();
+                id.starts_with(line) && id.ends_with(":ConditionalExpression:true")
+            })
+            .unwrap_or_else(|| panic!("{listed}"));
+        assert_eq!(dropping["strong"]["status"], "killed", "{dropping}");
+    }
+    assert!(
+        mutants
+            .iter()
+            .filter(|mutant| mutant["strong"]["status"] == "killed")
+            .count()
+            > 4,
+        "{listed}"
+    );
+}
+
 /// A continuous pass gives each Vitest run a bounded number of slots (Vitest
 /// reads every slot's file as the run starts): a pass that needs more runs
 /// again, in the same pass, with the verdicts one run gives.

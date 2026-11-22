@@ -288,6 +288,17 @@ spawners sharing the workers were no faster than one. Vitest 1-3 fork
 through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
 from Vitest's process. The pass summary counts `spawnedWorkers`.
 
+A tinypool worker that loses its channel (one the pass stops once a failed
+test decided its copy, or one a mutant disconnects or ends) still gets
+tinypool's relayed writes for a moment; tinypool 1.1 (Vitest 3.2) let the
+failed write ("Channel closed", EPIPE) become an unhandled rejection, and
+Vitest ended the run at that. On destr 2.0.5 installed with npm (Vitest 3.2.7)
+most passes ended that way, 80 of its 141 mutants left errors after every
+retry; with the lockfile's Vitest 3.1.1 (tinypool 1.0) none did. The process's
+exit already tells tinypool the worker is gone, as for any worker that dies,
+so the failed write's error is dropped: 40 passes since, each with the same
+111 kills and 30 survivors.
+
 A copy's worker spends its first few hundred milliseconds before it can
 claim anything: Node starting, Vitest's worker loading, and in a DOM
 environment that environment's package (jsdom took 300 ms on tRPC, where every
