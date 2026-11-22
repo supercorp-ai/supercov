@@ -419,6 +419,16 @@ fn plan_text(data: &Value) -> String {
         let score = summary["mutationScore"]
             .as_f64()
             .map_or("-".to_owned(), |score| format!("{:.1}%", score * 100.0));
+        // Mutants that did not compile, and those no driver could run.
+        let mut extra = match summary["unviable"].as_u64() {
+            Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
+            _ => String::new(),
+        };
+        for (runner, count) in summary["notRun"].as_object().into_iter().flatten() {
+            extra.push_str(&format!(
+                "  {count} mutant(s) not run: no strong driver for {runner}\n"
+            ));
+        }
         return format!(
             "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
             data["run"].as_str().unwrap_or(""),
@@ -428,10 +438,7 @@ fn plan_text(data: &Value) -> String {
             summary["noCoverage"],
             summary["equivalent"],
             summary["error"],
-            match summary["unviable"].as_u64() {
-                Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
-                _ => String::new(),
-            },
+            extra,
             summary["ran"],
             summary["durationMs"],
         );
@@ -587,6 +594,41 @@ pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, 
 
 /// The mutation score StrykerJS reports: killed and timed out over all
 /// that are not equivalent or errors.
+/// The mutants a pass could not run because no driver runs their tests, by
+/// the runners they ran under: an `error` none of whose candidates' runners
+/// its driver runs.
+fn not_run(
+    plan: &StrongPlan,
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut not_run = std::collections::BTreeMap::new();
+    for mutant in &plan.mutants {
+        if verdicts
+            .get(&mutant.id)
+            .is_none_or(|verdict| verdict.status != "error")
+        {
+            continue;
+        }
+        let driver = supercov_engine::strong_driver::driver_of(mutant, &plan.tests);
+        let runners = mutant
+            .candidates
+            .iter()
+            .filter_map(|candidate| plan.tests.get(candidate.test))
+            .map(|test| test.runner.as_str())
+            .collect::<BTreeSet<_>>();
+        if runners.is_empty()
+            || runners
+                .iter()
+                .any(|runner| supercov_engine::strong_driver::drives(driver, runner))
+        {
+            continue;
+        }
+        let runners = runners.into_iter().collect::<Vec<_>>().join(", ");
+        *not_run.entry(runners).or_insert(0) += 1;
+    }
+    not_run
+}
+
 fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> {
     let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
     let detected = count("killed") + count("timeout");
@@ -882,6 +924,8 @@ fn execute(
             // counted apart, and left out of the score.
             "unviable": count("unviable"),
             "mutationScore": score(&saved),
+            // Errors because no driver runs their tests, by runner.
+            "notRun": not_run(&plan, &saved),
             "durationMs": started.elapsed().as_millis() as u64,
             "commandExitCode": command_exit,
         },
@@ -919,6 +963,98 @@ mod tests {
         assert_eq!(span_lines("src/a.ts"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:Mutator"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
+    }
+
+    /// Mutants in `error` because no driver runs their tests are counted by
+    /// runner, said in one line each, and left out of the score as every
+    /// error is.
+    #[test]
+    fn mutants_no_driver_runs_are_said_and_left_out_of_the_score() {
+        use supercov_engine::strong_plan::{
+            Candidate, CandidateReason, PlannedMutant, PlannedTest,
+        };
+        let tests = ["jest", "pytest", "vitest-browser"]
+            .map(|runner| PlannedTest {
+                id: runner.into(),
+                file: None,
+                name: runner.into(),
+                title: None,
+                runner: runner.into(),
+                duration_ms: None,
+                span: None,
+                runnable: true,
+            })
+            .to_vec();
+        let mutant = |id: &str, language: &str, candidates: &[usize]| PlannedMutant {
+            id: id.into(),
+            file: "a".into(),
+            language: language.into(),
+            index: 0,
+            mutator: "M".into(),
+            weak: "unknown",
+            decided: None,
+            reason: None,
+            candidates: candidates
+                .iter()
+                .map(|test| Candidate {
+                    test: *test,
+                    reason: CandidateReason::Unknown,
+                })
+                .collect(),
+            whole_files: Vec::new(),
+            server_wide: None,
+            covering: 0,
+            statement: None,
+            function: None,
+            function_hit_by: Default::default(),
+        };
+        let plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests,
+            mutants: vec![
+                mutant("py-1", "python", &[1]),
+                mutant("py-2", "python", &[1]),
+                mutant("wasm", "rust", &[2]),
+                // An error of a mutant a driver runs, one with no test, and
+                // a kill: none is a mutant no driver runs.
+                mutant("js-error", "javascript", &[0]),
+                mutant("no-test", "python", &[]),
+                mutant("killed", "javascript", &[0]),
+            ],
+        };
+        let verdict = |status: &str| Verdict {
+            status: status.into(),
+            killed_by: None,
+            tests: 0,
+            duration_ms: 0,
+            reason: None,
+        };
+        let verdicts = ["py-1", "py-2", "wasm", "js-error", "no-test"]
+            .map(|id| (id.to_owned(), verdict("error")))
+            .into_iter()
+            .chain([("killed".to_owned(), verdict("killed"))])
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let counted = not_run(&plan, &verdicts);
+        assert_eq!(
+            counted,
+            std::collections::BTreeMap::from([
+                ("pytest".to_owned(), 2),
+                ("vitest-browser".to_owned(), 1)
+            ])
+        );
+        // The score is the kill's alone.
+        assert_eq!(score(&verdicts), Some(1.0));
+        let text = plan_text(&json!({
+            "run": "r1",
+            "summary": {"killed": 1, "timeout": 0, "survived": 0, "noCoverage": 0, "equivalent": 0,
+                "error": 5, "unviable": 0, "ran": 6, "durationMs": 1, "mutationScore": 1.0,
+                "notRun": counted},
+        }));
+        assert!(
+            text.contains("  2 mutant(s) not run: no strong driver for pytest\n")
+                && text.contains("  1 mutant(s) not run: no strong driver for vitest-browser\n"),
+            "{text}"
+        );
     }
 
     #[test]

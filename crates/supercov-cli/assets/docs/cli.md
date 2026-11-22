@@ -465,8 +465,11 @@ start-up run with the server restarted for them. Jest, node:test, Mocha, AVA,
 node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
 command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
-the first failure. Mutants of languages other than JavaScript and TypeScript
-are listed `error` until their language has a driver. See
+the first failure; Jest and Mocha keep resident runners for it. Rust mutants
+run through cargo's tests, or through the JavaScript tests that load the
+crate compiled to wasm. A mutant no driver runs the tests of is an `error`,
+which the score leaves out as every error, and the summary says how many in a
+line per runner (`12 mutant(s) not run: no strong driver for pytest`). See
 `docs/design/strong-mutation.md` and `docs/design/mutation-drivers.md`.
 
 - `--shard k/n` runs one of n shares of the mutants, for parallel jobs.

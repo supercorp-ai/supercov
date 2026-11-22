@@ -159,6 +159,19 @@ pub fn driver_of<'a>(
     }
 }
 
+/// Whether the driver of `language` (as `driver_of` names it) runs tests
+/// under `runner`.
+pub fn drives(language: &str, runner: &str) -> bool {
+    match language {
+        crate::mutant_list::JAVASCRIPT => {
+            STRONG_RUNNERS.contains(&runner)
+                && !matches!(runner, "rust-libtest" | "nextest" | "rustdoc")
+        }
+        crate::mutant_list::RUST => matches!(runner, "rust-libtest" | "nextest" | "rustdoc"),
+        _ => false,
+    }
+}
+
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
     matches!(
@@ -272,6 +285,10 @@ mod tests {
         assert_eq!(driver_of(&mutant(rust, &[0, 9]), &tests), rust);
         assert_eq!(driver_of(&mutant(rust, &[]), &tests), rust);
         assert_eq!(driver_of(&mutant(javascript, &[2]), &tests), javascript);
+        // Which runners each driver runs.
+        assert!(drives(javascript, "jest") && !drives(javascript, "nextest"));
+        assert!(drives(rust, "nextest") && !drives(rust, "jest"));
+        assert!(!drives("python", "pytest"));
     }
 
     #[test]
