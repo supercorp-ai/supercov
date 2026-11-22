@@ -4,17 +4,17 @@
   "shard": null,
   "variant": "own-vitest",
   "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
-  "startedAt": "2026-11-22T12:34:15.449Z",
+  "startedAt": "2026-11-22T15:09:45.978Z",
   "machine": {
-    "instanceType": "m8a.4xlarge",
+    "instanceType": "c8a.4xlarge",
     "cpus": 16,
     "cpuModel": "AMD EPYC 9R45",
-    "memGiB": 61.6
+    "memGiB": 30.7
   },
   "versions": {
     "supercovWrapper": "4.28.0",
     "supercov": "supercov 4.28.0 (rust contract v1)",
-    "supercovBinaryKey": "7bde1dc6674d633b",
+    "supercovBinaryKey": "1f3f04d3df5eb6d4",
     "node": "v24.22.3",
     "pnpm": "9.0.6",
     "vitest": "1.5.3",
@@ -28,75 +28,75 @@
     {
       "name": "clone",
       "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/scule 5bc68048caad7c0e7de35842c83a510e8e1a7c4f && git checkout -q FETCH_HEAD",
-      "startOffsetS": 0.01,
-      "wallS": 0.248,
+      "startOffsetS": 0.02,
+      "wallS": 0.191,
       "exitCode": 0,
       "rusage": {
         "userS": 0.02,
         "sysS": 0,
         "cpuS": 0.02,
-        "cpuPercent": "12%",
-        "maxRssKiB": 19020,
+        "cpuPercent": "16%",
+        "maxRssKiB": 19036,
         "note": "GNU time: the process and every descendant it waited for"
       }
     },
     {
       "name": "pnpm-setup",
       "command": "npm i -g pnpm@9.0.6 >/dev/null && pnpm --version",
-      "startOffsetS": 0.26,
-      "wallS": 1.676,
+      "startOffsetS": 0.21,
+      "wallS": 1.238,
       "exitCode": 0,
       "rusage": {
-        "userS": 0.51,
-        "sysS": 0.11,
-        "cpuS": 0.62,
-        "cpuPercent": "37%",
-        "maxRssKiB": 140024,
+        "userS": 0.54,
+        "sysS": 0.09,
+        "cpuS": 0.63,
+        "cpuPercent": "51%",
+        "maxRssKiB": 144780,
         "note": "GNU time: the process and every descendant it waited for"
       }
     },
     {
       "name": "install",
       "command": "pnpm install --frozen-lockfile",
-      "startOffsetS": 1.94,
-      "wallS": 1.394,
+      "startOffsetS": 1.45,
+      "wallS": 1.203,
       "exitCode": 0,
       "rusage": {
-        "userS": 2.94,
-        "sysS": 0.51,
-        "cpuS": 3.45,
-        "cpuPercent": "248%",
-        "maxRssKiB": 817548,
+        "userS": 3.07,
+        "sysS": 0.46,
+        "cpuS": 3.53,
+        "cpuPercent": "294%",
+        "maxRssKiB": 825464,
         "note": "GNU time: the process and every descendant it waited for"
       }
     },
     {
       "name": "tool-install",
       "command": "npm i --prefix /home/runner/work/_temp/mutation-bench/supercov-cli --no-audit --no-fund supercov@4.28.0 >/dev/null && ls /home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin",
-      "startOffsetS": 3.33,
-      "wallS": 4.088,
+      "startOffsetS": 2.65,
+      "wallS": 4.452,
       "exitCode": 0,
       "rusage": {
         "userS": 1.18,
-        "sysS": 0.22,
-        "cpuS": 1.4,
-        "cpuPercent": "34%",
-        "maxRssKiB": 350308,
+        "sysS": 0.26,
+        "cpuS": 1.44,
+        "cpuPercent": "32%",
+        "maxRssKiB": 350356,
         "note": "GNU time: the process and every descendant it waited for"
       }
     },
     {
       "name": "tests",
       "command": "node_modules/.bin/vitest run --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
-      "startOffsetS": 7.46,
-      "wallS": 0.717,
+      "startOffsetS": 7.14,
+      "wallS": 0.648,
       "exitCode": 0,
       "rusage": {
-        "userS": 1.28,
-        "sysS": 0.59,
-        "cpuS": 1.87,
-        "cpuPercent": "263%",
-        "maxRssKiB": 436112,
+        "userS": 1.33,
+        "sysS": 0.61,
+        "cpuS": 1.94,
+        "cpuPercent": "300%",
+        "maxRssKiB": 435972,
         "note": "GNU time: the process and every descendant it waited for"
       },
       "tests": {
@@ -109,46 +109,46 @@
     {
       "name": "supercov-measure",
       "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov -- node_modules/.bin/vitest run",
-      "startOffsetS": 8.18,
-      "wallS": 1.508,
+      "startOffsetS": 7.79,
+      "wallS": 1.336,
       "exitCode": 0,
       "rusage": {
-        "userS": 1.75,
+        "userS": 1.78,
         "sysS": 0.8,
-        "cpuS": 2.55,
-        "cpuPercent": "169%",
-        "maxRssKiB": 494708,
+        "cpuS": 2.58,
+        "cpuPercent": "194%",
+        "maxRssKiB": 490676,
         "note": "GNU time: the process and every descendant it waited for"
       },
-      "runDir": ".supercov/runs/run_5696900ef06d97c6"
+      "runDir": ".supercov/runs/run_784e1ae30b3f8a7d"
     },
     {
       "name": "supercov-plan",
       "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov runs latest mutants test --plan --json  > /home/runner/work/supercov/supercov/out/supercov-plan.json",
-      "startOffsetS": 9.69,
-      "wallS": 0.034,
+      "startOffsetS": 9.13,
+      "wallS": 0.035,
       "exitCode": 0,
       "rusage": {
         "userS": 0.02,
         "sysS": 0,
         "cpuS": 0.02,
         "cpuPercent": "100%",
-        "maxRssKiB": 51068,
+        "maxRssKiB": 50944,
         "note": "GNU time: the process and every descendant it waited for"
       }
     },
     {
       "name": "supercov-strong",
       "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov runs latest mutants test --json  > /home/runner/work/supercov/supercov/out/supercov-strong.result.json",
-      "startOffsetS": 9.73,
-      "wallS": 2.978,
+      "startOffsetS": 9.16,
+      "wallS": 3.037,
       "exitCode": 0,
       "rusage": {
-        "userS": 17.53,
-        "sysS": 7.33,
-        "cpuS": 24.86,
-        "cpuPercent": "835%",
-        "maxRssKiB": 781716,
+        "userS": 17.4,
+        "sysS": 7.18,
+        "cpuS": 24.58,
+        "cpuPercent": "810%",
+        "maxRssKiB": 774508,
         "note": "GNU time: the process and every descendant it waited for"
       },
       "result": "supercov-strong.result.json",
@@ -156,5 +156,5 @@
       "mutants": "supercov-strong.mutants.jsonl"
     }
   ],
-  "totalS": 12.74
+  "totalS": 12.24
 }

@@ -22881,12 +22881,14 @@ fn a_running_pass_says_how_far_it_got() {
 }
 
 /// A pass runs in stages, each one run of all it holds: every mutant's
-/// cheapest file beside that file's baseline, then the next batch of the
-/// mutants' other files, beside theirs, the likeliest killer first (nothing
-/// learned yet: the cheapest). `inc`'s mutants survive `a`, which only calls
-/// it; the next batch is one file, the quick `c`, which kills each of them,
-/// so the slow `b` never runs: two copies each, in two stages (the fixture's
-/// `cart.js` mutants have one test file, and one copy each).
+/// cheapest file beside that file's baseline, and each mutant's next batch
+/// of other files, the likeliest killer first (nothing learned yet: the
+/// cheapest), held back after them until the mutant's copy before has ended.
+/// `inc`'s mutants survive `a`, which only calls it; the next batch is one
+/// file, the quick `c`, which kills each of them, so the slow `b` never runs:
+/// two copies each (the fixture's `cart.js` mutants have one test file, and
+/// one copy each). A held-back copy whose mutant was killed first ends with
+/// no process.
 #[cfg(unix)]
 #[test]
 fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
@@ -22918,7 +22920,6 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         .json();
     let passes = reply["passes"].as_array().unwrap();
     assert_eq!(passes.len(), 1, "{reply}");
-    assert_eq!(passes[0]["stages"], 2, "{reply}");
     let ran = reply["summary"]["ran"].as_u64().unwrap();
     let listed = project
         .supercov(&[
@@ -22948,7 +22949,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         ran + killed,
         "{reply}"
     );
-    assert_eq!(passes[0]["profile"]["skippedCopies"], 0, "{reply}");
+    assert!(
+        passes[0]["profile"]["skippedCopies"].as_u64().unwrap_or(0) <= killed,
+        "{reply}"
+    );
+    assert!(passes[0]["stages"].as_u64().unwrap_or(0) <= 2, "{reply}");
 }
 
 /// A mutant that makes a module throw while it loads: its copy's test file

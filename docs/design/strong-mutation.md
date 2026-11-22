@@ -110,6 +110,30 @@ copies of its other files that no worker has started yet end before their test
 file loads. Should the confirmation overturn the kill, those files run in the
 next stage.
 
+A stage used to end before a mutant's next batch could start, so a mutant left
+alive early in a stage waited for the stage's slowest copy (hono's workers were
+busy 61% of the pass). Where the reporter gives each copy its assignment (see
+below), each mutant in a stage also lists its next batch, after all the
+stage's other work and held back: a held-back copy runs only if every other
+copy of its mutant in the stage has ended with no failed test by the time a
+worker takes it (and its mutant is still undecided); otherwise its file goes back to the mutant's
+later files. So a mutant its first copy leaves alive goes on in the same
+stage, in what used to be the stage's idle end, and a held-back copy that does
+not run costs no process. Paired on hono's six shards and tRPC's shards 1-11:
+hono 73 to 64 ms a mutant (workers busy 61% to 71%), tRPC 1,142 to 1,084 ms.
+Running a mutant's later files one at a time in the stage instead (all of them
+listed, each held back while another copy of its mutant runs) was slower:
+most were taken while their mutant's copy still ran, and went back to the next
+stage (hono 102 ms a mutant).
+
+A mutant's copy that fails a test its file's known baseline passed is decided
+by it: its later tests are skipped, and nothing it does after can change its
+verdict. Its worker is stopped as soon as the failure is reported, not at the
+end of its file. A test that timed out can leave a runaway loop going in its
+worker until then: on tRPC twelve such workers held 2 GB each at once, and the
+16-vCPU, 32 GB machine's job was ended with SIGTERM in about one shard run in
+three. The profile counts them as `settledCopies`.
+
 ## Running many mutants at once without restarting anything (Vitest)
 
 A Vitest run evaluates each test file in an isolated module graph (the

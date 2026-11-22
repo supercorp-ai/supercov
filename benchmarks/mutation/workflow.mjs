@@ -108,6 +108,7 @@ const lines = [
   '          SUPERCOV_DIAG_FILES: ${{ vars.SUPERCOV_DIAG_FILES }}',
   '          SUPERCOV_DIAG_POINTS: ${{ vars.SUPERCOV_DIAG_POINTS }}',
   '          DIAG_SCRIPT: ${{ vars.DIAG_SCRIPT }}',
+  '          SUPERCOV_BENCH_STRONG_WRAP: ${{ vars.SUPERCOV_BENCH_STRONG_WRAP }}',
   '        run: >-',
   '          node benchmarks/mutation/run-job.mjs --project ${{ matrix.project }} --scenario ${{ matrix.scenario }}',
   "          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }} ${{ matrix.variant && format('--variant {0}', matrix.variant) || '' }} --out out",
