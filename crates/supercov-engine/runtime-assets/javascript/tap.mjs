@@ -12,7 +12,7 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
+import { activateCoverageScope, beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
 import { runnerExecutionScope, writeRunnerEvidence } from "./runnerEvidence.mjs";
 import { strongJob } from "./strongJob.mjs";
 
@@ -73,6 +73,7 @@ async function subtestClasses() {
             // Frames stay as libtap writes them.
         }
         classes.push(createRequire(import.meta.url)(join(lib, "test.js")));
+        topLevel.libtap = true;
     }
     catch {
         // Neither tap's own classes nor libtap's: tap 14 or older.
@@ -123,6 +124,13 @@ function nameFromTheCopy(StackUtils) {
         };
 }
 
+// tap counts a test file as a test of its own: assertions at its top level,
+// outside any subtest, pass or fail it. What runs there is that test's, the
+// file's top level, which tap's own report names after the file, and it is
+// written as a test where the file asserts there (or has no subtest), as the
+// file's module setup otherwise.
+const topLevel = { subtests: 0, points: 0, libtap: false };
+
 export async function adaptTap(testFile) {
     const evidenceDirectory = process.env.SUPERCOV_EVIDENCE_DIR;
     if (!evidenceDirectory)
@@ -131,6 +139,16 @@ export async function adaptTap(testFile) {
         if (typeof Class?.prototype?.sub === "function" && !Class.prototype.sub.supercovTap)
             patch(Class, testFile, evidenceDirectory);
     }
+    const identity = { runner: "tap", file: testFile, name: "(top level)" };
+    const scope = runnerExecutionScope(identity);
+    beginBufferedServerEvidence(scope);
+    activateCoverageScope(scope);
+    process.once("exit", (code) => {
+        // libtap passes or fails a subtest's point on its parent too.
+        const asserts = topLevel.points > (topLevel.libtap ? topLevel.subtests : 0);
+        const written = asserts ? identity : { ...identity, role: "setup" };
+        writeRunnerEvidence(written, !asserts || code === 0 ? "passed" : "failed", scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
+    });
 }
 
 function patch(TestBase, testFile, evidenceDirectory) {
@@ -157,8 +175,10 @@ function patch(TestBase, testFile, evidenceDirectory) {
         // failure. A subtest runs with its parent, as it does without
         // Supercov.
         const job = strongJob();
-        const topLevel = !this.parent;
-        if (job && (job.stopped || (topLevel && !job.selects(testFile, scope.testId))))
+        const atTop = !this.parent;
+        if (atTop)
+            topLevel.subtests += 1;
+        if (job && (job.stopped || (atTop && !job.selects(testFile, scope.testId))))
             extra = { ...extra, skip: true };
         beginBufferedServerEvidence(scope);
         let written = false;
@@ -197,4 +217,16 @@ function patch(TestBase, testFile, evidenceDirectory) {
         return result;
     };
     TestBase.prototype.sub.supercovTap = true;
+    // Every assertion passes or fails through these: those of a file's top
+    // level, outside any subtest, are counted.
+    for (const name of ["pass", "fail"]) {
+        const assertion = TestBase.prototype[name];
+        if (typeof assertion !== "function")
+            continue;
+        TestBase.prototype[name] = function supercovTapAssertion(...args) {
+            if (!this.parent)
+                topLevel.points += 1;
+            return Reflect.apply(assertion, this, args);
+        };
+    }
 }

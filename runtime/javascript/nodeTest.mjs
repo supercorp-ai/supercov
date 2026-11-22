@@ -159,6 +159,10 @@ function wrappedRegistration(original, parentTestId, forcedStatus) {
         };
         // Allocate at registration, never callback completion: concurrent tests
         // can finish in any order. Count each source/name within its parent.
+        if (!parentTestId) {
+            const counted = Symbol.for("supercov.nodeTestRegistrations");
+            globalThis[counted] = (globalThis[counted] ?? 0) + 1;
+        }
         const registrationKey = runnerTestId(identity);
         const registrationOrdinal = registrationCounts.get(registrationKey) ?? 0;
         registrationCounts.set(registrationKey, registrationOrdinal + 1);

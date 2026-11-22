@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1223")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1221")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1223"),
+        seen.contains("test fault at fs (javascript_run.rs:1221"),
         "{seen}"
     );
 }
@@ -3036,10 +3036,12 @@ fn the_harness_commands_refuse_input_they_cannot_read() {
         );
     }
     // A command still running is reported at each interval, in ms then s.
+    // The interval is short enough that a busy machine still reports once
+    // before the first second.
     let slow = project
         .supercov_with(
             &["__supervise", "--", "sleep", "2.5"],
-            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "400")],
+            &[("SUPERCOV_DIAGNOSTIC_INTERVAL_MS", "100")],
         )
         .exits(0);
     let reports = slow
@@ -6468,10 +6470,12 @@ fn mocha_tests_are_attributed_one_by_one_and_selected_by_grep() {
     );
     project.git(&["init", "-q"]);
     project.commit("mocha");
-    // Serially and with --parallel, where each worker runs its own files.
+    // Serially, with --parallel, where each worker runs its own files, and
+    // with --check-leaks, which must not see Supercov's own globals.
     for command in [
         &["--", "npx", "mocha"][..],
         &["--", "npx", "mocha", "--parallel"],
+        &["--", "npx", "mocha", "--check-leaks"],
     ] {
         project.supercov(command).succeeds();
         let summary = project.supercov(&["runs", "latest"]).succeeds();
@@ -16053,7 +16057,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2623 => main.rs:2623",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2034 => javascript_frontend.rs:2034",
+            "fs.read_to_string#javascript_frontend.rs:2053 => javascript_frontend.rs:2053",
         ],
     );
 }
@@ -17617,18 +17621,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1364",
-        "fs.create_dir_all#javascript_run.rs:758",
-        "fs.write#javascript_run.rs:1092",
+        "fs.create_dir_all#javascript_run.rs:752",
+        "fs.write#javascript_run.rs:1086",
         "fs.canonicalize#process_supervision.rs:1796",
-        "fs.create_dir_all#javascript_run.rs:1171",
-        "fs.create_dir_all#javascript_run.rs:1361",
+        "fs.create_dir_all#javascript_run.rs:1169",
+        "fs.create_dir_all#javascript_run.rs:1359",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
+        "fs.create_dir_all#javascript_run.rs:1634",
         "fs.create_dir_all#javascript_run.rs:1636",
-        "fs.create_dir_all#javascript_run.rs:1638",
         "fs.create_dir_all#lifecycle.rs:1055",
+        "fs.create_dir_all#javascript_run.rs:1736",
         "fs.create_dir_all#javascript_run.rs:1738",
-        "fs.create_dir_all#javascript_run.rs:1740",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17794,19 +17798,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@40", "runtime.d.mts"),
-        ("fs.rename@41", "playwright.mjs"),
-        ("fs.rename@43", "playwright.config.mjs"),
-        ("fs.rename@44", "vitest.config.mjs"),
-        ("fs.rename@47", "vitestCommands.mjs"),
+        ("fs.rename@42", "runtime.d.mts"),
+        ("fs.rename@43", "playwright.mjs"),
+        ("fs.rename@45", "playwright.config.mjs"),
+        ("fs.rename@46", "vitest.config.mjs"),
+        ("fs.rename@49", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@49", "test/cart.test.js"),
-        ("fs.rename@50", "authored-sources.json"),
-        ("fs.rename@51", "statement-exclusions.json"),
-        ("fs.rename@52", "mutants.json"),
-        ("fs.rename@53", "manifest.json"),
-        ("fs.rename@54", "instrumentation-complete"),
-        ("fs.rename@55", "injected fault at fs"),
+        ("fs.rename@51", "test/cart.test.js"),
+        ("fs.rename@52", "authored-sources.json"),
+        ("fs.rename@53", "statement-exclusions.json"),
+        ("fs.rename@54", "mutants.json"),
+        ("fs.rename@55", "manifest.json"),
+        ("fs.rename@56", "instrumentation-complete"),
+        ("fs.rename@57", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18125,12 +18129,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:359",
-            "javascript_frontend.rs:359",
+            "fs.read#javascript_frontend.rs:361",
+            "javascript_frontend.rs:361",
         ),
         (
-            "fs.read#javascript_frontend.rs:371",
-            "javascript_frontend.rs:371",
+            "fs.read#javascript_frontend.rs:373",
+            "javascript_frontend.rs:373",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -18160,12 +18164,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1816@2",
+            "fs.read_to_string#javascript_frontend.rs:1835@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1816"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1835"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -21956,12 +21960,12 @@ fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Proj
         "package.json",
         &format!(r#"{{ "name": "cart", "type": "{module}" }}"#),
     );
+    // The repository's packages, where it has them: Bun's tests need none
+    // and run where they were never installed (the Bun bootstrap job).
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    std::os::unix::fs::symlink(
-        modules.canonicalize().unwrap(),
-        project.root.join("node_modules"),
-    )
-    .unwrap();
+    if let Ok(modules) = modules.canonicalize() {
+        std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
+    }
     project.write(".gitignore", "node_modules\n.supercov\n");
     let exports = if module == "module" {
         ("export function", "")
@@ -22043,7 +22047,9 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
 }
 
 /// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
-/// run's command for one test file with the mutant on and only its tests.
+/// run's command for one test file with the mutant on and only its tests. A
+/// node:test file that asserts at its top level, with no test() in it, is a
+/// test of its own, as node:test counts it.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
@@ -22070,7 +22076,7 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
             ),
             (
                 "test/count.test.js",
-                "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { countdown } from \"../src/cart.js\";\ntest(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+                "import assert from \"node:assert/strict\";\nimport { countdown } from \"../src/cart.js\";\nassert.equal(countdown(3), 0);\n",
             ),
         ],
     );
@@ -22157,7 +22163,8 @@ fn mutants_test_runs_bun_test_mutants_one_job_at_a_time() {
 }
 
 /// `mutants test` under node-tap, installed from the registry as the
-/// failure-output check installs it: each test file is a process of tap's.
+/// failure-output check installs it: each test file is a process of tap's,
+/// and a file that asserts at its top level is a test of its own.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
@@ -22186,7 +22193,7 @@ fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
             ),
             (
                 "test/count.test.js",
-                "import t from \"tap\";\nimport { countdown } from \"../src/cart.js\";\nt.test(\"counts down\", async (t) => t.equal(countdown(3), 0));\n",
+                "import t from \"tap\";\nimport { countdown } from \"../src/cart.js\";\nt.equal(countdown(3), 0);\n",
             ),
         ],
     );
@@ -22197,7 +22204,7 @@ fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
         project.root.join("node_modules"),
     )
     .unwrap();
-    assert_cart_verdicts(&project, &["npx", "tap"], "tap");
+    assert_cart_verdicts(&project, &["npx", "tap", "--disable-coverage"], "tap");
 }
 
 /// `mutants test` under Vitest's Browser Mode: the job's mutant is switched
@@ -22873,12 +22880,14 @@ fn a_running_pass_says_how_far_it_got() {
 }
 
 /// A pass runs in stages, each one run of all it holds: every mutant's
-/// cheapest file beside that file's baseline, then the next batch of the
-/// mutants' other files, beside theirs, the likeliest killer first (nothing
-/// learned yet: the cheapest). `inc`'s mutants survive `a`, which only calls
-/// it; the next batch is one file, the quick `c`, which kills each of them,
-/// so the slow `b` never runs: two copies each, in two stages (the fixture's
-/// `cart.js` mutants have one test file, and one copy each).
+/// cheapest file beside that file's baseline, and each mutant's next batch
+/// of other files, the likeliest killer first (nothing learned yet: the
+/// cheapest), held back after them until the mutant's copy before has ended.
+/// `inc`'s mutants survive `a`, which only calls it; the next batch is one
+/// file, the quick `c`, which kills each of them, so the slow `b` never runs:
+/// two copies each (the fixture's `cart.js` mutants have one test file, and
+/// one copy each). A held-back copy whose mutant was killed first ends with
+/// no process.
 #[cfg(unix)]
 #[test]
 fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
@@ -22910,7 +22919,6 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         .json();
     let passes = reply["passes"].as_array().unwrap();
     assert_eq!(passes.len(), 1, "{reply}");
-    assert_eq!(passes[0]["stages"], 2, "{reply}");
     let ran = reply["summary"]["ran"].as_u64().unwrap();
     let listed = project
         .supercov(&[
@@ -22940,7 +22948,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         ran + killed,
         "{reply}"
     );
-    assert_eq!(passes[0]["profile"]["skippedCopies"], 0, "{reply}");
+    assert!(
+        passes[0]["profile"]["skippedCopies"].as_u64().unwrap_or(0) <= killed,
+        "{reply}"
+    );
+    assert!(passes[0]["stages"].as_u64().unwrap_or(0) <= 2, "{reply}");
 }
 
 /// A mutant that makes a module throw while it loads: its copy's test file
@@ -23045,6 +23057,69 @@ fn a_strong_pass_forks_its_workers_through_a_spawner_with_the_same_verdicts() {
     assert_eq!(none, Some(0));
     assert!(!through.is_empty());
     assert_eq!(through, direct);
+}
+
+/// The spawner keeps workers started ahead of Vitest's requests, and a copy
+/// that gets one sees the process a fresh worker is: Vitest's worker entry
+/// as its script, nothing of Supercov's in its environment (a test file that
+/// sees otherwise fails to load, and kills what survives). Started ahead or
+/// not (`SUPERCOV_STRONG_WORKERS_AHEAD=0`), each mutant gets the same verdict.
+#[cfg(unix)]
+#[test]
+fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
+    let project = vitest_mutants_project("strong-ahead");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nif (!/[\\\\/]workers[\\\\/]forks\\.js$/.test(process.argv[1] ?? \"\")) throw new Error(`not Vitest's worker: ${process.argv[1]}`);\nif (\"SUPERCOV_STRONG_WORKER\" in process.env) throw new Error(\"Supercov's worker variable is set\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("worker checks");
+    let verdicts = |ahead: &str| {
+        // One worker: its copies run one after another, so most get a
+        // worker started while the one before ran.
+        project
+            .supercov(&["--", "npx", "vitest", "run", "--maxWorkers=1"])
+            .succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_WORKERS_AHEAD", ahead)],
+            )
+            .json();
+        assert_eq!(reply["summary"]["error"], 0, "{reply}");
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let statuses = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"]["status"].to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (
+            reply["passes"][0]["profile"]["usedAhead"].as_u64(),
+            statuses,
+        )
+    };
+    let (used, ahead) = verdicts("4");
+    assert!(used.unwrap_or(0) > 0, "{used:?}");
+    let (none, fresh) = verdicts("0");
+    assert_eq!(none.unwrap_or(0), 0);
+    assert!(ahead.values().any(|status| status == "\"killed\""));
+    assert!(ahead.values().any(|status| status == "\"survived\""));
+    assert_eq!(ahead, fresh);
 }
 
 /// A test file that does not finish without a mutant (here it throws while

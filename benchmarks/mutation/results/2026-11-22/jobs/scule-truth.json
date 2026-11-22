@@ -1,0 +1,160 @@
+{
+  "project": "scule",
+  "scenario": "truth",
+  "shard": null,
+  "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+  "startedAt": "2026-11-20T00:03:31.246Z",
+  "machine": {
+    "instanceType": "m8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 61.6
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "9.0.6",
+    "vitest": "5.1.1",
+    "vitestProject": "1.5.3"
+  },
+  "notes": [
+    "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): StrykerJS 10's Vitest runner needs Vitest >= 2; scule pins Vitest 1.5.3",
+    "also added vite@8.3.8: scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/scule 5bc68048caad7c0e7de35842c83a510e8e1a7c4f && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.202,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0,
+        "cpuS": 0.02,
+        "cpuPercent": "16%",
+        "maxRssKiB": 19052,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@9.0.6 >/dev/null && pnpm --version",
+      "startOffsetS": 0.21,
+      "wallS": 1.323,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.54,
+        "sysS": 0.12,
+        "cpuS": 0.66,
+        "cpuPercent": "50%",
+        "maxRssKiB": 144972,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.54,
+      "wallS": 1.229,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.92,
+        "sysS": 0.49,
+        "cpuS": 3.41,
+        "cpuPercent": "279%",
+        "maxRssKiB": 823240,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-plugins-remove",
+      "command": "pnpm remove @vitest/coverage-v8",
+      "startOffsetS": 2.77,
+      "wallS": 0.772,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.53,
+        "sysS": 0.22,
+        "cpuS": 1.75,
+        "cpuPercent": "227%",
+        "maxRssKiB": 546616,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-upgrade",
+      "command": "pnpm add -D vitest@5.1.1 vite@8.3.8",
+      "startOffsetS": 3.54,
+      "wallS": 1.149,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.3,
+        "sysS": 0.31,
+        "cpuS": 2.61,
+        "cpuPercent": "228%",
+        "maxRssKiB": 829328,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 4.69,
+      "wallS": 1.338,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.78,
+        "sysS": 0.4,
+        "cpuS": 3.18,
+        "cpuPercent": "238%",
+        "maxRssKiB": 771188,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "truth",
+      "command": "node_modules/.bin/stryker run stryker.truth.json",
+      "startOffsetS": 6.04,
+      "wallS": 3.918,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 24.92,
+        "sysS": 2.33,
+        "cpuS": 27.25,
+        "cpuPercent": "695%",
+        "maxRssKiB": 266656,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": true,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/truth.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "truth.json"
+    }
+  ],
+  "totalS": 9.96
+}
