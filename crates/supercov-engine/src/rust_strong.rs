@@ -2432,10 +2432,11 @@ mod tests {
         // A build the halving starts that cannot be made ends the pass: the
         // one with no suspect (the fourth), then the first of the halves.
         // Each build syncs its copy from one call, a directory at a time:
-        // the project's own four (itself, `src`, `tests`, `bin`).
+        // the project's own four (itself, `src`, `tests`, `bin`). The needle
+        // is the call alone: a measured build wraps the `?` around it.
         let text = include_str!("rust_strong.rs");
         let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
-        let sync = body[..body.find("sync_project(root, &places.switched)?").unwrap()]
+        let sync = body[..body.find("sync_project(root, &places.switched)").unwrap()]
             .matches('\n')
             .count()
             + 1;
@@ -2776,6 +2777,19 @@ mod tests {
             summary.lines().last().unwrap().contains("\"baselines\":2"),
             "{summary}"
         );
+        // Where nextest's listing of the build cannot be kept, the pass ends.
+        let text = include_str!("rust_strong.rs");
+        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
+        let metadata = body[..body
+            .find("crate::fault_fs::create_dir_all(&metadata)")
+            .unwrap()]
+            .matches('\n')
+            .count()
+            + 1;
+        request.results = root.join("unkept.jsonl");
+        let place = format!("fs.create_dir_all#rust_strong.rs:{metadata}");
+        let failed = crate::fault::during(&place, || run_strong_rust(&request, &mut Vec::new()));
+        assert!(failed.is_err(), "{place}: {failed:?}");
         // A test that cannot be found when its mutant runs (after its
         // baseline) is passed over.
         request.command[0] = "cargo".into();
@@ -3114,6 +3128,28 @@ mod tests {
             });
             assert!(failed.unwrap_err().contains("wasm-plan.json"), "{site}");
         }
+        // A scratch copy that cannot be made ends the switch.
+        let scratch = offset
+            + body
+                .lines()
+                .position(|line| line.contains("sync_project(&source_root, &checked)"))
+                .unwrap()
+            + 1;
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        std::fs::write(copy.join("web/rust/src/lib.rs"), &source).unwrap();
+        let site = format!("fs.create_dir_all#rust_strong.rs:{scratch}");
+        let failed = crate::fault::during(&site, || {
+            switch_wasm_workspace(
+                &root,
+                "web/rust",
+                &copy.join("web/rust"),
+                &plan_path,
+                &results,
+                &cargo,
+                &mut Vec::new(),
+            )
+        });
+        assert!(failed.is_err(), "{site}");
         let packages = BTreeSet::from(["grades".to_owned()]);
         let target = fixture_root.join("wasm-target");
         assert!(

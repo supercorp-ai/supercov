@@ -365,12 +365,15 @@ pub fn switch_for_strong_pass(
             let crate_directory = manifest.parent().unwrap_or(workspace).to_owned();
             crate::rust_worker::cargo_workspace_root(&crate_directory).unwrap_or(crate_directory)
         })
-        .filter_map(|cargo_root| {
-            let relative = cargo_root.strip_prefix(workspace).ok()?;
-            Some((
-                relative.to_string_lossy().replace('\\', "/"),
-                cargo_root.clone(),
-            ))
+        // A Cargo workspace above the copy is not the project's.
+        .filter(|cargo_root| cargo_root.starts_with(workspace))
+        .map(|cargo_root| {
+            let relative = cargo_root
+                .strip_prefix(workspace)
+                .expect("a root inside the copy")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (relative, cargo_root)
         })
         .collect::<BTreeMap<_, _>>();
     let cargo = crate::rust_strong::WasmCargo {

@@ -182,7 +182,8 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
     // where the value does: the value's probe goes around them all, and the
     // build still compiles. Only `false` was returned, so `true` differs.
     // Code the target leaves out, and a constant the compiler evaluates,
-    // carry no probe.
+    // carry no probe. A returned value whose operator's probe starts, or
+    // ends, where it does goes around that probe.
     let both = Project::empty("strong-rust-returned-decision");
     both.write(
         "Cargo.toml",
@@ -194,6 +195,8 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
             "pub fn both(a: bool, b: bool) -> bool {\n    a && b\n}\n",
             "#[cfg(not(unix))]\npub fn never(a: u8) -> u8 {\n    a + 1\n}\n",
             "pub const K: u8 = 2 + 3;\n",
+            "pub fn product_first(a: u8, b: u8, c: u8) -> u8 {\n    a * b + c\n}\n",
+            "pub fn product_last(a: u8, b: u8, c: u8) -> u8 {\n    a + b * c\n}\n",
         ),
     );
     both.write(

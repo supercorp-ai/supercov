@@ -2352,6 +2352,22 @@ fn integration_choice() {
                 .count()
                 + 1
         };
+        // A crate's root, and the workspace as its modules are resolved,
+        // that cannot be found: their calls are earlier in the file.
+        let anywhere = |needle: &str| text[..text.find(needle).unwrap()].matches('\n').count() + 1;
+        for needle in [
+            "fs::canonicalize(&target.src_path).map_err",
+            "let canonical_workspace = ",
+        ] {
+            let site = format!("fs.canonicalize#rust_project.rs:{}", anywhere(needle));
+            let failed =
+                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
+            assert!(
+                matches!(failed, Err(RustProjectError::Io { .. })),
+                "{site}: {:?}",
+                failed.err()
+            );
+        }
         for (fault, needle) in [
             ("read_to_string", "fs::read_to_string(path)"),
             ("read_to_string", "fs::read_to_string(&root)"),
