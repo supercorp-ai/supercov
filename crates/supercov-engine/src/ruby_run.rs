@@ -379,7 +379,7 @@ fn run_direct_ruby_in(
         if let Some(mutants) = &project.mutants {
             entries.push(crate::evidence_archive::EvidenceArchiveEntry {
                 path: "mutants.json".into(),
-                contents: serde_json::to_vec(mutants).expect("plain data serializes"),
+                contents: serde_json::to_vec(mutants.get()).expect("plain data serializes"),
             });
         }
         let entries = crate::source_capture::append(entries, &source_inputs);

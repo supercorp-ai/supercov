@@ -1463,7 +1463,12 @@ module Supercov
       value_ids(target).each do |kind, id|
         note_value(context, id, truth == (SINGLETONS[kind] ? true : false) ? "same" : "differs")
       end
-      note_values_done(context, key) if settled?(target, value_bits(context))
+      if settled?(target, value_bits(context))
+        note_values_done(context, key)
+      else
+        # The same truth again adds nothing: `Probe#cv` hands it back.
+        skip_in(context, key, truth ? TRUTHY : FALSY)
+      end
       value
     end
 
@@ -1598,12 +1603,21 @@ module Supercov
 
     def note_values_done(context, key)
       (@values_done[context] || @seen_lock.synchronize { @values_done[context] ||= {} })[key] = true
-      # Skipped outright only where no thread can be in another context:
-      # `switch` empties the list whenever that changes.
+      skip_in(context, key, true)
+    end
+
+    # What `Probe` skips at `key` without a call here: `true` for every
+    # value, TRUTHY or FALSY for a truth already recorded. Set only where no
+    # thread can be in another context: `switch` empties the list whenever
+    # that changes.
+    TRUTHY = 1
+    FALSY = 2
+
+    def skip_in(context, key, mark)
       return if @mutex.owned?
 
       @mutex.synchronize do
-        @value_skip[key] = true if context == @context && @active_threads.each_value.all? { |each| each == context }
+        @value_skip[key] = mark if context == @context && @active_threads.each_value.all? { |each| each == context }
       end
     end
 
@@ -1858,7 +1872,10 @@ module Supercov
     def ok0(key) = @runtime.probe_ok0(key)
     def bo(key, left) = @skip[key] ? left : @runtime.probe_operand(key, left)
     def mc(key, receiver) = @skip[key] ? receiver : @runtime.probe_call(key, receiver)
-    def cv(key, value) = @skip[key] ? value : @runtime.probe_truth(key, value)
+    def cv(key, value)
+      skip = @skip[key]
+      skip == true || skip == (value ? Runtime::TRUTHY : Runtime::FALSY) ? value : @runtime.probe_truth(key, value)
+    end
   end
 
   # The receiver of a project that uses Ractors. A non-main Ractor cannot

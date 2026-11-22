@@ -6,6 +6,7 @@
 //! unparseable so the run can say exactly what its denominator covers.
 
 use crate::fault_fs as fs;
+use crate::mutant_list::MutantsFile;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -71,7 +72,64 @@ pub struct PreparedRubyProject {
     pub unparseable: Vec<(String, String)>,
     /// The measured files' mutants, where the run lists them as it measures
     /// (`SUPERCOV_MUTANTS=1`), with infection probes placed.
-    pub mutants: Option<crate::mutant_list::MutantsFile>,
+    pub mutants: Option<MutantListing>,
+}
+
+/// The measured files' mutants, listed on a thread of their own while the
+/// tests run: enumerating them is the measured run's largest cost before
+/// the tests start (erubi: 80 ms of a 470 ms run).
+#[derive(Debug, Clone)]
+pub struct MutantListing {
+    pending: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<MutantsFile>>>>,
+    listed: std::sync::Arc<std::sync::OnceLock<MutantsFile>>,
+}
+
+impl MutantListing {
+    fn start(
+        files: Vec<(
+            String,
+            Vec<u8>,
+            crate::ruby_instrumenter::RubyFileObligations,
+        )>,
+    ) -> Self {
+        let thread = std::thread::spawn(move || {
+            let mut mutants = BTreeMap::new();
+            for (relative, source, obligations) in files {
+                let listed = crate::ruby_mutants::candidates(&relative, &source, &obligations);
+                if !listed.is_empty() {
+                    mutants.insert(relative, listed);
+                }
+            }
+            MutantsFile::listed(
+                crate::ruby_mutants::RUBY,
+                crate::ruby_mutants::MUTANT_SET,
+                mutants,
+            )
+        });
+        Self {
+            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(thread))),
+            listed: std::sync::Arc::default(),
+        }
+    }
+
+    /// The listing, once its thread has ended.
+    pub fn get(&self) -> &MutantsFile {
+        self.listed.get_or_init(|| {
+            let thread = self
+                .pending
+                .lock()
+                .expect("no listing panics while holding its thread")
+                .take()
+                .expect("a listing is joined once");
+            thread.join().expect("listing mutants does not panic")
+        })
+    }
+}
+
+impl PartialEq for MutantListing {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
 }
 
 /// Asked only of a `.rb` file.
@@ -223,7 +281,7 @@ fn prepare(
     let mut limitation_ids = BTreeSet::new();
     let mut unparseable = Vec::new();
     let listing = std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| value == "1");
-    let mut mutants = BTreeMap::new();
+    let mut listed_files = Vec::new();
     for relative in &files.sources {
         let path = root.join(relative);
         let source = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -235,10 +293,7 @@ fn prepare(
         ) {
             Ok(obligations) => {
                 if listing {
-                    let listed = crate::ruby_mutants::candidates(relative, &source, &obligations);
-                    if !listed.is_empty() {
-                        mutants.insert(relative.clone(), listed);
-                    }
+                    listed_files.push((relative.clone(), source.clone(), obligations.clone()));
                 }
                 manifest.points.extend(obligations.manifest.points);
                 manifest.decisions.extend(obligations.manifest.decisions);
@@ -341,13 +396,7 @@ fn prepare(
         manifest,
         files,
         unparseable,
-        mutants: listing.then(|| {
-            crate::mutant_list::MutantsFile::listed(
-                crate::ruby_mutants::RUBY,
-                crate::ruby_mutants::MUTANT_SET,
-                mutants,
-            )
-        }),
+        mutants: listing.then(|| MutantListing::start(listed_files)),
     }))
 }
 
