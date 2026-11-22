@@ -201,8 +201,7 @@ To re-plan shards after a corpus change:
 
 ## Results of 2026-11-22, later: next batches within a stage, decided copies stopped
 
-Supercov's cold rows again (`results/2026-11-22/summary.md`), on the binary of `2cd0441e` (CI run
-4715437556747167), against the morning's binary (`e19bd687`) on the same machine type. A mutant's
+Supercov's cold rows again (`results/2026-11-22/summary.md`), on the binary of `2cd0441e`, against the morning's binary (`e19bd687`) on the same machine type. A mutant's
 next batch now runs in the same stage once its copies before have ended with every test passing, and
 a copy's worker stops as soon as a failed test decides it.
 
@@ -224,7 +223,7 @@ a copy's worker stops as soon as a failed test decides it.
 
 ## Where StrykerJS's time goes on tRPC (2026-11-22)
 
-Measured with `diag/stryker-profile.sh` (CI run 8370474132027066): StrykerJS 10.1.1 as the cold
+Measured with `diag/stryker-profile.sh`: StrykerJS 10.1.1 as the cold
 scenario runs it, on tRPC's first cold shard (122 mutants, 111 with coverage), every Node process
 recording its start, end, forks and, in a Vitest worker, the test file of each "run" message.
 
@@ -253,8 +252,7 @@ the copy before it has ended, and the stage barrier then holds the next file bac
 ## Results of 2026-11-22: workers started ahead, a process only once the file is known
 
 Supercov's cold rows again (`results/2026-11-22/summary.md`; every other row is 2026-11-20's), on
-the binary of `e19bd687` (key `7bde1dc6674d633b`; CI runs 4633090738757946, 5286085914853970 and
-4678410489961734), against the spawner binary of the rows before, on the same 16-vCPU machine type:
+the binary of `e19bd687` (key `7bde1dc6674d633b`), against the spawner binary of the rows before, on the same 16-vCPU machine type:
 
 | project | strong pass s, spawner | strong pass s, now | ms per mutant run (StrykerJS's mutant phase) | soundness violations | extra kills |
 |---|---:|---:|---|---:|---:|
@@ -282,7 +280,7 @@ Where the time goes now:
 ## Results of 2026-11-21: the strong pass in stages
 
 Supercov's cold rows again (`results/2026-11-21/summary.md`), on the binary of the strong pass in
-stages (key `0f34df1d56509c31`, CI runs 4767710917481845 and 6327964608487668); every other row is
+stages (key `0f34df1d56509c31`); every other row is
 2026-11-20's. Against the binary of the previous rows (`e8f192cd`, rounds), on the same 16-vCPU
 machines:
 
@@ -354,10 +352,10 @@ Where the time goes:
 ### Supercov
 
 Supercov cold rows come from one binary: `af7340e5` plus the working tree (build key
-`dcb4c21223a29dde`, built in run 4574534097087808), at the default strong-round size (twice the
-Vitest workers), in CI run 8528048117638039. tRPC's shard 16 was re-run in 6898820936997587 after
+`dcb4c21223a29dde`), at the default strong-round size (twice the
+Vitest workers). tRPC's shard 16 was re-run after
 its measure hit a flaky test (`sse.test.ts > SSE on serverless - emit and disconnect early`). The PR
-column is from an earlier binary (`8342afac`, run 4982353503892003). Wall seconds; hono's and tRPC's
+column is from an earlier binary (`8342afac`). Wall seconds; hono's and tRPC's
 strong pass are summed over their shards (6 and 32), each of which measured again (one job's
 measure is shown).
 
@@ -377,17 +375,17 @@ measure is shown).
 - Five libraries and scule (both Vitest versions): none.
 - hono, 10 "soundness violations", all **ground-truth artifacts**:
   - the seven diagnosed earlier (below): `smart-router/router.ts:14:24` and `:15:7`, `jwt.ts:156:77`, `html.ts:63`, `:76`, `:81` and `:161`;
-  - three new ones, `html.ts:82:9` `typeof r === 'object'` to `true`, `html.ts:100:21` (the `if (match === -1)` block emptied) and `html.ts:185:7` `preserveCallbacks` to `false`. Earlier binaries killed them with the same order-dependent tests as the false kills below, so they agreed with the ground truth. This binary overturns those kills and calls them survived. Applied by hand (run 7936397974794381, `diag/hono-overturned.sh`), each passes `render to stream` alone, `streaming.test.tsx` and `components.test.tsx` whole, both together, and the whole suite (5,010). So survived is right, and StrykerJS's kills (by `render to stream` and the `ErrorBoundary > streaming` tests) are its own artifacts, like `html.ts:63`/`:76`/`:81`/`:161`.
-- hono extra kills: **none**. The five of `6049a02f` are gone, `html.ts:83` included (now survived, as in the ground truth). They were Supercov false kills; four came from order-dependent tests run without their predecessors (diagnosed in runs 6026863845292028 and 4897865421927113, `diag/hono-extra.sh`).
-- tRPC `stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false`: **StrykerJS hit-limit heuristic (Supercov: survived, by design)**. Diagnosed in runs 6026863845292028 and 6222063720211872 (`diag/trpc-withping.sh`):
+  - three new ones, `html.ts:82:9` `typeof r === 'object'` to `true`, `html.ts:100:21` (the `if (match === -1)` block emptied) and `html.ts:185:7` `preserveCallbacks` to `false`. Earlier binaries killed them with the same order-dependent tests as the false kills below, so they agreed with the ground truth. This binary overturns those kills and calls them survived. Applied by hand (`diag/hono-overturned.sh`), each passes `render to stream` alone, `streaming.test.tsx` and `components.test.tsx` whole, both together, and the whole suite (5,010). So survived is right, and StrykerJS's kills (by `render to stream` and the `ErrorBoundary > streaming` tests) are its own artifacts, like `html.ts:63`/`:76`/`:81`/`:161`.
+- hono extra kills: **none**. The five of `6049a02f` are gone, `html.ts:83` included (now survived, as in the ground truth). They were Supercov false kills; four came from order-dependent tests run without their predecessors (`diag/hono-extra.sh`).
+- tRPC `stream/utils/withPing.ts:37:9-37:20:ConditionalExpression:false`: **StrykerJS hit-limit heuristic (Supercov: survived, by design)**. Diagnosed with `diag/trpc-withping.sh`):
   - StrykerJS's report says "Hit limit reached (8224/4100)": its limit is 100 times the 41 evaluations of its dry run, and its Timeout means passing that limit, not a hang.
   - With plain Vitest the two covering files pass with the mutant (1.7 s). The covering tests take about twice as long (97–131 ms against 51–61 ms; `e2e, withPing` 144–155 ms against 6–8 ms), and line 37 is evaluated about 45,350 times against 8, all during the tests.
   - No test observes the mutant, so Supercov keeps "survived" deliberately. Its copies report `claimed`, every test passing, and `done`. mutator calls it Killed.
 - tRPC `http/contentType.ts:109:7-110:39:LogicalOperator:||`: **flaky** ground-truth kill (one test; StrykerJS's cold run and mutator call it survived too).
 
-**Diagnosis of hono's seven** (binary `568217e7`, key `62219e9f2b81e21b`). CI run 7222499611771269
+**Diagnosis of hono's seven** (binary `568217e7`, key `62219e9f2b81e21b`). A run
 kept every strong round (`SUPERCOV_STRONG_KEEP_ROUNDS=1`); `diag/strong-rounds.mjs` reads them.
-Run 8634879108287974 (`diag/hono-order.sh`) applied each mutant by hand and ran plain Vitest. For
+A second run (`diag/hono-order.sh`) applied each mutant by hand and ran plain Vitest. For
 every mutant, the plan's `index` names the same mutant in the strong copy's
 `frontend-evidence/mutants.json` (router 8 and 9, html 14, 32, 42 and 115, jwt 160).
 
@@ -454,8 +452,7 @@ not reproduce outside StrykerJS.
 - Measure costs the plain test run plus 0.4–2.6 s.
 - Three tRPC shards (5, 23, 25) end a pass at its deadline and finish in the next; no job is lost.
 
-**Strong-round size**, measured with the earlier binary of `0331242b` (key `92c60964ce6caf76`;
-CI runs 6150252416259884 and 6687871227236369), each setting a full cold run:
+**Strong-round size**, measured with the earlier binary of `0331242b` (key `92c60964ce6caf76`), each setting a full cold run:
 
 | project | setting | strong pass s (sum of shards) | strong ms per mutant run, wall / CPU | StrykerJS mutant phase, ms per mutant | verdicts different from setting 6 |
 |---|---|---:|---|---:|---|
@@ -476,16 +473,7 @@ CI runs 6150252416259884 and 6687871227236369), each setting a full cold run:
   run and ground truth call it survived. It is likely a timing-sensitive test failing under the
   heavier round, so a flaky kill rather than a real one.
 
-Diagnosis runs: 7222499611771269 and 8634879108287974 (hono's seven), 6026863845292028, 6222063720211872 and 4897865421927113 (withPing and hono's extra kills, binary `5e47d81d`), 7936397974794381 (the three overturned hono mutants).
 
-CI runs used for these results: 7918046463203622 (all projects), 6816238857423170 (scule),
-8402334254856692 (hono PR, StrykerJS), 6506939654971330 (tRPC PR), 7095666567225085,
-7210302856247792, 8297132922154682 and 6783811573326500 (tRPC full runs and ground truth),
-4574534097087808 (Supercov build), 8528048117638039 and 6898820936997587 (Supercov cold runs),
-4982353503892003 (Supercov PR runs). Earlier Supercov binaries, kept for the history above: builds 6615399405765448, 7585433971020896, 5656720915005855, 8047260535649989,
-4535161164572003 and 5306559846578190; runs 8315113977722139, 6376777667608942,
-5925894578908004, 6328770082850449, 5483861312150401, 8608543604157054, 6892707219384574, 6150252416259884 and 6687871227236369;
-diagnosis 7222499611771269 and 8634879108287974.
 
 ## Files
 
