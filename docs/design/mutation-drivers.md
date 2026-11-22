@@ -322,3 +322,14 @@ on its own.
 | value probes | `supercov_instrument.py` (`_MutantProbes`) and `supercov_runtime.py`, from the plan's `mutantProbes` |
 
 See `python-mutants.md`.
+
+## Go
+
+| Contract | Go |
+| --- | --- |
+| enumerator | `go_mutants.rs` (Gremlins 0.6.0's tokens and order; `docs/design/go-mutation.md`) |
+| schemata | `go_instrumenter.rs` (`strong_rewrite`), with `runtime/go/mutants` (go/types) saying which mutants compile |
+| runtime switch | `runtime/go/supercov/strong.go` (`StrongSlot`, `SUPERCOV_ACTIVE_MUTANT`) |
+| driver | `go_strong.rs`: test binaries built once, `-test.run` by exact name |
+| value probes | `go_instrumenter.rs` (comparison probes), `runtime/go/supercov/mutants.go` |
+

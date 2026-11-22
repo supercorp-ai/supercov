@@ -51,6 +51,20 @@ pub enum GoProbeTarget {
         branch: String,
         alternative: String,
     },
+    /// A comparison's operands, for weak mutation: the runtime stores the
+    /// relations they were seen in as bits (`lt` 1, `eq` 2, `gt` 4,
+    /// `unordered` 8), and the run reads them as the site's outcomes. `site`
+    /// is the operator's position, `file:line:column`.
+    Comparison {
+        site: String,
+    },
+    /// An integer operation's result beside each of its mutants', for weak
+    /// mutation: bits 16 and 32 say the mutant's value was the same or
+    /// differed (`<site>#0`, the operator's swap), 64 and 128 the same of a
+    /// removed self-assignment (`<site>#1`, `x += y` to `x = y`).
+    Operation {
+        site: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +84,9 @@ pub struct GoFileObligations {
     /// Conditions per decision, in the order the runtime indexes them. The
     /// harness passes this to `Arm` so the runtime can size its vectors.
     pub decision_widths: Vec<u8>,
+    /// Bytes the rewriter removes: a probed comparison's operator, which
+    /// becomes the comma between the probe's arguments.
+    pub removed: Vec<(usize, usize)>,
 }
 
 /// An obligation's identity, derived from what it is rather than from how many
@@ -372,7 +389,13 @@ pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
 /// Statements Go nests directly inside a block. Declarations that cannot
 /// execute -- an import, a type -- carry no coverage question and are absent
 /// rather than counted as uncovered.
-fn is_statement(kind: &str) -> bool {
+/// How many ancestors `node` has: a wrapper deeper in the tree goes inside
+/// one at the same bytes.
+fn depth(node: Node) -> i32 {
+    std::iter::successors(node.parent(), Node::parent).count() as i32
+}
+
+pub(crate) fn is_statement(kind: &str) -> bool {
     matches!(
         kind,
         "assignment_statement"
@@ -424,6 +447,13 @@ struct Collector<'a> {
     conditions: std::collections::HashSet<(usize, usize)>,
     /// Decisions used as values in a file without generics.
     unmeasured_values: Vec<(String, usize, usize, String)>,
+    /// Whether comparisons get weak mutation's value probes.
+    comparisons: bool,
+    removed: Vec<(usize, usize)>,
+    /// What the type checker says of each mutated token's expression, by
+    /// the token's offset: an operation is probed only where it is an
+    /// integer one whose type the file can write.
+    facts: Option<&'a std::collections::HashMap<usize, SiteFacts>>,
 }
 
 /// A branch whose condition is a single operand needs no independence
@@ -464,7 +494,7 @@ fn ending_fallthrough(clause: Node) -> Option<Node> {
     (last.kind() == "fallthrough_statement").then_some(last)
 }
 
-fn in_statement_position(node: Node) -> bool {
+pub(crate) fn in_statement_position(node: Node) -> bool {
     node.parent()
         .is_some_and(|parent| parent.kind() == "statement_list")
 }
@@ -704,8 +734,130 @@ impl<'a> Collector<'a> {
         index_of_decision
     }
 
+    /// `a < b` as `(__supercov.Cmp(<slot>, <op>, a, b) == true)`: the
+    /// operands evaluated once, in order, and the comparison an untyped
+    /// boolean as it was.
+    fn probe_comparison(&mut self, node: Node) {
+        let operator = field(node, "operator");
+        let code = match &self.source[operator.byte_range()] {
+            "<" => 0,
+            "<=" => 1,
+            ">" => 2,
+            _ => 3,
+        };
+        let (line, column) = (
+            operator.start_position().row + 1,
+            operator.start_position().column + 1,
+        );
+        let site = format!("{}:{line}:{column}", self.file);
+        let slot = self.probe(GoProbeTarget::Comparison { site }, node.start_byte());
+        // Inside every wrapper at the same bytes: opened last, closed first.
+        let depth = depth(node);
+        self.edit(
+            node.start_byte(),
+            1000 + depth,
+            format!("({}.Cmp({slot}, {code}, ", self.alias),
+        );
+        self.edit(operator.start_byte(), 30, ", ".to_owned());
+        self.removed
+            .push((operator.start_byte(), operator.end_byte()));
+        self.edit(node.end_byte(), -depth, ") == true)".to_owned());
+    }
+
+    /// An integer operation the type checker typed: `x + y` as
+    /// `__supercov.Arith[T](<slot>, <op>, x, y)`, `-x` as
+    /// `__supercov.Unary[T](<slot>, <op>, x)`, `x += y` as `x +=
+    /// __supercov.Assign[T](<slot>, <op>, x, y)`; each evaluates its operands
+    /// once, in order (`x` of an assignment again, where reading it again
+    /// does nothing), and records whether each mutant's value differed.
+    fn probe_operation(&mut self, node: Node) {
+        let Some(site) = crate::go_mutants::site_of(node, self.source) else {
+            return;
+        };
+        let Some(facts) = self.facts.and_then(|facts| facts.get(&site.token.0)) else {
+            return;
+        };
+        if !facts.integer
+            || facts.constant
+            || facts.type_name.is_empty()
+            || facts.type_name.contains('\0')
+            || !in_function_body(node)
+        {
+            return;
+        }
+        // The runtime's codes: `Arith`'s and `Assign`'s 0 to 8, `Shift`'s
+        // and `AssignShift`'s 0 and 1 for the last two.
+        let table = ["+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>"];
+        let code_of = |operator: &str| table.iter().position(|seen| *seen == operator);
+        let operator = site.operator.as_str();
+        let (line, column) = crate::go_mutants::position(self.source, site.token.0);
+        let base = format!("{}:{line}:{column}", self.file);
+        let alias = self.alias.to_owned();
+        let type_name = facts.type_name.clone();
+        let depth = depth(node);
+        let (function, code, wrapped, operands) = match (site.kind, operator) {
+            (crate::go_mutants::SiteKind::Binary, _) => {
+                // A comparison or a logical operator is not an operation.
+                let Some(code) = code_of(operator) else {
+                    return;
+                };
+                ("Arith", code, node, None)
+            }
+            (crate::go_mutants::SiteKind::Unary, "-") => ("Unary", 0, node, None),
+            (crate::go_mutants::SiteKind::Unary, "+") => ("Unary", 1, node, None),
+            (crate::go_mutants::SiteKind::Assignment, _) => {
+                // An assignment with an operator has one operand each side.
+                let target = field(node, "left").named_child(0).expect("one operand");
+                let value = field(node, "right").named_child(0).expect("one operand");
+                if !crate::go_mutants::reads_alike(target, self.source) {
+                    return;
+                }
+                let code =
+                    code_of(operator.trim_end_matches('=')).expect("an assignment's operator");
+                let target = self.source[target.byte_range()].to_owned();
+                ("Assign", code, value, Some(target))
+            }
+            // `&x`, `^x`, `x++`, `break`: none is an operation's value.
+            _ => return,
+        };
+        let (function, code) = if code >= 9 {
+            (
+                if function == "Arith" {
+                    "Shift"
+                } else {
+                    "AssignShift"
+                },
+                code - 9,
+            )
+        } else {
+            (function, code)
+        };
+        let slot = self.probe(GoProbeTarget::Operation { site: base }, node.start_byte());
+        let target = operands.map_or(String::new(), |target| format!("{target}, "));
+        self.edit(
+            wrapped.start_byte(),
+            1000 + depth,
+            format!("{alias}.{function}[{type_name}]({slot}, {code}, {target}"),
+        );
+        if site.kind != crate::go_mutants::SiteKind::Assignment {
+            // The operator becomes the comma between the operands, or, of a
+            // unary operation, nothing.
+            self.removed.push(site.token);
+            if site.kind == crate::go_mutants::SiteKind::Binary {
+                self.edit(site.token.0, 30, ", ".to_owned());
+            }
+        }
+        self.edit(wrapped.end_byte(), -depth, ")".to_owned());
+    }
+
     fn walk(&mut self, node: Node) {
         let alias = self.alias.to_owned();
+        if self.comparisons && crate::go_mutants::comparison_probe(node, self.source) {
+            self.probe_comparison(node);
+        }
+        if self.comparisons && self.facts.is_some() {
+            self.probe_operation(node);
+        }
         match node.kind() {
             "function_declaration" | "method_declaration" | "func_literal" => {
                 let label = node
@@ -1107,6 +1259,12 @@ pub struct GoEdit {
 /// moved the column: `./crypto.go:4:38: undefined` for `4:15`. With no file
 /// named, the comment keeps the name the file already has.
 pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
+    rewrite_removing(source, edits, &[])
+}
+
+/// `rewrite`, with each of `removed`'s byte ranges taken out first: no edit
+/// lands inside one, and an edit at its start goes where it was.
+pub fn rewrite_removing(source: &str, edits: &[GoEdit], removed: &[(usize, usize)]) -> String {
     let mut ordered = edits.to_vec();
     ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
     let lines = std::iter::once(0)
@@ -1114,8 +1272,17 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
         .collect::<Vec<_>>();
     let mut out = source.to_owned();
     let mut placed = None;
+    let mut removals = removed.to_vec();
+    removals.sort_unstable();
     // Every edit is placed at an offset of a node parsed from `source`.
     for edit in ordered {
+        // Removals at or after this offset, before anything lands on it.
+        while let Some(&(start, end)) = removals.last()
+            && start >= edit.at
+        {
+            out.replace_range(start..end, "");
+            removals.pop();
+        }
         if placed != Some(edit.at) {
             placed = Some(edit.at);
             let line = lines.partition_point(|start| *start <= edit.at);
@@ -1124,6 +1291,8 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
         }
         out.insert_str(edit.at, &edit.text);
     }
+    // Each removal has an edit at its start (the operation's own probe),
+    // so none is left.
     out
 }
 
@@ -1189,6 +1358,53 @@ pub fn build_go_obligations_for(
     alias: &str,
     generics: bool,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_probing(
+        file,
+        source,
+        next_probe,
+        next_decision,
+        alias,
+        generics,
+        false,
+    )
+}
+
+/// `build_go_obligations_for`, and with `comparisons` weak mutation's value
+/// probe on every comparison `go_mutants::comparison_probe` takes.
+pub fn build_go_obligations_probing(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    next_decision: &mut u32,
+    alias: &str,
+    generics: bool,
+    comparisons: bool,
+) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_valued(
+        file,
+        source,
+        next_probe,
+        next_decision,
+        alias,
+        generics,
+        comparisons,
+        None,
+    )
+}
+
+/// `build_go_obligations_probing`, and with `facts` (the type checker's, by
+/// token offset) a value probe on every integer operation a mutant changes.
+#[allow(clippy::too_many_arguments)]
+pub fn build_go_obligations_valued(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    next_decision: &mut u32,
+    alias: &str,
+    generics: bool,
+    comparisons: bool,
+    facts: Option<&std::collections::HashMap<usize, SiteFacts>>,
+) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
     let decision_base = *next_decision;
     let mut collector = Collector {
@@ -1207,6 +1423,9 @@ pub fn build_go_obligations_for(
         generics,
         conditions: std::collections::HashSet::new(),
         unmeasured_values: Vec::new(),
+        comparisons,
+        removed: Vec::new(),
+        facts,
     };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().children(&mut cursor) {
@@ -1252,7 +1471,1127 @@ pub fn build_go_obligations_for(
         probes: collector.probes,
         edits,
         decision_widths: collector.widths,
+        removed: collector.removed,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Strong mode: mutant schemata (docs/design/strong-mutation.md, Go).
+//
+// Every mutant a strong pass runs is written into its file behind a switch,
+// and the file is otherwise left as written: no coverage probe, no
+// weak-mutation probe. One mutant is active per test-binary process
+// (`SUPERCOV_ACTIVE_MUTANT`), so one build serves the whole pass.
+//
+// Go type-checks every switch, so a switch has to be a program Go accepts
+// whichever way it goes, and the program with the switch off has to be the
+// program as written, evaluated exactly as written. The forms:
+//
+// - `==`, `!=`: `((x == y) != s.On(i))`, an untyped boolean as the original
+//   is, its operands evaluated once.
+// - `&&`, `||`: `((bool(x) != s.Is(i)) && (bool(y) != s.Is(i))) != s.On(i)`,
+//   which is `x && y` with the switch off and `x || y` with it on,
+//   short-circuiting as each does.
+// - `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `-` and `+`: a
+//   generic call of the runtime's (`Lss`, `Add`, `Neg`, ...) taking the
+//   operands once, instantiated with the expression's own type where the
+//   file can write it; a comparison's call is compared with `true`, which
+//   makes it the untyped boolean it was.
+// - a constant expression (`time.Second * 2`, `1 << 10`): `Pick` among the
+//   expression as written and each mutant of it written whole, so the
+//   compiler evaluates every one as a constant -- a switch inside it would
+//   have made the original a run-time computation, which overflows where
+//   the constant does not. Where Go requires a constant (a `const`
+//   declaration, an array length) nothing can switch, and the mutant is
+//   `unplaceable`.
+// - `x += y`, `x++`, `break`: the statement written once per mutant in an
+//   `if s.On(i) { ... } else { <original> }`; where a statement cannot
+//   stand (a `for` clause's post statement, an `if`'s initializer), the
+//   same inside `func() { ... }()`.
+//
+// A mutant that does not compile alone (`go_mutants`' check) gets no switch:
+// it is reported `unviable`. A switch Go still refuses (a type the file
+// cannot write, inference that picks another type) is found by building:
+// the error's position is in a site's range, and that site's mutants are
+// left out and run in builds of their own.
+// ---------------------------------------------------------------------------
+
+/// One mutant a strong pass switches: its place in its file's list, the
+/// token's bytes and what the token becomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongMutant {
+    pub index: usize,
+    pub token: (usize, usize),
+    pub replacement: String,
+    pub mutator: String,
+}
+
+/// What the type checker says of the expression a token is the operator
+/// of (`go_mutants`' check), by the token's offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SiteFacts {
+    pub constant: bool,
+    pub constant_context: bool,
+    pub float: bool,
+    pub string: bool,
+    /// The expression's type as the file writes it; empty for an untyped
+    /// one, and holding a NUL where a package in it is not imported.
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// The operands' type is an integer one.
+    pub integer: bool,
+    /// For a constant: the bytes of the largest constant expression around
+    /// it, which a switch must hold whole.
+    pub root: Option<(usize, usize)>,
+    /// That expression's type, written as `type_name` is.
+    pub root_type: String,
+    /// Whether that expression is a boolean.
+    pub root_bool: bool,
+}
+
+/// A file rewritten with its switches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongFile {
+    pub text: String,
+    /// The mutants that got a switch.
+    pub switched: Vec<usize>,
+    /// The mutants that could not, and why.
+    pub unplaceable: Vec<(usize, String)>,
+    /// Each switch's bytes in `text`, and its mutants: where a compile error
+    /// there is laid at.
+    pub sites: Vec<(usize, usize, Vec<usize>)>,
+}
+
+/// The name a file's switch record is read under: one per file, since a
+/// package shares its top-level names.
+pub fn strong_slot_name(file: &str) -> String {
+    format!(
+        "__supercovStrong{}",
+        &crate::stable_ids::digest(&[file])[..12]
+    )
+}
+
+struct Schemata<'a> {
+    source: &'a str,
+    alias: &'a str,
+    slot: String,
+    /// Each switched site's token offset, and its mutants as
+    /// `(index, replacement)`.
+    by_token: std::collections::HashMap<usize, Vec<(usize, String)>>,
+    facts: &'a std::collections::HashMap<usize, SiteFacts>,
+    sites: std::collections::HashMap<usize, crate::go_mutants::GoSite>,
+    /// Each site's token offset, by its node's bytes.
+    by_node: std::collections::HashMap<(usize, usize), Vec<usize>>,
+    /// The largest constant expressions holding a switched mutant, by their
+    /// bytes, with the facts of one site in each.
+    roots: std::collections::HashMap<(usize, usize), SiteFacts>,
+    out: String,
+    switched: Vec<usize>,
+    unplaceable: Vec<(usize, String)>,
+    placed: Vec<(usize, usize, Vec<usize>)>,
+}
+
+impl Schemata<'_> {
+    fn facts(&self, token: usize) -> SiteFacts {
+        self.facts.get(&token).cloned().unwrap_or_default()
+    }
+
+    /// The site whose node is exactly `node`, with mutants to switch.
+    fn site_at(&self, node: Node) -> Option<crate::go_mutants::GoSite> {
+        let site = self
+            .by_node
+            .get(&(node.start_byte(), node.end_byte()))?
+            .iter()
+            .map(|token| &self.sites[token])
+            .find(|site| node.kind() == site_kind_name(site.kind, node.kind()))?;
+        self.by_token
+            .contains_key(&site.token.0)
+            .then(|| site.clone())
+    }
+
+    /// The site at `token` gets no switch: its mutants are unplaceable.
+    fn refuse(&mut self, token: usize, reason: &str) {
+        let mutants = self.by_token.remove(&token).expect("a site with mutants");
+        self.unplaceable.extend(
+            mutants
+                .into_iter()
+                .map(|(index, _)| (index, reason.to_owned())),
+        );
+    }
+
+    /// The node as written, its sites switched.
+    fn emit(&mut self, node: Node) {
+        if let Some(facts) = self.roots.remove(&(node.start_byte(), node.end_byte())) {
+            let start = self.out.len();
+            let indices = self.emit_constant(node, &facts);
+            self.switched.extend(indices.iter().copied());
+            self.placed.push((start, self.out.len(), indices));
+            return;
+        }
+        // A constant's site is switched only as its root is, whole.
+        if let Some(site) = self.site_at(node)
+            && !self.facts(site.token.0).constant
+            && self.emit_site(node, &site)
+        {
+            return;
+        }
+        self.emit_children(node, None);
+    }
+
+    /// The node's children, each emitted, with the source between them; the
+    /// token at `swap` written as its replacement.
+    fn emit_children(&mut self, node: Node, swap: Option<((usize, usize), &str)>) {
+        let mut at = node.start_byte();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.out.push_str(&self.source[at..child.start_byte()]);
+            match swap {
+                Some((token, replacement)) if (child.start_byte(), child.end_byte()) == token => {
+                    self.out.push_str(replacement);
+                }
+                _ => self.emit(child),
+            }
+            at = child.end_byte();
+        }
+        self.out.push_str(&self.source[at..node.end_byte()]);
+    }
+
+    /// The site's switch, or `false` where it has none and is emitted as
+    /// written.
+    fn emit_site(&mut self, node: Node, site: &crate::go_mutants::GoSite) -> bool {
+        let facts = self.facts(site.token.0);
+        let start = self.out.len();
+        let mutants = self.by_token[&site.token.0].clone();
+        let emitted = match site.kind {
+            crate::go_mutants::SiteKind::Binary => self.emit_binary(node, site, &mutants, &facts),
+            crate::go_mutants::SiteKind::Unary => self.emit_unary(node, site, &mutants, &facts),
+            _ => self.emit_statement(node, site, &mutants),
+        };
+        if !emitted {
+            self.out.truncate(start);
+            return false;
+        }
+        let indices = mutants.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        self.switched.extend(indices.iter().copied());
+        self.placed.push((start, self.out.len(), indices));
+        true
+    }
+
+    /// `index` of mutant with `replacement` at this site, or -2: the
+    /// runtime's mark for no switch.
+    fn index_of(mutants: &[(usize, String)], replacement: &str, nth: usize) -> String {
+        mutants
+            .iter()
+            .filter(|(_, candidate)| candidate == replacement)
+            .nth(nth)
+            .map_or("-2".to_owned(), |(index, _)| index.to_string())
+    }
+
+    fn operands<'t>(node: Node<'t>) -> (Node<'t>, Node<'t>) {
+        (field(node, "left"), field(node, "right"))
+    }
+
+    /// `[T]` where the file can write the expression's type.
+    fn instantiation(facts: &SiteFacts) -> String {
+        if facts.type_name.is_empty() || facts.type_name.contains('\0') {
+            String::new()
+        } else {
+            format!("[{}]", facts.type_name)
+        }
+    }
+
+    fn emit_binary(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+        facts: &SiteFacts,
+    ) -> bool {
+        let (left, right) = Self::operands(node);
+        let slot = self.slot.clone();
+        let alias = self.alias.to_owned();
+        let operator = site.operator.as_str();
+        let call = |name: &str, indices: String| {
+            format!(
+                "{alias}.{name}{}({slot}, {indices}, ",
+                Self::instantiation(facts)
+            )
+        };
+        let (open, close) = match operator {
+            "==" | "!=" => {
+                let index = Self::index_of(mutants, if operator == "==" { "!=" } else { "==" }, 0);
+                self.out.push_str("((");
+                self.emit_children(node, None);
+                self.out.push_str(&format!(") != {slot}.On({index}))"));
+                return true;
+            }
+            "&&" | "||" => {
+                let index = Self::index_of(mutants, if operator == "&&" { "||" } else { "&&" }, 0);
+                self.out.push_str("(((bool(");
+                self.emit(left);
+                self.out
+                    .push_str(&format!(") != {slot}.Is({index})) {operator} (bool("));
+                self.emit(right);
+                self.out
+                    .push_str(&format!(") != {slot}.Is({index}))) != {slot}.On({index}))"));
+                return true;
+            }
+            "<" | "<=" | ">" | ">=" => {
+                let (name, boundary, negation) = match operator {
+                    "<" => ("Lss", "<=", ">="),
+                    "<=" => ("Leq", "<", ">"),
+                    ">" => ("Gtr", ">=", "<="),
+                    _ => ("Geq", ">", "<"),
+                };
+                let indices = format!(
+                    "{}, {}",
+                    Self::index_of(mutants, boundary, 0),
+                    Self::index_of(mutants, negation, 0)
+                );
+                // A comparison's own type is a boolean whichever it is:
+                // the call is instantiated with its operands' type.
+                (
+                    format!("({alias}.{name}({slot}, {indices}, "),
+                    ") == true)".to_owned(),
+                )
+            }
+            "+" | "-" | "*" | "/" | "%" => {
+                let (name, indices) = match operator {
+                    "+" => ("Add", Self::index_of(mutants, "-", 0)),
+                    "-" => (
+                        "Sub",
+                        format!(
+                            "{}, {}",
+                            Self::index_of(mutants, "+", 0),
+                            Self::index_of(mutants, "+", 1)
+                        ),
+                    ),
+                    "*" => ("Mul", Self::index_of(mutants, "/", 0)),
+                    "/" => ("Quo", Self::index_of(mutants, "*", 0)),
+                    _ => ("Rem", Self::index_of(mutants, "*", 0)),
+                };
+                (call(name, indices), ")".to_owned())
+            }
+            // `&`, `|`, `^`, `&^`, `<<`, `>>`.
+            _ => {
+                let (name, replacement) = match operator {
+                    "&" => ("And", "|"),
+                    "|" => ("Or", "&"),
+                    "^" => ("Xor", "&"),
+                    "&^" => ("AndNot", "&"),
+                    "<<" => ("Shl", ">>"),
+                    _ => ("Shr", "<<"),
+                };
+                (
+                    call(name, Self::index_of(mutants, replacement, 0)),
+                    ")".to_owned(),
+                )
+            }
+        };
+        self.out.push_str(&open);
+        self.emit(left);
+        self.out.push_str(", ");
+        self.emit(right);
+        self.out.push_str(&close);
+        true
+    }
+
+    fn emit_unary(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+        facts: &SiteFacts,
+    ) -> bool {
+        let operand = field(node, "operand");
+        let slot = self.slot.clone();
+        let (name, indices) = match site.operator.as_str() {
+            "-" => (
+                "Neg",
+                format!(
+                    "{}, {}",
+                    Self::index_of(mutants, "+", 0),
+                    Self::index_of(mutants, "+", 1)
+                ),
+            ),
+            "+" => ("Pos", Self::index_of(mutants, "-", 0)),
+            // `^x` to `&x` makes a pointer of a number: no switch holds
+            // both. (`&x` to `|x` never compiles.)
+            _ => {
+                self.refuse(site.token.0, "type-changing");
+                return false;
+            }
+        };
+        self.out.push_str(&format!(
+            "{}.{name}{}({slot}, {indices}, ",
+            self.alias,
+            Self::instantiation(facts)
+        ));
+        self.emit(operand);
+        self.out.push(')');
+        true
+    }
+
+    /// The largest constant expression around switched mutants: `Pick`
+    /// among it as written and each of them written whole. Its mutants.
+    fn emit_constant(&mut self, node: Node, facts: &SiteFacts) -> Vec<usize> {
+        let range = node.start_byte()..node.end_byte();
+        let mut inside = self
+            .by_token
+            .iter()
+            .filter(|(at, _)| range.contains(*at))
+            .flat_map(|(at, mutants)| {
+                mutants
+                    .iter()
+                    .map(move |(index, replacement)| (*index, *at, replacement.clone()))
+            })
+            .collect::<Vec<_>>();
+        inside.sort_unstable();
+        let original = &self.source[range.clone()];
+        let values = std::iter::once(original.to_owned())
+            .chain(inside.iter().map(|(_, at, replacement)| {
+                let token = self.sites[at].token;
+                format!(
+                    "{}{replacement}{}",
+                    &self.source[range.start..token.0],
+                    &self.source[token.1..range.end]
+                )
+            }))
+            .collect::<Vec<_>>();
+        let indices = inside
+            .iter()
+            .map(|(index, _, _)| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = values
+            .iter()
+            .map(|value| format!("({value})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let typed = SiteFacts {
+            type_name: facts.root_type.clone(),
+            ..SiteFacts::default()
+        };
+        let call = format!(
+            "{}.Pick{}({}, []int32{{{indices}}}, {values})",
+            self.alias,
+            if facts.root_bool {
+                String::new()
+            } else {
+                Self::instantiation(&typed)
+            },
+            self.slot
+        );
+        if facts.root_bool {
+            // Compared with `true`, it is the untyped boolean it was.
+            self.out.push_str(&format!("({call} == true)"));
+        } else {
+            self.out.push_str(&call);
+        }
+        inside.into_iter().map(|(index, _, _)| index).collect()
+    }
+
+    /// `x += y`, `x++`, `break`: the statement once per mutant, behind `if`.
+    fn emit_statement(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+    ) -> bool {
+        // A statement is in a statement list (a label's included), or is a
+        // `for` clause's, an `if`'s or a `switch`'s own: an `if` cannot
+        // stand there, and a closure can. (`break` and `continue` are only
+        // ever in a list.)
+        let listed = node
+            .parent()
+            .is_some_and(|parent| matches!(parent.kind(), "statement_list" | "labeled_statement"));
+        if !listed {
+            self.out.push_str("func() { ");
+        }
+        mutants.iter().for_each(|(index, replacement)| {
+            self.out
+                .push_str(&format!("if {}.On({index}) {{ ", self.slot));
+            self.emit_children(node, Some((site.token, replacement)));
+            self.out.push_str(" } else ");
+        });
+        self.out.push_str("{ ");
+        self.emit_children(node, None);
+        self.out.push_str(" }");
+        if !listed {
+            self.out.push_str(" }()");
+        }
+        true
+    }
+}
+
+/// The tree-sitter kind a site of `kind` has, `actual` where several do.
+fn site_kind_name(kind: crate::go_mutants::SiteKind, actual: &str) -> &'static str {
+    match kind {
+        crate::go_mutants::SiteKind::Binary => "binary_expression",
+        crate::go_mutants::SiteKind::Unary => "unary_expression",
+        crate::go_mutants::SiteKind::Assignment => "assignment_statement",
+        crate::go_mutants::SiteKind::IncDec if actual == "dec_statement" => "dec_statement",
+        crate::go_mutants::SiteKind::IncDec => "inc_statement",
+        crate::go_mutants::SiteKind::Branch if actual == "continue_statement" => {
+            "continue_statement"
+        }
+        crate::go_mutants::SiteKind::Branch => "break_statement",
+    }
+}
+
+/// `source` (the file mutants.json keys `key`) with a switch for each of
+/// `mutants` that can have one. `refused` are token offsets whose sites a
+/// build refused: they are left as written, their mutants unplaceable.
+/// `language` is the minor version of Go the file is compiled as: below
+/// 1.21 (the switches lean on that version's inference of untyped
+/// arguments) the file's `//go:build` line gains `go1.21`, which compiles
+/// that one file as Go 1.21 -- and no later, so a loop variable keeps the
+/// meaning it had before 1.22.
+pub fn strong_rewrite(
+    key: &str,
+    source: &str,
+    mutants: &[StrongMutant],
+    facts: &std::collections::HashMap<usize, SiteFacts>,
+    refused: &std::collections::HashSet<usize>,
+    language: u32,
+) -> Result<StrongFile, GoInstrumenterError> {
+    let tree = parse(source)?;
+    let sites = crate::go_mutants::sites(&tree, source)
+        .into_iter()
+        .map(|site| (site.token.0, site))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut by_token = std::collections::HashMap::<usize, Vec<(usize, String)>>::new();
+    let mut unplaceable = Vec::new();
+    mutants.iter().for_each(|mutant| {
+        let found = sites
+            .get(&mutant.token.0)
+            .is_some_and(|site| site.token == mutant.token);
+        match (found, refused.contains(&mutant.token.0)) {
+            (false, _) => unplaceable.push((mutant.index, "node-not-found".to_owned())),
+            (true, true) => unplaceable.push((mutant.index, "refused-by-compiler".to_owned())),
+            (true, false) => by_token
+                .entry(mutant.token.0)
+                .or_default()
+                .push((mutant.index, mutant.replacement.clone())),
+        }
+    });
+    // Constants: switched as the largest constant expression around them,
+    // where Go lets a switch stand at all.
+    let mut roots = std::collections::HashMap::new();
+    by_token
+        .iter_mut()
+        .filter_map(|(token, mutants)| {
+            Some((facts.get(token).filter(|facts| facts.constant)?, mutants))
+        })
+        .for_each(
+            |(site_facts, mutants)| match (site_facts.constant_context, site_facts.root) {
+                (false, Some(root)) => {
+                    roots.entry(root).or_insert_with(|| site_facts.clone());
+                }
+                (context, _) => {
+                    let reason = if context {
+                        "constant-context"
+                    } else {
+                        "constant-without-root"
+                    };
+                    unplaceable.extend(
+                        mutants
+                            .drain(..)
+                            .map(|(index, _)| (index, reason.to_owned())),
+                    );
+                }
+            },
+        );
+    by_token.retain(|_, mutants| !mutants.is_empty());
+    let requested = by_token
+        .values()
+        .flatten()
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut by_node = std::collections::HashMap::<(usize, usize), Vec<usize>>::new();
+    sites.values().for_each(|site| {
+        by_node.entry(site.node).or_default().push(site.token.0);
+    });
+    let mut schemata = Schemata {
+        source,
+        alias: RUNTIME_ALIAS,
+        roots,
+        by_node,
+        slot: strong_slot_name(key),
+        by_token,
+        facts,
+        sites,
+        out: String::with_capacity(source.len() * 2),
+        switched: Vec::new(),
+        unplaceable,
+        placed: Vec::new(),
+    };
+    schemata.emit(tree.root_node());
+    let Schemata {
+        out,
+        mut switched,
+        mut unplaceable,
+        placed,
+        slot,
+        ..
+    } = schemata;
+    switched.sort_unstable();
+    switched.dedup();
+    // A mutant whose site was never reached by the walk (a root no node has
+    // the bytes of) or turned down without a reason has no switch either.
+    let missing = requested
+        .into_iter()
+        .filter(|index| switched.binary_search(index).is_err())
+        .filter(|index| !unplaceable.iter().any(|(seen, _)| seen == index))
+        .map(|index| (index, "no-switch".to_owned()))
+        .collect::<Vec<_>>();
+    unplaceable.extend(missing);
+    unplaceable.sort();
+    if switched.is_empty() {
+        return Ok(StrongFile {
+            text: source.to_owned(),
+            switched,
+            unplaceable,
+            sites: Vec::new(),
+        });
+    }
+    // The record, and the runtime's import on the package clause's line: a
+    // line of its own would move every line below it.
+    let mut text = out;
+    let import = import_edit(&text, RUNTIME_ALIAS, RUNTIME_IMPORT)
+        .expect("a parsed file has a package clause");
+    let shift = import.text.len();
+    text.insert_str(import.at, &import.text);
+    // The language version the switches need, for this file alone.
+    let lead = if language < 21 {
+        upgrade_to_go_1_21(&mut text)
+    } else {
+        0
+    };
+    let key_literal = serde_json::to_string(key).expect("a string serializes");
+    text.push_str(&format!(
+        "\nvar {slot} = {RUNTIME_ALIAS}.StrongSlot({key_literal})\n"
+    ));
+    let sites = placed
+        .into_iter()
+        .map(|(start, end, indices)| {
+            // Every switch is after the package clause, where the import
+            // goes, and after the build line.
+            let moved = |at: usize| (at + shift).saturating_add_signed(lead);
+            (moved(start), moved(end), indices)
+        })
+        .collect();
+    Ok(StrongFile {
+        text,
+        switched,
+        unplaceable,
+        sites,
+    })
+}
+
+/// Compiles one file as Go 1.21 whatever its module's `go` line says: its
+/// `//go:build` line gains `&& go1.21`, or the file gains one. Go 1.21 is
+/// the language the generic switches and probes lean on (its inference of
+/// untyped arguments), and no later, so a loop variable keeps the meaning
+/// it had before 1.22. Returns how many bytes the text grew by before its
+/// package clause.
+pub fn upgrade_to_go_1_21(text: &mut String) -> isize {
+    let header = text.split("\npackage ").next().unwrap_or_default().len();
+    // An old `// +build` line must say what `//go:build` says, or `go vet`
+    // (which `go test` runs) refuses the file; Go reads only the new line.
+    // Each becomes `//`, of the same lines.
+    let mut grown = 0;
+    while let Some(at) = text[..(header as isize + grown) as usize].find("// +build") {
+        let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+        grown -= (end - at - 2) as isize;
+        text.replace_range(at..end, "//");
+    }
+    let header = (header as isize + grown) as usize;
+    grown
+        + match text[..header].find("//go:build ") {
+            Some(at) => {
+                let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+                let expression = text[at + "//go:build ".len()..end].trim().to_owned();
+                let line = format!("//go:build ({expression}) && go1.21");
+                let longer = line.len() as isize - (end - at) as isize;
+                text.replace_range(at..end, &line);
+                longer
+            }
+            None => {
+                let line = "//go:build go1.21\n\n";
+                text.insert_str(0, line);
+                line.len() as isize
+            }
+        }
+}
+
+/// The switched site a compile error at byte `at` of a strong file is in:
+/// the innermost whose bytes hold it.
+pub fn strong_site_at(file: &StrongFile, at: usize) -> Option<&[usize]> {
+    file.sites
+        .iter()
+        .filter(|(start, end, _)| (*start..*end).contains(&at))
+        .min_by_key(|(start, end, _)| end - start)
+        .map(|(_, _, indices)| indices.as_slice())
+}
+
+#[cfg(test)]
+mod strong_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    /// Every listed mutant of `source`, to switch.
+    fn every(source: &str) -> Vec<StrongMutant> {
+        crate::go_mutants::listed_tokens(source)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (token, mutator, replacement))| StrongMutant {
+                index,
+                token,
+                replacement: replacement.to_owned(),
+                mutator: mutator.to_owned(),
+            })
+            .collect()
+    }
+
+    fn rewritten(source: &str, facts: &HashMap<usize, SiteFacts>, language: u32) -> StrongFile {
+        let file = strong_rewrite(
+            "a/b.go",
+            source,
+            &every(source),
+            facts,
+            &HashSet::new(),
+            language,
+        )
+        .unwrap();
+        parse(&file.text).unwrap_or_else(|error| panic!("{error}\n{}", file.text));
+        file
+    }
+
+    #[test]
+    fn each_operator_gets_the_switch_its_kind_needs() {
+        let source = "package p\n\nfunc f(a, b int, ok bool) (int, bool) {\n\tif a < b && ok {\n\t\ta += b\n\t}\n\tfor i := 0; i < b; i++ {\n\t\tif i == a {\n\t\t\tbreak\n\t\t}\n\t}\n\treturn -a * b, a != b\n}\n";
+        let file = rewritten(source, &HashMap::new(), 22);
+        let slot = strong_slot_name("a/b.go");
+        let text = &file.text;
+        for expected in [
+            format!(
+                "(((bool((__supercov.Lss({slot}, 1, 2, a, b) == true)) != {slot}.Is(0)) && (bool(ok) != {slot}.Is(0))) != {slot}.On(0))"
+            ),
+            format!(
+                "if {slot}.On(3) {{ a -= b }} else if {slot}.On(4) {{ a = b }} else {{ a += b }}"
+            ),
+            format!("func() {{ if {slot}.On(7) {{ i-- }} else {{ i++ }} }}()"),
+            format!("((i == a) != {slot}.On(8))"),
+            format!("if {slot}.On(9) {{ continue }} else {{ break }}"),
+            format!("__supercov.Mul({slot}, 10, __supercov.Neg({slot}, 11, 12, a), b)"),
+            format!("var {slot} = __supercov.StrongSlot(\"a/b.go\")"),
+            "; import __supercov \"github.com/supercorp-ai/supercov/runtime/go/supercov\""
+                .to_owned(),
+        ] {
+            assert!(text.contains(&expected), "{expected}\nin\n{text}");
+        }
+        assert_eq!(file.switched.len(), every(source).len());
+        assert!(file.unplaceable.is_empty(), "{:?}", file.unplaceable);
+        // A compile error inside a switch is laid at its innermost one.
+        let at = text.find("__supercov.Neg").unwrap();
+        assert_eq!(strong_site_at(&file, at), Some(&[11, 12][..]));
+        assert_eq!(strong_site_at(&file, 0), None);
+    }
+
+    #[test]
+    fn a_constant_is_switched_whole_and_a_required_one_not_at_all() {
+        let source = "package p\n\nimport \"time\"\n\nconst n = 1 + 2\n\nfunc f() time.Duration { return time.Second * (2 + 1) }\n";
+        let tokens = crate::go_mutants::listed_tokens(source).unwrap();
+        let root_start = source.find("time.Second *").unwrap();
+        let root = (root_start, source.find("1) }").unwrap() + 2);
+        let mut facts = HashMap::new();
+        facts.insert(
+            tokens[0].0.0,
+            SiteFacts {
+                constant: true,
+                constant_context: true,
+                ..SiteFacts::default()
+            },
+        );
+        for (token, _, _) in &tokens[1..] {
+            facts.insert(
+                token.0,
+                SiteFacts {
+                    constant: true,
+                    root: Some(root),
+                    root_type: "time.Duration".into(),
+                    ..SiteFacts::default()
+                },
+            );
+        }
+        let file = rewritten(source, &facts, 22);
+        assert_eq!(file.unplaceable, [(0, "constant-context".to_owned())]);
+        let slot = strong_slot_name("a/b.go");
+        assert!(
+            file.text.contains(&format!("__supercov.Pick[time.Duration]({slot}, []int32{{1, 2}}, (time.Second * (2 + 1)), (time.Second / (2 + 1)), (time.Second * (2 - 1)))")),
+            "{}",
+            file.text
+        );
+    }
+
+    #[test]
+    fn a_file_of_an_older_go_is_compiled_as_go_1_21() {
+        let source = "//go:build linux\n// +build linux\n\npackage p\n\nfunc f(a int) int { return a + 1 }\n";
+        let file = rewritten(source, &HashMap::new(), 16);
+        assert!(
+            file.text.starts_with("//go:build (linux) && go1.21\n//\n"),
+            "{}",
+            file.text
+        );
+        let file = rewritten(
+            "package p\n\nfunc f(a int) int { return a + 1 }\n",
+            &HashMap::new(),
+            16,
+        );
+        assert!(
+            file.text.starts_with("//go:build go1.21\n\npackage p"),
+            "{}",
+            file.text
+        );
+        // Its switch's bytes moved with what came before them.
+        let (start, end, _) = &file.sites[0];
+        assert!(
+            file.text[*start..*end].starts_with("__supercov.Add("),
+            "{}",
+            &file.text[*start..*end]
+        );
+    }
+
+    #[test]
+    fn a_comparison_gets_a_value_probe_inside_its_branch_wrapper() {
+        let source = "package p\n\nconst k = 1\n\nfunc f(a, b int) bool {\n\tif a<b {\n\t\treturn true\n\t}\n\treturn a >= b && 1 < 2 && a<<1 > b\n}\n";
+        let obligations =
+            build_go_obligations_probing("p.go", source, &mut 0, &mut 0, "rt", true, true).unwrap();
+        let sites = obligations
+            .probes
+            .values()
+            .filter_map(|probe| match &probe.target {
+                GoProbeTarget::Comparison { site } => Some(site.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Literals on both sides, and a shift whose operand takes its type
+        // from the comparison, are left alone.
+        assert_eq!(sites, ["p.go:6:6", "p.go:9:11"]);
+        let text = rewrite_removing(source, &obligations.edits, &obligations.removed);
+        let plain = text
+            .split("/*line ")
+            .map(|part| part.split_once("*/").map_or(part, |(_, rest)| rest))
+            .collect::<String>();
+        // Inside the branch's wrapper and the condition's, the operator a
+        // comma between the operands.
+        assert!(
+            plain.contains("rt.B(2, 3, bool((rt.Cmp(5, 0, a, b) == true)))"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("rt.C(0, 0, (rt.Cmp(10, 3, a ,  b) == true))"),
+            "{plain}"
+        );
+        parse(&plain).unwrap();
+        // Without probes, nothing is removed.
+        let plain = build_go_obligations_probing("p.go", source, &mut 0, &mut 0, "rt", true, false)
+            .unwrap();
+        assert!(plain.removed.is_empty());
+    }
+
+    #[test]
+    fn an_integer_operation_gets_a_value_probe_where_its_type_is_known() {
+        let source = "package p\n\nfunc f(a, b int, s []int) int {\n\ta += b\n\ts[f(1, 2, s)] -= 1\n\tb = b % 3\n\treturn -a*b + (a << b)\n}\n";
+        let integer = |type_name: &str| SiteFacts {
+            integer: true,
+            type_name: type_name.to_owned(),
+            ..SiteFacts::default()
+        };
+        let mut facts = HashMap::new();
+        for (token, _, _) in crate::go_mutants::listed_tokens(source).unwrap() {
+            facts.insert(token.0, integer("int"));
+        }
+        // A constant, and an operand whose type the file cannot write, get
+        // none.
+        let plus = source.find(" + ").unwrap() + 1;
+        facts.insert(
+            plus,
+            SiteFacts {
+                constant: true,
+                ..integer("int")
+            },
+        );
+        let shift = source.find("<<").unwrap();
+        facts.insert(shift, integer("x.T\0"));
+        // A site the type checker said nothing of gets none.
+        facts.remove(&source.find(" % ").map(|at| at + 1).unwrap());
+        let obligations = build_go_obligations_valued(
+            "p.go",
+            source,
+            &mut 0,
+            &mut 0,
+            "rt",
+            true,
+            true,
+            Some(&facts),
+        )
+        .unwrap();
+        let text = rewrite_removing(source, &obligations.edits, &obligations.removed);
+        let plain = text
+            .split("/*line ")
+            .map(|part| part.split_once("*/").map_or(part, |(_, rest)| rest))
+            .collect::<String>();
+        let sites = obligations
+            .probes
+            .values()
+            .filter_map(|probe| match &probe.target {
+                GoProbeTarget::Operation { site } => Some(site.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sites, ["p.go:4:4", "p.go:7:11", "p.go:7:9"], "{plain}");
+        assert!(plain.contains("a += rt.Assign[int]("), "{plain}");
+        assert!(plain.contains("b = b % 3"), "{plain}");
+        assert!(plain.contains(", 0, a, b)"), "{plain}");
+        // `s[f(...)]` is read again by the probe only where reading it does
+        // nothing: not here.
+        assert!(plain.contains("s[f(1, 2, s)] -= 1"), "{plain}");
+        assert!(plain.contains("rt.Arith[int]("), "{plain}");
+        assert!(plain.contains("rt.Unary[int]("), "{plain}");
+        parse(&plain).unwrap();
+    }
+
+    #[test]
+    fn an_older_file_s_build_lines_say_go_1_21_and_nothing_else() {
+        let mut text = "// +build linux\n//go:build linux\n\npackage p\n".to_owned();
+        let grown = upgrade_to_go_1_21(&mut text);
+        assert_eq!(text, "//\n//go:build (linux) && go1.21\n\npackage p\n");
+        assert_eq!(grown, text.len() as isize - 44);
+    }
+
+    #[test]
+    fn every_operator_and_statement_has_its_switch() {
+        let source = "package p\n\nfunc f(a, b uint, ok bool) (uint, bool) {\n\tx := a/b + a%b - a*b\n\ty := a&b | a^b | a&^b | a<<b | a>>b\n\tz := a <= b || a > b && !(a >= b) || ok != (a == b)\n\tfor i := 0; i < 3; i-- {\n\t\tif i > 1 {\n\t\t\tcontinue\n\t\t}\n\t}\n\tfor x -= 1; x > 9; x *= 2 {\n\t}\n\tif y <<= 1; y > 0 {\n\t}\n\tswitch z = !z; z {\n\t}\nlabel:\n\tx >>= 1\n\t_ = +x\n\t_ = ^x\n\tgoto label\n}\n";
+        let mut facts = HashMap::new();
+        let tokens = crate::go_mutants::listed_tokens(source).unwrap();
+        let caret = source.find("^x").unwrap();
+        facts.insert(caret, SiteFacts::default());
+        // A type the file cannot write instantiates nothing.
+        facts.insert(
+            source.find("a%b").unwrap() + 1,
+            SiteFacts {
+                type_name: "x.T\0".to_owned(),
+                ..SiteFacts::default()
+            },
+        );
+        let file = strong_rewrite(
+            "a/b.go",
+            source,
+            &every(source),
+            &facts,
+            &HashSet::new(),
+            22,
+        )
+        .unwrap();
+        parse(&file.text).unwrap_or_else(|error| panic!("{error}\n{}", file.text));
+        let slot = strong_slot_name("a/b.go");
+        for expected in [
+            "__supercov.Quo(",
+            "__supercov.Rem(",
+            "__supercov.Mul(",
+            "__supercov.Add(",
+            "__supercov.Sub(",
+            "__supercov.And(",
+            "__supercov.Or(",
+            "__supercov.Xor(",
+            "__supercov.AndNot(",
+            "__supercov.Shl(",
+            "__supercov.Shr(",
+            "__supercov.Leq(",
+            "__supercov.Gtr(",
+            "__supercov.Geq(",
+            "__supercov.Pos(",
+        ] {
+            assert!(file.text.contains(expected), "{expected}\n{}", file.text);
+        }
+        assert!(
+            file.text.contains(&format!(") != {slot}.Is(")),
+            "{}",
+            file.text
+        );
+        assert!(file.text.contains("func() { if "), "{}", file.text);
+        assert!(file.text.contains("{ i++ } else { i-- }"), "{}", file.text);
+        assert!(
+            file.text.contains("{ break } else { continue }"),
+            "{}",
+            file.text
+        );
+        // `^x` to `&x` is a pointer: no switch holds both.
+        let caret_index = tokens
+            .iter()
+            .position(|(token, _, _)| token.0 == caret)
+            .unwrap();
+        assert_eq!(
+            file.unplaceable,
+            [(caret_index, "type-changing".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_constant_comparison_s_switch_is_an_untyped_boolean_and_one_without_a_root_has_none() {
+        let source = "package p\n\nfunc f() (bool, int, int) { return 1 < 2, 3 + 4, 5 * 6 }\n";
+        let tokens = crate::go_mutants::listed_tokens(source).unwrap();
+        let at = |text: &str| source.find(text).unwrap();
+        let mut facts = HashMap::new();
+        for (token, _, _) in &tokens {
+            let (root, root_bool, root_type) = if token.0 < at("3 +") {
+                (Some((at("1 < 2"), at("1 < 2") + 5)), true, "")
+            } else if token.0 < at("5 *") {
+                (None, false, "")
+            } else {
+                // A root no node has the bytes of.
+                (Some((at("5 *") + 1, at("5 *") + 4)), false, "int")
+            };
+            facts.insert(
+                token.0,
+                SiteFacts {
+                    constant: true,
+                    root,
+                    root_bool,
+                    root_type: root_type.to_owned(),
+                    ..SiteFacts::default()
+                },
+            );
+        }
+        let file = strong_rewrite(
+            "a/b.go",
+            source,
+            &every(source),
+            &facts,
+            &HashSet::new(),
+            22,
+        )
+        .unwrap();
+        let slot = strong_slot_name("a/b.go");
+        assert!(
+            file.text.contains(&format!(
+                "(__supercov.Pick({slot}, []int32{{0, 1}}, (1 < 2), (1 <= 2), (1 >= 2)) == true)"
+            )),
+            "{}",
+            file.text
+        );
+        let reasons = file
+            .unplaceable
+            .iter()
+            .map(|(_, reason)| reason.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, ["constant-without-root", "no-switch"]);
+    }
+
+    #[test]
+    fn a_file_with_nothing_to_switch_is_left_as_written() {
+        let source = "package p\n\nfunc f() {}\n";
+        let file =
+            strong_rewrite("a/b.go", source, &[], &HashMap::new(), &HashSet::new(), 22).unwrap();
+        assert_eq!(file.text, source);
+        assert!(
+            strong_rewrite(
+                "a/b.go",
+                "package p\n\nfunc (",
+                &[],
+                &HashMap::new(),
+                &HashSet::new(),
+                22
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn every_comparison_and_operation_probe() {
+        let source = "package p\n\nvar g = 1 + 2\n\nfunc f(a, b int, c float64, s []int) int {\n\t_ = a <= b || a > b || a < b\n\t_ = c >= 1\n\ta <<= 1\n\ta++\n\t_ = &a\n\t_ = +a\n\t_ = a >> 1\n\t_ = c * 2\n\treturn a\n}\n";
+        let mut facts = HashMap::new();
+        for (token, _, _) in crate::go_mutants::listed_tokens(source).unwrap() {
+            facts.insert(
+                token.0,
+                SiteFacts {
+                    integer: true,
+                    type_name: "int".into(),
+                    ..SiteFacts::default()
+                },
+            );
+        }
+        // A float's operation, and one the checker said nothing of.
+        facts.insert(
+            source.find("c * 2").unwrap() + 2,
+            SiteFacts {
+                type_name: "float64".into(),
+                ..SiteFacts::default()
+            },
+        );
+        facts.remove(&source.find("a >> 1").unwrap());
+        let obligations = build_go_obligations_valued(
+            "p.go",
+            source,
+            &mut 0,
+            &mut 0,
+            "rt",
+            true,
+            true,
+            Some(&facts),
+        )
+        .unwrap();
+        let text = rewrite_removing(source, &obligations.edits, &obligations.removed);
+        let plain = text
+            .split("/*line ")
+            .map(|part| part.split_once("*/").map_or(part, |(_, rest)| rest))
+            .collect::<String>();
+        for expected in [
+            "rt.Cmp(5, 1, a ,  b)",
+            "rt.Cmp(6, 2, a ,  b)",
+            "rt.Cmp(7, 0, a ,  b)",
+            "rt.Cmp(9, 3, c ,  1)",
+            "rt.AssignShift[int](",
+            "rt.Unary[int](",
+            ", 1, a)",
+        ] {
+            assert!(plain.contains(expected), "{expected}\n{plain}");
+        }
+        assert!(plain.contains("a++"), "{plain}");
+        assert!(plain.contains("var g = 1 + 2"), "{plain}");
+        assert!(plain.contains("c * 2"), "{plain}");
+        parse(&plain).unwrap();
+    }
+
+    #[test]
+    fn what_has_no_place_is_said_so() {
+        let source = "package p\n\nfunc f(a int) int {\n\tswitch a += 1; a {\n\t}\n\treturn a\n}\n";
+        let mut mutants = every(source);
+        // A token the list never had.
+        mutants.push(StrongMutant {
+            index: 9,
+            token: (0, 7),
+            replacement: "x".into(),
+            mutator: "ArithmeticOperator".into(),
+        });
+        let refused = HashSet::from([mutants[0].token.0]);
+        let file =
+            strong_rewrite("a/b.go", source, &mutants, &HashMap::new(), &refused, 22).unwrap();
+        assert_eq!(
+            file.unplaceable,
+            [
+                (0, "refused-by-compiler".to_owned()),
+                (1, "refused-by-compiler".to_owned()),
+                (9, "node-not-found".to_owned())
+            ]
+        );
+        assert_eq!(file.text, source);
+        assert!(file.switched.is_empty());
+    }
 }
 
 #[cfg(test)]

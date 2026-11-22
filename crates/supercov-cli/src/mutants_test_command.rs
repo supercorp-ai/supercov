@@ -458,7 +458,9 @@ fn plan_text(data: &Value) -> String {
             summary["equivalent"],
             summary["error"],
             match summary["unviable"].as_u64() {
-                Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
+                Some(unviable) if unviable > 0 => {
+                    format!("  unviable      {unviable} (do not compile)\n")
+                }
                 _ => String::new(),
             },
             summary["ran"],
