@@ -190,8 +190,41 @@ v0.11.1, rust-hex v0.4.3, semver 1.0.27. The results are in
 
 ## Measured
 
-See the release report for the run of 2026-11-22; the figures there are
-copied here once the validation runs have finished.
+On SoroCI (16-CPU machines, one per job), 2026-11-22: cargo-mutants 27.1.0
+with `-j 8`, in shards of a crate's mutants; Supercov built from this tree,
+one job per crate, the strong pass with its default 8 workers. Every mutant
+of the three crates, 832 in all:
+
+| Crate | Mutants | Agree | Soundness violations | Viability disagreements | cargo-mutants (s, shards summed) | Supercov measured run + strong pass (s) |
+| --- | --- | --- | --- | --- | --- | --- |
+| strsim-rs v0.11.1 | 363 | 363 | 0 | 0 | 59.4 (4 shards) | 0.8 + 16.2 |
+| rust-hex v0.4.3 | 104 | 102 | 0 | 2 | 73.8 (2 shards) | 6.6 + 22.9 |
+| semver 1.0.27 | 365 | 362 | 0 | 3 | 44.1 (4 shards) | 1.4 + 16.2 |
+
+Each shard of cargo-mutants builds its own baseline, so the summed figures
+hold one baseline build per shard; the strong pass's figure holds its whole
+work: the switched build (1-3 builds as unviable mutants leave it), the
+baselines, every mutant's tests and the mutants built on their own (2, 5 and
+14). The strong verdicts were killed 277/76/270, timeout 3/1/5, survived
+63/16/30, no coverage 17/8/31, unviable 3/3/29.
+
+The five viability disagreements, each applied by hand:
+
+- hex `src/lib.rs:177:36` and `178:36`, `+` to `*` in `c - b'A' + 10`:
+  `b'A' * 10` overflows `u8`, and rustc's deny-by-default
+  `arithmetic_overflow` lint fails cargo-mutants' build. The pass caps lints,
+  as a measured run does, so the mutant builds and panics in the tests:
+  killed.
+- semver `src/identifier.rs:180:55`, `-` to `+` and `/` in
+  `PTR_BYTES * 8 - 1`: the shift by a constant past the width is the same
+  lint.
+- semver `src/identifier.rs:94:67`, `!0` to `0` in a `const` inside a
+  function no test calls: cargo-mutants' build fails on const evaluation
+  (a null `NonNull`); the plan records it no coverage without building it.
+
+None is a mutant one tool kills and the other calls survived.
+`cargo mutants --cap-lints=true` would build the four lint cases as the pass
+does.
 
 ## What is left
 
