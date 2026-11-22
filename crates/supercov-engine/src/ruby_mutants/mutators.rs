@@ -606,13 +606,13 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
             }
         }
         "when" => {
-            let body_index = input.children.len() - 1;
+            let body_index = input.children.len().saturating_sub(1);
             if input.node(body_index).is_some() {
                 mutate_child(&mut out, body_index, parent, |_| true);
             } else {
                 out.update(body_index, node(raise()));
             }
-            let conditions = input.children.len() - 1;
+            let conditions = input.children.len().saturating_sub(1);
             for index in 0..conditions {
                 if conditions > 1 {
                     out.delete(index);
@@ -1138,7 +1138,7 @@ fn case(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
             out.delete(index);
         }
     }
-    let last = length - 1;
+    let last = length.saturating_sub(1);
     if input.node(last).is_some() {
         mutate_child(out, last, parent, |_| true);
         out.update(last, Child::Nil);
@@ -1157,7 +1157,7 @@ fn case_match(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
             out.delete(index);
         }
     }
-    let last = length - 1;
+    let last = length.saturating_sub(1);
     if input.node(last).is_some() {
         mutate_child(out, last, parent, |_| true);
         out.update(last, Child::Nil);
@@ -1351,7 +1351,7 @@ fn index(out: &mut Out<'_>, parent: Option<&Parent<'_>>, assign: bool) {
         if let Some(value) = input.children.last().and_then(Child::node) {
             out.emit(value.clone());
         }
-        mutate_child(out, length - 1, parent, |_| true);
+        mutate_child(out, length.saturating_sub(1), parent, |_| true);
     }
 }
 
@@ -1476,8 +1476,9 @@ fn offset(value: &Child, delta: i8) -> Child {
 /// A rational's or imaginary's mutations' values, as `inspect` prints them:
 /// 0, 1, and one more and one less than the literal.
 fn numeric_values(input: &N) -> Vec<String> {
+    // A rational or imaginary holds its inspected value.
     let Child::Raw(text) = input.child(0) else {
-        unreachable!("a rational or imaginary holds its inspected value");
+        return Vec::new();
     };
     if input.ty == "rational" {
         // `(n/d)`, reduced: n ± d over d stays reduced.
@@ -1624,8 +1625,8 @@ fn rescue(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
             }
         }
     }
-    if let Some(else_body) = input.node(length - 1).cloned() {
-        mutate_child(out, length - 1, parent, |_| true);
+    if let Some(else_body) = input.node(length.saturating_sub(1)).cloned() {
+        mutate_child(out, length.saturating_sub(1), parent, |_| true);
         concat(out, else_body);
     }
     if standalone {

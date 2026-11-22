@@ -185,6 +185,7 @@ fn normalized(node: &N) -> Rc<N> {
                             | "def"
                             | "defs"
                             | "resbody"
+                            | "when"
                             | "in_pattern"
                             | "ensure"
                     )
@@ -505,4 +506,249 @@ fn ruby_enumeration_skips_what_it_cannot_read_and_keeps_ids_apart() {
     let ids = mutant_ids("a.rb", b"def twice(a)\n  [a, a]\nend\n");
     let unique: std::collections::BTreeSet<_> = ids.iter().collect();
     assert_eq!(unique.len(), ids.len(), "{ids:?}");
+}
+
+/// Every node of a method's Prism tree, by its byte range.
+#[derive(Default)]
+struct Spans {
+    spans: Vec<(usize, usize)>,
+    imaginary_floats: usize,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for Spans {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let location = node.location();
+        self.spans
+            .push((location.start_offset(), location.end_offset()));
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let location = node.location();
+        self.spans
+            .push((location.start_offset(), location.end_offset()));
+    }
+
+    fn visit_imaginary_node(&mut self, node: &ruby_prism::ImaginaryNode<'pr>) {
+        if node.numeric().as_float_node().is_some() {
+            self.imaginary_floats += 1;
+        }
+        ruby_prism::visit_imaginary_node(self, node);
+    }
+}
+
+/// A method holding syntax the port does not convert, wherever it is, is
+/// skipped whole: no part of it is converted without the rest. Each node of
+/// each fixture method is made `1.0i` (an imaginary float, which the port
+/// refuses) in turn; where the method still parses and holds it, the method
+/// is refused.
+#[test]
+fn a_method_holding_unconverted_syntax_anywhere_is_refused() {
+    let mut failures = Vec::new();
+    let mut refused = 0;
+    for path in fixtures() {
+        let source = fs::read(&path).unwrap();
+        let result = ruby_prism::parse(&source);
+        let mut finder = Methods::default();
+        finder.visit(&result.node());
+        for def in &finder.defs {
+            let location = def.location();
+            let text = &source[location.start_offset()..location.end_offset()];
+            let parsed = ruby_prism::parse(text);
+            let mut spans = Spans::default();
+            spans.visit(&parsed.node());
+            for (start, end) in spans.spans {
+                let mut spliced = text[..start].to_vec();
+                spliced.extend_from_slice(b"1.0i");
+                spliced.extend_from_slice(&text[end..]);
+                let reparsed = ruby_prism::parse(&spliced);
+                if reparsed.errors().next().is_some() {
+                    continue;
+                }
+                let mut holding = Spans::default();
+                holding.visit(&reparsed.node());
+                let mut methods = Methods::default();
+                methods.visit(&reparsed.node());
+                let Some(method) = methods.defs.first().and_then(|each| each.as_def_node()) else {
+                    continue;
+                };
+                if holding.imaginary_floats == 0 {
+                    continue;
+                }
+                match Converter::new(&spliced).method(&method) {
+                    Err(_) => refused += 1,
+                    Ok(tree) => failures.push(format!(
+                        "{}: {} converted as {}",
+                        path.display(),
+                        String::from_utf8_lossy(&spliced),
+                        sexp(&tree)
+                    )),
+                }
+            }
+        }
+    }
+    assert!(refused > 1000, "{refused}");
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// `node` with no span anywhere: printed from its children alone.
+fn unspanned(node: &N) -> Rc<N> {
+    Rc::new(N {
+        ty: node.ty,
+        children: node
+            .children
+            .iter()
+            .map(|child| match child {
+                Child::Node(inner) => Child::Node(unspanned(inner)),
+                other => other.clone(),
+            })
+            .collect(),
+        span: None,
+        syntax: node.syntax,
+    })
+}
+
+/// Every fixture method, and each of its mutants, printed from its
+/// children alone, on one line, parses back to its own tree: each node's
+/// printer, not only the source text it copies.
+#[test]
+fn ruby_methods_print_from_their_trees_and_parse_back() {
+    let mut failures = Vec::new();
+    for path in fixtures() {
+        let source = fs::read(&path).unwrap();
+        for method in defs(&source) {
+            let mutated = mutators::mutate(&method, None)
+                .into_iter()
+                .filter(|mutated| validates(mutated));
+            for def in std::iter::once(method.clone()).chain(mutated) {
+                let bare = unspanned(&def);
+                let Some(text) = print::one_line(&source, &method, &bare) else {
+                    failures.push(format!("{}: unprintable {}", path.display(), sexp(&def)));
+                    continue;
+                };
+                let reparsed = defs(text.as_bytes());
+                let errors: Vec<String> = ruby_prism::parse(text.as_bytes())
+                    .errors()
+                    .map(|error| error.message().to_owned())
+                    .collect();
+                let same = reparsed
+                    .first()
+                    .is_some_and(|reparsed| normalized(reparsed) == normalized(&def));
+                if !errors.is_empty() || !same {
+                    failures.push(format!(
+                        "{}: {text}\n  errors: {errors:?}\n  want: {}\n  got:  {}",
+                        path.display(),
+                        sexp(&normalized(&def)),
+                        reparsed
+                            .first()
+                            .map(|reparsed| sexp(&normalized(reparsed)))
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A node made another.
+type Change<'a> = dyn Fn(&N) -> Rc<N> + 'a;
+
+/// `tree` with the node at `target` (a preorder index) given to `change`.
+fn changed_at(tree: &N, target: usize, next: &mut usize, change: &Change<'_>) -> Rc<N> {
+    let index = *next;
+    *next += 1;
+    if index == target {
+        return change(tree);
+    }
+    Rc::new(N {
+        ty: tree.ty,
+        children: tree
+            .children
+            .iter()
+            .map(|child| match child {
+                Child::Node(inner) => Child::Node(changed_at(inner, target, next, change)),
+                other => other.clone(),
+            })
+            .collect(),
+        span: tree.span,
+        syntax: tree.syntax,
+    })
+}
+
+fn preorder(tree: &Rc<N>, into: &mut Vec<Rc<N>>) {
+    into.push(tree.clone());
+    for child in tree.children.iter().filter_map(Child::node) {
+        preorder(child, into);
+    }
+}
+
+/// The printer and the mutators never panic on a tree they do not expect:
+/// each fixture method, printed from its children, with one node made one
+/// the printer has no code for, or one child of a node made `nil`, a symbol
+/// or a node where the other was, or left out with those after it; and
+/// each such node mutated. Such trees are refused, or printed and mutated
+/// as well as their parts allow.
+#[test]
+fn printing_and_mutating_never_panic_on_a_malformed_tree() {
+    let unknown = |_: &N| N::new("unknown", Vec::new());
+    let mut refused = 0;
+    for path in fixtures() {
+        let source = fs::read(&path).unwrap();
+        for method in defs(&source) {
+            let bare = unspanned(&method);
+            let mut nodes = Vec::new();
+            preorder(&bare, &mut nodes);
+            for (target, node) in nodes.iter().enumerate() {
+                let broken = changed_at(&bare, target, &mut 0, &unknown);
+                if print::one_line(&source, &method, &broken).is_none() {
+                    refused += 1;
+                }
+                let mut subtree = Vec::new();
+                preorder(node, &mut subtree);
+                let small = subtree.len() <= 12;
+                for child in 0..node.children.len() {
+                    let malformed: [&Change<'_>; 3] = [
+                        &|node: &N| {
+                            let mut children = node.children.clone();
+                            children[child] = match &children[child] {
+                                Child::Node(_) => Child::Nil,
+                                _ => Child::Node(N::new("nil", Vec::new())),
+                            };
+                            node.with_children(children)
+                        },
+                        &|node: &N| {
+                            let mut children = node.children.clone();
+                            children[child] = Child::Sym("x".into());
+                            node.with_children(children)
+                        },
+                        &|node: &N| {
+                            let mut children = node.children.clone();
+                            children.truncate(child);
+                            node.with_children(children)
+                        },
+                    ];
+                    for change in malformed {
+                        let broken = changed_at(&bare, target, &mut 0, change);
+                        let _ = print::one_line(&source, &method, &broken);
+                        // Small nodes: each kind is small somewhere, and a
+                        // node's mutations are its subtree's.
+                        if small {
+                            let _ = mutators::mutate(&change(node), None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(refused > 1000, "{refused}");
 }

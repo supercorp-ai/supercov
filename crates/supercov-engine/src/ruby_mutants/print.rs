@@ -399,12 +399,12 @@ impl Printer<'_> {
             | "kwoptarg" | "procarg0" | "mlhs" | "forward_arg" | "kwnilarg" => self.parameter(node),
             "args" => self.arguments_list(node, true),
             "when" => {
-                let length = node.children.len();
-                let conditions = node.children[..length - 1]
+                let (body, conditions) = node.children.split_last()?;
+                let conditions = conditions
                     .iter()
                     .map(|condition| self.argument(condition.node()?))
                     .collect::<Option<Vec<_>>>()?;
-                let body = self.statements(&node.children[length - 1])?;
+                let body = self.statements(body)?;
                 Some(format!("when {} then {body}", conditions.join(", ")))
             }
             "in_pattern" => {
@@ -494,18 +494,24 @@ impl Printer<'_> {
                 plain.push(self.parameter(child)?);
             }
         }
+        let shadow = if shadow.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", shadow.join(", "))
+        };
         if block {
             if plain.is_empty() && shadow.is_empty() {
                 return Some(String::new());
             }
-            let shadow = if shadow.is_empty() {
-                String::new()
+            // `|a,|`: one plain parameter, not the block's whole argument.
+            let comma = if node.node(0).is_some_and(|first| first.ty == "arg") && plain.len() == 1 {
+                ","
             } else {
-                format!("; {}", shadow.join(", "))
+                ""
             };
-            return Some(format!("|{}{shadow}|", plain.join(", ")));
+            return Some(format!("|{}{comma}{shadow}|", plain.join(", ")));
         }
-        Some(format!("({})", plain.join(", ")))
+        Some(format!("({}{shadow})", plain.join(", ")))
     }
 
     /// A statement list's code: statements joined with `;`, `nil` for none.
@@ -577,19 +583,17 @@ impl Printer<'_> {
 
     /// A rescue's body and clauses, as a method or `begin` holds them.
     fn rescue_body(&self, node: &N) -> Option<String> {
-        let length = node.children.len();
+        let (else_branch, rest) = node.children.split_last()?;
+        let (body, clauses) = rest.split_first()?;
         let mut parts = Vec::new();
-        if !node.child(0).is_nil() {
-            parts.push(self.statements(node.child(0))?);
+        if !body.is_nil() {
+            parts.push(self.statements(body)?);
         }
-        for clause in &node.children[1..length - 1] {
+        for clause in clauses {
             parts.push(self.resbody(clause.node()?)?);
         }
-        if !node.child(length - 1).is_nil() {
-            parts.push(format!(
-                "else; {}",
-                self.statements(node.child(length - 1))?
-            ));
+        if !else_branch.is_nil() {
+            parts.push(format!("else; {}", self.statements(else_branch)?));
         }
         Some(parts.join("; "))
     }
@@ -777,7 +781,10 @@ impl Printer<'_> {
                                 Some(format!("{key}: {}", self.pattern(child.node(1)?)?))
                             }
                             "match_var" => Some(format!("{}:", child.child(0).sym()?)),
-                            "match_rest" => self.pattern(child),
+                            "match_rest" => match child.node(0) {
+                                Some(inner) => Some(format!("**{}", self.pattern(inner)?)),
+                                None => Some("**".into()),
+                            },
                             "match_nil_pattern" => Some("**nil".into()),
                             _ => None,
                         }
@@ -1074,7 +1081,9 @@ impl Printer<'_> {
                 } else {
                     self.argument(right)?
                 };
-                format!("{} = {right}", left.join(", "))
+                // `a, = b`: one target is still a multiple assignment.
+                let comma = if left.len() == 1 { "," } else { "" };
+                format!("{}{comma} = {right}", left.join(", "))
             }
             "and" => format!(
                 "{} && {}",
@@ -1148,8 +1157,8 @@ impl Printer<'_> {
                     // `case x in y` would read `x in y` as a test.
                     text.push(';');
                 }
-                let length = children.len();
-                for (position, clause) in children[1..length - 1].iter().enumerate() {
+                let (else_branch, rest) = children.split_last()?;
+                for (position, clause) in rest.get(1..)?.iter().enumerate() {
                     text.push_str(if position == 0 && node.node(0).is_some() {
                         " "
                     } else {
@@ -1157,9 +1166,9 @@ impl Printer<'_> {
                     });
                     text.push_str(&self.slot(clause.node()?)?);
                 }
-                if !children[length - 1].is_nil() {
+                if !else_branch.is_nil() {
                     text.push_str("; else ");
-                    text.push_str(&self.statements(&children[length - 1])?);
+                    text.push_str(&self.statements(else_branch)?);
                 }
                 text.push_str("; end");
                 text
