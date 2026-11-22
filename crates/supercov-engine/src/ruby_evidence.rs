@@ -1914,6 +1914,15 @@ pub(crate) mod tests {
         ]);
         for (bytes, reason) in [
             (set(0, b"X"), "header or version does not match"),
+            (valid[..10].to_vec(), "header or version does not match"),
+            (
+                set(8, &9_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
+            (
+                set(12, &8_u32.to_le_bytes()),
+                "header or version does not match",
+            ),
             (
                 set(16, &8_u64.to_le_bytes()),
                 "declared capacity is outside the mapped file",
