@@ -880,5 +880,10 @@ mod tests {
             xml.contains("<sourceFile>Path.go</sourceFile><mutatedClass>Win.Path</mutatedClass>")
         );
         assert!(xml.contains("<sourceFile>noext</sourceFile><mutatedClass>noext</mutatedClass>"));
+        // No mutants: an empty list.
+        assert_eq!(
+            pit_xml(&data(Vec::new())),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mutations partial=\"false\">\n</mutations>\n"
+        );
     }
 }

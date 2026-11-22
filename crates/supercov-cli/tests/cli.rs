@@ -24908,6 +24908,18 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
     assert!(kept["files"].get("src/tax.py").is_none());
     let bogus = export(&["--format", "bogus"]).exits(2);
     assert!(bogus.contains("jsonl, markdown, stryker or pit"), "{bogus}");
+    // A file with no mutants: a report with no file.
+    let empty: serde_json::Value =
+        serde_json::from_str(&export(&["src/consts.js", "--format", "stryker"]).succeeds())
+            .unwrap();
+    assert_eq!(empty["files"], serde_json::json!({}));
+    // Piped, the static HTML export is printed, as every format is.
+    assert!(
+        project
+            .supercov(&["runs", "latest", "report", "--format", "html"])
+            .succeeds()
+            .starts_with("<!doctype html>")
+    );
     // The static HTML export is not printed into a terminal: it is written
     // beside the store's reports, again each time, and the path said.
     for _ in 0..2 {
