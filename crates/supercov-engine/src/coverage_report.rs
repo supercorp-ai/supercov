@@ -3685,7 +3685,8 @@ pub type ParsedResults = FastMap<String, Vec<RawTestResult>>;
 /// What ran with no test running is in no test kind's row: `--kind unit`
 /// leaves it out, and `minimize` with it. Releases before 4.14.0 stored what
 /// Python and Ruby ran while loading under the kind `unit`, and an imported
-/// coverage.py report's under `unknown`; their runs read as later ones do.
+/// Python coverage report's under `unknown`; their runs read as
+/// later ones do.
 fn file_background_under_its_own_kind(raw_results: &mut [RawTestResult]) {
     for raw in raw_results {
         if raw.role == "background" {
