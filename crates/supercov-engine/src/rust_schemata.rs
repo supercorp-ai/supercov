@@ -231,13 +231,14 @@ fn emit(
             Kind::Wrap { cases } => {
                 let switch_start = out.code.len();
                 out.code.push('(');
-                for (ordinal, code) in cases {
+                // A switch is made with its first case.
+                cases.iter().for_each(|(ordinal, code)| {
                     out.code.push_str(&format!("if {runtime}{ordinal}) {{ "));
                     let own_start = out.code.len();
                     out.code.push_str(code);
                     out.replacements.push((*ordinal, own_start..out.code.len()));
                     out.code.push_str(" } else ");
-                }
+                });
                 out.code.push_str("{ ");
                 emit(source, runtime, placed, next, start..end, out);
                 out.code.push_str(" })");

@@ -2401,7 +2401,7 @@ mod tests {
         let place = format!(
             "fs.canonicalize#rust_strong.rs:{}@2",
             body[..body.find("fault_fs::canonicalize(executable)").unwrap()]
-                .lines()
+                .matches('\n')
                 .count()
                 + 1
         );
@@ -2540,8 +2540,9 @@ mod tests {
         // line though it wraps a `?` around it.
         let text = include_str!("rust_strong.rs");
         let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
+        // The line a needle is on, wherever on it the needle starts.
         let line_of =
-            |text: &str, needle: &str| text[..text.find(needle).unwrap()].lines().count() + 1;
+            |text: &str, needle: &str| text[..text.find(needle).unwrap()].matches('\n').count() + 1;
         let sync_start = line_of(body, "fn sync_project(");
         let sync_end = sync_start
             + body[body.find("fn sync_project(").unwrap()..]
