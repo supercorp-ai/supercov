@@ -556,26 +556,41 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
         for (file, mutant, key) in unmatched {
             let group =
                 by_group.get(&(file.clone(), mutant.mutator.name().to_owned(), key.clone()));
-            let found = group.and_then(|group| {
-                group.iter().copied().find(|at| {
-                    !taken[*at]
-                        && match pass {
-                            0 => pit[*at].line == mutant.start.0 && !crowded[*at],
-                            // javac gives an operator on a continuation line
-                            // the line of the operand before it, or of the
-                            // statement.
-                            1 => {
-                                !crowded[*at]
-                                    && (mutant.lines.0.saturating_sub(3)
-                                        ..=mutant.lines.1.max(mutant.end.0))
-                                        .contains(&pit[*at].line)
-                            }
-                            // kotlinc puts a condition's jumps on its last
-                            // line: the statement's every line.
-                            2 => (mutant.lines.0..=mutant.statement_end).contains(&pit[*at].line),
-                            _ => is_return(mutant.mutator),
+            let fits = |at: usize| {
+                !taken[at]
+                    && match pass {
+                        0 => pit[at].line == mutant.start.0 && !crowded[at],
+                        // javac gives an operator on a continuation line
+                        // the line of the operand before it, or of the
+                        // statement.
+                        1 => {
+                            !crowded[at]
+                                && !file.ends_with(".kt")
+                                && (mutant.lines.0.saturating_sub(3)
+                                    ..=mutant.lines.1.max(mutant.end.0))
+                                    .contains(&pit[at].line)
                         }
-                })
+                        // kotlinc puts a condition's jumps on its last
+                        // line: the statement's every line.
+                        2 => (mutant.lines.0..=mutant.statement_end).contains(&pit[at].line),
+                        _ => is_return(mutant.mutator),
+                    }
+            };
+            // In the statement pass a crowded line's mutants come first: they
+            // are the ones the line pass left for it, where the others on
+            // the statement's lines are code of their own (a `?.`).
+            let found = group.and_then(|group| {
+                let mut fitting = group.iter().copied().filter(|at| fits(*at));
+                if pass == 2 {
+                    let fitting = fitting.collect::<Vec<_>>();
+                    fitting
+                        .iter()
+                        .copied()
+                        .find(|at| crowded[*at])
+                        .or_else(|| fitting.first().copied())
+                } else {
+                    fitting.next()
+                }
             });
             match found {
                 Some(at) => {
@@ -796,6 +811,44 @@ mod tests {
             ],
         );
         assert_eq!(only_supercov, Vec::<String>::new());
+    }
+
+    /// A Kotlin mutant on a line where PIT has more of its kind than
+    /// Supercov (kotlinc's own null check beside it) takes a mutant of that
+    /// line, not the lone one of the line above, which is a `?.` of its own.
+    #[test]
+    fn a_kotlin_mutant_of_a_crowded_line_takes_that_line_s() {
+        let file = "fixture/Crowd.kt";
+        let source = "fun f(a: String?, b: Boolean, c: Boolean): Boolean {\n    val n = a?.length\n    return b && c\n}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let mutants = file_mutants(file, source, &index).unwrap().mutants;
+        let ours = mutants
+            .into_iter()
+            .filter(|mutant| mutant.start.0 == 3)
+            .take(1)
+            .collect::<Vec<_>>();
+        assert_eq!(ours.len(), 1);
+        let mutant = &ours[0];
+        let pit_at = |line: u32, index: u32, status: &str| PitMutant {
+            file: file.into(),
+            line,
+            mutator: mutant.mutator.name().into(),
+            key: mutant.key.clone(),
+            class: "fixture.CrowdKt".into(),
+            method: mutant.method.clone(),
+            description: String::new(),
+            status: status.into(),
+            killing_tests: Vec::new(),
+            index,
+        };
+        let pit = vec![
+            pit_at(2, 0, "SURVIVED"),
+            pit_at(3, 1, "KILLED"),
+            pit_at(3, 2, "KILLED"),
+        ];
+        let join = join_pit(&BTreeMap::from([(file.to_owned(), ours)]), &pit);
+        assert_eq!(join.pairs.len(), 1);
+        assert_eq!(pit[join.pairs[0].1].line, 3);
     }
 
     #[test]
