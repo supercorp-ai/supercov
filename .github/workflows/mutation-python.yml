@@ -1,0 +1,173 @@
+name: Python mutation
+
+# Supercov's Python mutants measured against mutmut 3.8.1 on four public
+# projects (benchmarks/mutation-python/README.md): each tool's verdicts and
+# time on the same runners, mutmut's full kill matrix as the ground truth,
+# and the cost of a measured run and of its value probes.
+
+on:
+  push:
+    branches: [release/mutation-python]
+    paths:
+      - .github/workflows/mutation-python.yml
+      - benchmarks/mutation-python/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutation-python
+      - run: cargo build --release -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov
+          path: target/release/supercov
+          retention-days: 3
+
+  supercov:
+    needs: build
+    name: Supercov ${{ matrix.project }} ${{ matrix.runner }} ${{ matrix.values }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [python-slugify, cachetools, parse, humanize]
+        runner: [pytest]
+        values: ["", values]
+        include:
+          - { project: cachetools, runner: unittest, values: "" }
+          - { project: cachetools, runner: unittest, values: values }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+      - run: benchmarks/mutation-python/run-supercov.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" ${{ matrix.runner }} "$RUNNER_TEMP/bin/supercov" out ${{ matrix.values }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: supercov-${{ matrix.project }}-${{ matrix.runner }}${{ matrix.values && '-values' || '' }}
+          path: out
+
+  overhead:
+    needs: build
+    name: Overhead ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [python-slugify, cachetools, parse, humanize]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: supercov
+          path: ${{ runner.temp }}/bin
+      - run: chmod +x "$RUNNER_TEMP/bin/supercov"
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+      - run: |
+          mkdir -p out
+          benchmarks/mutation-python/overhead.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/bin/supercov" | tee out/overhead.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overhead-${{ matrix.project }}
+          path: out
+
+  mutmut:
+    name: mutmut ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [python-slugify, cachetools, parse, humanize]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+      - run: benchmarks/mutation-python/run-mutmut.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus" out
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: mutmut-${{ matrix.project }}
+          path: out
+
+  matrix:
+    name: Kill matrix ${{ matrix.project }} ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: python-slugify, shard: 1/4 }
+          - { project: python-slugify, shard: 2/4 }
+          - { project: python-slugify, shard: 3/4 }
+          - { project: python-slugify, shard: 4/4 }
+          - { project: cachetools, shard: 1/4 }
+          - { project: cachetools, shard: 2/4 }
+          - { project: cachetools, shard: 3/4 }
+          - { project: cachetools, shard: 4/4 }
+          - { project: parse, shard: 1/1 }
+          - { project: humanize, shard: 1/10 }
+          - { project: humanize, shard: 2/10 }
+          - { project: humanize, shard: 3/10 }
+          - { project: humanize, shard: 4/10 }
+          - { project: humanize, shard: 5/10 }
+          - { project: humanize, shard: 6/10 }
+          - { project: humanize, shard: 7/10 }
+          - { project: humanize, shard: 8/10 }
+          - { project: humanize, shard: 9/10 }
+          - { project: humanize, shard: 10/10 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - run: benchmarks/mutation-python/setup.sh ${{ matrix.project }} "$RUNNER_TEMP/corpus"
+      - run: |
+          corpus="$RUNNER_TEMP/corpus"
+          benchmarks/mutation-python/mutmut-config.sh ${{ matrix.project }} "$corpus/src"
+          "$corpus/.venv/bin/python" benchmarks/mutation-python/generate.py "$corpus/src"
+          mkdir -p out
+          "$corpus/.venv/bin/python" benchmarks/mutation-python/kill_matrix.py "$corpus" --jobs "$(nproc)" --max-seconds 540 --baseline-runs 2 --shard ${{ matrix.shard }} --out "$PWD/out/kill-matrix.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: matrix-${{ matrix.project }}-${{ strategy.job-index }}
+          path: out
+
+  compare:
+    needs: [supercov, overhead, mutmut, matrix]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - run: benchmarks/mutation-python/compare-all.sh results "$RUNNER_TEMP/corpus" summary | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary
