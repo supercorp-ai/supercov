@@ -835,6 +835,10 @@ fn ruby_methods_with_unconverted_syntax_are_skipped_by_name() {
             "an imaginary literal",
         ),
         (
+            "def m(a)\n  (b, *c, a.c(1.5i).d), e = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
             "def m(a)\n  for a.c(1.5i).d in a\n  end\nend\n",
             "an imaginary literal",
         ),
@@ -1213,5 +1217,17 @@ fn ruby_blocks_and_odd_source_print_from_their_parts() {
     assert_eq!(
         print::one_line(odd, &literal, &literal).as_deref(),
         Some("1")
+    );
+}
+
+/// A destructuring parameter's trailing comma (`|(a, ), b|`) leaves no rest
+/// of its own, as parser reads it.
+#[test]
+fn ruby_destructuring_parameters_drop_an_implicit_rest() {
+    let method = defs(b"def m(list)\n  list.each { |(a, ), b| a }\nend\n").remove(0);
+    assert!(
+        sexp(&method).contains("(args (mlhs (arg :a)) (arg :b))"),
+        "{}",
+        sexp(&method)
     );
 }

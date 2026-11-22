@@ -5421,4 +5421,14 @@ end
             }
         }
     }
+
+    /// An insertion's probe keys: each call's first argument, and none for
+    /// the receiver named without a call.
+    #[test]
+    fn ruby_probe_keys_are_read_from_each_call() {
+        let text = format!(
+            "{RUBY_PROBE_RECEIVER}.s(12); {RUBY_PROBE_RECEIVER}.c(3, 0); {RUBY_PROBE_RECEIVER}"
+        );
+        assert_eq!(probe_keys_in(&text), [12, 3]);
+    }
 }

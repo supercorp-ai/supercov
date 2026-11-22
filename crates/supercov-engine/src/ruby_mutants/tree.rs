@@ -805,11 +805,8 @@ impl<'s> Converter<'s> {
             "send"
         };
         let mut children = vec![receiver, sym(selector)];
-        let attribute_write = call.is_attribute_write()
-            && call
-                .message_loc()
-                .is_some_and(|loc| !self.text(&loc).ends_with(b"="));
-        if attribute_write {
+        // `a.b = c` (Prism marks only that form, not `a.b=(c)`).
+        if call.is_attribute_write() {
             children.extend(arguments);
         } else {
             children.extend(Self::kwargs(arguments));
@@ -1831,10 +1828,9 @@ impl<'s> Converter<'s> {
                 for right in &write.rights() {
                     elements.push(node(self.target(&right)?));
                 }
-                if elements.len() == 1
-                    && write.rest().is_none()
-                    && elements[0].node().is_some_and(|only| only.ty == "mlhs")
-                {
+                // `((a, b)) = c` is `a, b = c`: one target alone, without a
+                // rest, is a nested one (else it is no multiple assignment).
+                if elements.len() == 1 && write.rest().is_none() {
                     elements = elements[0].node().expect("mlhs").children.clone();
                 }
                 let lhs_end = write.operator_loc().start_offset();
@@ -2224,7 +2220,7 @@ enum HeredocPart {
 /// written (`HEREDOC`).
 fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
     let mut children: Vec<Child> = Vec::new();
-    for part in parts {
+    parts.into_iter().for_each(|part| {
         match part {
             // Each a line's text: never empty.
             HeredocPart::Text(text) => {
@@ -2254,7 +2250,7 @@ fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
             }
             HeredocPart::Node(value) => children.push(node(value)),
         }
-    }
+    });
     // One part left is one line of text: an interpolation is followed by
     // its line's break.
     if let [only] = children.as_slice() {
@@ -2295,7 +2291,7 @@ fn procarg0(parameters: &ruby_prism::ParametersNode<'_>) -> bool {
     parameters.requireds().iter().count() == 1
         && parameters.optionals().iter().count() == 0
         && parameters.rest().is_none()
-        && parameters.posts().iter().count() == 0
+        // (Parameters after a rest need the rest.)
         && parameters.keywords().iter().count() == 0
         && parameters.keyword_rest().is_none()
         && parameters.block().is_none()
