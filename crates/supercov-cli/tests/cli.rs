@@ -15988,7 +15988,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
             "fs.write@2",
-            "fs.write@8",
+            "fs.write@10 => python_run.rs:449",
             "fs.rename@2",
             "fs.rename@9",
             "fs.open@7",
@@ -16465,7 +16465,7 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:567",
+        "fs.create_dir_all@6 => python_run.rs:569",
         "fs.read_dir@6 => python_run.rs:112",
         "fs.read_dir@7 => python_run.rs:112",
         "fs.file_type@9 => python_run.rs:115",
@@ -18020,8 +18020,8 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:708", "python_run.rs:708"),
-        ("fs.create_dir_all#python_run.rs:709", "python_run.rs:709"),
+        ("fs.create_dir_all#python_run.rs:710", "python_run.rs:710"),
+        ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
@@ -18211,8 +18211,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:715@1",
-            "python_run.rs:715",
+            "fs.write#python_run.rs:717@1",
+            "python_run.rs:717",
             "plan.json",
         ),
     ] {
@@ -22213,6 +22213,17 @@ fn mutants_test_runs_python_mutants_under_unittest() {
     let command = [
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
+    // `SUPERCOV_MUTANTS=0` is a plain run: no value probe, no list.
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "0")])
+        .succeeds();
+    let plain = project.latest();
+    assert!(
+        !project
+            .root
+            .join(format!(".supercov/runs/{plain}/mutants-listed.json"))
+            .exists()
+    );
     project
         .supercov_with(&command, &[("SUPERCOV_MUTANTS", "1")])
         .succeeds();

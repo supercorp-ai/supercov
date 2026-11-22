@@ -175,7 +175,8 @@ pub fn run_strong_python(
         .strong
         .results
         .parent()
-        .map_or_else(|| pass.root.join(".supercov/strong"), Path::to_path_buf);
+        .unwrap_or(&pass.root)
+        .to_path_buf();
     let runtime = work.join("python-runtime");
     crate::python_run::write_runtime(&runtime)?;
     let mut files = pass

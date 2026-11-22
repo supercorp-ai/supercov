@@ -665,13 +665,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("notes.txt"), "a\n").unwrap();
-        let recorded = ["src/a.js", "src/a.py", "src/a.rs", "notes.txt"]
+        std::fs::write(root.join("src/a.rb"), "def a = 1\n").unwrap();
+        let recorded = ["src/a.js", "src/a.py", "src/a.rs", "src/a.rb", "notes.txt"]
             .into_iter()
             .map(|file| (file.to_owned(), std::collections::BTreeSet::new()))
             .collect::<BTreeMap<_, _>>();
         // The JavaScript and Python files went to their enumerators, which
         // say neither is the file the run measured (no point of it was
-        // recorded); the text file to none.
+        // recorded); the Ruby file, of a language with no enumerator yet,
+        // and the text file to none.
         let listed = list_from_sources(&root, &recorded);
         assert_eq!(listed.changed, ["src/a.js", "src/a.py"]);
         // cargo-mutants' mutants of the Rust file, under its set.

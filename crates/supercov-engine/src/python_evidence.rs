@@ -2441,8 +2441,11 @@ pub(crate) mod tests {
             retry: 0,
             phase: "call".into(),
         };
+        // Each request also saw a value probe's outcome, which goes where its
+        // hits go.
         let observed = |hit: &str| Observations {
             hits: BTreeSet::from([hit.to_owned()]),
+            comparisons: BTreeMap::from([(hit.to_owned(), BTreeSet::from(["differs".to_owned()]))]),
             ..Observations::default()
         };
         let served = |worker: &str, test: &str, window: (i64, i64)| ServedTest {
@@ -2510,6 +2513,11 @@ pub(crate) mod tests {
         assert_eq!(
             hits("playwright:w0", "one"),
             BTreeSet::from(["first".to_owned()])
+        );
+        assert!(
+            evidence.per_identity[&identity("playwright:w0", "one")]
+                .comparisons
+                .contains_key("first")
         );
         assert_eq!(
             hits("playwright:w1", "three"),
@@ -3461,6 +3469,26 @@ pub(crate) mod tests {
         let read: crate::mutant_list::MutantsFile =
             serde_json::from_slice(&listed.contents).unwrap();
         assert_eq!(read.mutant_set.as_deref(), Some("mutmut@3.8.1"));
+        // An outcome of a context no phase declared is refused.
+        let directory = temporary("mutant-probes-unknown");
+        write_transport(
+            &directory.join("main.1.mmap"),
+            &[
+                lines[0].clone(),
+                json!({"t":"cmp","ctx":7,"id":"m.py:2:12","o":"lt"}),
+                json!({"t":"exit","at":9}),
+            ],
+            0,
+        );
+        let unknown = read_evidence_directory(&directory, "run-1").err().unwrap();
+        assert!(
+            matches!(
+                unknown,
+                PythonEvidenceError::UnknownContext { context: 7, .. }
+            ),
+            "{unknown:?}"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     /// A server that left no interpreter's evidence, or evidence that is no

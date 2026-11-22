@@ -350,15 +350,17 @@ fn list_probed_mutants(
         crate::python_mutants::probed(file, &source).ok()
     });
     let mut listed = BTreeMap::new();
-    for (file, probed) in files.into_iter().zip(probed) {
-        let Some((mutants, probes)) = probed else {
-            continue;
-        };
-        if let Some(file_plan) = plan.files.get_mut(&file) {
-            file_plan.mutant_probes = probes;
-        }
+    // A file that cannot be read or parsed lists no mutants and gets no
+    // probes; its own coverage probes report what is wrong with it.
+    let read = plan
+        .files
+        .iter_mut()
+        .zip(probed)
+        .filter_map(|((file, file_plan), probed)| probed.map(|probed| (file, file_plan, probed)));
+    for (file, file_plan, (mutants, probes)) in read {
+        file_plan.mutant_probes = probes;
         if !mutants.is_empty() {
-            listed.insert(file, mutants);
+            listed.insert(file.clone(), mutants);
         }
     }
     crate::mutant_list::MutantsFile::listed(
@@ -1335,5 +1337,42 @@ mod tests {
             (false, false)
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// The files a run lists its mutants from: each planned file's, with
+    /// its probes in its plan; one that cannot be read or parsed has none.
+    #[test]
+    fn a_run_lists_each_readable_planned_file_s_mutants() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-probed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.py"), "def f(a, b):\n    return a < b\n").unwrap();
+        std::fs::write(root.join("b.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("c.py"), "def (:\n").unwrap();
+        let mut plan = crate::python_instrumenter::PythonProbePlan {
+            version: 1,
+            root: root.display().to_string(),
+            files: ["a.py", "b.py", "c.py", "gone.py"]
+                .into_iter()
+                .map(|file| (file.to_owned(), Default::default()))
+                .collect(),
+            assertion_sites: BTreeMap::new(),
+        };
+        let listed = list_probed_mutants(&root, &mut plan);
+        assert_eq!(listed.files.keys().collect::<Vec<_>>(), ["a.py"]);
+        assert!(!plan.files["a.py"].mutant_probes.is_empty());
+        assert!(plan.files["c.py"].mutant_probes.is_empty());
+        let mut empty = crate::python_instrumenter::PythonProbePlan {
+            files: BTreeMap::new(),
+            ..plan
+        };
+        assert!(list_probed_mutants(&root, &mut empty).files.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
