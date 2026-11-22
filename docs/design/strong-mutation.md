@@ -141,6 +141,16 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
 - When every mutant is decided the run is cancelled; its slots left never
   start a process.
 
+On the public benchmark (16-CPU Linux machines, c8a/m8a.4xlarge; hono in 6
+shards, tRPC in 32), against the staged pass: hono 69 to 65 ms a mutant,
+tRPC 1,173 to 1,071 ms (StrykerJS's mutant phase: 51 and 755 ms), with the
+same disagreements with StrykerJS's full kill matrix and no extra kill. A
+tRPC mutant ran 10.9 files (killed 6.4, survived 37.5), 2.70 baselines (each
+shard is a pass with its own) and 0.30 confirmations; a hono mutant 2.4, 0.26
+and 0.35. Where the rest of the gap is: tRPC's baselines, repeated in every
+shard (StrykerJS's dry run is outside its figure), and a copy's start in a
+fresh worker, which StrykerJS pays too.
+
 ## Order and early exit
 
 A mutant's candidates are grouped by test file, cheapest file first. It runs
