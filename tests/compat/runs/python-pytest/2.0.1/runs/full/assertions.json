@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "assertions": [
+    {
+      "id": "a_2cb7ebad7d3484b7bc3f",
+      "at": {
+        "file": "tests/test_price.py",
+        "line": 5,
+        "column": 5,
+        "text": "assert price(200, True, False) == 180"
+      },
+      "observes": [],
+      "flows": []
+    },
+    {
+      "id": "a_90886cd277eddb0d4d89",
+      "at": {
+        "file": "tests/test_price.py",
+        "line": 9,
+        "column": 5,
+        "text": "assert price(20, False, True) == 15"
+      },
+      "observes": [],
+      "flows": []
+    }
+  ]
+}

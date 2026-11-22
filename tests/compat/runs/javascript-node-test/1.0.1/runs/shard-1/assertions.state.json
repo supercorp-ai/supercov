@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 3,
+  "inputsDigest": "e5eefc89eb0b426f8fa70953cd24ebc6506da0fc7a8ee188646e95fc17a821ef",
+  "evidenceDigest": "5cb1d2207df24715b5ed4605b4db2ef30e47336fcecdf9b629ddf62120c3fb06",
+  "flows": {},
+  "changes": [],
+  "inheritance": {
+    "from": null,
+    "skipped": []
+  },
+  "executions": {
+    "tests": [
+      {
+        "test": {
+          "file": "test/price.test.js",
+          "name": "coupons take five off"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            1
+          ]
+        }
+      },
+      {
+        "test": {
+          "file": "test/price.test.js",
+          "name": "members save on large orders"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            1
+          ]
+        }
+      }
+    ],
+    "probed": {
+      "src/price.js": [
+        1,
+        2,
+        3
+      ]
+    }
+  }
+}

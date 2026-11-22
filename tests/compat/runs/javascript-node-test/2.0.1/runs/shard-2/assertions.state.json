@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 3,
+  "inputsDigest": "e5eefc89eb0b426f8fa70953cd24ebc6506da0fc7a8ee188646e95fc17a821ef",
+  "evidenceDigest": "8105faa0fe558c42132b4262b0b288cb133dea0df099e7c31899ea8732066a75",
+  "flows": {},
+  "changes": [],
+  "inheritance": {
+    "from": null,
+    "skipped": []
+  },
+  "executions": {
+    "tests": [
+      {
+        "test": {
+          "file": "test/label.test.js",
+          "name": "large totals"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            2
+          ]
+        },
+        "attribution": "exact"
+      }
+    ],
+    "probed": {
+      "src/price.js": [
+        1,
+        2,
+        3
+      ]
+    },
+    "covered": {
+      "src/price.js": [
+        2
+      ]
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "setup": [],
+  "command": [
+    "npm",
+    "test"
+  ],
+  "file": "src/price.js",
+  "test": "coupons take five off",
+  "shards": [
+    [
+      "node",
+      "--test",
+      "test/price.test.js"
+    ],
+    [
+      "node",
+      "--test",
+      "test/label.test.js"
+    ]
+  ],
+  "since": "1.0.0"
+}

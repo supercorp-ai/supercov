@@ -1,0 +1,39 @@
+run run_453fd110209b1607
+command: supercov merge run_59d465fe46900a5b run_913596e24d6e086f
+
+Coverage
+  Lines      69.23% (9/13)
+  Branches   50.00% (5/10)
+  MC/DC      40.00% (2/5)
+
+By test kind
+  unit            3 test(s)  lines  69.23%  branches  50.00%  MC/DC  40.00%
+  3 test(s) use the runner's default kind; this is not inferred from their behavior.
+  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 3 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+  Command outputs  /work/project/.supercov/workspaces/workspace/project
+
+Tests
+  Total       3
+  Passed      3
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Runtime action phases (separate from assertion mappings)
+  Recorded within action phases      0 lines
+  Other recorded execution           9 lines
+  These runtime phase counts do not include the agent-assessed assertion coverage shown above.
+
+Commands
+  npx supercov runs 'run_453fd110209b1607' files
+  npx supercov runs 'run_453fd110209b1607' gaps
+  npx supercov runs 'run_453fd110209b1607' kinds
+  npx supercov runs 'run_453fd110209b1607' runners
+  npx supercov runs 'run_453fd110209b1607' scope
+  npx supercov runs run_453fd110209b1607 --help

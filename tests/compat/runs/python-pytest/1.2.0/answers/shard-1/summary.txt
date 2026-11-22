@@ -1,0 +1,38 @@
+run run_732c2aff63df89a8
+command: python3 -m pytest -q tests/test_price.py
+
+Coverage
+  Lines      64.29% (9/14)
+  Branches   50.00% (10/20)
+  MC/DC      40.00% (2/5)
+Assertions not assessed — No recorded flow explanations
+  0 assertions with flows; 2 without; 0 current flows; 0 stale; 0 draft
+
+By test kind
+  unit            2 test(s)  lines  64.29%  branches  50.00%  MC/DC  40.00%
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 2 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+
+Tests
+  Total       2
+  Passed      2
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Runtime action phases (separate from assertion mappings)
+  Recorded within action phases      0 lines
+  Other recorded execution           9 lines
+  These runtime phase counts do not include the agent-assessed assertion coverage shown above.
+
+Commands
+  npx supercov runs 'run_732c2aff63df89a8' files
+  npx supercov runs 'run_732c2aff63df89a8' gaps
+  npx supercov runs 'run_732c2aff63df89a8' kinds
+  npx supercov runs 'run_732c2aff63df89a8' runners
+  npx supercov runs 'run_732c2aff63df89a8' scope
+  npx supercov runs run_732c2aff63df89a8 --help

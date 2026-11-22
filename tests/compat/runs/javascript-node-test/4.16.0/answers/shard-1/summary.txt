@@ -1,0 +1,35 @@
+run run_13031d4c02165be9
+command: node --test test/price.test.js
+
+Coverage
+  Lines      53.85% (7/13)
+  Branches   40.00% (4/10)
+  MC/DC      40.00% (2/5)
+Assertions   not assessed — npx supercov runs run_13031d4c02165be9 assertions assess
+
+By test kind
+  unit            2 test(s)  lines  53.85%  branches  40.00%  MC/DC  40.00%
+  2 test(s) use the runner's default kind; this is not inferred from their behavior.
+  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 2 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+  Command outputs  /work/project/.supercov/workspaces/workspace/project
+
+Tests
+  Total       2
+  Passed      2
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Commands
+  npx supercov runs 'run_13031d4c02165be9' files
+  npx supercov runs 'run_13031d4c02165be9' gaps
+  npx supercov runs 'run_13031d4c02165be9' kinds
+  npx supercov runs 'run_13031d4c02165be9' runners
+  npx supercov runs 'run_13031d4c02165be9' scope
+  npx supercov runs run_13031d4c02165be9 --help

@@ -1,0 +1,41 @@
+run run_7fa30ca1baf09eac
+command: node --test test/price.test.js
+
+Coverage
+  Lines      53.85% (7/13)
+  Branches   40.00% (4/10)
+  MC/DC      40.00% (2/5)
+Assertions not assessed — No recorded flow explanations
+  0 assertions with flows; 2 without; 0 current flows; 0 stale; 0 draft
+
+By test kind
+  unit            2 test(s)  lines  53.85%  branches  40.00%  MC/DC  40.00%
+  2 test(s) use the runner's default kind; this is not inferred from their behavior.
+  Set SUPERCOV_TEST_KIND=integration (or unit/component/e2e) when running a suite to override it.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 2 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+  Command outputs  /work/project/.supercov/workspaces/workspace/project
+
+Tests
+  Total       2
+  Passed      2
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Runtime action phases (separate from assertion mappings)
+  Recorded within action phases      0 lines
+  Other recorded execution           7 lines
+  These runtime phase counts do not include the agent-assessed assertion coverage shown above.
+
+Commands
+  npx supercov runs 'run_7fa30ca1baf09eac' files
+  npx supercov runs 'run_7fa30ca1baf09eac' gaps
+  npx supercov runs 'run_7fa30ca1baf09eac' kinds
+  npx supercov runs 'run_7fa30ca1baf09eac' runners
+  npx supercov runs 'run_7fa30ca1baf09eac' scope
+  npx supercov runs run_7fa30ca1baf09eac --help
