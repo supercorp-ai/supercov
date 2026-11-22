@@ -647,10 +647,14 @@ impl Progress {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let started = std::time::Instant::now();
         let thread = std::thread::spawn(move || {
+            let mut first = None;
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(interval)
             {
-                eprintln!("{}", progress_line(&results, total, started.elapsed()));
+                eprintln!(
+                    "{}",
+                    progress_line(&results, total, started.elapsed(), &mut first)
+                );
             }
         });
         Self {
@@ -667,8 +671,16 @@ impl Drop for Progress {
     }
 }
 
-/// How far a pass got: its verdicts so far of the `total` it runs.
-fn progress_line(results: &Path, total: usize, elapsed: std::time::Duration) -> String {
+/// How far a pass got: its verdicts so far of the `total` it runs. `first`
+/// keeps when verdicts were first seen, and how many: the estimate runs at
+/// the rate since, so the build before the first test and the verdicts
+/// decided without running, all written at once, do not swing it.
+fn progress_line(
+    results: &Path,
+    total: usize,
+    elapsed: std::time::Duration,
+    first: &mut Option<(std::time::Duration, usize)>,
+) -> String {
     let text = std::fs::read_to_string(results).unwrap_or_default();
     let statuses = text
         .lines()
@@ -678,8 +690,17 @@ fn progress_line(results: &Path, total: usize, elapsed: std::time::Duration) -> 
         .collect::<Vec<_>>();
     let count = |status: &str| statuses.iter().filter(|seen| *seen == status).count();
     let done = statuses.len();
+    if done > 0 && first.is_none() {
+        *first = Some((elapsed, done));
+    }
     let left = if done > 0 {
-        let rest = elapsed.as_millis() * total.saturating_sub(done) as u128 / done as u128;
+        let remaining = total.saturating_sub(done) as u128;
+        let rest = match *first {
+            Some((then, seen)) if done > seen => {
+                elapsed.saturating_sub(then).as_millis() * remaining / (done - seen) as u128
+            }
+            _ => elapsed.as_millis() * remaining / done as u128,
+        };
         format!(
             "; about {} left",
             supercov_engine::process_supervision::format_duration(rest)
@@ -915,6 +936,33 @@ fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The estimate runs at the rate since verdicts were first seen: ten
+    /// decided at once after a minute's build, then one every ten seconds,
+    /// leave about ten seconds a mutant, not six a mutant then more.
+    #[test]
+    fn the_estimate_runs_at_the_rate_since_the_first_verdicts() {
+        let results =
+            std::env::temp_dir().join(format!("supercov-progress-{}", std::process::id()));
+        let write = |count: usize| {
+            let lines = (0..count)
+                .map(|n| format!("{{\"id\":\"m{n}\",\"status\":\"survived\"}}\n"))
+                .collect::<String>();
+            std::fs::write(&results, lines).unwrap();
+        };
+        let seconds = std::time::Duration::from_secs;
+        let mut first = None;
+        write(0);
+        let line = progress_line(&results, 30, seconds(30), &mut first);
+        assert!(line.contains("0 of 30") && !line.contains("left"), "{line}");
+        write(10);
+        let line = progress_line(&results, 30, seconds(60), &mut first);
+        assert!(line.ends_with("about 2m00s left"), "{line}");
+        write(12);
+        let line = progress_line(&results, 30, seconds(80), &mut first);
+        assert!(line.ends_with("about 3m00s left"), "{line}");
+        std::fs::remove_file(&results).ok();
+    }
 
     #[test]
     fn critical_globs_match_paths() {
