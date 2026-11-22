@@ -55,6 +55,46 @@ const REGISTRY: &str = r#"(() => {
   }
 })();"#;
 
+/// Switches a strong pass's mutant on in each wasm module the page makes:
+/// every switched crate exports a buffer for the mutant's file and a function
+/// that names its index (`rust-strong-runtime.rs`).
+const ACTIVATE: &str = r##"(() => {
+  const named = __SUPERCOV_MUTANT__;
+  const at = named.lastIndexOf("#");
+  if (at < 0) return;
+  const file = new TextEncoder().encode(named.slice(0, at));
+  const index = BigInt(named.slice(at + 1));
+  const activate = (instance) => {
+    const exports = instance.exports;
+    for (const name of Object.keys(exports)) {
+      if (!name.startsWith("__supercov_strong_activate_") || !exports.memory) continue;
+      const buffer = exports[name.replace("_activate_", "_buffer_")];
+      if (typeof buffer !== "function") continue;
+      try {
+        new Uint8Array(exports.memory.buffer, Number(buffer()), file.length).set(file);
+        exports[name](file.length, index);
+      } catch {}
+    }
+  };
+  const Instance = WebAssembly.Instance;
+  function Activated(module, imports) {
+    const instance = new Instance(module, imports);
+    activate(instance);
+    return instance;
+  }
+  Activated.prototype = Instance.prototype;
+  WebAssembly.Instance = Activated;
+  for (const name of ["instantiate", "instantiateStreaming"]) {
+    const original = WebAssembly[name];
+    if (typeof original !== "function") continue;
+    WebAssembly[name] = async function (...args) {
+      const result = await original.apply(WebAssembly, args);
+      activate(result instanceof Instance ? result : result.instance);
+      return result;
+    };
+  }
+})();"##;
+
 /// Each instrumented crate's region, whole, as base64.
 const TAKE: &str = r#"const out = [];
 for (const instance of globalThis.__supercovWasm ?? []) {
@@ -323,12 +363,22 @@ impl BrowserReader {
     /// The driver URL a test's runner is given: its evidence directory, hex
     /// in the path, is where that session's regions are written.
     pub fn remote_url(&self, evidence: &Path) -> String {
-        let hex = evidence
-            .to_string_lossy()
-            .bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        format!("http://{}/e/{hex}/", self.address)
+        self.remote_url_for(evidence, None)
+    }
+
+    /// `remote_url`, for a strong pass's test: the page's wasm modules get
+    /// `mutant` (`<file>#<index>`) switched on as they are instantiated.
+    pub(crate) fn remote_url_for(&self, evidence: &Path, mutant: Option<&str>) -> String {
+        let hex = |text: &str| {
+            text.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let mut path = hex(&evidence.to_string_lossy());
+        if let Some(mutant) = mutant {
+            path = format!("{path}-{}", hex(mutant));
+        }
+        format!("http://{}/e/{path}/", self.address)
     }
 }
 
@@ -557,15 +607,20 @@ fn answer(
     // `/e/<hex evidence directory>/<WebDriver path>`.
     let rest = request.path.strip_prefix("/e/")?;
     let (hex, webdriver) = rest.split_once('/').unwrap_or((rest, ""));
-    let evidence = PathBuf::from(
+    let text = |hex: &str| {
         String::from_utf8(
             (0..hex.len())
                 .step_by(2)
                 .filter_map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
                 .collect(),
         )
-        .ok()?,
-    );
+        .ok()
+    };
+    let (hex, mutant) = hex
+        .split_once('-')
+        .map_or((hex, None), |(hex, mutant)| (hex, Some(mutant)));
+    let evidence = PathBuf::from(text(hex)?);
+    let mutant = mutant.and_then(text);
     let webdriver = format!("/{webdriver}");
     // The runner closes its window rather than its session; either ends
     // what the page can tell.
@@ -613,9 +668,21 @@ fn answer(
             .as_str()
             .or_else(|| created["sessionId"].as_str())
     {
+        // A strong pass's test also has its mutant switched on in each wasm
+        // module as the page instantiates it, before any test runs.
+        let source = match &mutant {
+            Some(mutant) => format!(
+                "{REGISTRY}\n{}",
+                ACTIVATE.replace(
+                    "__SUPERCOV_MUTANT__",
+                    &Value::from(mutant.as_str()).to_string()
+                )
+            ),
+            None => REGISTRY.to_owned(),
+        };
         let install = json!({
             "cmd": "Page.addScriptToEvaluateOnNewDocument",
-            "params": {"source": REGISTRY},
+            "params": {"source": source},
         });
         let _ = call(
             upstream.address(),

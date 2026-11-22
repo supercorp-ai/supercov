@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { commandFor, drive, outcomes, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -43,7 +43,7 @@ const tests = [
     test_("b1", "t/b.test.js", 2_000), test_("b2", "t/b.test.js", 2_000),
     test_("c1", "t/c.test.js"), test_("c2", "t/c.test.js"),
     test_("d1", "t/d.test.js"),
-    test_("v1", "t/v.test.js", 1, "vitest"),
+    test_("v1", "t/v.spec.js", 1, "playwright"),
 ];
 const at = (id) => tests.findIndex((one) => one.id === id);
 const mutant = (id, candidates, extra = {}) => ({ id, file: "src/a.js", candidates: candidates.map((name) => ({ test: at(name), reason: "infected" })), ...extra });
@@ -119,8 +119,8 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.equal(verdicts["second-file"].killedBy, "t/c.test.js > c2");
     assert.match(verdicts.d.reason, /t\/d\.test\.js does not finish without a mutant/);
     assert.match(verdicts.unplaceable.reason, /function-source/);
-    assert.match(verdicts.elsewhere.reason, /ran under vitest/);
-    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under vitest/);
+    assert.match(verdicts.elsewhere.reason, /ran under playwright/);
+    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under playwright/);
     assert.equal(verdicts.nothing.reason, "no-runnable-candidate");
     // b2 alone fails without the mutant too: the kill was no kill, and the
     // whole file let the mutant live.
@@ -174,6 +174,26 @@ test("a job's command names its file where the runner takes one, and runs a proj
         }
         for (const command of [["npx", "jest"], ["npx", "mocha@10"], ["npx", "@scope/tool"], ["npx", "--package", "x"], ["npx"], ["node", "mocha"], ["npx", "-y"]])
             assert.deepEqual(withoutNpx(command, root), command);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("a command that starts Jest or Mocha itself names its arguments to them", () => {
+    assert.deepEqual(jestArguments(["/p/node_modules/.bin/jest", "--env", "node"]), ["--env", "node"]);
+    assert.deepEqual(jestArguments(["node", "node_modules/jest-cli/bin/jest.js", "-c", "x.js"]), ["-c", "x.js"]);
+    assert.equal(jestArguments(["npm", "test"]), undefined);
+    assert.deepEqual(mochaArguments(["/p/node_modules/.bin/mocha", "--check-leaks"]), ["--check-leaks"]);
+    assert.deepEqual(mochaArguments(["node", "node_modules/mocha/bin/_mocha"]), []);
+    assert.equal(mochaArguments(["npm", "test"]), undefined);
+    const root = mkdtempSync(join(tmpdir(), "supercov-package-"));
+    try {
+        assert.equal(packageIsCommonJs(root), true);
+        writeFileSync(join(root, "package.json"), '{"type":"module"}');
+        assert.equal(packageIsCommonJs(root), false);
+        writeFileSync(join(root, "package.json"), '{"type":"commonjs"}');
+        assert.equal(packageIsCommonJs(root), true);
     }
     finally {
         rmSync(root, { recursive: true, force: true });

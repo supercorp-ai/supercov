@@ -1,7 +1,7 @@
 {
 "mutantSet": "stryker-js@10.1.1",
 "file": "calls.ts",
-"skipped": {"Regex":4,"ignored":0},
+"skipped": {"ignored":0},
 "mutants": [
   {"file":"calls.ts","mutator":"BlockStatement","start":[6,109],"end":[37,2],"replacement":"{}","text":"{}"},
   {"file":"calls.ts","mutator":"CallExpression","start":[7,3],"end":[7,9],"replacement":"empty","text":";"},
@@ -30,7 +30,11 @@
   {"file":"calls.ts","mutator":"StringLiteral","start":[26,14],"end":[26,22],"replacement":"empty","text":"\"\""},
   {"file":"calls.ts","mutator":"StringLiteral","start":[27,13],"end":[27,25],"replacement":"empty","text":"\"\""},
   {"file":"calls.ts","mutator":"CallExpression","start":[29,3],"end":[29,16],"replacement":"empty","text":";"},
+  {"file":"calls.ts","mutator":"Regex","start":[30,7],"end":[30,19],"replacement":"anchored$","text":"/anchored$/"},
+  {"file":"calls.ts","mutator":"Regex","start":[30,7],"end":[30,19],"replacement":"^anchored","text":"/^anchored/"},
   {"file":"calls.ts","mutator":"StringLiteral","start":[31,18],"end":[31,24],"replacement":"empty","text":"\"\""},
+  {"file":"calls.ts","mutator":"Regex","start":[31,18],"end":[31,24],"replacement":"\\d","text":"\"\\\\d\""},
+  {"file":"calls.ts","mutator":"Regex","start":[31,18],"end":[31,24],"replacement":"\\D+","text":"\"\\\\D+\""},
   {"file":"calls.ts","mutator":"StringLiteral","start":[31,26],"end":[31,29],"replacement":"empty","text":"\"\""},
   {"file":"calls.ts","mutator":"StringLiteral","start":[32,18],"end":[32,25],"replacement":"empty","text":"\"\""},
   {"file":"calls.ts","mutator":"ConditionalExpression","start":[33,7],"end":[33,19],"replacement":"true","text":"true"},

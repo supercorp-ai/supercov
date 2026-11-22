@@ -219,7 +219,7 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
     }
     match mutant.mutator.as_str() {
         "StringLiteral" | "BooleanLiteral" | "ArrayDeclaration" | "ObjectLiteral"
-        | "UpdateOperator" => verdict_of(
+        | "UpdateOperator" | "Regex" => verdict_of(
             INFECTED,
             "reached",
             "the code ran, and this replacement differs wherever it is evaluated",
@@ -247,6 +247,30 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
             probed_operation(mutant, records)
         }
         "ArrowFunction" => arrow_function(mutant, records),
+        "UnaryOperator" if mutant.replacement == "removed" && mutant.original.starts_with('!') => {
+            verdict_of(
+                INFECTED,
+                "reached",
+                "the code ran, and `!x` differs from `x` wherever it is evaluated",
+            )
+        }
+        "UnaryOperator"
+            if mutant.replacement == "removed"
+                && mutant.original.starts_with('-')
+                && mutant.probe.is_some() =>
+        {
+            rust_valued(mutant, records)
+        }
+        "UnaryOperator" if mutant.replacement == "removed" && mutant.original.starts_with('-') => {
+            verdict_of(
+                Status::Unknown,
+                "no-operand-probe",
+                "the code ran; `-x` and `x` differ unless `x` is 0, and no probe recorded `x`",
+            )
+        }
+        RUST_FN_VALUE | "BinaryOperator" | "MatchArm" | "MatchArmGuard" | "StructField" => {
+            rust_operator(mutant, records)
+        }
         // Another language's mutator whose probe evaluated the original and
         // the replacement side by side: `differs` or `same` at each
         // evaluation (`docs/design/mutation-drivers.md`).
@@ -259,13 +283,218 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
     }
 }
 
+/// cargo-mutants' function body replacement.
+const RUST_FN_VALUE: &str = "FnValue";
+
+/// A cargo-mutants mutant the run reached (`rust_mutants`).
+fn rust_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    if mutant.probe.is_some() || mutant.compare.is_some() {
+        return rust_valued(mutant, records);
+    }
+    let replacement = mutant.replacement.as_str();
+    match mutant.mutator.as_str() {
+        RUST_FN_VALUE if replacement == "()" => verdict_of(
+            PROXY,
+            "function-ran",
+            "the function ran (a proxy: emptying it may change nothing)",
+        ),
+        RUST_FN_VALUE => verdict_of(
+            Status::Unknown,
+            "no-return-probe",
+            format!("the function ran, and no probe recorded whether it returned {replacement}"),
+        ),
+        "MatchArm" => verdict_of(
+            PROXY,
+            "arm-selected",
+            "the arm was selected (a proxy: with it deleted the `_` arm runs, which may do the same)",
+        ),
+        "MatchArmGuard" => {
+            let Some(decision) = &mutant.decision else {
+                return verdict_of(
+                    Status::Unknown,
+                    "no-decision",
+                    "the run measured no outcome of the guard",
+                );
+            };
+            let forced = replacement == "true";
+            let vectors = records.vectors(&decision.id);
+            if vectors.is_empty() {
+                return verdict_of(
+                    Status::NotReached,
+                    "guard-not-evaluated",
+                    "the guard never ran",
+                );
+            }
+            if vectors.iter().any(|(_, outcome)| *outcome != forced) {
+                return verdict_of(
+                    INFECTED,
+                    "guard-differs",
+                    format!(
+                        "the guard was {} where the mutant makes it {forced}",
+                        !forced
+                    ),
+                );
+            }
+            verdict_of(
+                Status::NotInfected,
+                "guard-always-same",
+                format!("the guard was {forced} at every evaluation, as the mutant makes it"),
+            )
+        }
+        "BinaryOperator" => {
+            let operator = mutant
+                .operator
+                .as_ref()
+                .map_or("", |operator| operator.text.as_str());
+            if matches!((operator, replacement), ("==", "!=") | ("!=", "==")) {
+                return verdict_of(
+                    INFECTED,
+                    "comparison-evaluated",
+                    "the comparison ran, and its negation differs at every evaluation",
+                );
+            }
+            verdict_of(
+                Status::Unknown,
+                "no-operand-probe",
+                format!(
+                    "the code ran, and no probe recorded whether `{operator}` and `{replacement}` give the same value there"
+                ),
+            )
+        }
+        _ => verdict_of(
+            Status::Unknown,
+            "no-field-probe",
+            "the code ran, and no probe recorded whether the field's value differs from the base's",
+        ),
+    }
+}
+
+/// A cargo-mutants mutant read through its value probe (`rust_value_probes`).
+/// A probe records an outcome at every evaluation, `unknown` where it cannot
+/// read the operands, so its silence is an expression that never ran.
+fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let replacement = mutant.replacement.as_str();
+    if let Some(site) = &mutant.compare {
+        let operator = mutant
+            .operator
+            .as_ref()
+            .map_or("", |operator| operator.text.as_str());
+        let Some(relations) = records.comparisons(site) else {
+            return verdict_of(
+                Status::NotReached,
+                "comparison-not-evaluated",
+                "the comparison never ran",
+            );
+        };
+        let value = |operator: &str, relation: &str| match relation {
+            "unordered" => Some(operator == "!="),
+            _ if matches!(operator, "==" | "!=") => Some((relation == "eq") == (operator == "==")),
+            _ => relational_value(operator, relation),
+        };
+        let mut unknown = false;
+        for relation in relations {
+            match (value(operator, relation), value(replacement, relation)) {
+                (Some(original), Some(mutated)) if original != mutated => {
+                    return verdict_of(
+                        INFECTED,
+                        "comparison-differs",
+                        format!(
+                            "the operands were {relation}, where `{replacement}` gives the other value"
+                        ),
+                    );
+                }
+                (Some(_), Some(_)) => {}
+                _ => unknown = true,
+            }
+        }
+        if unknown {
+            return verdict_of(
+                Status::Unknown,
+                "non-primitive-operands",
+                "operands the probe could not order",
+            );
+        }
+        return verdict_of(
+            Status::NotInfected,
+            "comparison-same",
+            format!("`{operator}` and `{replacement}` gave the same value at every evaluation"),
+        );
+    }
+    let Some(site) = &mutant.probe else {
+        return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
+    };
+    if mutant.mutator == RUST_FN_VALUE {
+        // The body replaced also skips what it does: a return value that
+        // matches proves nothing, one that differs infects.
+        let class = match replacement {
+            "true" | "1" | "1.0" => "1",
+            "false" | "0" | "0.0" => "0",
+            "-1" | "-1.0" => "-1",
+            _ => "",
+        };
+        let returned = records.comparisons(site);
+        if !class.is_empty()
+            && let Some(outcomes) = returned
+            && outcomes
+                .iter()
+                .any(|outcome| outcome != class && outcome != "unknown")
+        {
+            return verdict_of(
+                INFECTED,
+                "returned-other",
+                format!("the function returned other than {replacement} (or ended by a panic)"),
+            );
+        }
+        return verdict_of(
+            Status::Unknown,
+            "returned-same",
+            format!(
+                "the function ran, and returned no value other than {replacement}: what it does besides may still differ"
+            ),
+        );
+    }
+    let Some(outcomes) = records.comparisons(site) else {
+        return verdict_of(
+            Status::NotReached,
+            "not-evaluated",
+            "the expression never ran",
+        );
+    };
+    let differing = ["differs", "nonzero"];
+    if outcomes
+        .iter()
+        .any(|outcome| differing.contains(&outcome.as_str()))
+    {
+        return verdict_of(
+            INFECTED,
+            "replacement-differs",
+            "the mutant's value differed from the original's",
+        );
+    }
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome.as_str(), "same" | "zero"))
+    {
+        return verdict_of(
+            Status::NotInfected,
+            "replacement-same",
+            "the mutant's value was the original's at every evaluation",
+        );
+    }
+    verdict_of(
+        Status::Unknown,
+        "non-primitive-operands",
+        "operands the probe could not read",
+    )
+}
+
 /// Whether the mutated code ran: its statement, and its function where the
 /// function is not around the statement (a concise arrow's body), must both
 /// have been hit. A function body, which no statement contains, is reached
 /// by its function.
 fn reach(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Reason)> {
     let statement = mutant.statement.as_deref();
-    if statement.is_none() && mutant.mutator != BLOCK_STATEMENT {
+    if statement.is_none() && !matches!(mutant.mutator.as_str(), BLOCK_STATEMENT | RUST_FN_VALUE) {
         return Some(verdict_of(
             Status::Unknown,
             "no-statement-point",
@@ -1098,6 +1327,7 @@ const SPLICED: &[&str] = &[
     "UnaryOperator",
     "BooleanLiteral",
     "MethodExpression",
+    "BinaryOperator",
 ];
 
 /// What the mutant changes: the part of the original it replaces and what
@@ -1256,12 +1486,11 @@ fn replaced(mutant: &CandidateMutant) -> String {
         ))
     };
     let text = match mutant.mutator.as_str() {
-        "ArithmeticOperator" | "EqualityOperator" | "LogicalOperator" | "AssignmentOperator" => {
-            mutant
-                .operator
-                .as_ref()
-                .and_then(|operator| spliced(operator.at, operator.text.len(), descriptor))
-        }
+        "ArithmeticOperator" | "EqualityOperator" | "LogicalOperator" | "AssignmentOperator"
+        | "BinaryOperator" => mutant
+            .operator
+            .as_ref()
+            .and_then(|operator| spliced(operator.at, operator.text.len(), descriptor)),
         "UpdateOperator" => ["++", "--"]
             .into_iter()
             .find_map(|operator| original.find(operator))
@@ -1295,6 +1524,14 @@ fn replaced(mutant: &CandidateMutant) -> String {
         "ArrowFunction" => Some("() => undefined".to_owned()),
         "BlockStatement" | "ObjectLiteral" => Some("{}".to_owned()),
         "ArrayDeclaration" => Some(descriptor.to_owned()),
+        // The literal with the mutated pattern and its own flags, or the
+        // string `new RegExp` is given.
+        "Regex" => match original.rfind('/') {
+            Some(end) if original.starts_with('/') && end > 0 => {
+                Some(format!("/{descriptor}{}", &original[end..]))
+            }
+            _ => Some(format!("{descriptor:?}")),
+        },
         _ => None,
     };
     text.unwrap_or_else(|| descriptor.to_owned())
@@ -1461,6 +1698,8 @@ mod tests {
             (mutant("BlockStatement", "{}", "{ x(); }"), "{}"),
             (mutant("ArrayDeclaration", "[]", "[1, 2]"), "[]"),
             (mutant("CallExpression", "empty", "x();"), "empty"),
+            (mutant("Regex", "a", "/^a/gu"), "/a/gu"),
+            (mutant("Regex", "\\D", "\"\\\\d\""), "\"\\\\D\""),
         ];
         for (mutant, written) in cases {
             assert_eq!(replaced(&mutant), written, "{}", mutant.id);
@@ -1689,6 +1928,7 @@ mod tests {
             "ArrayDeclaration",
             "ObjectLiteral",
             "UpdateOperator",
+            "Regex",
         ] {
             expect(&mutant(mutator, "x", "x"), &ran(), INFECTED, "reached");
         }

@@ -754,8 +754,38 @@ time per mutant and its files cheapest first:
   that throws as it loads, a process that exits) killed the mutant: the test
   file did not finish.
 - A mutant whose candidates ran under a runner this pass does not run (a
-  plan mixing Vitest's node tests and its browser tests) is an `error`, never
-  `survived`.
+  Playwright test beside them) is an `error`, never `survived`. A Vitest run
+  of node and browser tests runs both here: a node test's job runs Vitest
+  with the job's file, its other tests skipped (`context.skip()`), as a
+  browser test's does.
+
+**Resident runners.** Jest and CommonJS Mocha suites run their jobs in
+resident processes, one per worker, as StrykerJS's runners do, instead of
+starting the runner for each job:
+
+- `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
+  (`runCLI` with `runTestsByPath`), in the fresh module registry and
+  environment Jest gives every test file; the job's mutant is switched on
+  before the file's modules load.
+- `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
+  project's CommonJS modules out of `require.cache` before each job and
+  loads the job's file with `require`, so it and the code it tests load
+  afresh with the mutant on.
+- A suite of ES modules cannot be loaded again in one thread: the host runs
+  each job in a worker thread of its own, which has a module graph of its
+  own, and makes and readies the next job's thread (Mocha and what
+  `--require` loads) while a job runs. On deep-eql (426 mutants) and
+  pathval (123) every verdict is that of a process per job
+  (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
+  against 7.2 s on a 16-CPU Linux machine, where jobs side by side hide most of a
+  process's start, and 9 s against 27 s on a laptop.
+
+The adapters write each job's evidence into the job's own directory, read
+when each record is written (a journal kept per directory: a resident
+process that kept the first job's wrote every later job's there, and their
+mutants read as survivors). A host that cannot start leaves its jobs to a
+process each; a job past its limit stops its host, and the next job starts
+another.
 
 The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
 confirmations, overturned kills, stopped jobs and their time.
@@ -768,25 +798,26 @@ projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
 command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
 its own), then Supercov, and joins every mutant's verdicts.
 
-Measured on SoroCI, one project per 16-CPU machine (c8a/m8a.4xlarge), both
+Measured on Linux (2026-11-22), one project per 16-CPU machine (c8a/m8a.4xlarge), both
 tools with 15 workers. Times in seconds; Supercov's are its measured run
 (with the mutants' values) and its strong pass. "Joined" counts the mutants
-both list: StrykerJS's `Regex` mutants are not listed by Supercov (see
-`mutants.md`), and are left out.
+both list, Regex mutants included.
 
 | project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| bytes.js | Mocha | mocha | 126 | 0 | 2.7 | 1.0 + 1.7 |
-| negotiator | Mocha | mocha | 544 | 0 | 2.9 | 1.1 + 5.9 |
-| ms | Jest | jest | 204 | 0 | 4.9 | 2.0 + 21.8 |
-| cron-parser | Jest | jest | 429 | 1 (error) | 33.6 | 2.8 + 37.3 |
-| classnames | node:test | command | 159 | 0 | 7.8 | 0.7 + 2.5 |
-| camelcase | node:test | command | 217 | 0 | 10.5 | 1.3 + 3.6 |
-| dot-prop | AVA | command | 584 | 0 | 50.1 | 1.4 + 28.5 |
-| p-map | AVA | command | 512 | 1 | 347.8 | 23.4 + 110.7 |
-| ini | tap | tap | 389 | 0 (28 StrykerJS errors) | 13.4 | 1.6 + 5.9 |
-| remix-auth | bun:test | command | 625 | 0 | 7.2 | 0.8 + 2.0 |
-| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.3 | 9.0 + 27.9 |
+| bytes.js | Mocha | mocha | 146 | 0 | 3.0 | 1.1 + 0.4 |
+| negotiator | Mocha | mocha | 544 | 0 | 3.4 | 1.2 + 1.0 |
+| ms | Jest | jest | 227 | 0 | 4.6 | 1.8 + 3.2 |
+| cron-parser | Jest | jest | 460 | 1 (error) | 31.8 | 2.4 + 22.4 |
+| classnames | node:test | command | 161 | 0 | 7.8 | 0.6 + 2.8 |
+| camelcase | node:test | command | 234 | 0 | 10.1 | 1.2 + 3.9 |
+| dot-prop | AVA | command | 590 | 0 | 46.4 | 2.7 + 26.7 |
+| p-map | AVA | command | 512 | 1 | 354.6 | 25.9 + 118.4 |
+| ini | tap | tap | 413 | 0 (28 StrykerJS errors) | 13.6 | 1.6 + 6.5 |
+| remix-auth | bun:test | command | 625 | 0 | 7.3 | 0.4 + 1.9 |
+| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
+| pathval | Mocha (ES modules) | mocha | 123 | 13 | 1.6 | 0.9 + 1.3 |
+| deep-eql | Mocha (ES modules) | mocha | (StrykerJS cannot run it) | | | 1.1 + 5.9 |
 
 No mutant StrykerJS detected (killed or timed out) is `survived` or
 `no-coverage` in Supercov, and none it let live is detected by Supercov but
@@ -805,7 +836,15 @@ the ones explained here, each applied by hand:
   a function body emptied: no switch could be placed
   (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
   An error is no verdict either way.
-- Verdicts StrykerJS and Supercov both detect differ in kind 48 times
+- pathval: StrykerJS kills 13 mutants Supercov says survive, each by one
+  test alone, `exclude __proto__`, which first asserts that no global
+  `polluted` exists. StrykerJS runs every mutant in one process: once a
+  mutant let `setPathValue(obj, '__proto__.polluted', true)` through, the
+  global stayed, and that test failed for every mutant after it. Applied by
+  hand (`index.js:84` without `^`, `index.js:174` `===` to `!==`), each
+  survives `npx mocha`. StrykerJS's Mocha runner cannot run deep-eql at all:
+  it needs Mocha's `lib/cli/run-helpers`, which Mocha 12 no longer has.
+- Verdicts StrykerJS and Supercov both detect differ in kind 52 times
   (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
   wrong is whichever the runner sees first.
 
@@ -818,19 +857,21 @@ no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
 
 **Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
 runs the whole command per mutant, and Supercov's jobs of one file and its
-candidates are 3-4 times faster (p-map 348 s against 134 s). Against
-StrykerJS's in-process Mocha runner a job's process start costs more: bytes.js
-about even, negotiator 2.4 times slower. Jest is slowest: each job starts Jest
-(about 1 s), where StrykerJS's runner keeps it resident; ms takes 4.9 s under
-StrykerJS and 23.8 s under Supercov, cron-parser 33.6 s and 40.1 s. Under tap,
-a job runs its file with `node` alone, as StrykerJS's runner does: ini 13.4 s
-against 7.5 s.
+candidates are 2.5-3.5 times faster (p-map 355 s against 144 s). Jest and
+CommonJS Mocha jobs run in resident runners (see above), as StrykerJS's
+runners do: ms takes 4.6 s under StrykerJS and 3.2 s in Supercov's strong
+pass (5.0 s with its measured run), cron-parser 31.8 s and 22.4 s (24.8 s),
+negotiator 3.4 s and 1.0 s. Before the resident runners each job started
+Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
+tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
+13.6 s against 8.1 s.
 
 ## Not yet
 
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
-- A Vitest run whose tests run both in node and in the browser: the browser's
-  mutants are run by the jobs pass, and those with candidates in node too are
-  `error`.
-- StrykerJS's `Regex` mutator: its mutants are not listed (bytes.js: 20 of 146).
+- Rust compiled to wasm that Vitest Browser Mode's pages load: not measured,
+  so not planned. Under Node and in Playwright's pages its mutants run
+  (`mutation-drivers.md`).
+- A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
+  command builds the wasm once.
