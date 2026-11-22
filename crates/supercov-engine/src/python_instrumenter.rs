@@ -323,7 +323,7 @@ impl<'a> SourceLocations<'a> {
     }
 }
 
-fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
+pub(crate) fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
     let start = range.start().to_usize().to_string();
     let end = range.end().to_usize().to_string();
     let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
@@ -333,7 +333,7 @@ fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
 /// Statements whose execution CPython never reports: docstrings are folded
 /// into `__doc__` without an instruction and scope declarations compile to
 /// nothing.
-fn is_unobservable_statement(statement: &Stmt, first_in_body: bool) -> bool {
+pub(crate) fn is_unobservable_statement(statement: &Stmt, first_in_body: bool) -> bool {
     matches!(statement, Stmt::Global(_) | Stmt::Nonlocal(_))
         || (first_in_body && is_docstring_stmt(statement))
 }

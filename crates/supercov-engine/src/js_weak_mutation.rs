@@ -218,13 +218,14 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
         return unreached;
     }
     match mutant.mutator.as_str() {
+        // Python's (`python_mutants`): a new literal, name or keyword.
         "StringLiteral" | "BooleanLiteral" | "ArrayDeclaration" | "ObjectLiteral"
-        | "UpdateOperator" => verdict_of(
+        | "UpdateOperator" | "NumberLiteral" | "Name" | "DictKeyword" => verdict_of(
             INFECTED,
             "reached",
             "the code ran, and this replacement differs wherever it is evaluated",
         ),
-        BLOCK_STATEMENT | "CallExpression" => {
+        BLOCK_STATEMENT | "CallExpression" | "LoopControl" => {
             if mutant.statement.is_some() {
                 verdict_of(
                     PROXY,

@@ -379,16 +379,20 @@ fn could_infect(
     mutant: &CandidateMutant,
     seen: &Observations,
     whole: &Observations,
+    language: &str,
 ) -> Option<CandidateReason> {
     // A method's body is reached when its function runs, though the
     // statement around the function (the export of the object it is on)
     // ran once, when the module loaded, in whichever test loaded it first.
     // Where this test ran the function and the run ran the statement, the
-    // statement counts as run here: it only ever adds a candidate.
+    // statement counts as run here: it only ever adds a candidate. Only a
+    // JavaScript mutant's statement can hold its function: a Python
+    // mutant's is always inside it (`python_mutants`).
     let widened;
     let seen = match (&mutant.statement, &mutant.function) {
         (Some(statement), Some(function))
-            if seen.hits.contains(function)
+            if language == crate::mutant_list::JAVASCRIPT
+                && seen.hits.contains(function)
                 && !seen.hits.contains(statement)
                 && whole.hits.contains(statement) =>
         {
@@ -682,7 +686,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                             // test's, which was taken above.
                             Some(CandidateReason::Unknown)
                         } else {
-                            could_infect(mutant, own, &whole)
+                            could_infect(mutant, own, &whole, &planned.language)
                         };
                         let Some(why) = why else { continue };
                         if planned.server_wide.is_none() {
@@ -1176,13 +1180,23 @@ mod tests {
         };
         assert!(!may_reach(&method, &hits(&["s"])));
         assert_eq!(
-            could_infect(&method, &hits(&["s"]), &hits(&["s", "f"])),
+            could_infect(&method, &hits(&["s"]), &hits(&["s", "f"]), "javascript"),
             None
         );
-        assert_eq!(could_infect(&method, &hits(&["f"]), &hits(&["f"])), None);
         assert_eq!(
-            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"])),
+            could_infect(&method, &hits(&["f"]), &hits(&["f"]), "javascript"),
+            None
+        );
+        assert_eq!(
+            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"]), "javascript"),
             Some(CandidateReason::Infected)
+        );
+        // A Python mutant's statement is inside its function: a test that
+        // called the function without running the statement did not reach
+        // it.
+        assert_eq!(
+            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"]), "python"),
+            None
         );
     }
 

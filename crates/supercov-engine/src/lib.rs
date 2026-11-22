@@ -75,6 +75,7 @@ pub mod python_evidence;
 #[cfg(any(test, feature = "oracle-harnesses"))]
 pub mod python_frontend;
 pub mod python_instrumenter;
+pub mod python_mutants;
 pub mod python_project;
 pub mod python_run;
 pub mod query_index;
