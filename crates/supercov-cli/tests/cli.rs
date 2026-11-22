@@ -24622,7 +24622,9 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         return;
     };
     let project = Project::empty("go-strong-make");
-    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    // A module older than Go 1.21: the probed file is built as 1.21, its
+    // own build constraint kept.
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.20\n");
     project.write(
         "double.go",
         "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
@@ -24675,9 +24677,13 @@ fn a_go_mutant_vet_rejects_is_unviable() {
         "odd_test.go",
         "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
     );
-    project
-        .supercov(&["mutants", "--json", "--", go, "test", "./..."])
+    let text = project
+        .supercov(&["mutants", "--", go, "test", "./..."])
         .succeeds();
+    assert!(
+        text.contains("  unviable      1 (do not compile)\n"),
+        "{text}"
+    );
     let saved = std::fs::read_dir(project.root.join(".supercov/runs"))
         .unwrap()
         .filter_map(|entry| std::fs::read(entry.unwrap().path().join("strong-mutation.json")).ok())

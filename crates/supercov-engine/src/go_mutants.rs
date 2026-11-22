@@ -563,8 +563,8 @@ pub(crate) fn candidates_of(
         let (statement, function) = points(file, token);
         let probed_here =
             Some(comparison_site(file, source, site.token.0)).filter(|site| probed.contains(site));
-        let relational = matches!(site.operator.as_str(), "<" | "<=" | ">" | ">=")
-            && site.kind == SiteKind::Binary;
+        // Only a binary site has one of these operators.
+        let relational = matches!(site.operator.as_str(), "<" | "<=" | ">" | ">=");
         let compare = probed_here.clone().filter(|_| relational);
         // An operation's probe, where the run put one there: its swap's
         // value at `#0`, a removed self-assignment's at `#1`.
@@ -743,6 +743,15 @@ mod tests {
     }
 
     #[test]
+    fn a_function_with_no_body_gives_its_mutants_no_function_point() {
+        // Declared here, defined in assembly: its parameter's array length
+        // has a mutant, and no function coverage could reach.
+        let mutants = candidate_mutants("a.go", "package p\n\nfunc g(x [1 + 2]int)\n").unwrap();
+        assert!(!mutants.is_empty());
+        assert!(mutants.iter().all(|mutant| mutant.function.is_none()));
+    }
+
+    #[test]
     fn a_mutant_links_to_the_statement_and_function_coverage_gives_it() {
         let source = "package p\n\nvar x = 1 + 2\n\nfunc f(a int) int {\n\treturn a + 1\n}\n";
         let mutants = candidate_mutants("a.go", source).unwrap();
@@ -889,7 +898,7 @@ mod tests {
 
     #[test]
     fn a_comparison_is_probed_only_where_a_generic_call_can_stand() {
-        let source = "package p\n\nconst c = 1 < 2\n\nvar v = 1 < 2\n\ntype T [2]int\n\nfunc f(a, b int) bool {\n\t_ = func() bool { return a < b }\n\t_ = 1 < 2\n\t_ = a<<1 > b\n\t_ = a == b\n\treturn a >= 1\n}\n\nfunc (T) m(a int) bool { return a <= 2 }\n";
+        let source = "package p\n\nconst c = 1 < 2\n\nvar v = 1 < 2\n\ntype T [2]int\n\nfunc f(a, b int) bool {\n\t_ = func() bool { return a < b }\n\t_ = 1 < 2\n\t_ = a<<1 > b\n\t_ = a == b\n\t_ = 1 < a\n\tconst k = 1 < 2\n\treturn a >= 1\n}\n\nfunc (T) m(a int) bool { return a <= 2 }\n";
         let tree = parse(source).unwrap();
         let probed = |after: &str, operator: &str| {
             comparison_probe(binary(&tree, source, after, operator), source)
@@ -901,6 +910,8 @@ mod tests {
         assert!(!probed("a<<1 >", ">"));
         assert!(!probed("a == b", "=="));
         assert!(probed("a >= 1", ">="));
+        assert!(probed("_ = 1 < a", "<"));
+        assert!(!probed("const k", "<"));
         assert!(probed("a <= 2", "<="));
         assert!(!comparison_probe(tree.root_node(), source));
         // An array length is no place for one either.
@@ -928,7 +939,7 @@ mod tests {
 
     #[test]
     fn what_reads_alike_twice() {
-        let source = "package p\n\nfunc f() { a.b[c][1], (d), _, e[g()], h().i, *j = 0, 0, 0, 0, 0, 0, 0 }\n";
+        let source = "package p\n\nfunc f() { a.b[c][1], (d), _, e[g()], h().i, *j, k()[l] = 0, 0, 0, 0, 0, 0, 0 }\n";
         let tree = parse(source).unwrap();
         let left = tree
             .root_node()
@@ -941,7 +952,7 @@ mod tests {
             .named_children(&mut list.walk())
             .map(|operand| reads_alike(operand, source))
             .collect::<Vec<_>>();
-        assert_eq!(alike, [true, true, false, false, false, false]);
+        assert_eq!(alike, [true, true, false, false, false, false, false]);
     }
 
     #[test]
@@ -1009,9 +1020,15 @@ mod tests {
         )
         .unwrap();
         recorded.insert("gone.go".to_owned(), Default::default());
+        // Rewritten since into what does not parse.
+        std::fs::write(root.join("d.go"), "package p\n\nfunc (").unwrap();
+        recorded.insert("d.go".to_owned(), Default::default());
         let listed = list_mutants(&root, &recorded);
         assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.go"]);
-        assert_eq!(listed.changed, ["c.go", "gone.go"]);
+        assert_eq!(listed.changed, ["c.go", "d.go", "gone.go"]);
+        // A run that recorded no Go file lists none.
+        let none = list_mutants(&root, &Default::default());
+        assert!(none.mutants.files.is_empty() && none.changed.is_empty());
         assert_eq!(listed.mutants.mutant_set.as_deref(), Some(MUTANT_SET));
         let _ = std::fs::remove_dir_all(&root);
     }

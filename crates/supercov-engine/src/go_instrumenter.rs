@@ -2305,7 +2305,7 @@ mod strong_tests {
 
     #[test]
     fn an_integer_operation_gets_a_value_probe_where_its_type_is_known() {
-        let source = "package p\n\nfunc f(a, b int, s []int) int {\n\ta += b\n\ts[f(1, 2, s)] -= 1\n\treturn -a*b + (a << b)\n}\n";
+        let source = "package p\n\nfunc f(a, b int, s []int) int {\n\ta += b\n\ts[f(1, 2, s)] -= 1\n\tb = b % 3\n\treturn -a*b + (a << b)\n}\n";
         let integer = |type_name: &str| SiteFacts {
             integer: true,
             type_name: type_name.to_owned(),
@@ -2327,6 +2327,8 @@ mod strong_tests {
         );
         let shift = source.find("<<").unwrap();
         facts.insert(shift, integer("x.T\0"));
+        // A site the type checker said nothing of gets none.
+        facts.remove(&source.find(" % ").map(|at| at + 1).unwrap());
         let obligations = build_go_obligations_valued(
             "p.go",
             source,
@@ -2351,8 +2353,9 @@ mod strong_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(sites, ["p.go:4:4", "p.go:6:11", "p.go:6:9"], "{plain}");
+        assert_eq!(sites, ["p.go:4:4", "p.go:7:11", "p.go:7:9"], "{plain}");
         assert!(plain.contains("a += rt.Assign[int]("), "{plain}");
+        assert!(plain.contains("b = b % 3"), "{plain}");
         assert!(plain.contains(", 0, a, b)"), "{plain}");
         // `s[f(...)]` is read again by the probe only where reading it does
         // nothing: not here.
@@ -2377,6 +2380,14 @@ mod strong_tests {
         let tokens = crate::go_mutants::listed_tokens(source).unwrap();
         let caret = source.find("^x").unwrap();
         facts.insert(caret, SiteFacts::default());
+        // A type the file cannot write instantiates nothing.
+        facts.insert(
+            source.find("a%b").unwrap() + 1,
+            SiteFacts {
+                type_name: "x.T\0".to_owned(),
+                ..SiteFacts::default()
+            },
+        );
         let file = strong_rewrite(
             "a/b.go",
             source,
