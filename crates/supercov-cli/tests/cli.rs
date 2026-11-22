@@ -16537,7 +16537,7 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read_dir@9",
             "fs.read_dir@13",
             "fs.create_dir_all@15",
-            "fs.create_dir_all@22",
+            "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
             "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
             // The harness a test package is given.
