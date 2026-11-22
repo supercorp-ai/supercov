@@ -91,7 +91,10 @@ pub struct StrongPass {
 
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
-    matches!(language, crate::mutant_list::JAVASCRIPT)
+    matches!(
+        language,
+        crate::mutant_list::JAVASCRIPT | crate::ruby_mutants::RUBY
+    )
 }
 
 /// Runs `language`'s share of a plan through that language's driver, and
@@ -114,6 +117,7 @@ pub fn run_strong_pass(
             crate::javascript_run::run_strong_javascript(&request, diagnostics)
                 .map_err(|error| error.to_string())
         }
+        crate::ruby_mutants::RUBY => crate::ruby_run::run_strong_ruby(pass, diagnostics),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }

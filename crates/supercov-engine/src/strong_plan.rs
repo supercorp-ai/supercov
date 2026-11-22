@@ -162,8 +162,9 @@ pub struct StrongPlan {
 }
 
 /// The runners whose tests a strong pass runs: those with a driver in
-/// `runtime/javascript` (`vitestStrong.mjs`, `playwrightStrong.mjs`).
-pub const STRONG_RUNNERS: [&str; 2] = ["vitest", "playwright"];
+/// `runtime/javascript` (`vitestStrong.mjs`, `playwrightStrong.mjs`) and
+/// `runtime/ruby/supercov_strong.rb`.
+pub const STRONG_RUNNERS: [&str; 4] = ["vitest", "playwright", "rspec", "minitest"];
 
 /// The file in a run's directory that holds its strong verdicts.
 pub const STRONG_VERDICTS_FILE: &str = "strong-mutation.json";

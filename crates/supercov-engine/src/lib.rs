@@ -80,6 +80,7 @@ pub mod python_run;
 pub mod query_index;
 pub mod ruby_evidence;
 pub mod ruby_instrumenter;
+pub mod ruby_mutants;
 pub mod ruby_project;
 pub mod ruby_run;
 pub mod run_currency;

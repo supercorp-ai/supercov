@@ -110,6 +110,7 @@ const mappings = [
     "supercov_minitest.rb",
     "supercov_rspec.rb",
     "supercov_runtime.rb",
+    "supercov_strong.rb",
     "supercov_testunit.rb",
   ]),
 ];

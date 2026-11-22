@@ -646,6 +646,9 @@ fn stdlib_provable(
 #[derive(Debug, Clone, PartialEq)]
 pub struct RubyFileObligations {
     pub manifest: CoverageManifest,
+    /// Each statement and function point's byte span, by id: where a
+    /// mutant's reach is read from.
+    pub point_spans: BTreeMap<String, (PointKind, usize, usize)>,
     pub plan: RubyFilePlan,
     pub probes: BTreeMap<u64, ProbeTarget>,
 }
@@ -737,6 +740,7 @@ struct Collector<'a> {
     /// `elsif` nodes already handled through their parent's chain walk.
     elsif_nodes: BTreeSet<usize>,
     depth: i64,
+    point_spans: BTreeMap<String, (PointKind, usize, usize)>,
     begin_unmeasured: Vec<(String, usize)>,
     /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
     ractor_blocks: Vec<(usize, usize)>,
@@ -777,6 +781,7 @@ impl<'a> Collector<'a> {
             edits: Vec::new(),
             next_probe,
             point_ids: BTreeSet::new(),
+            point_spans: BTreeMap::new(),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             claimed_lines: BTreeSet::new(),
@@ -881,6 +886,8 @@ impl<'a> Collector<'a> {
         label: Option<String>,
     ) {
         let (line, column) = self.line_column(start);
+        self.point_spans
+            .insert(id.to_owned(), (kind.clone(), start, end));
         self.manifest.points.push(PointMeta {
             id: id.into(),
             kind,
@@ -2995,6 +3002,7 @@ impl<'a> Collector<'a> {
         self.manifest.unmeasured.sort();
         self.manifest.unmeasured.dedup();
         RubyFileObligations {
+            point_spans: std::mem::take(&mut self.point_spans),
             manifest: self.manifest,
             plan: RubyFilePlan {
                 refine_blocks: std::mem::take(&mut self.refine_blocks),

@@ -188,6 +188,7 @@ pub(crate) fn list_from_sources(
     for (language, files) in by_language {
         let one = match language {
             JAVASCRIPT => crate::js_mutant_links::list_mutants(root, &files),
+            crate::ruby_mutants::RUBY => crate::ruby_mutants::list_mutants(root, &files),
             _ => continue,
         };
         listed.changed.extend(one.changed);
