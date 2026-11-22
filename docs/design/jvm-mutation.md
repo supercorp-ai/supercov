@@ -331,14 +331,19 @@ truth the verdicts are compared with.
 | commons-cli 1.9.0 (Java, JUnit 5) | 882 | 882 | 881 | 880 | 1 | 35 | 78 | 13 | 24 |
 | commons-csv 1.12.0 (Java, JUnit 5) | 720 | 719 | 717 | 717 | 0 | 46 | 131 | 17 | 27 |
 | typetools 0.6.3 (Java, TestNG) | 216 | 216 | 216 | 214 | 2 | 19 | 20 | 9 | 18 |
-| picnic 0.5.0 (Kotlin, JUnit 4) | 632 | 330 | 306 | 304 | 1 | 34 | 39 | 14 | 24 |
+| picnic 0.5.0 (Kotlin, JUnit 4) | 632 | 342 | 318 | 317 | 1 | 34 | 39 | 13 | 32 |
 | kotlinpoet 1.14.2 (Kotlin, JUnit 4, 12 shards) | 2,114 | 1,155 | 1,041 | 1,033 | 8 | 1,041 | 3,567 | 728 | 794 |
 
-The Kotlin enumeration changed after this run (explicit getters' returns,
-`x in names`, a local a lambda reads incremented by `Math`, pairing in the
-order the compiler emits code): joined with the same PIT reports, kotlinpoet
-matches 1,100 of PIT's mutants and picnic 313. Their verdicts were not run
-again.
+picnic was run again after the Kotlin enumeration changed (explicit
+getters' returns, `x in names`, a local a lambda reads incremented by
+`Math`, pairing in the order the compiler emits code, `Any`'s members'
+returns, no return of a `throw` body); its one violation is the one below.
+kotlinpoet's verdicts were not run again: joined with the same PIT reports
+it matches 1,121 of PIT's mutants. commons-cli, commons-csv, typetools and
+kotlinpoet were last run before a test class's own work was credited to
+its tests, before each JVM had a directory of its own and before the
+second baseline; both changes add candidates or remove false verdicts, and
+the projects were not run again.
 
 On the Java projects the measured run and the strong pass together take
 about as long as PIT as a team runs it, and a third to a half of PIT's
@@ -396,15 +401,29 @@ Mutants one tool lists and the other does not:
   PIT-only (the static initializer's anonymous classes) and commons-cli 3
   (lambdas returning a type variable).
 - **Kotlin, PIT-only:** code kotlinc writes that has no source of its own,
-  by `mutants pit`'s categories on kotlinpoet (1,073) and picnic (326):
-  inlined standard-library code reported past the file's end (202, 32),
-  property getters (154, 102), null checks kotlinc adds (107, 3) and those
-  of `?.`, `?:` and `!!` (52, 77), a `require` or `check`'s own jump where
-  its condition is one comparison (the same mutant as the comparison's;
-  111, 2), `for` loop counters (62, 20), `when` subject comparisons and
-  `is` branches (55), inlined `isNotEmpty()` and the like (45), range checks
-  (9), an array constructor's filling loop (8), and 276 and 82 others not
-  yet put down one by one.
+  by `mutants pit`'s categories on kotlinpoet (1,001) and picnic (314):
+  inlined standard-library code reported past the file's end (196, 32),
+  property getters (193, 102; a Boolean `isX` property's too), null checks
+  kotlinc adds (113, 3) and those of `?.`, `?:` and `!!` (52, 77), a
+  `require`, `check`, `requireNotNull` or `checkNotNull`'s own jump (109,
+  4), `when` subject comparisons and `is` branches (65), `for` loop
+  counters (62, 20), inlined `isEmpty()`, `isNotEmpty()` and the like (52),
+  the loops and conditions a standard-library function inlines with the
+  lambda or reference given to it (`forEach`, `filter`, `use`, `repeat`,
+  ...: 45, 27), a property assignment's setter call, a `+=`'s inlined
+  `putAll` or an indexed operator `set` (31, 30), range checks (15), a
+  lambda's or function reference's class's own return (10), an array
+  constructor's filling loop (8), a spread's copying (2). Left as `other`:
+  kotlinpoet 54 and picnic 11 (before: 276 and 82). Most of kotlinpoet's
+  are calls to `internal` overloads Supercov cannot tell return nothing
+  (`emit`, some of whose declarations return a `CodeWriter`) and calls
+  that are a lambda's last expression; picnic's are calls on values whose
+  type the source does not name (`layout.draw`), `--` through an operator
+  `get`/`set`, and `equals`' `is` and `&&`. A call kotlinc names after its
+  module (`emit$kotlinpoet`), its default arguments (`$default`) or the
+  function around it is joined by each name it holds, which paired 6 more
+  on kotlinpoet; an override of `hashCode`, `equals` or `toString` returns
+  `Any`'s type, which paired 7 more on picnic.
 - **Kotlin, Supercov-only:** kotlinpoet 114, picnic 24. Of kotlinpoet's,
   17 are `+`, `+=` or `-=` on a type the source does not show (a
   collection, a string) that the compiler refuses: `unviable`. picnic's
@@ -416,19 +435,18 @@ java-diff-utils 4.12 (Maven, JUnit 5, Checkstyle) and aedile 3.0.4 (Gradle,
 Kotlin, Kotest), on the same machines:
 
 - **java-diff-utils.** The measured run skips Checkstyle in the copy and
-  says so. PIT 909 mutants, Supercov 916, 902 matched, 900 agree. The
-  strong pass took 178 s (PIT as a team runs it 322 s, its full matrix
-  556 s). Before the two-step time limit and the evaluation limit's time
-  allowance, 7 of the then 9 violations were Supercov timeouts on the
-  linear-space Myers diff, whose hot loops pass a million evaluations of
-  a mutant in a normal run. The 2 left are `factory()` returning `null`:
-  PIT kills them through a `@MethodSource` and `@BeforeAll`/`@AfterAll`,
-  code that runs for a test class rather than a test, which the JUnit
-  Platform listener does not yet credit to the class's tests (one
-  candidate for one, none for the other). Not yet fixed.
-- **aedile.** All 28 mutants killed (before: all 28 `error`, the Kotest
-  tests not found). Each candidate runs its whole spec, so the pass took
-  548 s for 28 mutants; a Kotest test filter would run one test.
+  says so. PIT 909 mutants, Supercov 916, 902 matched, 902 agree: no
+  violation. The strong pass took 191 s (PIT as a team runs it 322 s, its
+  full matrix 556 s). Before the two-step time limit and the evaluation
+  limit's time allowance, 7 of the then 9 violations were Supercov
+  timeouts on the linear-space Myers diff, whose hot loops pass a million
+  evaluations of a mutant in a normal run; then the 2 `factory()` returns
+  PIT kills through a `@MethodSource` and a `@BeforeAll` (see **A test
+  class's own work**), and a false `timeout` past the evaluation limit in a
+  performance test (see **Time**).
+- **aedile.** All 28 mutants killed. Its candidates run through Kotest's
+  test filter: the pass took 367 s (548 s when each ran its whole spec);
+  Gradle's start and Kotest's per spec are most of what is left.
 
 ### Ant
 
@@ -438,7 +456,7 @@ its tests `org/apache/tools/ant/util/*Test.java` through the build's
 
 | | PIT mutants | Supercov mutants | matched | agree | violations | PIT s | PIT matrix s | measured run s | strong pass s |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Apache Ant `util` | 2,083 | 2,056 | 2,039 | 2,016 | 22 | 119 | 160 | 11 | 29 |
+| Apache Ant `util` | 2,083 | 2,056 | 2,039 | 2,018 | 21 | 119 | 160 | 10 | 54 |
 
 PIT runs through its command line over the classes Ant compiled, with the
 system properties the build's `<junit>` sets. The violations, with the
@@ -452,23 +470,19 @@ where marked "checked":
   test class's static field). PIT's JVM already holds the cached value, so
   the mutant changes nothing there; Ant forks a JVM per test class, as
   Supercov's fresh class loader starts afresh.
-- **Supercov survived, PIT killed (16):** 13 in `FileUtils`, killed in
-  PIT's run by `XMLFragmentTest`, `JavaEnvUtilsTest`, `ResourceUtilsTest`
-  or `LoaderUtilsTest`, and `DeweyDecimal.java:214`. Checked
-  `FileUtils.java:1374` and `:1523`: the whole suite passes with them, so
-  PIT's kills come from its environment (one JVM, tests sharing a
-  `FileUtils` cache and files), not from the project's tests as they run.
-  The others are not checked one by one.
-- **Supercov wrong (1, checked):** `LazyFileOutputStream.java:128`
-  (`write(b, 0, b.length)` removed). `testByteArray` fails with it, as PIT
-  says; the strong pass called it survived. The test asserts a file
-  `test.txt` exists in the working directory, which the class's other tests
-  create and delete: with 16 JVMs in one directory, another JVM's
-  `testOpen` made the file while the mutant ran. The strong pass does not
-  yet isolate tests that share files in the working directory, and a
-  survivor is not confirmed by running its candidates again alone.
+- **Supercov survived, PIT killed (15, all checked):** 14 in `FileUtils`,
+  killed in PIT's run by `XMLFragmentTest`, `JavaEnvUtilsTest`,
+  `ResourceUtilsTest`, `LoaderUtilsTest` or `FileUtilsTest`, and
+  `DeweyDecimal.java:214`. Each was applied to the source and the build's
+  whole `junit-tests` run with it: it passes with every one, so PIT's kills
+  come from its environment (one JVM, tests sharing a `FileUtils` cache and
+  files: `testCreateNewFile` makes a `dummy` it deletes only as its JVM
+  ends), not from the project's tests as they run.
+- **Fixed:** `LazyFileOutputStream.java:128` (`write(b, 0, b.length)`
+  removed), a false `survived` while the pass's JVMs shared one working
+  directory (see **Several JVMs**), is killed.
 
-`FileUtils.java:1204` (`createNewFile` returns `true`) is decided without
-running: every test saw it return `true`. The pass's one `error` is the
-same file's `createNewFile` mutant, whose run ended the formatter's JVM
-before its verdict (Ant's own classes are the ones under test).
+The strong pass took 54 s, 29 s before: each test runs twice for its
+baseline now, and a test class's own work makes every test of its file a
+candidate. No mutant is left an `error` (118 were, with the second
+baseline missing: see **Baselines and confirmations**).
