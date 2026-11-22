@@ -219,7 +219,75 @@ confirmations, kills overturned, and the baseline's time.
 
 ## Validation
 
-RESULTS
+Four public projects (`benchmarks/mutation-python/README.md`): python-slugify
+9.2.0, cachetools 8.0.2 (its `unittest.TestCase` suite run both by pytest
+and by `python -m unittest`), parse 1.22.4 and humanize 4.17.0. The ground
+truth is mutmut's full kill matrix: every test run against every one of
+mutmut's 5,438 mutants (`kill_matrix.py`), on the same SoroCI machines (16
+CPUs) as Supercov. Supercov measured the same sources mutmut mutates
+(`SUPERCOV_SOURCE_ROOTS`) with a plain run, and planned from reach alone.
+
+| Project | Mutants | Both detect | Both leave | Matrix detects, Supercov not | Supercov detects, matrix not |
+| --- | --- | --- | --- | --- | --- |
+| python-slugify | 1,124 | 936 | 186 | 0 | 2 |
+| cachetools (pytest) | 1,660 | 1,521 | 136 | 0 | 3 |
+| cachetools (unittest) | 1,660 | 1,521 | 136 | 0 | 3 |
+| parse | 1,306 | 1,160 | 146 | 0 | 0 |
+| humanize | 1,348 | 1,238 | 110 | 0 | 0 |
+
+"Detects" is killed or timeout, as both tools score them; "leaves" is
+survived or no coverage. Every mutant the matrix detects, Supercov detects.
+The five it detects and the matrix does not were each applied to the source
+by hand and the suite run as written; each fails it:
+
+- python-slugify `__main__.py:44:5-45:108:CallArgument:None@2` and
+  `removed@2`: `test_algorithm_cli` runs `python -m slugify --algorithm
+  invalid` and expects argparse to refuse the choice. mutmut's trampoline
+  switches a mutant only where the function's module is the mutant's, and a
+  module run with `-m` is `__main__`, so mutmut never switches them on there;
+  Supercov's import hook does.
+- cachetools `__init__.py:877:77-877:82:BooleanLiteral:True` (`cachedmethod`'s
+  `info=False`), `__init__.py:888:21-888:59:IfExpression:true` and
+  `_descriptor.py:21:13-21:33:AssignmentValue:None` (`__set_name__`): the test
+  modules apply `@cachedmethod` to their classes as they are imported. The
+  matrix imports them once, without a mutant, before it forks; mutmut runs
+  only the tests that called the function while its statistics were
+  gathered, which a decorator run at import is not. Supercov runs such a
+  mutant in a fresh interpreter with the mutant on from its start, and
+  `test_decorator_attributes` and `test_class_access_pickle` fail.
+
+Earlier passes disagreed in more places, each fixed: a test the measured run
+skipped (a subtest skipped before the assertion that would fail) was no
+candidate (python-slugify, 2); a mutant whose module a test module imports
+lost its kill when the fresh interpreter could not collect the test (6 on
+python-slugify, 24 on cachetools); and a count of evaluations per process made
+humanize's benchmark tests read as timeouts (3). The first matrix was also
+made on another machine, where a locale and gettext's tools changed what
+humanize's tests do (4), and without parse's README in mutmut's tree, whose
+doctests the suite runs (8): the matrix above was made again on SoroCI, with
+the README copied.
+
+### Speed
+
+Wall time on 16 CPUs, mutmut with one child per CPU, Supercov's forks one
+per CPU:
+
+| Project | mutmut run | per mutant | Supercov measured run | strong pass | per mutant |
+| --- | --- | --- | --- | --- | --- |
+| python-slugify | 10.4 s | 9.2 ms | 1.3 s | 9.7 s | 8.6 ms |
+| cachetools (pytest) | 27.0 s | 16.3 ms | 1.5 s | 18.4 s | 11.1 ms |
+| cachetools (unittest) | | | 1.0 s | 13.3 s | 8.1 ms |
+| parse | 269.2 s | 206 ms | 1.4 s | 14.1 s | 11.0 ms |
+| humanize | 65.8 s | 48.8 ms | 5.2 s | 14.6 s | 10.9 ms |
+
+Per mutant is the run's time over the mutants it ran (Supercov's strong pass
+alone; with its measured run, python-slugify is 9.7 ms a mutant, about
+mutmut's). parse's suite turns pytest-cov on in its own configuration: every
+mutmut worker builds a coverage report over the mutated tree, which a strong
+pass does not. On python-slugify, whose CLI tests start `python -m slugify`
+in subprocesses, keeping each switched file's compiled code beside the
+schemata took the pass from 147 s to 9.7 s: every subprocess parsed every
+mutant's copy before.
 
 ## Not yet
 
