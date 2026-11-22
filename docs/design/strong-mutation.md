@@ -90,6 +90,79 @@ And a mutant in module-level code (no function around it) takes every test
 of each file that ran it, whole: a module loaded lazily by one test keeps the
 mutated value for the file's later tests, which never run that code again.
 
+## The continuous pass (Vitest 4 and later)
+
+Where Supercov's spawner forks Vitest's workers (Vitest 4 and later, files
+isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
+
+- **Baselines once per file.** Each test file's baseline runs once, the
+  union of its mutants' candidates, at the head of the run, from a slot of
+  the file's own (Vitest's "start" for it says the file's project and
+  environment); a mutant's copy of the file runs once it is known. A union
+  that fails, or does not finish, without a mutant means a candidate leans
+  on a test the union left out: the file's copies run whole from then on.
+  A file's whole baseline runs where a mutant takes the file whole (a
+  mutant of module-level code takes every file that loads the module), and a
+  whole copy goes on past a test that fails without the mutant too. Run only
+  once a whole copy failed, it made tRPC's pass a third slower (a copy, the
+  baseline and the copy again, one after another). Those are the only
+  repeats, and none is per copy.
+- **One run.** It lists more worker slots than the pass can use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
+  "run", for work that is ready: a baseline a mutant now needs, a
+  confirmation, or the next file of a mutant whose copy before ended with
+  every test passing. The worker is then told to run that work's test file
+  in place of the slot's (slots are files of the work's project and
+  environment, learned from Vitest's "start" for each file's baseline).
+  Vitest's own limit on workers running at once holds.
+- **A mutant's files one after another**, the likeliest killer first (a
+  file's kills over its runs so far, over its cost), and its chain stops at
+  its first kill, as StrykerJS runs a mutant's covering files with `bail`.
+  Parallelism comes from many mutants at once; of the mutants ready, the one
+  with the most work left goes first, so long chains do not end the pass.
+- **Confirmations only for left-out tests.** A kill is certain where the
+  copy ran every test its file's baseline ran before the failing one (a
+  copy of the whole file always does, against the whole baseline). Any
+  other kill came from a copy that left out earlier tests: those tests, up
+  to the failing one, run again with no mutant (one run for every mutant
+  with the same tests), and where they fail that way too the mutant runs
+  the file whole. This is the only trigger.
+- **No worker idles while a mutant has files left.** Where no mutant is
+  waiting for its next file, a slot takes the next file of a mutant whose
+  copy is still running (the most work left first). Its verdict is the
+  same; a copy that a kill of its mutant makes moot is stopped.
+- **A failure before the mutant ran is run again.** Each test's record says
+  how often the copy's mutant had been evaluated by its end. Up to the first
+  evaluation a copy runs exactly as its file does without the mutant, so a
+  test that failed before it failed for another reason (on tRPC, timing
+  tests such as `lazy connection where the first connection fails` failed
+  once in a run that way, and stood as kills the ground truth does not
+  have). Such a copy runs again, once; a failure that repeats counts, since
+  the mutant may have run in a process the copy started.
+- **A worker that lost its channel to Vitest did not finish its file.** A
+  mutant that disconnects the worker (`process.disconnect()`) leaves Vitest
+  unable to hear the file end, as a plain run would fail it: the copy's
+  last record says the channel was lost, and the mutant is killed.
+- **A worker's end is told to Vitest as a worker's would be.** Errors of
+  writes to a worker that has ended are dropped (its exit says the rest); a
+  worker the pass stopped between its file's end and Vitest's "stop" exits
+  only once the "stop" comes (or a forced stop), and an ended worker
+  answers a "stop": before, the former threw "Worker exited unexpectedly"
+  in Vitest's process, which ended the run, and the command started the
+  pass again.
+- When every mutant is decided the run is cancelled; its slots left never
+  start a process.
+
+On the public benchmark (16-CPU Linux machines, c8a/m8a.4xlarge; hono in 6
+shards, tRPC in 32), against the staged pass: hono 69 to 68 ms a mutant
+(63-68 over four full runs), tRPC 1,173 to 1,068 ms (StrykerJS's mutant
+phase: 51 and 755 ms), with the
+same disagreements with StrykerJS's full kill matrix and no extra kill. A
+tRPC mutant ran 10.8 files (killed 6.3, survived 37.2), 2.69 baselines (each
+shard is a pass with its own) and 0.31 confirmations; a hono mutant 2.5, 0.25
+and 0.33. Where the rest of the gap is: tRPC's baselines, repeated in every
+shard (StrykerJS's dry run is outside its figure), and a copy's start in a
+fresh worker, which StrykerJS pays too.
+
 ## Order and early exit
 
 A mutant's candidates are grouped by test file, cheapest file first. It runs

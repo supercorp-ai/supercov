@@ -22936,6 +22936,54 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     assert_eq!(never["strong"]["status"], "killed", "{never}");
 }
 
+/// The same, where no mutant of module-level code has the file run whole
+/// already: a kill a test left out caused is overturned, and the mutant runs
+/// the file whole once its whole baseline, run for it, is known.
+#[cfg(unix)]
+#[test]
+fn an_overturned_kill_runs_its_file_whole_after_its_whole_baseline() {
+    let project = vitest_mutants_project("strong-overturn-whole");
+    project.write(
+        "src/items.js",
+        "const state = {};\nexport function register(item) {\n  if (item) (state.items ??= []).push(item);\n}\nexport function count() {\n  const items = state.items ?? [];\n  return items.length > 0 ? items.length : 0;\n}\n",
+    );
+    project.write(
+        "test/items.test.js",
+        "import { expect, it } from \"vitest\";\nimport { count, register } from \"../src/items.js\";\nit(\"registers\", () => register(\"a\"));\nit(\"counts what was registered\", () => expect(count()).toBe(1));\n",
+    );
+    project.commit("items");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(
+        reply["passes"][0]["overturned"].as_u64().unwrap_or(0) > 0,
+        "{reply}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/items.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let equal = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:7:") && id.contains(":EqualityOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+}
+
 /// A mutant that makes work a test left running loop forever (a timer that
 /// fires after the test passed): its evaluations pass the limit outside any
 /// test, and the mutant is a timeout, not a survivor.
@@ -23155,9 +23203,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
             .all(|mutant| mutant["strong"]["status"] != "survived"),
         "{listed}"
     );
-    assert_eq!(
-        passes[0]["profile"]["mutantCopies"],
-        ran + killed,
+    // One more copy for each kill a confirmation overturned (the mutant
+    // runs its file whole).
+    assert!(
+        passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
+            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
@@ -23332,6 +23382,129 @@ fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
     assert!(ahead.values().any(|status| status == "\"killed\""));
     assert!(ahead.values().any(|status| status == "\"survived\""));
     assert_eq!(ahead, fresh);
+}
+
+/// A mutant that makes a worker drop its channel to Vitest (here it
+/// disconnects): Vitest cannot hear the file finish, so it did not, and the
+/// mutant is killed whatever the copy wrote. Nothing reports a closed
+/// channel as an error of the run, and the pass runs once.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
+    let project = vitest_mutants_project("strong-channel-closed");
+    project.write(
+        "src/bye.js",
+        "export function bye(flag) {\n  if (flag) process.disconnect?.();\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/bye.test.js",
+        "import { expect, it } from \"vitest\";\nimport { bye } from \"../src/bye.js\";\nit(\"stays\", () => expect(bye(false)).toBe(1));\n",
+    );
+    project.commit("bye");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(!said.contains("Channel closed"), "{said}");
+    assert!(!said.contains("Unhandled"), "{said}");
+    assert_eq!(reply["passes"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(
+        said.matches("strong pass: switches in").count(),
+        1,
+        "{said}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/bye.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let disconnects = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/bye.js:2:") && id.ends_with(":ConditionalExpression:true")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
+}
+
+/// A copy that runs none, or only some, of the tests it was to run proves
+/// nothing: here `labels` exists in the measured run only, so the copies of
+/// `label`'s mutants run no test. They are errors that say so, never
+/// survivors, with the stages and without.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_runs_none_of_its_tests_makes_its_mutant_an_error() {
+    let project = vitest_mutants_project("strong-ran-none");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  if (!process.env.SUPERCOV_STRONG) it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("labels in the measured run only");
+    for stages in ["", "1"] {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_STAGES", stages)],
+            )
+            .json();
+        assert!(
+            reply["summary"]["error"].as_u64().unwrap_or(0) > 0,
+            "{reply}"
+        );
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutants = listed["data"]["mutants"].as_array().unwrap();
+        let of_label = mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("src/cart.js:9:")
+            })
+            .collect::<Vec<_>>();
+        assert!(!of_label.is_empty(), "{listed}");
+        for mutant in of_label {
+            if mutant["strong"].is_null() {
+                continue;
+            }
+            assert_ne!(mutant["strong"]["status"], "survived", "{mutant}");
+            if mutant["strong"]["status"] == "error" {
+                assert!(
+                    mutant["strong"]["reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("ran none of the tests it was to run"),
+                    "{mutant}"
+                );
+            }
+        }
+        assert!(
+            mutants
+                .iter()
+                .any(|mutant| mutant["strong"]["status"] == "killed"),
+            "{listed}"
+        );
+    }
 }
 
 /// A test file that does not finish without a mutant (here it throws while
