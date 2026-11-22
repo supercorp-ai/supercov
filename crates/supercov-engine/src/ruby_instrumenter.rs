@@ -892,10 +892,11 @@ impl<'a> Collector<'a> {
     /// each mutant's value from the same operands.
     fn operand_probe(&mut self, node: &CallNode<'_>) {
         let operator = String::from_utf8_lossy(node.name().as_slice()).into_owned();
+        // `=~`, `!~` and `===` are left out: a regexp's match sets `$~`
+        // in the frame that calls it, which would be the probe's.
         let binary = matches!(
             operator.as_str(),
-            "!=" | "!~"
-                | "%"
+            "!=" | "%"
                 | "&"
                 | "*"
                 | "**"
@@ -907,8 +908,6 @@ impl<'a> Collector<'a> {
                 | "<="
                 | "<=>"
                 | "=="
-                | "==="
-                | "=~"
                 | ">"
                 | ">="
                 | ">>"
@@ -948,11 +947,15 @@ impl<'a> Collector<'a> {
             kinds,
         });
         let receiver_location = receiver.location();
+        // The receiver is inside the call, and so inside any wrapper of the
+        // call that opens where it does: it nests one deeper.
+        self.depth += 1;
         self.wrap(
             receiver_location.start_offset(),
             receiver_location.end_offset(),
             format!("{RUBY_PROBE_RECEIVER}.bo({key}, ("),
         );
+        self.depth -= 1;
         self.value_sites.insert(site);
     }
 
@@ -3717,6 +3720,33 @@ pub fn apply_edits(source: &[u8], edits: &[Edit]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An infection probe wraps a binary operator's receiver alone, inside
+    /// any wrapper of the comparison that opens where the receiver does, and
+    /// leaves out the operators that set `$~`.
+    #[test]
+    fn operand_probes_wrap_the_receiver_inside_a_condition() {
+        let source = b"def existing?(key)\n  !@overwrite && key != \"MODE\" && ENV.key?(key)\nend\ndef m(a, b)\n  a =~ b\n  a + b * 2\nend\n";
+        let mut next = 0;
+        let obligations = build_ruby_obligations_with("a.rb", source, &mut next, true).unwrap();
+        let text = String::from_utf8(apply_edits(source, &obligations.plan.edits)).unwrap();
+        assert!(
+            ruby_prism::parse(text.as_bytes()).errors().next().is_none(),
+            "{text}"
+        );
+        assert!(
+            text.contains("bo(") && text.contains(", (key)) != \"MODE\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("=~ b") || !text.contains("bo(") || text.matches("bo(").count() == 3,
+            "{text}"
+        );
+        assert_eq!(
+            obligations.value_sites.iter().cloned().collect::<Vec<_>>(),
+            ["a.rb:2:18-2:31", "a.rb:6:3-6:12", "a.rb:6:7-6:12"]
+        );
+    }
 
     /// Shapes probes go around -- jumps out of `unless`/`else` and
     /// `begin`/`rescue`/`else`, empty bodies, negations, `case` without a

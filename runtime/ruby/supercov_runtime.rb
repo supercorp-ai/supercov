@@ -1641,7 +1641,7 @@ module Supercov
       @left = left
     end
 
-    %i[!= !~ % & * ** + - / < << <= <=> == === =~ > >= >> ^ |].each do |operator|
+    %i[!= % & * ** + - / < << <= <=> == > >= >> ^ |].each do |operator|
       define_method(operator) { |right| @runtime.probe_binary(@key, @left, operator, right) }
     end
   end
