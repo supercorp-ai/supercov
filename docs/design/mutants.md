@@ -82,8 +82,15 @@ from their replacement code:
 | BlockStatement, ObjectLiteral | `{}` |
 | ArrayDeclaration | the replacement: `[]`, `["Stryker was here"]`, `Array()`, `Array([])`, `new Array()`, `new Array([])` |
 | CallExpression | `empty` (the statement removed) |
+| Regex | the mutated pattern, without slashes or flags: a literal's, or the string `new RegExp` is given |
 
-Regex mutants (weapon-regex's) are not enumerated yet and have no descriptor.
+Regex mutants are weapon-regex 2.0.6's level-1 mutants, the level StrykerJS
+asks for (`js_regex_mutants.rs`): an anchor removed, a character class or
+predefined class negated (a Unicode property class only under `u` or `v`),
+a quantifier removed, a lookaround negated, in weapon-regex's order. A
+pattern weapon-regex cannot parse has none. `js_regex_mutants.rs` is tested
+against weapon-regex's own output for 4323 patterns
+(`tests/fixtures/regex-mutants.json`).
 The grammar is implemented twice: in `scripts/stryker-parity.mjs`, which
 prints StrykerJS's own mutants with their descriptors and writes the goldens,
 and in the engine's `descriptor_from_stryker`. The engine's enumeration is
@@ -549,9 +556,9 @@ the reader requires every copy to be the same, which runs of one source are.
 
 ## What stays out
 
-- Regex mutants are not enumerated: comparing JavaScript regexes needs a
-  JavaScript engine, and a later step compares the original and the mutated
-  regex in the page or process.
+- A weak verdict that compares what the original and the mutated regex
+  match: a reached Regex mutant is `infected` (its pattern differs), and only
+  the strong pass says whether a test tells them apart.
 - Code that ran in a server process measured by a runtime older than value
   records (its records carry no `values` note): its outcome-based verdicts stay
   `unknown`. A server process, and node:test, AVA and tap's test processes,

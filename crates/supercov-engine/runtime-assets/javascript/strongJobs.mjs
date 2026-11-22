@@ -21,7 +21,7 @@
 // ran other tests than its baseline did is confirmed by running the job's
 // tests again without the mutant. A job past 3x its baseline and 10 s is
 // stopped: a timeout, unless a test had already failed.
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -31,7 +31,9 @@ import { fileURLToPath } from "node:url";
 // included, runs all its baseline's tests beside a mutant's own candidates
 // rather than confirm a kill apart (`tryFile`).
 const UNION_MS = 1_500;
-const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
+// Vitest's node tests run here where the run also had browser tests, which
+// Vitest's own driver cannot run beside them.
+const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser", "vitest"]);
 
 function parallelism() {
     const given = Number(process.env.SUPERCOV_STRONG_WORKERS);
@@ -151,6 +153,123 @@ export function withoutNpx(command, root) {
     return existsSync(binary) ? [binary, ...rest.slice(at + 1)] : command;
 }
 
+// The arguments a command gives Jest, where it starts Jest itself (`jest`,
+// `npx jest`, `node_modules/.bin/jest`): a resident Jest parses them as
+// Jest's CLI would.
+export function jestArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])jest(?:\.js)?$/.test(word) || /jest-cli[\\/]bin[\\/]jest\.js$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
+// The arguments a command gives Mocha, where it starts Mocha itself.
+export function mochaArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])_?mocha(?:\.js)?$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
+// Whether a project's .js files are CommonJS (its package.json has no
+// `"type": "module"`).
+export function packageIsCommonJs(root) {
+    try {
+        return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).type !== "module";
+    }
+    catch {
+        return true;
+    }
+}
+
+// Resident runners (strongJestHost.mjs, strongMochaHost.mjs), each running one
+// job at a time. A host whose job passes its limit is stopped, and the next
+// job starts another.
+function residentHosts({ script, args, root, environment, log }) {
+    const idle = [];
+    const all = new Set();
+    const host = () => new Promise((resolveHost, rejectHost) => {
+        const child = fork(fileURLToPath(new URL(`./${script}`, import.meta.url)), [], {
+            cwd: root,
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+            detached: process.platform !== "win32",
+        });
+        // Its output is drained, and kept for whoever reads why a job failed.
+        const keep = (chunk) => {
+            try {
+                appendFileSync(log, chunk);
+            }
+            catch {
+                // The log is for reading only.
+            }
+        };
+        child.stdout.on("data", keep);
+        child.stderr.on("data", keep);
+        all.add(child);
+        child.once("exit", () => all.delete(child));
+        child.on("message", function started(message) {
+            if (message?.type === "started")
+                child.send({ type: "init", args: args ?? [] });
+            else if (message?.type === "ready") {
+                child.off("message", started);
+                if (message.error) {
+                    stop(child);
+                    rejectHost(new Error(message.error));
+                }
+                else
+                    resolveHost(child);
+            }
+        });
+        child.once("error", rejectHost);
+    });
+    let number = 0;
+    return {
+        async run(job, limitMs) {
+            let child;
+            try {
+                child = idle.pop() ?? await host();
+            }
+            catch (error) {
+                try {
+                    appendFileSync(log, `[supercov] the resident runner did not start: ${error?.stack ?? error}\n`);
+                }
+                catch {
+                    // The log is for reading only.
+                }
+                return { timedOut: false, error, notStarted: true };
+            }
+            const id = ++number;
+            return new Promise((resolveRun) => {
+                let settled = false;
+                const settle = (outcome) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    clearTimeout(timer);
+                    child.off("message", answered);
+                    child.off("exit", exited);
+                    resolveRun(outcome);
+                };
+                const answered = (message) => {
+                    if (message?.type === "done" && message.id === id) {
+                        idle.push(child);
+                        settle({ timedOut: false, error: message.error });
+                    }
+                };
+                const exited = () => settle({ timedOut: false, error: "the resident runner ended" });
+                const timer = setTimeout(() => {
+                    stop(child);
+                    settle({ timedOut: true });
+                }, limitMs);
+                child.on("message", answered);
+                child.once("exit", exited);
+                child.send({ type: "job", id, ...job });
+            });
+        },
+        close() {
+            for (const child of all)
+                stop(child);
+        },
+    };
+}
+
 function readTimeouts(path) {
     try {
         return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
@@ -223,6 +342,32 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
 
     const run = slots(workers);
+    // A command that starts Jest or Mocha itself: its jobs run in resident
+    // runners, one per worker, rather than start the command each.
+    const residentAllowed = environment.SUPERCOV_STRONG_RESIDENT !== "0";
+    const jestArgs = residentAllowed ? jestArguments(withoutNpx(command, root)) : undefined;
+    const mochaArgs = residentAllowed ? mochaArguments(withoutNpx(command, root)) : undefined;
+    const jestHosts = residentHosts({ script: "strongJestHost.mjs", args: jestArgs, root, environment, log: join(work, "jest-hosts.log") });
+    const mochaHosts = residentHosts({ script: "strongMochaHost.mjs", args: mochaArgs, root, environment, log: join(work, "mocha-hosts.log") });
+    // A suite of ES modules, which cannot be loaded again in one thread,
+    // runs each job in a fresh thread of a resident Mocha
+    // (SUPERCOV_STRONG_MOCHA_ESM=process: a process per job instead).
+    const esmHosts = residentHosts({ script: "strongMochaHost.mjs", args: mochaArgs, root, environment: { ...environment, SUPERCOV_MOCHA_FRESH_WORKERS: "1" }, log: join(work, "mocha-esm-hosts.log") });
+    const esmResident = process.env.SUPERCOV_STRONG_MOCHA_ESM !== "process";
+    const commonJs = packageIsCommonJs(root);
+    const broken = new Set();
+    const residentFor = (file) => {
+        const runner = runnerOf.get(file);
+        if (broken.has(runner))
+            return undefined;
+        if (runner === "jest" && jestArgs)
+            return jestHosts;
+        if (runner === "mocha" && mochaArgs && (/\.cjs$/.test(file) || (commonJs && /\.js$/.test(file))))
+            return mochaHosts;
+        if (runner === "mocha" && mochaArgs && esmResident)
+            return esmHosts;
+        return undefined;
+    };
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
 
@@ -236,92 +381,129 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             const evidence = join(directory, "evidence");
             mkdirSync(evidence, { recursive: true });
             const spec = join(directory, "job.json");
-            writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail }));
+            writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail, mutant: mutant ? `${mutant.file}#${mutant.index}` : null }));
             const results = join(directory, "results.jsonl");
             const log = join(directory, "output.log");
-            const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
             const begun = Date.now();
-            let output;
-            try {
-                output = [];
-                const overrides = {
-                    // What tap's runner gives each test file it starts.
-                    ...(runnerOf.get(file) === "tap" ? { TAP_CHILD_ID: String(number) } : {}),
-                    SUPERCOV_EVIDENCE_DIR: evidence,
-                    SUPERCOV_STRONG_JOB: spec,
-                    SUPERCOV_ACTIVE_MUTANT: mutant ? `${mutant.file}#${mutant.index}` : "-",
-                    SUPERCOV_STRONG_RESULTS: results,
-                    // Only this driver reads the plan: Vitest's and
-                    // Playwright's configurations would drive their own.
-                    SUPERCOV_STRONG_PLAN: "",
-                };
-                // Supercov's preload, in this process too, gives every child
-                // this process's own Supercov settings over the ones it is
-                // given: the job's are this process's while it starts.
-                const saved = Object.fromEntries(Object.keys(overrides).map((name) => [name, process.env[name]]));
-                Object.assign(process.env, overrides);
-                let child;
+            const resident = residentFor(file);
+            // A runner's own command, started for this job alone.
+            const spawnJob = () => {
+                const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
+                let output;
                 try {
-                    child = spawn(program, args, {
-                        cwd: root,
-                        env: { ...environment, ...overrides },
-                        stdio: ["ignore", "pipe", "pipe"],
-                        detached: process.platform !== "win32",
-                        shell: process.platform === "win32",
-                        windowsHide: true,
-                    });
-                }
-                finally {
-                    for (const [name, value] of Object.entries(saved)) {
-                        if (value === undefined)
-                            delete process.env[name];
-                        else
-                            process.env[name] = value;
-                    }
-                }
-                let size = 0;
-                const keep = (chunk) => {
-                    // A job's output is kept for whoever reads why it failed,
-                    // up to a megabyte.
-                    if (size < 1 << 20) {
-                        output.push(chunk);
-                        size += chunk.length;
-                    }
-                };
-                child.stdout.on("data", keep);
-                child.stderr.on("data", keep);
-                let timedOut = false;
-                const timer = setTimeout(() => {
-                    timedOut = true;
-                    profile.stopped += 1;
-                    stop(child);
-                }, limitMs);
-                const finish = (code, error) => {
-                    clearTimeout(timer);
-                    profile.jobMs += Date.now() - begun;
+                    output = [];
+                    const overrides = {
+                        // What tap's runner gives each test file it starts.
+                        ...(runnerOf.get(file) === "tap" ? { TAP_CHILD_ID: String(number) } : {}),
+                        SUPERCOV_EVIDENCE_DIR: evidence,
+                        SUPERCOV_STRONG_JOB: spec,
+                        SUPERCOV_ACTIVE_MUTANT: mutant ? `${mutant.file}#${mutant.index}` : "-",
+                        SUPERCOV_STRONG_RESULTS: results,
+                        // Only this driver reads the plan: Vitest's and
+                        // Playwright's configurations would drive their own.
+                        SUPERCOV_STRONG_PLAN: "",
+                    };
+                    // Supercov's preload, in this process too, gives every child
+                    // this process's own Supercov settings over the ones it is
+                    // given: the job's are this process's while it starts.
+                    const saved = Object.fromEntries(Object.keys(overrides).map((name) => [name, process.env[name]]));
+                    Object.assign(process.env, overrides);
+                    let child;
                     try {
-                        writeFileSync(log, Buffer.concat(output));
+                        child = spawn(program, args, {
+                            cwd: root,
+                            env: { ...environment, ...overrides },
+                            stdio: ["ignore", "pipe", "pipe"],
+                            detached: process.platform !== "win32",
+                            shell: process.platform === "win32",
+                            windowsHide: true,
+                        });
                     }
-                    catch {
-                        // The log is for reading; a verdict does not need it.
+                    finally {
+                        for (const [name, value] of Object.entries(saved)) {
+                            if (value === undefined)
+                                delete process.env[name];
+                            else
+                                process.env[name] = value;
+                        }
                     }
-                    const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
-                    resolveJob({
-                        statuses: outcomes(evidence),
-                        timedOut,
-                        mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
-                        exitCode: code,
-                        error,
-                        durationMs: Date.now() - begun,
-                        directory,
-                    });
-                };
-                child.on("error", (error) => finish(null, error));
-                child.on("close", (code) => finish(code));
+                    let size = 0;
+                    const keep = (chunk) => {
+                        // A job's output is kept for whoever reads why it failed,
+                        // up to a megabyte.
+                        if (size < 1 << 20) {
+                            output.push(chunk);
+                            size += chunk.length;
+                        }
+                    };
+                    child.stdout.on("data", keep);
+                    child.stderr.on("data", keep);
+                    let timedOut = false;
+                    const timer = setTimeout(() => {
+                        timedOut = true;
+                        profile.stopped += 1;
+                        stop(child);
+                    }, limitMs);
+                    const finish = (code, error) => {
+                        clearTimeout(timer);
+                        profile.jobMs += Date.now() - begun;
+                        try {
+                            writeFileSync(log, Buffer.concat(output));
+                        }
+                        catch {
+                            // The log is for reading; a verdict does not need it.
+                        }
+                        const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
+                        resolveJob({
+                            statuses: outcomes(evidence),
+                            timedOut,
+                            mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
+                            exitCode: code,
+                            error,
+                            durationMs: Date.now() - begun,
+                            directory,
+                        });
+                    };
+                    child.on("error", (error) => finish(null, error));
+                    child.on("close", (code) => finish(code));
+                }
+                catch (error) {
+                    resolveJob({ statuses: new Map(), timedOut: false, mutantTimedOut: false, exitCode: null, error, durationMs: 0, directory });
+                }
+            };
+            if (!resident) {
+                spawnJob();
+                return;
             }
-            catch (error) {
-                resolveJob({ statuses: new Map(), timedOut: false, mutantTimedOut: false, exitCode: null, error, durationMs: 0, directory });
-            }
+            // A resident runner runs the job (strongJestHost.mjs,
+            // strongMochaHost.mjs); one that cannot start leaves its runner's
+            // jobs to the command.
+            const environmentOfJob = {
+                SUPERCOV_EVIDENCE_DIR: evidence,
+                SUPERCOV_STRONG_JOB: spec,
+                SUPERCOV_STRONG_RESULTS: results,
+                SUPERCOV_STRONG_PLAN: "",
+            };
+            resident.run({ file: join(root, file), mutant: mutant ? { file: mutant.file, index: mutant.index } : null, environment: environmentOfJob }, limitMs).then(({ timedOut, error, notStarted }) => {
+                if (notStarted) {
+                    broken.add(runnerOf.get(file));
+                    spawnJob();
+                    return;
+                }
+                if (timedOut)
+                    profile.stopped += 1;
+                profile.jobMs += Date.now() - begun;
+                const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
+                resolveJob({
+                    statuses: outcomes(evidence),
+                    timedOut,
+                    mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
+                    exitCode: error ? 1 : 0,
+                    error,
+                    durationMs: Date.now() - begun,
+                    directory,
+                });
+            });
         }));
     }
 
@@ -448,7 +630,9 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     for (const planned of plan.mutants) {
         if (planned.decided)
             continue;
-        const found = indexes.get(planned.id);
+        // A Rust mutant (Rust compiled to wasm) is switched by its index in
+        // its file's list, as the pass's build placed it.
+        const found = planned.language === "rust" ? { index: planned.index, entry: {} } : indexes.get(planned.id);
         if (!found) {
             write({ id: planned.id, status: "error", reason: "the copy lists no such mutant: the source changed since the run", tests: 0, durationMs: 0 });
             continue;
@@ -496,6 +680,9 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // Every file's baseline runs the tests of all its mutants: none starts
     // before all are known.
     await Promise.all(pending.map((task) => runMutant(...task)));
+    jestHosts.close();
+    mochaHosts.close();
+    esmHosts.close();
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }

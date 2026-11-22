@@ -476,7 +476,7 @@ fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
 }
 
 /// Report whether a probe placed at this node could not run correctly.
-fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
+pub(crate) fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
     in_const_context(node) || in_global_allocator(node)
 }
 
@@ -513,6 +513,34 @@ fn push_wrapper(
 
 /// Spaces in place of `bytes`, their line breaks kept so every line stays
 /// where it was.
+/// The scope a wrapper of `range` needs to go around every wrapper inside
+/// it that starts or ends where it does, and inside every wrapper around it
+/// that does: `None` where no scope can (a wrapper's pair of insertions is
+/// pushed together, its start then its end).
+fn outer_scope(insertions: &[Insertion], range: TextRange) -> Option<usize> {
+    let (start, end) = range_offsets(range);
+    let mut lowest = 1usize;
+    let mut highest = usize::MAX;
+    for pair in insertions.windows(2) {
+        let [opening, closing] = pair else { continue };
+        if opening.kind != InsertionKind::Start || closing.kind != InsertionKind::End {
+            continue;
+        }
+        let (from, to) = (opening.offset, closing.offset);
+        let inside = from >= start && to <= end && (from == start || to == end);
+        let around = from <= start
+            && to >= end
+            && (from == start || to == end)
+            && (from, to) != (start, end);
+        if inside {
+            lowest = lowest.max(opening.scope_len.saturating_add(1));
+        } else if around {
+            highest = highest.min(opening.scope_len.saturating_sub(1));
+        }
+    }
+    (lowest <= highest).then_some(lowest)
+}
+
 fn blank(bytes: &mut [u8]) {
     bytes
         .iter_mut()
@@ -719,7 +747,7 @@ impl<'a> SourceLocations<'a> {
     }
 }
 
-fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
+pub(crate) fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
     let start = usize::from(range.start()).to_string();
     let end = usize::from(range.end()).to_string();
     let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
@@ -1455,6 +1483,21 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
         });
     }
     Err(newest_errors.unwrap_or_default())
+}
+
+/// Whether files are instrumented with weak mutation's value probes
+/// (`rust_value_probes`), for a run measured with `SUPERCOV_MUTANTS=1`.
+static VALUE_PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the value probes on or off for what this process instruments.
+pub fn set_value_probes(on: bool) {
+    VALUE_PROBES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The file as written, parsed with the newest edition it parses under: no
+/// macro is read as code. `None` where no edition parses it.
+pub(crate) fn parse_source(source: &str) -> Option<(SourceFile, Edition)> {
+    parse_any_edition(source).ok()
 }
 
 fn expression_view(source: &str, edition: Edition) -> ExpressionView {
@@ -3209,6 +3252,65 @@ fn numbered_file(
             .and_then(|value| value.as_str())
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
+
+    if VALUE_PROBES.load(std::sync::atomic::Ordering::Relaxed) && !test_file {
+        let skip = |node: &ra_ap_syntax::SyntaxNode| {
+            let range = node.text_range();
+            in_test_code(&tests, range)
+                || in_test_code(&compiled_out, range)
+                || cannot_carry_probe(node)
+        };
+        let mut ordinal = |id: &str| hit_ordinal(id);
+        let mut edits =
+            crate::rust_value_probes::place(file, source, runtime_path, &skip, &mut ordinal);
+        // A returned value goes around what is placed inside it, its own
+        // operators' probes among them: placed last, it sees them all.
+        edits.sort_by_key(|edit| {
+            matches!(
+                edit,
+                crate::rust_value_probes::ValueEdit::Wrap { outer: true, .. }
+            )
+        });
+        for edit in edits {
+            match edit {
+                // An operator's probe goes inside every wrapper of its
+                // range, a returned value's around all of them.
+                crate::rust_value_probes::ValueEdit::Wrap {
+                    range,
+                    prefix,
+                    suffix,
+                    outer: false,
+                } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
+                crate::rust_value_probes::ValueEdit::Wrap {
+                    range,
+                    prefix,
+                    suffix,
+                    outer: true,
+                } => {
+                    if let Some(scope_len) = outer_scope(&insertions, range) {
+                        let (start, end) = range_offsets(range);
+                        insertions.push(Insertion {
+                            offset: start,
+                            kind: InsertionKind::Start,
+                            scope_len,
+                            rank: 0,
+                            text: prefix,
+                        });
+                        insertions.push(Insertion {
+                            offset: end,
+                            kind: InsertionKind::End,
+                            scope_len,
+                            rank: 0,
+                            text: suffix,
+                        });
+                    }
+                }
+                crate::rust_value_probes::ValueEdit::At { offset, text } => {
+                    push_direct(&mut insertions, offset, text);
+                }
+            }
+        }
+    }
 
     // Test faults stand in for insertions that overlap and for a transform
     // that no longer parses, which a correct instrumenter never makes.

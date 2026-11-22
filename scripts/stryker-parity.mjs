@@ -15,10 +15,8 @@
 // `replacement` its descriptor (see "Descriptors" below). `file` is relative
 // to --root, which defaults to the current directory.
 //
-// Regex mutants come from weapon-regex and are out of the enumeration's
-// scope: they are left out and only counted, as are mutants a
-// `// Stryker disable` comment ignores. Both counts go to standard error, and
-// into each golden.
+// Mutants a `// Stryker disable` comment ignores are left out and only
+// counted; the count goes to standard error, and into each golden.
 //
 // --write-goldens writes FILE.stryker.json beside each FILE instead of
 // printing.
@@ -55,7 +53,9 @@
 //   ArrayDeclaration      the replacement: [] ["Stryker was here"] Array()
 //                         Array([]) new Array() new Array([])
 //   CallExpression        empty (the statement removed)
-//   Regex                 none: not enumerated
+//   Regex                 the mutated pattern weapon-regex made, without
+//                         slashes or flags: a regular expression literal's
+//                         pattern, or the string `new RegExp` is given
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -252,6 +252,12 @@ export function descriptorFromStryker(parse, mutator, original, replacement) {
     }
     case 'CallExpression':
       return text === ';' || text === '' ? 'empty' : undefined;
+    case 'Regex': {
+      const node = unparenthesized(parse(text));
+      if (node?.type === 'RegExpLiteral') return node.pattern;
+      if (node?.type === 'StringLiteral') return node.value;
+      return undefined;
+    }
     default:
       return undefined;
   }
@@ -293,14 +299,10 @@ async function strykerMutants(found, root, files) {
     const starts = lineStarts(content);
     const offset = ({ line, column }) => starts[line] + column;
     const mutants = [];
-    const skipped = { Regex: 0, ignored: 0 };
+    const skipped = { ignored: 0 };
     for (const mutant of instrumented.mutants) {
       if (mutant.status === 'Ignored') {
         skipped.ignored++;
-        continue;
-      }
-      if (mutant.mutatorName === 'Regex') {
-        skipped.Regex++;
         continue;
       }
       const { start, end } = mutant.location;
@@ -359,7 +361,7 @@ async function main() {
       failed = true;
       continue;
     }
-    console.error(`${name}: ${mutants.length} mutants (${skipped.Regex} Regex and ${skipped.ignored} ignored left out)`);
+    console.error(`${name}: ${mutants.length} mutants (${skipped.ignored} ignored left out)`);
     if (writeGoldens) {
       const golden = `{\n"mutantSet": ${JSON.stringify(MUTANT_SET)},\n"file": ${JSON.stringify(name)},\n"skipped": ${JSON.stringify(skipped)},\n"mutants": [\n${entryLines(mutants)}\n]\n}\n`;
       writeFileSync(`${absolute}.stryker.json`, golden.replace('[\n\n]', '[]'));

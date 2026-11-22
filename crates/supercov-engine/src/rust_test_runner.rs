@@ -1366,6 +1366,7 @@ pub(crate) fn snapshot_regions(
         .map(|decision| (decision.id.as_str(), decision))
         .collect::<BTreeMap<_, _>>();
     let mut hits = BTreeSet::new();
+    let mut values = BTreeMap::<String, BTreeSet<String>>::new();
     let mut vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
     // Records a thread wrote since its last assertion. An assertion witnesses
     // its own thread's records and no other's: a test that spawns threads
@@ -1381,6 +1382,16 @@ pub(crate) fn snapshot_regions(
             sequence += 1;
             let thread = entry.thread;
             match entry.observation {
+                // A value probe's outcome is a value the weak report reads,
+                // never a point covered.
+                RustProbeObservation::Hit { id } if id.starts_with("rs:value:") => {
+                    if let Some((site, outcome)) = id.split_once('#') {
+                        values
+                            .entry(site.to_owned())
+                            .or_default()
+                            .insert(outcome.to_owned());
+                    }
+                }
                 RustProbeObservation::Hit { id } => {
                     if !points.contains_key(id.as_str()) && !alternatives.contains(id.as_str()) {
                         return Err(RustTestRunnerError::UnknownProbe(id));
@@ -1478,6 +1489,15 @@ pub(crate) fn snapshot_regions(
             hits: hits.into_iter().collect(),
             events,
             logicals: Vec::new(),
+            comparisons: values
+                .into_iter()
+                .map(
+                    |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                        id,
+                        outcomes: outcomes.into_iter().collect(),
+                    },
+                )
+                .collect(),
             ..Default::default()
         },
         phases,
@@ -2703,6 +2723,53 @@ pub fn run_prepared_rust_tests(
         build_ms,
         execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+impl ArtifactLauncher {
+    /// `command`, with variables for the test itself: a WASI runtime gives
+    /// its module only the variables named to it (`--env`), any other
+    /// launch passes the process's on.
+    pub(crate) fn command_with_guest_environment(
+        &self,
+        executable: &Path,
+        variables: &[(&str, String)],
+    ) -> Command {
+        match &self.runner {
+            Some(runner) if is_wasi_runtime(&runner.program) => {
+                let mut command = Command::new(&runner.program);
+                command.args(&runner.arguments);
+                for (name, value) in variables {
+                    command.arg(format!("--env={name}={value}"));
+                }
+                command.arg(executable);
+                command.envs(self.environment.iter().map(|(name, value)| (name, value)));
+                command
+            }
+            _ => {
+                let mut command = self.command(executable, None);
+                command.envs(variables.iter().map(|(name, value)| (*name, value)));
+                // A browser's page reads no variable: the driver proxy
+                // switches its modules' mutant on.
+                if let Some(browser) = &self.browser {
+                    let mutant = variables
+                        .iter()
+                        .find(|(name, _)| *name == "SUPERCOV_ACTIVE_MUTANT")
+                        .map(|(_, value)| value.as_str());
+                    command.env(
+                        "CHROMEDRIVER_REMOTE",
+                        browser.remote_url_for(&std::env::temp_dir(), mutant),
+                    );
+                }
+                command
+            }
+        }
+    }
+}
+
+/// Whether a `cargo test` option takes a value (`Some(true)`), takes none
+/// (`Some(false)`), or is no `cargo test` option.
+pub(crate) fn cargo_option_value(argument: &str) -> Option<bool> {
+    cargo_option_takes_value(argument)
 }
 
 #[cfg(test)]
