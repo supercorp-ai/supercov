@@ -93,14 +93,6 @@ impl Mutator {
             Mutator::PrimitiveReturns => "PrimitiveReturns",
         }
     }
-
-    /// A mutator by its name, or by PIT's class name for it
-    /// (`org.pitest...ConditionalsBoundaryMutator`).
-    pub fn from_name(name: &str) -> Option<Mutator> {
-        let simple = name.rsplit('.').next().unwrap_or(name);
-        let simple = simple.strip_suffix("Mutator").unwrap_or(simple);
-        Mutator::ALL.into_iter().find(|m| m.name() == simple)
-    }
 }
 
 pub type Range = (usize, usize);
@@ -390,16 +382,6 @@ impl Prim {
             3 => Prim::Float,
             2 => Prim::Long,
             _ => Prim::Int,
-        }
-    }
-
-    /// The word PIT's descriptions use for an operation in this type.
-    pub fn pit_word(self) -> &'static str {
-        match self.promote(Prim::Int) {
-            Prim::Long => "long",
-            Prim::Float => "float",
-            Prim::Double => "double",
-            _ => "integer",
         }
     }
 }
