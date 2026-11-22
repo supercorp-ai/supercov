@@ -428,19 +428,17 @@ fn bools_may_report(node: Node, source: &str) -> bool {
             .enumerate()
             .any(|(at, text)| texts[..at].contains(text));
         let compared = if op == "||" { "!=" } else { "==" };
-        let mut named = Vec::new();
-        for operand in &operands {
-            if operator_of(*operand, source) != Some(compared) {
-                continue;
-            }
-            let (left, right) = (field(*operand, "left"), field(*operand, "right"));
-            // Either side may be the constant.
-            for (name, constant) in [(left, right), (right, left)] {
-                if may_be_constant(constant) {
-                    named.push(plain(&source[name.byte_range()]));
-                }
-            }
-        }
+        // Either side of each comparison may be the constant.
+        let named = operands
+            .iter()
+            .filter(|operand| operator_of(**operand, source) == Some(compared))
+            .flat_map(|operand| {
+                let (left, right) = (field(*operand, "left"), field(*operand, "right"));
+                [(left, right), (right, left)]
+            })
+            .filter(|(_, constant)| may_be_constant(*constant))
+            .map(|(name, _)| plain(&source[name.byte_range()]))
+            .collect::<Vec<_>>();
         let compared_twice = named
             .iter()
             .enumerate()
@@ -1017,7 +1015,7 @@ mod tests {
 
     #[test]
     fn only_what_vet_may_report_is_vetted() {
-        let source = "package p\n\nimport \"sync/atomic\"\n\nfunc f(x, a, b int, n *int64) bool {\n\ty := x + 1\n\ty += int(atomic.AddInt64(n, 1))\n\ty -= 1\n\t_ = x != 1 && (x != 2)\n\t_ = a < b || a <= b\n\t_ = !(a < b) || y > 0\n\t_ = x != p.A && 1 != x\n\treturn x == f2() && x == y\n}\n";
+        let source = "package p\n\nimport \"sync/atomic\"\n\nfunc f(x, a, b int, n *int64) bool {\n\ty := x + 1\n\ty += int(atomic.AddInt64(n, 1))\n\ty -= 1\n\t_ = x != 1 && (x != 2)\n\t_ = a < b || a <= b\n\t_ = !(a < b) || y > 0\n\t_ = x != p.A && 1 != x\n\t_ = x != f2() && x != 3\n\t_ = !(x != 4 && x != 5)\n\t_ = y != a+f2() && y != 6\n\treturn x == f2() && x == y\n}\n";
         let vetted = |after: &str, operator: &str, replacement: &str| {
             let start = source.find(after).unwrap();
             let at = start + source[start..].find(operator).unwrap();
@@ -1027,6 +1025,11 @@ mod tests {
         assert!(vetted("x != 1 &&", "&&", "||"));
         assert!(vetted("a <= b", "<=", "<"));
         assert!(vetted("x != p.A", "&&", "||"));
+        // A chain inside a negation.
+        assert!(vetted("!(x != 4", "&&", "||"));
+        // What may not be constant is no constant.
+        assert!(!vetted("x != f2()", "&&", "||"));
+        assert!(!vetted("y != a+f2()", "&&", "||"));
         // Neither.
         assert!(!vetted("x != 1 &&", "!=", "=="));
         assert!(!vetted("!(a < b)", "<", "<="));
