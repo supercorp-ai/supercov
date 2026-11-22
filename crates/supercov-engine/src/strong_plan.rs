@@ -730,9 +730,15 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         .filter(|(test, _)| runnable[*test])
                         .map(|(test, reason)| Candidate { test, reason })
                         .collect::<Vec<_>>();
+                    // A test of the mutant's own file's test file first
+                    // (`JvmAnnotationsTest` for `JvmAnnotations.kt`): it
+                    // is the likeliest to kill it, and the first kill ends
+                    // the mutant's run. Then the fastest.
+                    let own = |test: &PlannedTest| !names_its_test_file(file, test);
                     candidates.sort_by(|a, b| {
                         let (ta, tb) = (&tests[a.test], &tests[b.test]);
-                        (ta.duration_ms.is_none(), ta.duration_ms, &ta.name).cmp(&(
+                        (own(ta), ta.duration_ms.is_none(), ta.duration_ms, &ta.name).cmp(&(
+                            own(tb),
                             tb.duration_ms.is_none(),
                             tb.duration_ms,
                             &tb.name,
@@ -759,6 +765,22 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     })
 }
 
+/// Whether `test`'s file is named after `file` (`a/Cart.kt` and
+/// `test/CartTest.kt`, `cart.test.ts`, `test_cart.py`): its file name
+/// without extension holds the source's, whatever the case.
+fn names_its_test_file(file: &str, test: &PlannedTest) -> bool {
+    let stem = |path: &str| {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        name.split('.').next().unwrap_or(name).to_ascii_lowercase()
+    };
+    let source = stem(file);
+    !source.is_empty()
+        && test
+            .file
+            .as_deref()
+            .is_some_and(|test_file| stem(test_file).contains(&source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,6 +790,30 @@ mod tests {
         LogicalVector, RuntimeSnapshot, ServerRecord,
     };
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+
+    #[test]
+    fn a_test_file_named_after_the_source_is_its_own() {
+        let test = |file: Option<&str>| PlannedTest {
+            id: "t".into(),
+            file: file.map(str::to_owned),
+            name: "t".into(),
+            title: None,
+            runner: "r".into(),
+            duration_ms: None,
+            span: None,
+            runnable: true,
+        };
+        let own = |file, test_file| names_its_test_file(file, &test(test_file));
+        assert!(own(
+            "src/jvm/JvmAnnotations.kt",
+            Some("test/jvm/JvmAnnotationsTest.kt")
+        ));
+        assert!(own("src/cart.ts", Some("test/cart.test.ts")));
+        assert!(own("pkg/cart.py", Some("tests/test_cart.py")));
+        assert!(!own("src/cart.ts", Some("test/checkout.test.ts")));
+        assert!(!own("src/cart.ts", None));
+        assert!(!own(".ts", Some("test/cart.test.ts")));
+    }
 
     /// A passed record of `role` that hit `hits`, under the id `id`.
     fn record(id: &str, role: &str, file: Option<&str>, hits: &[&str]) -> RawTestResult {
