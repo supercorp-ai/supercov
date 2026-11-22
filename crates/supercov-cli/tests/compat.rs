@@ -746,7 +746,7 @@ fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
         } else {
             let refused = strong.exits(2);
             assert!(
-                refused.contains("The strong pass runs tests under vitest and playwright")
+                refused.contains("The strong pass runs tests under vitest, playwright")
                     && refused.contains("ran under node:test")
                     && refused.contains("cannot run their mutants"),
                 "{refused}"

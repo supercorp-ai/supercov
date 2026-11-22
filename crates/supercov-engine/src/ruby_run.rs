@@ -1034,12 +1034,12 @@ mod tests {
 }
 
 /// The test runners whose tests the Ruby strong driver runs.
-pub const RUBY_STRONG_RUNNERS: [&str; 2] = ["rspec", "minitest"];
+pub const RUBY_STRONG_RUNNERS: [&str; 4] = ["rspec", "minitest", "test-unit", "cucumber"];
 
 /// Ruby's strong pass (`docs/design/mutation-drivers.md`): the plan's Ruby
 /// mutants written into their files behind switches, and the command run
 /// once with `supercov_strong.rb` loaded in place of the coverage runtime.
-/// When RSpec or Minitest is about to run the loaded suite, that runtime
+/// When the runner is about to run the loaded suite, that runtime
 /// runs the plan instead, one fork per mutant, and appends each verdict to
 /// the results. Mutants it cannot run are given their verdict here.
 pub fn run_strong_ruby(
@@ -1088,7 +1088,7 @@ pub fn run_strong_ruby(
             verdict(
                 id,
                 "error",
-                "none of its candidate tests ran under RSpec or Minitest",
+                "none of its candidate tests ran under RSpec, Minitest, test-unit or Cucumber",
             )?;
             continue;
         }

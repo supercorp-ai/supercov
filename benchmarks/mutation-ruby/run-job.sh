@@ -73,6 +73,24 @@ timeout "${MUTANT_TIMEOUT:-300}" bundle exec mutant run --usage opensource --int
 mutant_seconds=$(echo "$(seconds) - $start" | bc)
 cp .mutant/results/*.json.gz "$out/" 2>/dev/null || true
 
+# The measured run's overhead: the median of five runs each of the plain
+# suite, Supercov without the value probes, and Supercov with them.
+median() { sort -n | awk '{ value[NR] = $1 } END { print value[int((NR + 1) / 2)] }'; }
+time_runs() {
+  for _ in 1 2 3 4 5; do
+    local from; from=$(seconds)
+    "$@" > /dev/null 2>&1 || true
+    echo "$(seconds) - $from" | bc
+  done | median
+}
+plain_seconds=$(time_runs timeout 120 "${command[@]}")
+unprobed_seconds=$(time_runs timeout 120 "$SUPERCOV_BIN" -- "${command[@]}")
+probed_seconds=$(time_runs timeout 120 env SUPERCOV_MUTANTS=1 "$SUPERCOV_BIN" -- "${command[@]}")
+# Supercov's own split of one run each: the test command's share (`tests=`)
+# apart from setting up and publishing.
+timeout 120 "$SUPERCOV_BIN" -- "${command[@]}" > "$out/unprobed.log" 2>&1 || true
+SUPERCOV_MUTANTS=1 timeout 120 "$SUPERCOV_BIN" -- "${command[@]}" > "$out/probed.log" 2>&1 || true
+
 # Supercov: the measured run, then the strong pass.
 start=$(seconds)
 # With the mutants listed and their values recorded, as `supercov mutants`
@@ -85,5 +103,6 @@ strong_seconds=$(echo "$(seconds) - $start" | bc)
 
 "$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --json --limit 0 > "$out/join.json" 2> "$out/join.log" || true
 "$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --format jsonl --output "$out/join.jsonl" 2>> "$out/join.log" || true
-ruby "$here/summarize.rb" "$out/join.json" "$out/join.jsonl" "$project" "$mutant_seconds" "$measured_seconds" "$strong_seconds" "$jobs" > "$out/summary.json"
+ruby "$here/summarize.rb" "$out/join.json" "$out/join.jsonl" "$project" "$mutant_seconds" "$measured_seconds" "$strong_seconds" "$jobs" \
+  "$plain_seconds" "$unprobed_seconds" "$probed_seconds" "$out/unprobed.log" "$out/probed.log" > "$out/summary.json"
 cat "$out/summary.json"

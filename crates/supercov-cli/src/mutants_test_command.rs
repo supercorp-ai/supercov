@@ -333,11 +333,13 @@ fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), Str
         .into_iter()
         .collect::<Vec<_>>()
         .join(", ");
+    let (last, others) = STRONG_RUNNERS
+        .split_last()
+        .expect("the strong pass has runners");
+    let supported = format!("{} and {last}", others.join(", "));
     Err(format!(
-        "The strong pass runs tests under {}, and run {}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {} mutants` lists them with what the run's own tests tell of each.",
-        STRONG_RUNNERS.join(" and "),
-        run.id,
-        run.id,
+        "The strong pass runs tests under {supported}, and run {}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {} mutants` lists them with what the run's own tests tell of each.",
+        run.id, run.id,
     ))
 }
 

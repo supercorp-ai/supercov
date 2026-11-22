@@ -78,6 +78,20 @@ function query(args, environment, cwd = project) {
 }
 
 
+// The strong pass on the latest run: no mutant in error, and `killed` killed
+// by `killer`, the runner's own id for the test.
+function assertStrongPass(runner, killed, killer, environment) {
+  const ran = supercov(['runs', 'latest', 'mutants', 'test', '--json'], { ...environment, SUPERCOV_STRONG_JOBS: '2' });
+  assert.equal(ran.status, 0, `${runner} strong pass\n${ran.stdout}\n${ran.stderr}`);
+  const reply = JSON.parse(ran.stdout);
+  assert.equal(reply.summary.error, 0, `${runner}: ${ran.stdout}\n${ran.stderr}`);
+  assert.ok(reply.summary.killed > 0 && reply.summary.survived > 0, `${runner}: ${ran.stdout}`);
+  const listed = query(['runs', 'latest', 'mutants', '--limit', '0'], environment);
+  const mutant = listed.mutants.find((each) => each.id === killed);
+  assert.equal(mutant?.strong?.status, 'killed', `${runner}: ${JSON.stringify(mutant)}`);
+  assert.equal(mutant.strong.killedBy, killer, `${runner}: ${JSON.stringify(mutant)}`);
+}
+
 function assertStdlibOnlyTotals(summary) {
   // Ruby 3.3 measures through Coverage alone: lines, methods and stdlib
   // branches are exact, probe-driven obligations are declared unmeasured.
@@ -372,6 +386,17 @@ try {
   assert.match(JSON.stringify(negation), /UnitStyleTest#test_negation/, 'test-unit identity reaches the line');
   const testUnitFile = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
   assert.doesNotMatch(JSON.stringify(testUnitFile), /ruby-runner-adapter-failed/, 'the test-unit adapter installed completely');
+  // test-unit required on the command line loads before Supercov's runtime
+  // (a `-r` there comes before RUBYOPT's), as Rake's test task does with
+  // `-rhelper`: its adapter installs anyway, and its autorun, which Ruby
+  // then calls after Supercov's own `at_exit`, still writes its evidence.
+  const preloaded = supercov(['--', 'ruby', '-rtest/unit', '-Itest', 'test/unit_style_test.rb'], environment);
+  assert.equal(preloaded.status, 0, `${preloaded.stdout}\n${preloaded.stderr}`);
+  assert.doesNotMatch(preloaded.stdout, /IOError/, preloaded.stdout);
+  assert.match(preloaded.stderr, /2 test\(s\) across 1 source file\(s\)/, preloaded.stderr);
+  if (probes) {
+    assertStrongPass('test-unit', 'lib/shapes.rb:38:5-38:11:String:removed', 'UnitStyleTest#test_negation', environment);
+  }
 
   // Thread-parallel Minitest: probes stay per test, stdlib deltas that
   // overlapped go to the run and the limitation says so.
@@ -388,6 +413,9 @@ try {
   assert.match(cucumberRunners.stdout, /cucumber\s+2 test\(s\)/);
   const countdown = query(['runs', 'latest', 'line', 'lib/shapes.rb:99'], environment);
   assert.match(JSON.stringify(countdown), /features\/shapes\.feature:7/, 'Cucumber scenario identity reaches the line');
+  if (probes) {
+    assertStrongPass('cucumber', 'lib/shapes.rb:49:10-49:15:NamedValue:nil', 'features/shapes.feature:2', environment);
+  }
 
   // One failing test per runner, reported as one. Every leg above passes, so
   // a runner whose failure path was broken looked fine: the test-unit

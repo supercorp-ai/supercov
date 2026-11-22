@@ -528,7 +528,8 @@ values the assertion checks.
 
 `supercov mutants` lists a Ruby run's mutants as the mutant gem (0.17.1, its
 light operators) makes them for every method, and `supercov mutants test`
-runs them under RSpec and Minitest, one fork of the loaded suite per mutant.
+runs them under RSpec, Minitest, test-unit and Cucumber, one fork of the
+loaded suite per mutant.
 `--stryker` also reads mutant's session results (`.mutant/results`) and joins
 them by the method each mutation makes. See `docs/design/ruby-mutation.md`.
 

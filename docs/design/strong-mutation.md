@@ -550,6 +550,7 @@ by this pass: a mutant no Playwright test kills is then an `error`, never a
 ## Not yet
 
 - Jest, Mocha and node:test drivers (Vitest and Playwright first). Ruby's
-  RSpec and Minitest driver is described in `ruby-mutation.md`.
+  RSpec, Minitest, test-unit and Cucumber driver is described in
+  `ruby-mutation.md`.
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.

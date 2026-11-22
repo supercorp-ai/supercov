@@ -30,20 +30,26 @@ enumerates the same set without running mutant (`ruby_mutants/`):
   outside a loop or block, `a || (b || c)`, and a left operand that binds
   more loosely than its operator (`(a + b) * c` prints as `a + b * c`), a
   regexp literal in a condition (a match against `$_` once parsed), and
-  `(a || b) && c` anywhere but a statement (Unparser writes it with `and`).
-  A call by a local variable's name is written with parentheses (`rule()`).
+  `(a || b) && c` anywhere but a statement (Unparser writes it with `and`),
+  and a pin of anything but a variable or parentheses (`^nil`). A call by a
+  local variable's name is written with parentheses (`rule()`). Floats are
+  equal as Ruby holds them equal, so `-0.0` made `0.0` is no change.
 - A regexp's body is parsed as `regexp_parser` parses it (`regexp.rs`) and
   mutated as mutant's regexp mutators do: a quantifier removed or `*` made
   `+`, `\d` and `\D` (and the other character types, `\b`, `^`, `$`)
   swapped, an alternative removed, a capturing group made passive or a named
-  one renamed `_name`. A pattern with a conditional or a set intersection is
-  not read, and gets no body mutations.
+  one renamed `_name`. An interval followed by `?` or `+` is two
+  quantifiers, as Ruby reads it (`a{2}?` is `(?:a{2})?`), each removed
+  apart. A mutation that leaves a back reference or subexpression call
+  without its group (`(a)\1` made `(?:a)\1`) is not a regexp Ruby parses,
+  and is dropped. A pattern with a conditional or a set intersection is not
+  read, and gets no body mutations.
 
 `scripts/mutant-parity.rb` prints mutant's own mutants of the fixtures in
 `crates/supercov-engine/tests/fixtures/mutant-parity` and writes the goldens
 (`FILE.mutant.json`); the engine's tests compare node by node: each method's
 tree, and each mutant's located node and replacement, in mutant's order
-(1,118 mutants on the fixtures, every one equal; the tests also take a
+(3,835 mutants on the fixtures, every one equal; the tests also take a
 project's files and goldens from `MUTANT_PARITY_FIXTURES`).
 
 ### Ids
@@ -63,17 +69,53 @@ start and a hash of the whole). Two mutants that would share an id get `#2`,
 
 Reach is read from the innermost statement and method points around the
 mutant, as for every language. A run measured with `SUPERCOV_MUTANTS=1`
-(what `supercov mutants` asks for) also places an infection probe on every
-binary operator's receiver: `$__supercov.bo(k, (a)) < b`. The receiver
-stands in as an `Operand`, whose operator method computes the original
-value and, from the same operands, each of mutant's mutants of that operator:
-another operator (`==`, `eql?`, `equal?` for `<`), the left or the right
-operand alone, `!a.eql?(b)` for `!=`. Each is recorded per test as `same`,
-`differs` or `unknown` at `file:L:C-EL:EC#<kind>`; another operator is
-computed only where both operands are plain values (nil, booleans, integers,
-finite non-zero floats, symbols, strings, rationals), where it cannot run
-code with effects. Every other mutant is `unknown` once reached: the plan
-takes every test that reached it.
+(what `supercov mutants` asks for) also places value probes where mutant
+replaces an expression with one a probe can compute beside the original.
+Each records per test `same`, `differs` or `unknown` at
+`file:L:C-EL:EC#<kind>`, and a mutant is linked to a probe only where the
+probe records its kind on every evaluation: no record then means the
+expression never ran.
+
+- A binary operator's receiver: `$__supercov.bo(k, (a)) < b`. The receiver
+  stands in as an `Operand`, whose operator method computes the original
+  value and, from the same operands, another operator (`==`, `eql?`,
+  `equal?` for `<`), `!a.eql?(b)` for `!=`, the left or right operand alone,
+  and `true`, `false` or `nil` in the operation's place.
+- A method call that mutant replaces: another method from mutant's table
+  (`any?` for `empty?`, `lstrip` and `rstrip` for `strip`), the receiver
+  alone, `true` and `false` for a predicate, and `nil`:
+  `$__supercov.mc(k, (s)).strip`. A plain receiver stands in as a `Call`,
+  whose `method_missing` makes the call on it and computes the
+  replacements; anything else is passed on as it is, and its kinds are
+  `unknown`. A call with a block, a splat, keywords, `&.`, a `self`
+  receiver, a method with an effect (`!` methods, `push`, `pop`, `send`,
+  `sample`) or a name `BasicObject` answers itself is not probed, nor is
+  any call in a file that activates a refinement (`using`), which a call
+  made from the runtime would not see.
+- An `if`, `unless`, `elsif` or ternary predicate that reads a variable (a
+  local, instance or global variable, or `self`):
+  `if $__supercov.cv(k, (x))`, against mutant's `true` and `false` in its
+  place.
+
+A value is compared only where both sides are plain (nil, booleans,
+integers, finite non-zero floats, symbols, strings, rationals), and a
+replacement is computed only from methods Ruby defines itself (a C method or
+one in `<internal:`), on plain values, so computing it has no effect. In a
+predicate (of `if`, `unless`, `while`, `until` or a ternary) only the
+values' truth is compared, whatever they are. A mutant that leaves out an
+operand, a receiver or an argument is linked only where what it leaves out
+is a variable read or a literal without interpolation: anything else could
+have done something beside giving its value. An original that raises
+records `unknown`. `String#<<` appends to its receiver, so its kinds are
+`unknown`.
+
+`=~`, `!~` and `===` are not probed: a regexp's match sets `$~` in the frame
+that calls it, which would be the probe's. mutant's mutants of `return`
+(`return x` made `x`, or `nil`) change where the method returns, not a
+value, and are left to the strong pass.
+
+Every other mutant is `unknown` once reached: the plan takes every test
+that reached it.
 
 ## Strong mutation
 
@@ -111,10 +153,11 @@ hit limit raises `Supercov::Strong::MutantTimeout`, an `Exception` that a
 `rescue => e` does not catch, noting the mutant in the timeouts file. It
 reads `SUPERCOV_ACTIVE_MUTANT` at start.
 
-When the suite has loaded and RSpec (`Runner#run_specs`) or Minitest
-(`Minitest.run`) is about to run it, it runs the plan instead, as mutant
-does: one `fork` of the loaded process per mutant, as many at once as
-`SUPERCOV_STRONG_JOBS` (default: the machine's CPUs).
+When the suite has loaded and RSpec (`Runner#run_specs`), Minitest
+(`Minitest.run`), test-unit (`AutoRunner#run`) or Cucumber (`Runtime#run!`,
+once its step definitions have loaded) is about to run it, it runs the plan
+instead, as mutant does: one `fork` of the loaded process per mutant, as
+many at once as `SUPERCOV_STRONG_JOBS` (default: the machine's CPUs).
 
 - A baseline fork runs every candidate test without a mutant first: a test
   that fails there is no kill, and its duration sets each mutant's time
@@ -128,7 +171,13 @@ does: one `fork` of the loaded process per mutant, as many at once as
   itself: 35 of dotenv's 195 examples failed without a mutant, because
   nothing had loaded `StringIO` as RSpec's formatters do. Minitest runs each
   test by class and method, after its seed and plugins are set up as
-  `Minitest.run` sets them.
+  `Minitest.run` sets them. test-unit runs the chosen tests through its own
+  mediator, a suite per class so the class's `startup` and `shutdown` run
+  around them; a data-driven test runs every data set under its one id.
+  Cucumber compiles the feature files through its own filters (tags, names,
+  lines, hooks, the `BeforeAll` hooks) with one more that passes on only the
+  chosen scenarios, into its own test runner; a scenario's id is its
+  location (`features/a.feature:3`).
 - A kill is confirmed: the same tests up to the failing one run again
   without the mutant. Where they fail that way too, the candidates' files
   run whole with and without the mutant, and only a test that fails only
@@ -156,6 +205,21 @@ then Supercov's measured run and strong pass, and joins the two:
 `supercov runs latest mutants --stryker .mutant/results` reads mutant's
 session results and matches each mutation to Supercov's mutant by the method
 it makes. `summarize.rb` counts every disagreement.
+
+mutant has no test-unit or Cucumber integration. For those,
+`benchmarks/mutation-ruby/by-hand-job.sh` runs Supercov's strong pass and
+then `by-hand.rb`, which runs every mutant the pass ran again on its own:
+the whole suite, in a fresh process, with only that mutant switched on
+(`SUPERCOV_STRONG_SWITCHES_ONLY` and `SUPERCOV_ACTIVE_MUTANT`), killed when
+the suite fails. Nothing of the pass's runner is used: no candidate tests,
+no forks, no stopping at the first failure. That strong pass runs on a run
+measured without the value probes, so no weak verdict decides a mutant and
+every mutant a test reached is run both ways; the weak verdicts come from a
+second run with the probes, and one of not infected for a mutant the suite
+killed by hand counts as a violation.
+
+Both jobs also time five runs each of the plain suite, Supercov without the
+value probes and Supercov with them, and take the medians.
 
 ### Results
 
@@ -188,11 +252,17 @@ Disagreements found on the way, each applied by hand and fixed:
   appends to its receiver, which the value comparison did not see.
 - A mutant whose test calls `exit` ends the test process: mutant counts it
   only with `process_abort` on.
+- Running first the tests that had killed a mutant nearby, to stop sooner,
+  made 9 of dotenv's mutants kills that mutant calls survivors: a test that
+  fails on its own with the mutant passes after the tests before it. The
+  pass keeps the suite's order.
+- ostruct's suite runs test-unit through `ruby -rhelper` (as Rake's test
+  task does), which loads test-unit before Supercov's runtime: its tests ran
+  after the runtime had closed its evidence, and a child started with
+  `--disable-gems` found no `RbConfig`. Both are fixed in the runtime.
 
 ## Not yet
 
-- Two mutant mutations of a rescue clause's body added to a statement list
-  (dotenv's `parse`) that Unparser does not print back, and Supercov keeps.
-- test-unit and Cucumber in the strong pass (their runs list mutants and
-  weak results).
-- Infection probes beyond binary operators.
+- The test-unit and Cucumber drivers have run under test-unit 3.7 and
+  Cucumber 12 only. The Cucumber one uses cucumber-core's filters and event
+  bus, which releases before 3 do not have.
