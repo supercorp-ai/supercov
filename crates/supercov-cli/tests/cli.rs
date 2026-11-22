@@ -25878,6 +25878,7 @@ fn ruby_children_without_rubygems_keep_their_error_output_clean() {
 /// A Ruby run measured for mutants records, per test, whether each mutant
 /// a value probe computes would have given the original's value: a call's
 /// other method, its receiver alone, a condition's truth.
+#[cfg(unix)]
 #[test]
 fn ruby_value_probes_tell_which_mutants_no_test_infects() {
     let Some(ruby) = ruby() else {
@@ -25929,6 +25930,7 @@ fn ruby_value_probes_tell_which_mutants_no_test_infects() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn ruby_mutants_are_mutant_gems_and_the_strong_pass_runs_them_in_minitest() {
     let Some(ruby) = ruby() else {

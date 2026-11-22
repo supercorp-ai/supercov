@@ -2916,6 +2916,7 @@ mod tests {
     }
 
     /// The bytes a pass left in the project's `.supercov`.
+    #[cfg(unix)]
     fn left_behind(root: &Path) -> u64 {
         fn size(path: &Path) -> u64 {
             std::fs::read_dir(path).map_or(0, |entries| {
