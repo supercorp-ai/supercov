@@ -137,14 +137,14 @@ test("each mutant runs against its candidates, file by file, and the first failu
 // never need the cheap one that kills nothing.
 test("a mutant runs the file likeliest to kill it first, as the pass learns", async () => {
     const tests = [test_("a1", "t/a.test.js", 1), test_("b1", "t/b.test.js", 50)];
-    const mutants = ["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => ({ id, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }, { test: 1, reason: "infected" }] }));
+    const mutants = Array.from({ length: 20 }, (_, n) => ({ id: `m${n}`, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }, { test: 1, reason: "infected" }] }));
     const listed = mutants.map(({ id }) => ({ id }));
     const rules = Object.fromEntries(listed.map((_, index) => [`src/a.js#${index}`, { b1: "fail" }]));
     const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/a.test.js": ["a1"], "t/b.test.js": ["b1"] }, workers: 1 });
     assert.ok(Object.values(verdicts).every((verdict) => verdict.status === "killed"), JSON.stringify(verdicts));
-    // Two baselines; the first two mutants (under way at once) run both
-    // files, the four after them the killing one alone.
-    assert.equal(summary.jobs, 2 + 2 * 2 + 4, JSON.stringify(summary));
+    // Two baselines; the first eight mutants (under way at once) run both
+    // files, the twelve after them the killing one alone.
+    assert.equal(summary.jobs, 2 + 8 * 2 + 12, JSON.stringify(summary));
 });
 
 // Ctrl-C reaches the driver, not its jobs, which run in process groups of

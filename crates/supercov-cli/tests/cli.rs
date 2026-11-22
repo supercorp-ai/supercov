@@ -22027,7 +22027,12 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
     // tax.js's mutants alone; cart.js's keep their verdicts, as no cart test
     // ran tax.js. (`runs <id> mutants test` tests the run it names whole.)
     project.edit("src/tax.js", "sum * 0.2", "sum / 5");
-    let kept = project.supercov(&["mutants"]).succeeds();
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
     let to_run = project
         .supercov(&[
             "runs",
@@ -22041,13 +22046,14 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         ])
         .json()["summary"]["toRun"]
         .clone();
+    let kept = project.supercov(&["mutants"]).succeeds();
     assert!(
         kept.contains(&format!("verdict(s) kept from run {run}")),
         "{kept}"
     );
     assert!(
         kept.contains(&format!("  ran {to_run} mutant(s)")),
-        "{kept}"
+        "{to_run}: {kept}"
     );
     // As a pull request's comment.
     let markdown = project
@@ -24115,12 +24121,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1382",
+            "fs.write#mutants_test_command.rs:1395",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1382"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1395"),
         "{}",
         unwritten.stderr()
     );
@@ -24365,7 +24371,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:283")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:287")],
         )
         .exits(2);
     assert!(

@@ -409,7 +409,15 @@
             "testEnvironment": "node",
             "roots": [
               "<rootDir>/test/unit"
-            ]
+            ],
+            "transform": {
+              "\\.js$": [
+                "babel-jest",
+                {
+                  "envName": "commonjsNode"
+                }
+              ]
+            }
           }
         },
         "coverageAnalysis": "perTest",
@@ -418,7 +426,7 @@
           ".local"
         ]
       },
-      "note": "Jest 28: its configuration is read through jest-config's own build (no readInitialOptions before 29.3)"
+      "note": "Jest 28: its configuration is read through jest-config's own build (no readInitialOptions before 29.3). StrykerJS's Jest runner sets BABEL_ENV=test, so its transform is told uuid's Babel environment"
     },
     {
       "name": "luxon-duration",

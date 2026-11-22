@@ -667,18 +667,33 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         const begun = Date.now();
         let ran = 0;
         const left = [...groups];
-        while (left.length > 0) {
-            // Ties go to the cheapest, as the groups are sorted by cost.
-            const at = left.reduce((best, group, index) => (promise(group) > promise(left[best]) ? index : best), 0);
-            const [group] = left.splice(at, 1);
-            const verdict = await tryFile(mutant, group);
-            ran += verdict.tests;
-            const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
-            seen.ran += 1;
-            if (verdict.status === "killed" || verdict.status === "timeout")
-                seen.kills += 1;
-            killsOf.set(group.file, seen);
-            if (verdict.status !== "alive") {
+        // Its first file alone, as most killed mutants die in it; then the
+        // rest in batches of 4, 16, ... side by side, the likeliest first: a
+        // survivor needs them all, and one after another its files were the
+        // pass's longest wait (luxon: a module-level mutant's 58 test files).
+        for (let size = 1; left.length > 0; size *= 4) {
+            const batch = [];
+            while (batch.length < size && left.length > 0) {
+                // Ties go to the cheapest, as the groups are sorted by cost.
+                const at = left.reduce((best, group, index) => (promise(group) > promise(left[best]) ? index : best), 0);
+                batch.push(...left.splice(at, 1));
+            }
+            const verdicts = await Promise.all(batch.map(async (group) => {
+                const verdict = await tryFile(mutant, group);
+                const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
+                seen.ran += 1;
+                if (verdict.status === "killed" || verdict.status === "timeout")
+                    seen.kills += 1;
+                killsOf.set(group.file, seen);
+                return verdict;
+            }));
+            ran += verdicts.reduce((sum, verdict) => sum + verdict.tests, 0);
+            // A kill decides it, then a timeout, then a file that does not
+            // finish without it.
+            const verdict = ["killed", "timeout", "error"]
+                .map((status) => verdicts.find((one) => one.status === status))
+                .find(Boolean);
+            if (verdict) {
                 write({ id: mutant.id, status: verdict.status, ...(verdict.killedBy ? { killedBy: verdict.killedBy } : {}), tests: ran, durationMs: Date.now() - begun, ...(verdict.reason ? { reason: verdict.reason } : {}) });
                 return;
             }
@@ -744,11 +759,12 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         pending.push([mutant, groups, elsewhere]);
     }
     // Every file's baseline runs the tests of all its mutants: none starts
-    // before all are known. Twice as many mutants as workers are under way at
-    // once, each a job at a time, which keeps every worker busy; a mutant
-    // that starts later picks its first file from what the pass learned.
+    // before all are known. Eight times as many mutants as workers are under
+    // way at once, enough to keep every worker busy while some wait on a
+    // file's baseline; a mutant that starts later picks its first file from
+    // what the pass learned.
     const queue = pending.values();
-    await Promise.all(Array.from({ length: Math.min(pending.length, 2 * workers) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(pending.length, 8 * workers) }, async () => {
         for (const task of queue)
             await runMutant(...task);
     }));
