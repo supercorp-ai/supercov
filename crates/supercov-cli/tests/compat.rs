@@ -649,8 +649,7 @@ fn oldest_and_newest_javascript() -> Vec<&'static Recording> {
 /// answers with the list beside the run, and its shards still merge, the
 /// merge listing what the whole suite does. A strong pass then runs and
 /// saves a verdict for each mutant into the run, or is refused with the
-/// reason: the strong pass drives Vitest and Playwright, and these fixtures'
-/// tests ran under `node:test`.
+/// reason where no driver runs the fixtures' runner.
 #[test]
 fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
     let summary = |installed: &Installed, id: &str| {
@@ -763,10 +762,16 @@ fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
             .find(|word| word.starts_with("run_"))
             .unwrap_or_else(|| panic!("no merged run named\n{merged}"))
             .to_owned();
+        // The strong verdicts are the whole run's, which the merge of its
+        // shards does not have: everything else is the same.
+        let without_score = |mut summary: Value| {
+            summary["mutationScore"] = Value::Null;
+            summary
+        };
         assert_eq!(
             summary(&installed, &merged_id),
-            summary(&installed, &id),
-            "the shards merged list the whole suite's mutants, with its verdicts"
+            without_score(summary(&installed, &id)),
+            "the shards merged list the whole suite's mutants"
         );
     });
 }
