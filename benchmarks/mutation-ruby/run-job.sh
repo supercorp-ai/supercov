@@ -54,6 +54,10 @@ else
   printf 'require "mutant"\nrequire "mutant/integration/minitest"\nMinitest::Test.cover("%s")\n' "$subjects" > "$work/shim/every_test.rb"
   requires=("$work/shim/every_test.rb" "${requires[@]}")
 fi
+# A mutant whose fork exits before its tests end (a test that calls `exit`)
+# fails the run: mutant counts that only with `process_abort`, which Supercov
+# always does.
+[ -e .mutant.yml ] || printf 'coverage_criteria:\n  process_abort: true\n' > .mutant.yml
 bundle config set --local path "$work/bundle" >/dev/null
 bundle install --jobs 8 --quiet
 

@@ -126,7 +126,21 @@ fn place(source: &[u8], mutant: &RubyMutant) -> Result<(usize, usize, Shape, Str
     loop {
         let (original, mutated) = &pairs[index];
         let mutated = mutated.as_ref().expect("an ancestor of the located node");
-        if let Some(shape) = placeable(original)
+        // `self` as a receiver calls private methods only written as
+        // `self.`: in a switch, or switched from, it is an expression, so the
+        // call around it takes the switch.
+        let private_receiver = (mutated.ty == "self" || original.ty == "self")
+            && index > 0
+            && matches!(
+                pairs[index - 1].0.ty,
+                "send" | "csend" | "op_asgn" | "or_asgn" | "and_asgn" | "index" | "indexasgn"
+            )
+            && pairs[index - 1]
+                .0
+                .node(0)
+                .is_some_and(|receiver| Rc::ptr_eq(receiver, original));
+        if !private_receiver
+            && let Some(shape) = placeable(original)
             && let Some(copy) = print::one_line(source, mutated)
         {
             let (start, end) = original.span.expect("placeable");
