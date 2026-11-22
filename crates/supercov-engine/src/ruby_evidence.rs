@@ -2150,6 +2150,45 @@ pub(crate) mod tests {
             let error = format!("{:?}", read(&records).unwrap_err());
             assert!(error.contains(reason), "{error}");
         }
+        // Values alone, outside any test, are the run's background.
+        let mut next = 0;
+        let obligations = crate::ruby_instrumenter::build_ruby_obligations_with(
+            "a.rb", b"x = 1\n", &mut next, true,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.7.a.mmap"),
+            transport(&[
+                head[0].clone(),
+                head[1].clone(),
+                head[2].clone(),
+                json!({"t":"cmps","ctx":0,"n":[0],"o":[2]}),
+                json!({"t":"outcome","worker":"main","test":"T#test_a","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"minitest"}),
+                json!({"t":"exit","at":9}),
+            ]),
+        )
+        .unwrap();
+        let run = build_ruby_frontend_run(
+            &obligations.manifest,
+            &directory,
+            "run-1",
+            "now",
+            0,
+            Path::new(""),
+        )
+        .unwrap();
+        assert!(
+            run.request
+                .raw_results
+                .iter()
+                .any(|raw| raw.test == "Ruby load and background execution"),
+            "{:?}",
+            run.request
+                .raw_results
+                .iter()
+                .map(|raw| &raw.test)
+                .collect::<Vec<_>>()
+        );
         fs::remove_dir_all(&directory).unwrap();
     }
 

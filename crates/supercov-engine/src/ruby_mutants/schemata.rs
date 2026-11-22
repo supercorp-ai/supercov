@@ -123,8 +123,8 @@ pub(super) fn place(
         // `self` as a receiver calls private methods only written as
         // `self.`: in a switch, or switched from, it is an expression, so the
         // call around it takes the switch.
-        let private_receiver = (mutated.ty == "self" || original.ty == "self")
-            && index > 0
+        let private_receiver = index > 0
+            && (mutated.ty == "self" || original.ty == "self")
             && matches!(
                 pairs[index - 1].0.ty,
                 "send" | "csend" | "op_asgn" | "or_asgn" | "and_asgn" | "index" | "indexasgn"

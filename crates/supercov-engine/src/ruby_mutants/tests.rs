@@ -1268,6 +1268,14 @@ fn a_switch_goes_around_a_self_receiver_and_past_a_copy_that_does_not_print() {
     let (start, end, _, copy) = schemata::place(source, &mutant(def, receiver_replaced)).unwrap();
     assert_eq!(&source[start..end], b"self.a");
     assert_eq!(copy, "nil.a");
+    // `self` made an argument is no receiver: the switch goes around it.
+    let source2 = b"def m\n  a.b(c)\nend\n";
+    let def2 = &defs(source2)[0];
+    let call2 = def2.node(2).unwrap();
+    let argument_self = with(def2, 2, with(call2, 2, N::new("self", Vec::new())));
+    let (start, end, _, copy) = schemata::place(source2, &mutant(def2, argument_self)).unwrap();
+    assert_eq!(&source2[start..end], b"c");
+    assert_eq!(copy, "self");
     // A replacement no printer knows: no switch.
     let unprintable = with(def, 2, with(call, 0, N::new("unknown", Vec::new())));
     assert_eq!(
