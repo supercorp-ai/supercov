@@ -506,6 +506,7 @@ fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reas
         "non-primitive-operands",
         "operands the probe could not read",
     )
+}
 
 /// PIT's mutators (`jvm_mutants`), decided by their value probes where the
 /// run placed one, and by reach otherwise. `None` for another mutator.

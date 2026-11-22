@@ -2847,6 +2847,7 @@ mod tests {
             command: Vec::new(),
             plan: plan_path.clone(),
             results: results.clone(),
+            workers: 1,
         };
         let found = verdicts(&request);
         let status = |descriptor: &str| found[&format!("{file}:{descriptor}")]["status"].clone();
@@ -3105,6 +3106,7 @@ mod tests {
             command: Vec::new(),
             plan: iter_plan_path.clone(),
             results: iter_results.clone(),
+            workers: 1,
         });
         assert!(iter_switched > 0);
         assert!(!iter_found.is_empty());

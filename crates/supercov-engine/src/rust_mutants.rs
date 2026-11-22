@@ -197,7 +197,6 @@ pub(crate) fn list(
                 untestable: None,
                 is_static: false,
                 unplaceable: None,
-                effects: false,
             };
             // The value probe at the mutated code, where the run placed one.
             let probed = |range: TextRange, kind: &str| {
