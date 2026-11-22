@@ -276,7 +276,8 @@ impl Printer<'_> {
         if located.ty == "if" && located.has(syntax::ELSIF) {
             // An `elsif` is its `if`'s else branch.
             return match replacement.ty {
-                "if" if !replacement.has(syntax::TERNARY) || replacement.span.is_none() => {
+                // Any `if` (a ternary too) is written as the `elsif`.
+                "if" => {
                     let condition = self.expression(replacement.node(0)?)?;
                     let then_branch = self.statements(replacement.child(1))?;
                     match replacement.child(2) {
@@ -644,7 +645,8 @@ impl Printer<'_> {
                     None => true,
                     Some(_) => match self.slice(node) {
                         Some(text) => {
-                            node.children.len() == 2 || text.ends_with(')') || text.ends_with(']')
+                            // (`a.b [1]` is a command call, not atomic.)
+                            node.children.len() == 2 || text.ends_with(')')
                         }
                         None => false,
                     },
@@ -921,7 +923,9 @@ impl Printer<'_> {
                 _ => return None,
             },
             "rational" => match node.child(0) {
-                Child::Raw(text) => rational(text)?,
+                // Written in decimals, as every rational literal and its
+                // mutants are.
+                Child::Raw(text) => rational(text).expect("a decimal rational"),
                 _ => return None,
             },
             "complex" => match node.child(0) {
@@ -929,7 +933,8 @@ impl Printer<'_> {
                     let inner = text.trim_start_matches('(').trim_end_matches(')');
                     let imaginary = inner
                         .strip_prefix("0+")
-                        .or_else(|| inner.strip_prefix('0'))?;
+                        .or_else(|| inner.strip_prefix('0'))
+                        .expect("`(0+2i)` or `(0-2i)`");
                     imaginary.to_owned()
                 }
                 _ => return None,
@@ -1109,7 +1114,7 @@ impl Printer<'_> {
                     {
                         format!(
                             "{} ? {} : {}",
-                            self.operand(node.node(0)?)?,
+                            self.operand(node.node(0).expect("a condition"))?,
                             self.operand(then_branch)?,
                             self.operand(else_branch)?
                         )
@@ -1209,7 +1214,7 @@ impl Printer<'_> {
                     })
                     && !node.child(0).is_nil();
                 if modifier {
-                    let resbody = node.node(1)?;
+                    let resbody = node.node(1).expect("a modifier's clause");
                     format!(
                         "{} rescue {}",
                         self.operand(node.node(0)?)?,
@@ -1224,7 +1229,6 @@ impl Printer<'_> {
                     format!("begin; {}; end", self.rescue_body(node)?)
                 }
             }
-            "ensure" => format!("begin; {}; end", self.ensure_body(node)?),
             "return" | "next" | "break" => {
                 if children.is_empty() {
                     node.ty.to_owned()

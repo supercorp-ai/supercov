@@ -361,14 +361,13 @@ impl Parser<'_> {
                 // A run of plain characters, its last one apart where a
                 // quantifier follows it.
                 let start = self.at;
-                while let Some(next) = self.peek() {
-                    if "()[]\\^$.|*+?".contains(next)
-                        || (next == '{' && self.quantifier_length() > 0)
-                    {
-                        break;
-                    }
-                    self.at += 1;
-                }
+                self.at = (start..self.chars.len())
+                    .find(|index| {
+                        let next = self.chars[*index];
+                        "()[]\\^$.|*+?".contains(next)
+                            || (next == '{' && self.interval_length(*index) > 0)
+                    })
+                    .unwrap_or(self.chars.len());
                 if self.at == start {
                     // A `{` that starts no quantifier.
                     self.at += 1;
@@ -634,17 +633,19 @@ fn quantifiers(quantifier: &str) -> Vec<&str> {
 fn mutate(expression: &Expr) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::new();
     let emit = |each: Expr, out: &mut Vec<Expr>| {
-        if each != *expression && !out.contains(&each) {
+        // (No mutation is its input: each changes it.)
+        if !out.contains(&each) {
             out.push(each);
         }
     };
     match expression.kind {
         Kind::Alternation => {
-            for index in 0..expression.children.len() {
+            // Each alternative left out (an alternation has two at least).
+            (0..expression.children.len()).for_each(|index| {
                 let mut copy = expression.clone();
                 copy.children.remove(index);
                 emit(copy, &mut out);
-            }
+            });
         }
         Kind::Capture if !expression.children.is_empty() => {
             let mut copy = expression.clone();
@@ -779,6 +780,7 @@ mod tests {
             "a*(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10",
             "{2}",
             "\\p{Alpha",
+            "\\p{",
             "(?<>x)",
             "[]a]",
             "[a&b]",

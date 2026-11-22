@@ -1006,9 +1006,9 @@ fn binary(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
     }
     let inverse = if input.ty == "and" { "or" } else { "and" };
     out.emit(input.with_type(inverse));
-    mutate_child(out, 0, parent, |mutation| {
-        !matches!(mutation.ty, "irange" | "erange") || !mutation.child(1).is_nil()
-    });
+    // mutant refuses a left operand made an endless range (`a..`), which
+    // only parentheses put there, and they stay: every mutation is kept.
+    mutate_child(out, 0, parent, |_| true);
     mutate_child(out, 1, parent, |_| true);
 }
 
@@ -1560,9 +1560,7 @@ fn rescue(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
         }
     }
     if rescues.len() > 1 {
-        for index in &rescues {
-            out.delete(*index);
-        }
+        rescues.iter().for_each(|index| out.delete(*index));
     }
     if standalone {
         rescues

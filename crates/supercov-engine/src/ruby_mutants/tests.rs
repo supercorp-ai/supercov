@@ -1138,6 +1138,7 @@ fn ruby_mutants_unparser_cannot_print_back_are_refused() {
         "(def :m (args) (defs (lvar :x) :n (args) nil))".into(),
         "(def :m (args) (block (send nil :a) (args (optarg :x (lvar :y))) nil))".into(),
         "(def :m (args) (block (lvar :y) (args) nil))".into(),
+        "(def :m (args) (def :n (args (optarg :x (lvar :y))) nil))".into(),
     ];
     for text in &refused {
         assert!(!validates(&tree(text)), "{text}");

@@ -524,6 +524,17 @@ fn misplaced(node: &N, parent: Option<&N>) -> bool {
     {
         return true;
     }
+    // Nor a regexp part but text or `#{...}` (`/a#@b/`, or `@b` made
+    // `nil`): it prints `#{@b}`, a statement once parsed.
+    if node.ty == "regexp"
+        && node
+            .children
+            .iter()
+            .filter_map(Child::node)
+            .any(|part| !matches!(part.ty, "str" | "begin" | "regopt"))
+    {
+        return true;
+    }
     // Unparser does not print an interpolation of several statements back.
     if matches!(node.ty, "dstr" | "dsym" | "xstr" | "regexp")
         && node
@@ -1000,7 +1011,7 @@ fn method_of(code: &[u8]) -> Option<Rc<N>> {
     }
     let mut finder = Methods::default();
     finder.visit(&result.node());
-    let def = finder.defs.first()?.as_def_node()?;
+    let def = finder.defs.first()?.as_def_node().expect("a def");
     Converter::new(code).method(&def).ok()
 }
 
@@ -1058,7 +1069,7 @@ fn probe_kind(mutant: &RubyMutant) -> Option<String> {
         return Some("right".into());
     }
     // `!=`'s negations, `!a.eql?(b)` and `!a.equal?(b)`, over its operands.
-    if selector == "!=" && replacement.child(1).sym() == Some("!") {
+    if selector == "!=" {
         let inner = replacement.node(0).expect("`!`'s operand");
         return inner.child(1).sym().map(|name| format!("not:{name}"));
     }

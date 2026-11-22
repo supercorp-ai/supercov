@@ -162,6 +162,7 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
     text.match?(%r{a#{text}b})
     text.match?(/a#{text}b/i)
     text.match?(/a/mix)
+    text.match?(/a#@b/)
   end
 
   def hashes(a, b)
@@ -169,6 +170,7 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
     {"a b": 1, "c": 2}
     {a => 1, :b => 2}
     {nil => 1, self => 2}
+    {a: 1}.merge(b)
     {"a#{b}": 1}
     {}
   end
@@ -191,6 +193,7 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
   def conditionals(a, b)
     a ? b : nil
     a ? nil : b
+    a ? (b; a.call) : nil
     if a
     elsif b
       1

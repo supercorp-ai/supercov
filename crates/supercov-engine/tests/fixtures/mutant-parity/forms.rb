@@ -64,6 +64,9 @@ class Forms
     list.each { |a, b:| b }
     list.each { |a, **b| b }
     list.each { |a, &b| b }
+    list.map { |a| a }.size
+    list.each do |a| a end.size
+    -> { 1 }.call
     list.map { _1 + _2 }
     list.map { it + 1 }
     list.each do |a|
@@ -162,12 +165,14 @@ class Forms
     super { a }
     super(&block)
     super a do a end
+    super(a).to_s
   end
 
   def yields(a)
     yield
     yield a
     yield a, key: 1
+    yield(a).to_s
   end
 
   def numbered_references
