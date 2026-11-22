@@ -191,12 +191,15 @@ alone, all constant declarations; no switch was refused.
    every CPU).
 5. A kill is the mutant's: the package passed whole without it.
 6. A mutant's first attempt at a package has one and a half times the
-   package's baseline and a second. A run past it is stopped, and the
-   mutant runs again after every other has, in a round of retries alone,
-   with three times the baseline and ten seconds; past that the process
-   group is killed: `timeout`. A test that failed before the limit makes the
-   mutant killed either way. A mutant that hangs holds a worker for a second
-   or two in the main round, not for ten. The runtime
+   package's baseline and a second. A run past it is stopped and run again
+   at once, on the same worker, with three times the baseline and three
+   seconds; past that the process group is killed: `timeout`. A test that
+   failed before the limit makes the mutant killed either way. At first the
+   second attempts waited for a round of their own after every other
+   mutant, with ten seconds: that round lasted a full limit and was most of
+   the pass on small modules (8.4 of go-humanize's 12.5 s, 11 of uuid's
+   15.9). No mutant of the validation modules that got past its first
+   limit ever finished: each hung, or passed its hit limit. The runtime
    counts the active mutant's evaluations; past the hit limit it panics
    (`SUPERCOV_MUTANT_TIMEOUT`) and appends the mutant to the results'
    `.timeouts.jsonl`, so a recovered panic is still a timeout. The Go driver
@@ -229,9 +232,15 @@ it `unviable`, as it calls one that does not compile, with vet's finding;
 Gremlins calls it killed. Of those checks, only two read what a token
 mutation changes: `bools`, of the operands of an `&&` or `||` chain (`x !=
 1 && x != 2` to `x != 1 || x != 2`, "suspect or"), and `atomic`, of an
-assignment of an `atomic` call to its own operand. Each mutant there is
-vetted alone (`go vet -atomic -bools -overlay`), the package with only that
-mutant in place. A command that turns `go test`'s vet off (`-vet=off`)
+assignment of an `atomic` call to its own operand. A mutant is vetted only
+where it may give either something to report: an assignment holding an
+`atomic.` call, or a chain whose operands, mutated, hold one twice (`a < b
+|| a <= b` to `a < b || a < b`) or compare one expression by `!=` in an
+`||` (`==` in an `&&`) with two that may be constants (literals, names,
+qualified names). Each is vetted alone (`go vet -atomic -bools -overlay`),
+the package with only that mutant in place, and vet decides. At first every
+mutant in a chain was vetted: 21 `go vet` runs on go-humanize for its 3
+findings, now 3. A command that turns `go test`'s vet off (`-vet=off`)
 turns this off too.
 
 Examples are candidates: a command that passed passed each of its
@@ -258,21 +267,38 @@ strong pass) against Gremlins' whole run.
 
 | Module | Mutants | Killed (Gremlins / Supercov) | Unviable | 16 CPUs: Gremlins s / Supercov s | 4 CPUs: Gremlins s / Supercov s |
 | --- | --- | --- | --- | --- | --- |
-| dustin/go-humanize v1.0.1 | 332 | 234 / 211 | 84 | 14.6 / 19.1 | 61.2 / 24.7 |
-| google/btree v1.1.3 | 367 | 140 / 134 | 21 | 11.1 / 10.2 | 41.1 / 29.0 |
-| hashicorp/golang-lru v2.0.7 | 165 | 119 / 107 | 11 | 31.9 / 21.2 | 165.3 / 59.3 |
-| google/uuid v1.6.0 | 205 | 127 / 143 | 1 | 15.0 / 21.0 | 90.0 / 43.7 |
-| spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.0 / 8.4 | 59.4 / 22.9 |
+| dustin/go-humanize v1.0.1 | 332 | 234 / 211 | 84 | 15.5 / 12.3 | 61.2 / 24.7 |
+| google/btree v1.1.3 | 367 | 140 / 134 | 21 | 11.3 / 11.4 | 41.1 / 29.0 |
+| hashicorp/golang-lru v2.0.7 | 165 | 120 / 104 | 11 | 31.7 / 17.9 | 165.3 / 59.3 |
+| google/uuid v1.6.0 | 205 | 130 / 145 | 1 | 15.3 / 13.6 | 90.0 / 43.7 |
+| spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.4 / 8.8 | 59.4 / 22.9 |
 
-16 CPUs: one c8a.4xlarge machine per tool. 4 CPUs: GitHub's `ubuntu-latest`
-(`.github/workflows/mutation-go.yml`). Counts are the 16-CPU run's; the
-4-CPU run's differ only in golang-lru (117 / 105) and uuid (130 / 143), by
-the flaky and time-dependent mutants below. Gremlins runs one `go test` per
+16 CPUs: one c8a.4xlarge machine per tool, with the retries and vetting
+of this note (counts of that run; golang-lru's and uuid's move by their
+flaky and time-dependent mutants, below). 4 CPUs: GitHub's
+`ubuntu-latest` (`.github/workflows/mutation-go.yml`), measured before
+them, when a mutant past its first limit waited for a round of its own with
+ten seconds; they would take less now. Gremlins runs one `go test` per
 mutant, as many at once as there are CPUs, and pays for each on four;
-Supercov builds each package's binary once and runs the candidates its
-weak verdicts leave. On sixteen CPUs both take seconds and Supercov's
-fixed costs (the measured run, the type check, the builds) are most of its
-time.
+Supercov builds each package's binary once and runs the candidates its weak
+verdicts leave.
+
+Where Supercov's time goes, on 16 CPUs (`[supercov] Go pass timings`):
+
+| Module | Measured run | Type check | Vet | Binaries | Mutants |
+| --- | --- | --- | --- | --- | --- |
+| go-humanize | 6.6 | 0.6 | 0.6 | 0.3 | 4.1 |
+| btree | 8.2 | 0.5 | 0.6 | 0.6 | 1.3 |
+| golang-lru | 8.8 | 0.4 | 0.1 | 0.9 | 7.5 |
+| uuid | 7.6 | 0.4 | 0.6 | 0.3 | 4.6 |
+| cast | 7.4 | 0.3 | 0.6 | 0.3 | 0.05 |
+
+Seconds. The measured run is most of it, and most of that is Go compiling
+the module and the standard library's packages it needs on a machine that
+never had (a second run of go-humanize takes 0.3 s), which Gremlins'
+coverage run pays as well. Before, go-humanize took 19.1 s and uuid 21.0:
+the round of retries with ten seconds was 8.4 and 11 s of their passes, and
+21 `go vet` runs on go-humanize found the 3 that 3 now find.
 
 Value probes, by the median of two runs of `supercov run -- go test ./...`
 on 16 CPUs after a first, without probes, with them, with them after a
@@ -293,7 +319,12 @@ only (a comparison's probe infers its type), of the packages without their
 tests (`go list` without `-test` compiles no test dependencies: 0.06 s
 rather than 0.19 s on go-humanize), and kept in
 `.supercov/cache/go-facts.json` under a digest of the run's sources, its
-module's requirements and the environment that picks the build. A run of
+module's requirements, the command's build tags and the environment that
+picks the build. The type checker is asked with the tags the command gives
+`go test` (`-tags`, or those a wrapped command's last run passed, which
+the recording `go` saw), and `GOFLAGS` reaches it as it reaches `go test`:
+at first it was asked without them, and a file behind a tag got no
+operation probes. A run of
 the same sources reads them; one after an edit asks again, 0.04 to 0.11 s.
 The helper that answers is built once into `.supercov/cache/go-mutants`
 (5 MB, built `-trimpath -ldflags=-s -w`), 3-4 s on a machine's first run.
@@ -373,8 +404,9 @@ and btree's Example-only kills).
 ## Not yet
 
 - Value probes for floating-point operations.
-- Value probes for files behind a build tag: the type checker's facts for
-  a measured run are asked without the command's tags, so such a file's
-  operations get no probe and their mutants stay `unknown` (they run).
+- Value probes in files behind a build tag that a wrapped command (`make
+  test`) passes to `go test`: its tags are known from the run before, so
+  the first run with mutants asks without them, and those operations' mutants
+  stay `unknown` (they run).
 - The recording `go` on Windows: there the pass reads flags only from a `go
   test` the command names itself.
