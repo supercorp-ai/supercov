@@ -896,7 +896,7 @@ class Runtime:
         if type(a) not in _PLAIN or type(b) not in _PLAIN:
             self._value(site, "other")
             return result
-        if mutated in ("lshift", "rshift") and type(b) is int and type(a) in (int, bool) and b > 4096:
+        if mutated in ("__lshift__", "__rshift__") and type(b) is int and type(a) in (int, bool) and b > 4096:
             # A shift by this much: both are 0 where `a` is, and differ
             # otherwise; the mutant's value is not worked out.
             self._value(site, "same" if a == 0 else "differs")

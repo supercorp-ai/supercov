@@ -114,7 +114,7 @@ pub struct PythonMutant {
     /// Statically equivalent: the literal's value does not change.
     pub same_value: bool,
     /// The operator it changes: where it starts, and its text.
-    pub operator: Option<(usize, &'static str)>,
+    pub operator: Option<(usize, String)>,
     /// The value probe that decides its infection, where one can.
     pub probe: Option<ProbeTarget>,
 }
@@ -625,24 +625,6 @@ fn range_of(range: TextRange) -> (usize, usize) {
     (range.start().to_usize(), range.end().to_usize())
 }
 
-fn binary(operator: Operator) -> &'static str {
-    match operator {
-        Operator::Add => "+",
-        Operator::Sub => "-",
-        Operator::Mult => "*",
-        Operator::MatMult => "@",
-        Operator::Div => "/",
-        Operator::Mod => "%",
-        Operator::Pow => "**",
-        Operator::LShift => "<<",
-        Operator::RShift => ">>",
-        Operator::BitOr => "|",
-        Operator::BitXor => "^",
-        Operator::BitAnd => "&",
-        Operator::FloorDiv => "//",
-    }
-}
-
 /// mutmut's swap of a binary (or augmented) operator.
 fn swapped(operator: Operator) -> Option<Operator> {
     Some(match operator {
@@ -658,24 +640,6 @@ fn swapped(operator: Operator) -> Option<Operator> {
     })
 }
 
-fn augmented(operator: Operator) -> &'static str {
-    match operator {
-        Operator::Add => "+=",
-        Operator::Sub => "-=",
-        Operator::Mult => "*=",
-        Operator::MatMult => "@=",
-        Operator::Div => "/=",
-        Operator::Mod => "%=",
-        Operator::Pow => "**=",
-        Operator::LShift => "<<=",
-        Operator::RShift => ">>=",
-        Operator::BitOr => "|=",
-        Operator::BitXor => "^=",
-        Operator::BitAnd => "&=",
-        Operator::FloorDiv => "//=",
-    }
-}
-
 /// The probe that sees whether a value the mutant replaces with `None` was
 /// `None`.
 fn none_probe(value: &Expr) -> ProbeTarget {
@@ -684,40 +648,6 @@ fn none_probe(value: &Expr) -> ProbeTarget {
         range: range_of(value.range()),
         original: "",
         mutated: "",
-    }
-}
-
-/// The `operator` module's function for a binary operator.
-fn operator_function(operator: Operator) -> &'static str {
-    match operator {
-        Operator::Add => "add",
-        Operator::Sub => "sub",
-        Operator::Mult => "mul",
-        Operator::MatMult => "matmul",
-        Operator::Div => "truediv",
-        Operator::Mod => "mod",
-        Operator::Pow => "pow",
-        Operator::LShift => "lshift",
-        Operator::RShift => "rshift",
-        Operator::BitOr => "or_",
-        Operator::BitXor => "xor",
-        Operator::BitAnd => "and_",
-        Operator::FloorDiv => "floordiv",
-    }
-}
-
-fn comparison(operator: CmpOp) -> &'static str {
-    match operator {
-        CmpOp::Eq => "==",
-        CmpOp::NotEq => "!=",
-        CmpOp::Lt => "<",
-        CmpOp::LtE => "<=",
-        CmpOp::Gt => ">",
-        CmpOp::GtE => ">=",
-        CmpOp::Is => "is",
-        CmpOp::IsNot => "is not",
-        CmpOp::In => "in",
-        CmpOp::NotIn => "not in",
     }
 }
 
@@ -809,9 +739,9 @@ impl<'t, 'a> Walker<'t, 'a> {
 
     /// The last mutant pushed, if `before` mutants were there: it changes
     /// the operator at `at`.
-    fn note_operator(&mut self, before: usize, at: usize, text: &'static str) {
+    fn note_operator(&mut self, before: usize, at: usize, text: impl Into<String>) {
         if self.mutants.len() > before {
-            self.mutants.last_mut().expect("pushed").operator = Some((at, text));
+            self.mutants.last_mut().expect("pushed").operator = Some((at, text.into()));
         }
     }
 
@@ -921,8 +851,11 @@ impl<'t, 'a> Walker<'t, 'a> {
                     .text
                     .opens_before(assign.value.range().start().to_usize(), target_end);
                 let operator_start = self.text.skip_forward(target_end, value_start);
-                let operator = (operator_start, operator_start + binary(assign.op).len() + 1);
-                let original = augmented(assign.op);
+                let operator = (
+                    operator_start,
+                    operator_start + assign.op.as_str().len() + 1,
+                );
+                let original = format!("{}=", assign.op.as_str());
                 self.push(
                     "AugmentedAssignment",
                     "=",
@@ -932,7 +865,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                     &[operator],
                 );
                 if let Some(new) = swapped(assign.op) {
-                    let text = format!("{}=", binary(new));
+                    let text = format!("{}=", new.as_str());
                     let before = self.mutants.len();
                     self.push(
                         "AssignmentOperator",
@@ -1126,20 +1059,20 @@ impl<'t, 'a> Walker<'t, 'a> {
                 let before = self.mutants.len();
                 self.push(
                     "ArithmeticOperator",
-                    binary(new),
+                    new.as_str(),
                     range,
                     (left_end, right_start),
-                    format!(" {} ", binary(new)),
+                    format!(" {} ", new.as_str()),
                     &[(operator_start, operator_start + 1)],
                 );
-                self.note_operator(before, operator_start, binary(operation.op));
+                self.note_operator(before, operator_start, operation.op.as_str());
                 self.note_probe(
                     before,
                     ProbeTarget {
                         kind: "arith",
                         range,
-                        original: operator_function(operation.op),
-                        mutated: operator_function(new),
+                        original: operation.op.dunder(),
+                        mutated: new.dunder(),
                     },
                 );
             }
@@ -1371,7 +1304,7 @@ impl<'t, 'a> Walker<'t, 'a> {
                     );
                     second + if *operator == CmpOp::IsNot { 3 } else { 2 }
                 }
-                other => operator_start + comparison(*other).len(),
+                other => operator_start + other.as_str().len(),
             };
             let comparator_end = self
                 .text
@@ -1390,13 +1323,13 @@ impl<'t, 'a> Walker<'t, 'a> {
                 let before = self.mutants.len();
                 self.push(
                     "EqualityOperator",
-                    comparison(new),
+                    new.as_str(),
                     (operator_start, comparator_end),
                     splice,
-                    format!(" {} ", comparison(new)),
+                    format!(" {} ", new.as_str()),
                     &[(operator_start, operator_end)],
                 );
-                self.note_operator(before, operator_start, comparison(*operator));
+                self.note_operator(before, operator_start, operator.as_str());
                 let relation = match operator {
                     CmpOp::Lt => Some("lt"),
                     CmpOp::LtE => Some("le"),
@@ -1431,13 +1364,13 @@ impl<'t, 'a> Walker<'t, 'a> {
                 let before = self.mutants.len();
                 self.push(
                     "EqualityOperator",
-                    comparison(new),
+                    new.as_str(),
                     (operator_start, operator_end),
                     splice,
-                    format!(" {} ", comparison(new)),
+                    format!(" {} ", new.as_str()),
                     &[(operator_start, operator_end)],
                 );
-                self.note_operator(before, operator_start, comparison(*operator));
+                self.note_operator(before, operator_start, operator.as_str());
             }
             self.visit_expr(comparator);
             previous = comparator;
@@ -1917,12 +1850,12 @@ fn listed_with(
             start: text.position(mutant.span.0),
             end: text.position(mutant.span.1),
             original: source[mutant.span.0..mutant.span.1].to_owned(),
-            operator: mutant
-                .operator
-                .map(|(at, text)| crate::mutant_list::MutantOperator {
-                    text: text.to_owned(),
+            operator: mutant.operator.as_ref().map(|(at, text)| {
+                crate::mutant_list::MutantOperator {
+                    text: text.clone(),
                     at: at - mutant.span.0,
-                }),
+                }
+            }),
             value_used: false,
             // A Python conditional's test still runs in its mutant (`(test)
             // and False`): nothing of it is skipped.
@@ -2454,7 +2387,7 @@ mod tests {
         assert_eq!((arith.span.start, arith.span.end), ([4, 15], [4, 21]));
         assert_eq!(
             (arith.original.as_str(), arith.mutated.as_str()),
-            ("add", "sub")
+            ("__add__", "__sub__")
         );
         let compare = probes.iter().find(|probe| probe.kind == "compare").unwrap();
         assert_eq!(compare.original, "lt");
