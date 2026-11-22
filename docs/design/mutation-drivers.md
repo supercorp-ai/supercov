@@ -313,6 +313,14 @@ the page makes runs the attempt's mutant. A Rust wasm run names its tests by
 their file too (`<file>::<id>`); the Vitest and Playwright drivers read the
 id after it.
 
+A job that starts the command (node:test, AVA, tap, bun:test) builds the
+wasm again, writing it where every other job's tests load it: two such jobs
+side by side made a test file break off as it loaded the half-written glue,
+a kill that was none (gl-matrix-wasm: one to seven of 249 mutants a pass, a
+different few each time). Where a pass switches wasm mutants and any test
+file's jobs start the command, its jobs run one at a time; Jest and Mocha's
+resident runners, Vitest and Playwright start the command once.
+
 A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
 time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
 measures yet, so none of its mutants are planned; and a mutant a switch

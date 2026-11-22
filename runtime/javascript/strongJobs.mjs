@@ -341,7 +341,6 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     for (const [file, entries] of Object.entries(listed))
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
 
-    const run = slots(workers);
     // A command that starts Jest or Mocha itself: its jobs run in resident
     // runners, one per worker, rather than start the command each.
     const residentAllowed = environment.SUPERCOV_STRONG_RESIDENT !== "0";
@@ -368,6 +367,12 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             return esmHosts;
         return undefined;
     };
+    // Rust compiled to wasm (SUPERCOV_WASM_STRONG): a job that starts the
+    // command builds the wasm again, writing it where every other job's
+    // tests load it, so where any file's jobs start the command, one job
+    // runs at a time.
+    const rebuilds = Boolean(process.env.SUPERCOV_WASM_STRONG) && known.some((file) => !residentFor(file));
+    const run = slots(rebuilds ? 1 : workers);
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
 
