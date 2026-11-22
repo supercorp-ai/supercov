@@ -1402,14 +1402,14 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // A candidate that fails beside only its file's other candidates leans
         // on a test before it: the file's copies run it whole from then on.
         const forceWhole = new Set();
-        // A whole file's baseline runs only once a copy of the whole file
-        // fails (it then decides that kill): a mutant of module-level code
-        // takes every file that loads the module, and most such copies pass
-        // or fail on a test that passes without the mutant either way.
+        // A file's whole baseline runs before the copies of the whole file.
+        // (Run only once such a copy failed, it made tRPC's pass a third
+        // slower: a whole file's tests that fail without a mutant then cost a
+        // copy, a baseline and the copy again, one after another.)
         for (const job of pending) {
             for (const group of job.files) {
                 if (group.whole)
-                    baseOf(group.file);
+                    need(group.file, "whole");
                 else {
                     need(group.file, "union");
                     group.tests.forEach((id) => baseOf(group.file).union.tests.add(id));
@@ -1417,7 +1417,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
         }
         const shapeOf = (group) => group.whole || forceWhole.has(group.file) ? "whole" : "union";
-        const baselineReady = (group) => shapeOf(group) === "whole" || baseOf(group.file).union.state === "known";
+        const baselineReady = (group) => baseOf(group.file)[shapeOf(group)].state === "known";
         const unusable = (group) => {
             const entry = baseOf(group.file)[shapeOf(group)];
             return entry.state === "known" && !entry.done;

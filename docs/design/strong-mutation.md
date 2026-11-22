@@ -101,11 +101,12 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   environment); a mutant's copy of the file runs once it is known. A union
   that fails, or does not finish, without a mutant means a candidate leans
   on a test the union left out: the file's copies run whole from then on.
-  A file's whole baseline runs only when a copy of the whole file fails (a
-  mutant of module-level code takes every file that loads the module whole,
-  and most such copies pass): it decides that kill and every later one in
-  the file, and a whole copy goes on past a test that fails without the
-  mutant too. Those are the only repeats, and none is per copy.
+  A file's whole baseline runs where a mutant takes the file whole (a
+  mutant of module-level code takes every file that loads the module), and a
+  whole copy goes on past a test that fails without the mutant too. Run only
+  once a whole copy failed, it made tRPC's pass a third slower (a copy, the
+  baseline and the copy again, one after another). Those are the only
+  repeats, and none is per copy.
 - **One run.** It lists more worker slots than the pass can use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
   "run", for work that is ready: a baseline a mutant now needs, a
   confirmation, or the next file of a mutant whose copy before ended with
