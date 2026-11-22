@@ -16543,7 +16543,7 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@15",
             "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
-            "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
+            "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
             "fs.write#go_run.rs:525 => go_run.rs:525",
             // The report the run built, refused as one Supercov got wrong.
@@ -18054,14 +18054,14 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
         return;
     }
     for (fault, place) in [
-        ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+        ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1223", "go_run.rs:1223"),
-        ("fs.create_dir_all#go_run.rs:1233", "go_run.rs:1233"),
+        ("fs.write#go_run.rs:1216", "go_run.rs:1216"),
+        ("fs.create_dir_all#go_run.rs:1226", "go_run.rs:1226"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19418,8 +19418,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:736", "go_run.rs:736"),
-                ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+                ("fs.canonicalize#go_run.rs:732", "go_run.rs:732"),
+                ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );

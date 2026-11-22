@@ -911,4 +911,27 @@ mod tests {
         assert_eq!(listed.mutants.mutant_set.as_deref(), Some(MUTANT_SET));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn a_go_operation_s_probe_decides_its_weak_verdict() {
+        use crate::js_weak_mutation::{Observations, Status, verdict};
+        let source = "package p\n\nfunc f(a int) int {\n\tfor {\n\t\tbreak\n\t}\n\treturn -a\n}\n";
+        let mutants = candidate_mutants("a.go", source).unwrap();
+        let mut seen = Observations::default();
+        seen.hits
+            .extend(mutants.iter().filter_map(|mutant| mutant.statement.clone()));
+        seen.hits
+            .extend(mutants.iter().filter_map(|mutant| mutant.function.clone()));
+        let (status, _) = verdict(&mutants[0], &seen);
+        assert_eq!(status, Status::Infected { proxy: true });
+        // `-a` to `+a`: no probe, no verdict from values; with one, its
+        // values decide.
+        let mut negated = mutants[1].clone();
+        assert_eq!(negated.mutator, INVERT_NEGATIVES);
+        assert_eq!(verdict(&negated, &seen).0, Status::Unknown);
+        negated.probe = Some("a.go:7:9#0".into());
+        seen.comparisons
+            .insert("a.go:7:9#0".into(), ["same".to_owned()].into());
+        assert_eq!(verdict(&negated, &seen).0, Status::NotInfected);
+    }
 }

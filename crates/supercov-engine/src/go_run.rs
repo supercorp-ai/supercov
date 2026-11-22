@@ -319,9 +319,9 @@ fn instrument_sources(
                 at.display()
             )
         })?;
-        for (name, contents) in runtime_files() {
-            write(&at.join(RUNTIME_DIRECTORY).join(name), contents)?;
-        }
+        runtime_files().into_iter().try_for_each(|(name, contents)| {
+            write(&at.join(RUNTIME_DIRECTORY).join(name), contents)
+        })?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
         Ok(())
     })?;
@@ -616,26 +616,40 @@ fn go_flags(
 /// a `go` is on PATH to stand in front of.
 #[cfg(unix)]
 fn go_recorder(work: &Path) -> Option<(PathBuf, PathBuf)> {
+    which::which("go")
+        .ok()
+        .and_then(|real| recorder_in(work, &real).ok())
+}
+
+/// The recording `go` in front of `real`, written into `work`.
+#[cfg(unix)]
+fn recorder_in(work: &Path, real: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
     use std::os::unix::fs::PermissionsExt;
-    let real = which::which("go").ok()?;
     let directory = work.join("go-recorder");
     let log = work.join("go-invocations.log");
-    fs::create_dir_all(&directory).ok()?;
-    let real = real.to_string_lossy().replace('\'', "'\\''");
-    let log_text = log.to_string_lossy().replace('\'', "'\\''");
+    let quoted = |path: &Path| path.to_string_lossy().replace('\'', "'\\''");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = test ]; then\n  {{ for argument in \"$@\"; do printf '%s\\037' \"$argument\"; done; printf '\\n'; }} >> '{log_text}'\nfi\nexec '{real}' \"$@\"\n"
+        "#!/bin/sh\nif [ \"$1\" = test ]; then\n  {{ for argument in \"$@\"; do printf '%s\\037' \"$argument\"; done; printf '\\n'; }} >> '{}'\nfi\nexec '{}' \"$@\"\n",
+        quoted(&log),
+        quoted(real)
     );
     let shim = directory.join("go");
-    fs::write(&shim, script).ok()?;
-    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).ok()?;
-    Some((directory, log))
+    fs::create_dir_all(&directory)?;
+    fs::write(&shim, script)?;
+    fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    Ok((directory, log))
 }
 
 #[cfg(not(unix))]
 fn go_recorder(_work: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
+
+/// What separates the entries of PATH.
+#[cfg(windows)]
+const PATH_SEPARATOR: &str = ";";
+#[cfg(not(windows))]
+const PATH_SEPARATOR: &str = ":";
 
 /// `environment` with the recording `go` first on PATH.
 fn with_go_recorder(
@@ -647,7 +661,7 @@ fn with_go_recorder(
     };
     let mut path = directory.as_os_str().to_owned();
     if let Some((_, existing)) = environment.iter().find(|(name, _)| name == "PATH") {
-        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(PATH_SEPARATOR);
         path.push(existing);
     }
     environment.retain(|(name, _)| name != "PATH");
@@ -676,9 +690,7 @@ fn save_go_invocations(root: &Path, command: &[String], log: &Path) {
         .filter(|arguments| !arguments.is_empty())
         .collect::<Vec<_>>();
     let path = go_invocations_path(root, command);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+    let _ = fs::create_dir_all(path.with_file_name(""));
     let _ = fs::write(&path, serde_json::to_vec(&invocations).expect("plain data"));
 }
 
@@ -692,39 +704,23 @@ pub fn recorded_go_invocations(root: &Path, command: &[String]) -> Vec<Vec<Strin
 
 /// Whether the run lists its mutants: `SUPERCOV_MUTANTS` is `1` or `true`.
 pub(crate) fn mutants_requested() -> bool {
-    std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
+    switched_on(std::env::var("SUPERCOV_MUTANTS").ok())
 }
 
-/// The Go mutants of every source the run measured, read from the project.
-fn list_measured_mutants(
-    root: &Path,
-    project: &PreparedGoProject,
-) -> crate::mutant_list::MutantsFile {
-    let probed = project
-        .probes
-        .values()
-        .filter_map(|probe| match &probe.target {
-            crate::go_instrumenter::GoProbeTarget::Comparison { site }
-            | crate::go_instrumenter::GoProbeTarget::Operation { site } => Some(site.clone()),
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let mut files = BTreeMap::new();
-    for (relative, _) in &project.instrumented {
-        let Ok(source) = fs::read_to_string(root.join(relative)) else {
-            continue;
-        };
-        if let Ok(mutants) = crate::go_mutants::candidate_mutants_probed(relative, &source, &probed)
-            && !mutants.is_empty()
-        {
-            files.insert(relative.clone(), mutants);
-        }
+/// Whether a switch's variable, set to `value`, turns it on: `1` or `true`.
+fn switched_on(value: Option<String>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "1" | "true"))
+}
+
+/// A test's status as the run keeps it: an Example's outcome is checked
+/// after it returns, where no record of it reaches, so it ran `unknown`; a
+/// command that passed passed every one of them.
+fn kept_status(status: &str, exit_code: i32) -> String {
+    if status == "unknown" && exit_code == 0 {
+        "passed".to_owned()
+    } else {
+        status.to_owned()
     }
-    crate::mutant_list::MutantsFile::listed(
-        crate::go_mutants::GO,
-        crate::go_mutants::MUTANT_SET,
-        files,
-    )
 }
 
 /// The fingerprint a later query compares against the stored run.
@@ -978,14 +974,7 @@ pub fn run_direct_go(
                         runner: test.runner.clone(),
                         package: package.directory.clone(),
                         file: package.declared_in.get(&test.name).cloned(),
-                        // An Example's outcome is checked after it returns,
-                        // where no record of it reaches: it ran `unknown`.
-                        // A command that passed passed every one of them.
-                        status: if test.status == "unknown" && exit_code == 0 {
-                            "passed".to_owned()
-                        } else {
-                            test.status.clone()
-                        },
+                        status: kept_status(&test.status, exit_code),
                         attributed: !test.unattributed,
                     });
                 }
@@ -1050,8 +1039,12 @@ pub fn run_direct_go(
         if mutants_requested() {
             entries.push(crate::evidence_archive::EvidenceArchiveEntry {
                 path: "mutants.json".into(),
-                contents: serde_json::to_vec(&list_measured_mutants(&root, &instrumented.project))
-                    .expect("plain data serializes"),
+                contents: serde_json::to_vec(&crate::mutant_list::MutantsFile::listed(
+                    crate::go_mutants::GO,
+                    crate::go_mutants::MUTANT_SET,
+                    instrumented.project.mutants.clone(),
+                ))
+                .expect("plain data serializes"),
             });
         }
         let raw = write_archive(
@@ -1304,6 +1297,67 @@ impl GoServer {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_run_with_mutants_records_each_go_test_its_command_starts() {
+        let work =
+            std::env::temp_dir().join(format!("supercov-go-recorder-{}", std::process::id()));
+        let real = Path::new("/bin/echo");
+        let (directory, log) = recorder_in(&work, real).unwrap();
+        assert!(directory.join("go").is_file());
+        // Each step of writing it failing leaves no recorder.
+        for fault in ["fs.create_dir_all", "fs.write", "fs.set_permissions"] {
+            let failed = crate::fault::during(fault, || recorder_in(&work, real));
+            assert!(failed.is_err(), "{fault}");
+        }
+        let shim = directory.join("go");
+        std::process::Command::new(&shim)
+            .args(["test", "-tags", "a b", "./..."])
+            .output()
+            .unwrap();
+        std::process::Command::new(&shim)
+            .arg("version")
+            .output()
+            .unwrap();
+        let root = work.join("project");
+        let command = ["make".to_owned(), "test".to_owned()];
+        save_go_invocations(&root, &command, &log);
+        assert_eq!(
+            recorded_go_invocations(&root, &command),
+            [["test", "-tags", "a b", "./..."]]
+        );
+        assert!(recorded_go_invocations(&root, &["other".to_owned()]).is_empty());
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn the_recording_go_goes_first_on_path() {
+        let recorder = (PathBuf::from("/r"), PathBuf::from("/r/log"));
+        let with = |environment: Vec<(OsString, OsString)>| {
+            with_go_recorder(environment, Some(&recorder))
+                .into_iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(
+            with(vec![("PATH".into(), "/bin".into())]),
+            Some(OsString::from(format!("/r{PATH_SEPARATOR}/bin")))
+        );
+        assert_eq!(with(Vec::new()), Some(OsString::from("/r")));
+        assert!(with_go_recorder(Vec::new(), None).is_empty());
+    }
+
+    #[test]
+    fn mutants_are_asked_for_with_one_or_true_and_examples_pass_with_their_command() {
+        assert!(switched_on(Some(" 1 ".into())));
+        assert!(switched_on(Some("true".into())));
+        assert!(!switched_on(Some("0".into())));
+        assert!(!switched_on(None));
+        assert_eq!(kept_status("unknown", 0), "passed");
+        assert_eq!(kept_status("unknown", 1), "unknown");
+        assert_eq!(kept_status("failed", 0), "failed");
+    }
+
     use super::*;
 
     /// A file that does not parse is named for the project as it stands.

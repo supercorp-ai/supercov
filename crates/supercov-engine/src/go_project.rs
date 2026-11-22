@@ -71,6 +71,9 @@ pub struct PreparedGoProject {
     /// than skipped silently: a file Supercov cannot read is a hole in the
     /// denominator, and a hole nobody is told about is a wrong number.
     pub unparseable: Vec<(String, String)>,
+    /// Each measured file's mutants, linked to the value probes placed in
+    /// it, where the run lists its mutants (`SUPERCOV_MUTANTS`).
+    pub mutants: std::collections::BTreeMap<String, Vec<crate::js_mutant_links::CandidateMutant>>,
 }
 
 /// A Go test file is exactly one whose name ends `_test.go`. The toolchain
@@ -393,7 +396,9 @@ pub fn prepare_go_project(
     let mut next_decision = 0_u32;
     // A run that lists its mutants probes their values; an operation's probe
     // needs its type, which only the type checker knows.
-    let facts = crate::go_run::mutants_requested()
+    let requested = crate::go_run::mutants_requested();
+    let mut mutants = std::collections::BTreeMap::new();
+    let facts = requested
         .then(|| crate::go_strong::site_facts(root, &files.sources))
         .flatten()
         .unwrap_or_default();
@@ -418,7 +423,7 @@ pub fn prepare_go_project(
             &mut next_decision,
             crate::go_instrumenter::RUNTIME_ALIAS,
             language >= 18,
-            crate::go_run::mutants_requested(),
+            requested,
             facts.get(relative),
         ) {
             Ok(obligations) => {
@@ -431,6 +436,23 @@ pub fn prepare_go_project(
                 manifest
                     .limitations
                     .extend(obligations.manifest.limitations);
+                if requested {
+                    let probed = obligations
+                        .probes
+                        .values()
+                        .filter_map(|probe| match &probe.target {
+                            crate::go_instrumenter::GoProbeTarget::Comparison { site }
+                            | crate::go_instrumenter::GoProbeTarget::Operation { site } => {
+                                Some(site.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let listed =
+                        crate::go_mutants::candidate_mutants_probed(relative, &source, &probed)
+                            .expect("a file that was instrumented parses");
+                    mutants.insert(relative.clone(), listed);
+                }
                 probes.extend(obligations.probes);
                 decision_widths.extend(obligations.decision_widths);
                 let mut text = crate::go_instrumenter::rewrite_removing(
@@ -486,7 +508,9 @@ pub fn prepare_go_project(
         }
     };
     manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
+    mutants.retain(|_, listed: &mut Vec<_>| !listed.is_empty());
     Ok(PreparedGoProject {
+        mutants,
         root: root.to_owned(),
         files,
         manifest,
