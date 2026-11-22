@@ -5247,6 +5247,11 @@ pub fn run_strong_jvm(
         }
         let jvm_plan = work.join("plan.jvm.tsv");
         let claims = work.join("claims");
+        // Mutants whose test ran past the short time limit: they wait for a
+        // round of their own, with the generous limit, once the others have
+        // verdicts.
+        let slow = work.join("slow");
+        let _ = fs::remove_file(&slow);
         let supervisor = crate::process_supervision::ProcessSupervisor::new()
             .map_err(|error| error.to_string())?;
         let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
@@ -5262,7 +5267,17 @@ pub fn run_strong_jvm(
             if remaining.is_empty() {
                 break;
             }
-            write(&jvm_plan, &strong_plan_text(&tests, &remaining, &slots))?;
+            let listed_slow = fs::read_to_string(&slow).unwrap_or_default();
+            let is_slow =
+                |mutant: &&StrongMutant| listed_slow.lines().any(|line| line == mutant.id);
+            let quick = remaining
+                .iter()
+                .filter(|mutant| !is_slow(mutant))
+                .cloned()
+                .collect::<Vec<_>>();
+            let retry = quick.is_empty();
+            let round = if retry { remaining.clone() } else { quick };
+            write(&jvm_plan, &strong_plan_text(&tests, &round, &slots))?;
             let _ = fs::remove_dir_all(&claims);
             let log = work.join(format!("build-{start}.log"));
             let mut environment = crate::rust_runtime::measured_environment(
@@ -5283,8 +5298,12 @@ pub fn run_strong_jvm(
                 ("SUPERCOV_STRONG_JVM_PLAN", jvm_plan.as_os_str()),
                 ("SUPERCOV_STRONG_RESULTS", request.results.as_os_str()),
                 ("SUPERCOV_STRONG_CLAIMS", claims.as_os_str()),
+                ("SUPERCOV_STRONG_SLOW", slow.as_os_str()),
             ] {
                 environment.push((OsString::from(name), value.to_owned()));
+            }
+            if retry {
+                environment.push((OsString::from("SUPERCOV_STRONG_RETRY"), OsString::from("1")));
             }
             let spec = CommandSpec {
                 program: command[0].clone().into(),

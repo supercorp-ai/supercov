@@ -6,6 +6,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -41,6 +43,13 @@ public final class SupercovStrongPass {
   static final String PLAN = "SUPERCOV_STRONG_JVM_PLAN";
   static final String RESULTS = "SUPERCOV_STRONG_RESULTS";
   static final String CLAIMS = "SUPERCOV_STRONG_CLAIMS";
+  /**
+   * Where a JVM lists the mutants whose test ran past the first, short time
+   * limit; set to retry them, the round that runs them alone with the
+   * generous limit ({@code SUPERCOV_STRONG_RETRY=1}).
+   */
+  static final String SLOW = "SUPERCOV_STRONG_SLOW";
+  static final String RETRY = "SUPERCOV_STRONG_RETRY";
   /** Set in a JVM a driver started to share the pass. */
   static final String MINION = "supercov.strong.minion";
 
@@ -75,11 +84,14 @@ public final class SupercovStrongPass {
     }
 
     /**
-     * Twice StrykerJS's limit, as the JavaScript drivers give: the longer of
-     * its measured run and its baseline, times 3, and 10 s.
+     * The JavaScript drivers' two limits: first 1.5 times the longer of its
+     * measured run and its baseline, and 1 s; a mutant past it is tried
+     * again in a round of its own, with twice StrykerJS's limit (3 times,
+     * and 10 s), before it is called a timeout.
      */
-    long limitMillis() {
-      return Math.max(measuredMillis, baselineMillis) * 3 + 10_000L;
+    long limitMillis(boolean generous) {
+      long longer = Math.max(measuredMillis, baselineMillis);
+      return generous ? longer * 3 + 10_000L : longer * 3 / 2 + 1_000L;
     }
   }
 
@@ -107,6 +119,8 @@ public final class SupercovStrongPass {
     boolean timedOut;
     public boolean mutantTimeout;
     public String reason;
+    /** The test's thread, where it ran past its time. */
+    Thread worker;
 
     /** Records a failure, keeping the first one's reason. */
     public void fail(Throwable error) {
@@ -137,6 +151,11 @@ public final class SupercovStrongPass {
   private final Map<Integer, Test> tests = new HashMap<>();
   private final List<Mutant> mutants = new ArrayList<>();
   private final String results;
+  /** Where mutants past the short limit are listed, and whether this is their retry. */
+  private final File slow;
+  private final boolean retry;
+  /** A test thread that ran past the short limit and was left running. */
+  private Thread abandoned;
   private final File claims;
   private final String module;
   private final Executor executor;
@@ -145,6 +164,9 @@ public final class SupercovStrongPass {
     this.executor = executor;
     this.module = module;
     this.results = System.getenv(RESULTS);
+    String slowFile = System.getenv(SLOW);
+    this.slow = slowFile == null ? null : new File(slowFile);
+    this.retry = "1".equals(System.getenv(RETRY));
     String claimed = System.getenv(CLAIMS);
     this.claims = claimed == null ? null : new File(claimed);
     String limit = System.getenv("SUPERCOV_MUTANT_HIT_LIMIT");
@@ -370,6 +392,15 @@ public final class SupercovStrongPass {
       }
       ran++;
       Outcome outcome = execute(test, true, mutant.file, mutant.index, mutated);
+      if (outcome.timedOut && !retry && slow != null) {
+        // Past the short limit: tried again alone, with the generous one,
+        // in a round of its own. Its thread is left running; one such
+        // thread at a time, or the JVM stops taking mutants.
+        markSlow(mutant);
+        boolean another = abandoned != null && abandoned.isAlive();
+        abandoned = outcome.worker;
+        return !another;
+      }
       if (outcome.timedOut) {
         write(mutant, "timeout", test.name, ran, started, "ran past its time limit");
         return false;
@@ -398,6 +429,16 @@ public final class SupercovStrongPass {
     }
     write(mutant, "survived", null, ran, started, ran == 0 ? "no-passing-candidate" : null);
     return true;
+  }
+
+  /** Lists the mutant for the retry round. */
+  private void markSlow(Mutant mutant) {
+    try (Writer out =
+        new OutputStreamWriter(new FileOutputStream(slow, true), StandardCharsets.UTF_8)) {
+      out.write(mutant.id + "\n");
+    } catch (IOException e) {
+      // Not listed: the next round runs it with the short limit again.
+    }
   }
 
   private Outcome execute(final Test test, boolean mutated, int file, int index) {
@@ -433,13 +474,15 @@ public final class SupercovStrongPass {
     worker.setContextClassLoader(loader);
     worker.start();
     try {
-      // A baseline gets a minute more: nothing has measured it yet.
-      worker.join(mutated ? test.limitMillis() : test.limitMillis() + 60_000L);
+      // A baseline gets a minute more than the generous limit: nothing has
+      // measured it yet.
+      worker.join(mutated ? test.limitMillis(retry) : test.limitMillis(true) + 60_000L);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
     if (worker.isAlive()) {
       outcome.timedOut = true;
+      outcome.worker = worker;
     }
     if (mutated && switches.limitReached()) {
       outcome.mutantTimeout = true;
