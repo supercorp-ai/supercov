@@ -259,6 +259,15 @@ by hand and the suite run as written; each fails it:
   mutant in a fresh interpreter with the mutant on from its start, and
   `test_decorator_attributes` and `test_class_access_pickle` fail.
 
+The same validation on GitHub's 4-CPU runners (`.github/workflows/mutation-python.yml`,
+the matrix in shards under ten minutes) agrees mutant for mutant, but for one
+more cachetools mutant Supercov detects and the matrix does not:
+`func.py:87:23-87:47:CallArgument:removed@2`, `RRCache(maxsize, choice)` with
+`choice` dropped. `test_rr_choice` expects `min` to pick the key evicted; the
+mutant evicts at random, and the test fails 16 runs in 20 with the mutant
+applied by hand. The matrix and mutmut drew a passing run there, and the
+16-CPU matrix a failing one.
+
 Measured with the mutants' values (`SUPERCOV_MUTANTS=1`) the verdicts are the
 same, mutant for mutant. The probes decided 19 survivors without running
 them (a boundary whose operands were never equal, a value that was already
@@ -294,6 +303,24 @@ per CPU:
 | parse | 269.2 s | 206 ms | 1.4 s | 14.1 s | 11.0 ms |
 | humanize | 65.8 s | 48.8 ms | 5.2 s | 14.6 s | 10.9 ms |
 
+On GitHub's 4-CPU runners, each tool on a runner of its own, with parse's
+pytest-cov off for mutmut too (as a strong pass has it):
+
+| Project | mutmut run | per mutant | Supercov measured run | strong pass | per mutant |
+| --- | --- | --- | --- | --- | --- |
+| python-slugify | 36.7 s | 32.6 ms | 1.3 s | 40.5 s | 36.1 ms |
+| cachetools (pytest) | 65.9 s | 39.7 ms | 1.9 s | 45.1 s | 27.1 ms |
+| cachetools (unittest) | | | 1.5 s | 39.9 s | 24.1 ms |
+| parse | 70.5 s | 54.0 ms | 2.3 s | 75.8 s | 59.6 ms |
+| humanize | 211.9 s | 157.2 ms | 6.3 s | 54.1 s | 40.4 ms |
+
+GitHub's runners vary from one to the next: an earlier run of the same
+workflow took mutmut 63.6 s on python-slugify (Supercov 40.8 s) and 293.1 s on
+humanize, and parse's strong pass with values took 47.2 s against 75.8 s
+without. On these runners Supercov is faster on cachetools and humanize, and
+about mutmut's speed on python-slugify and parse (whose 16-CPU mutmut time
+above has pytest-cov on).
+
 Per mutant is the run's time over the mutants it ran (Supercov's strong pass
 alone; with its measured run, python-slugify is 9.7 ms a mutant, about
 mutmut's). parse's suite turns pytest-cov on in its own configuration: every
@@ -306,16 +333,16 @@ mutant's copy before.
 ### The measured run's cost
 
 The suite alone, under `supercov --`, and under `supercov --` with
-`SUPERCOV_MUTANTS=1`, each the best of three on 16 CPUs (`overhead.sh`;
-humanize's pytest-benchmark tests run once, since they size their rounds to
-the speed they measure):
+`SUPERCOV_MUTANTS=1`, each the best of three (`overhead.sh`; humanize's
+pytest-benchmark tests run once, since they size their rounds to the speed
+they measure), on 16 CPUs and on GitHub's 4:
 
-| Project | Tests alone | Measured | Measured with values |
-| --- | --- | --- | --- |
-| python-slugify | 0.63 s | 0.85 s (1.33×) | 0.95 s (1.50×) |
-| cachetools | 0.52 s | 0.98 s (1.88×) | 1.92 s (3.65×) |
-| parse | 0.58 s | 0.72 s (1.24×) | 0.83 s (1.43×) |
-| humanize | 1.05 s | 1.25 s (1.19×) | 1.33 s (1.27×) |
+| Project | Tests alone | Measured | Measured with values | 4 CPUs: measured | with values |
+| --- | --- | --- | --- | --- | --- |
+| python-slugify | 0.63 s | 0.85 s (1.33×) | 0.95 s (1.50×) | 1.35× | 1.62× |
+| cachetools | 0.52 s | 0.98 s (1.88×) | 1.92 s (3.65×) | 1.84× | 3.46× |
+| parse | 0.58 s | 0.72 s (1.24×) | 0.83 s (1.43×) | 1.24× | 1.44× |
+| humanize | 1.05 s | 1.25 s (1.19×) | 1.33 s (1.27×) | 1.25× | 1.44× |
 
 These include the interpreter's start and pytest's collection, which the
 probes do not slow. cachetools' values cost has not been profiled yet.
