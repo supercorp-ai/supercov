@@ -32,6 +32,7 @@ tag="$(field tag)"
 build="$(field build)"
 flags="$(field flags)"
 targets="$(field targets)"
+all_targets="$targets"
 module="$(field module)"
 junit5="$(field junit5)"
 testng="$(field testng)"
@@ -141,7 +142,7 @@ PY
   else
     local task="pitest"
     [ -n "$module" ] && task=":$module:pitest"
-    PIT_MATRIX="$matrix" PIT_THREADS="$threads" PIT_TARGETS="$targets" \
+    PIT_MATRIX="$matrix" PIT_THREADS="$threads" PIT_TARGETS="$targets" PIT_TESTS="$all_targets" \
       PIT_JUNIT5="$([ "$junit5" = true ] && echo 1 || echo 0)" \
       PIT_TESTNG="$([ "$testng" = true ] && echo 1 || echo 0)" \
       ./gradlew --no-daemon -q $flags --init-script "$here/pit-init.gradle" "$task" >&2

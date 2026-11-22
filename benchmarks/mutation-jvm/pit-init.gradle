@@ -15,6 +15,10 @@ allprojects { project ->
             fullMutationMatrix = System.getenv("PIT_MATRIX") == "1"
             threads = Integer.parseInt(System.getenv("PIT_THREADS") ?: "4")
             if (System.getenv("PIT_TARGETS")) { targetClasses = System.getenv("PIT_TARGETS").split(",") as List }
+            // The plugin's tests default to the target classes, which a
+            // shard's class names leave without a test: every test of the
+            // project, as Maven's plugin does.
+            if (System.getenv("PIT_TESTS")) { targetTests = System.getenv("PIT_TESTS").split(",") as List }
             if (System.getenv("PIT_TESTNG") == "1") { testPlugin = "testng" }
             failWhenNoMutations = false
             timeoutConstInMillis = 10000
