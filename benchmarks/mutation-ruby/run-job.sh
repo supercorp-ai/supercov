@@ -41,12 +41,12 @@ if [ ! -f Gemfile ]; then
 fi
 printf '\ngem "mutant", "0.17.1"\ngem "mutant-%s", "0.17.1"\n' "$integration" >> Gemfile
 if [ "$integration" = rspec ]; then
-  printf '\nRSpec.configure { |config| config.define_derived_metadata { |metadata| metadata[:mutant_expression] = "*" } }\n' >> spec/spec_helper.rb
+  printf '\nRSpec.configure { |config| config.define_derived_metadata { |metadata| metadata[:mutant_expression] = "%s" } }\n' "$subjects" >> spec/spec_helper.rb
   printf 'gem "rspec"\n' >> Gemfile
 else
   printf 'gem "minitest"\n' >> Gemfile
   mkdir -p "$work/shim"
-  printf 'require "mutant/minitest/coverage"\nMinitest::Test.cover("*")\n' > "$work/shim/every_test.rb"
+  printf 'require "mutant/minitest/coverage"\nMinitest::Test.cover("%s")\n' "$subjects" > "$work/shim/every_test.rb"
   requires=("$work/shim/every_test.rb" "${requires[@]}")
 fi
 bundle config set --local path "$work/bundle" >/dev/null
@@ -59,19 +59,20 @@ seconds() { date +%s.%N; }
 
 # The mutant gem, every test per mutant.
 start=$(seconds)
-bundle exec mutant run --usage opensource --integration "$integration" --include lib \
+timeout "${MUTANT_TIMEOUT:-300}" bundle exec mutant run --usage opensource --integration "$integration" --include lib \
   "${require_flags[@]}" --jobs "$jobs" --mutation-timeout 60 "$subjects" > "$out/mutant.log" 2>&1 || true
 mutant_seconds=$(echo "$(seconds) - $start" | bc)
 cp .mutant/results/*.json.gz "$out/" 2>/dev/null || true
 
 # Supercov: the measured run, then the strong pass.
 start=$(seconds)
-"$SUPERCOV_BIN" -- "${command[@]}" > "$out/supercov-run.log" 2>&1
+timeout 120 "$SUPERCOV_BIN" -- "${command[@]}" > "$out/supercov-run.log" 2>&1
 measured_seconds=$(echo "$(seconds) - $start" | bc)
 start=$(seconds)
-SUPERCOV_STRONG_JOBS="$jobs" "$SUPERCOV_BIN" runs latest mutants test --json > "$out/supercov-strong.json" 2> "$out/supercov-strong.log" || true
+SUPERCOV_STRONG_JOBS="$jobs" timeout "${STRONG_TIMEOUT:-240}" "$SUPERCOV_BIN" runs latest mutants test --json > "$out/supercov-strong.json" 2> "$out/supercov-strong.log" || true
 strong_seconds=$(echo "$(seconds) - $start" | bc)
 
-"$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --json --limit 1000000 > "$out/join.json" 2> "$out/join.log" || true
-ruby "$here/summarize.rb" "$out/join.json" "$project" "$mutant_seconds" "$measured_seconds" "$strong_seconds" "$jobs" > "$out/summary.json"
+"$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --json --limit 0 > "$out/join.json" 2> "$out/join.log" || true
+"$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --format jsonl --output "$out/join.jsonl" 2>> "$out/join.log" || true
+ruby "$here/summarize.rb" "$out/join.json" "$out/join.jsonl" "$project" "$mutant_seconds" "$measured_seconds" "$strong_seconds" "$jobs" > "$out/summary.json"
 cat "$out/summary.json"

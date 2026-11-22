@@ -156,6 +156,17 @@ module Supercov
 
     # The pass: every mutant of the plan, each in a fork of this process.
     class Pass
+      # A forked process's work, ended without the parent's `at_exit` hooks
+      # (a runner's autorun among them): an error that escapes it ends the
+      # process with no outcome written.
+      def self.child
+        yield
+        exit!(0)
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        warn("[supercov] #{error.class}: #{error.message}")
+        exit!(1)
+      end
+
       def initialize(runner)
         @runner = runner
         @plan = Strong.plan
@@ -168,6 +179,13 @@ module Supercov
       def run
         tests = @runner.tests
         baseline = run_isolated(-1, @plan["baseline"].select { |id| tests.key?(id) }, nil, all: true)
+        unless baseline
+          # Without a baseline no verdict means anything: every mutant is an
+          # error, and the pass says why.
+          @plan["mutants"].each { |mutant| write(mutant, "error", nil, 0, 0, "the candidate tests did not finish without a mutant") }
+          @results.close
+          return
+        end
         @failing = baseline[:failed].to_h { |id| [id, true] }
         @durations = baseline[:durations]
         queue = @plan["mutants"].dup
@@ -199,13 +217,16 @@ module Supercov
           return
         end
         reader, writer = IO.pipe
+        reader.binmode
+        writer.binmode
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         pid = fork do
           reader.close
-          outcome = attempt(mutant["key"], ids, all: false)
-          writer.write(Marshal.dump(outcome))
-          writer.close
-          exit!(0)
+          Pass.child do
+            outcome = attempt(mutant["key"], ids, all: false)
+            writer.write(Marshal.dump(outcome))
+            writer.close
+          end
         end
         writer.close
         running[pid] = { mutant: mutant, reader: reader, started: started, deadline: started + limit(ids), ids: ids }
@@ -270,13 +291,17 @@ module Supercov
       def confirmed?(sequence)
         @confirmed.fetch(sequence) do
           baseline = run_isolated(-1, sequence, nil, all: true)
-          @confirmed[sequence] = baseline[:failed].empty?
+          @confirmed[sequence] = !baseline.nil? && baseline[:failed].empty?
         end
       end
 
       def files_whole(mutant, duration)
         whole = @runner.whole(mutant["tests"])
         without = run_isolated(-1, whole, nil, all: true)
+        unless without
+          write(mutant, "error", nil, 0, duration, "its tests' files did not finish without it")
+          return
+        end
         with = run_isolated(mutant["key"], whole, limit(whole), all: true)
         if with.nil?
           write(mutant, "timeout", nil, whole.size, duration, "its tests' files ran past their time")
@@ -291,11 +316,14 @@ module Supercov
       # `deadline` seconds.
       def run_isolated(key, ids, deadline, all:)
         reader, writer = IO.pipe
+        reader.binmode
+        writer.binmode
         pid = fork do
           reader.close
-          writer.write(Marshal.dump(attempt(key, ids, all: all)))
-          writer.close
-          exit!(0)
+          Pass.child do
+            writer.write(Marshal.dump(attempt(key, ids, all: all)))
+            writer.close
+          end
         end
         writer.close
         if deadline
@@ -314,7 +342,7 @@ module Supercov
         end
         data = reader.read
         reader.close
-        data.empty? ? { failed: ids, ran: 0, durations: {}, sequence: ids, timed_out: false } : Marshal.load(data) # rubocop:disable Security/MarshalLoad
+        data.empty? ? nil : Marshal.load(data) # rubocop:disable Security/MarshalLoad
       end
 
       # In the forked process: the tests, in order, with the mutant on,

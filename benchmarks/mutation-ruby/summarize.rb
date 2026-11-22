@@ -3,12 +3,13 @@
 # Summarizes one project's join of the mutant gem's verdicts with
 # Supercov's strong pass: counts, every disagreement, and the times.
 #
-#   ruby summarize.rb join.json project mutant-seconds measured-seconds strong-seconds jobs
+#   ruby summarize.rb join.json join.jsonl project mutant-seconds measured-seconds strong-seconds jobs
 
 require "json"
 
-join_path, project, mutant_seconds, measured_seconds, strong_seconds, jobs = ARGV
+join_path, lines_path, project, mutant_seconds, measured_seconds, strong_seconds, jobs = ARGV
 data = JSON.parse(File.read(join_path))["data"]
+data["mutants"] = File.readlines(lines_path).map { |line| JSON.parse(line) }
 killed = ->(status) { %w[killed timeout].include?(status) }
 mutant_killed = ->(status) { %w[Killed Timeout].include?(status) }
 disagreements = []
