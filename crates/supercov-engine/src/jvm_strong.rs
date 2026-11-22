@@ -486,10 +486,12 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             .find(|file| *file == &mutant.file || file.ends_with(&format!("/{}", mutant.file)))
             .cloned()
             .unwrap_or_else(|| mutant.file.clone());
-        by_group
-            .entry((file, mutant.mutator.clone(), mutant.key.clone()))
-            .or_default()
-            .push(at);
+        for key in pit_keys(mutant) {
+            by_group
+                .entry((file.clone(), mutant.mutator.clone(), key))
+                .or_default()
+                .push(at);
+        }
     }
     // A group's mutants in code order, ours in source order, so that where
     // several share the line PIT reports (kotlinc puts a condition's jumps
@@ -628,6 +630,30 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
     join
 }
 
+/// The names a mutant of PIT's may go by in source. kotlinc names a call
+/// to an `internal` function after its module (`emit$kotlinpoet`), one
+/// with default arguments `emit$default`, a local function after the one
+/// around it (`emit$possiblyEmitInitializer`), and a private member an
+/// accessor reaches `access$emit`: a removed call is joined by each name
+/// such a method's name holds.
+fn pit_keys(mutant: &PitMutant) -> Vec<String> {
+    let mut keys = vec![mutant.key.clone()];
+    let named = mutant.mutator == "VoidMethodCall"
+        || mutant.mutator.ends_with("ReturnVals")
+        || mutant.mutator == "PrimitiveReturns";
+    // A Java lambda's method (`lambda$f$3`) is joined by its own name.
+    if named && mutant.key.contains('$') && mutant.file.ends_with(".kt") {
+        keys.extend(
+            mutant
+                .key
+                .split('$')
+                .filter(|part| !matches!(*part, "" | "access" | "default" | "p"))
+                .map(str::to_owned),
+        );
+    }
+    keys
+}
+
 fn is_return(mutator: crate::jvm_mutants::Mutator) -> bool {
     use crate::jvm_mutants::Mutator;
     matches!(
@@ -640,6 +666,55 @@ fn is_return(mutator: crate::jvm_mutants::Mutator) -> bool {
     )
 }
 
+/// Whether a line calls a standard-library function that kotlinc inlines
+/// with the lambda or reference given to it (`forEach`, `filter`, `use`,
+/// `repeat`, ...): its loop, its counter, its conditions and its `finally`
+/// are code the compiler writes at that line.
+fn inlines_a_lambda(line: &str) -> bool {
+    const INLINED: [&str; 30] = [
+        "forEach",
+        "filter",
+        "filterNot",
+        "filterKeys",
+        "map",
+        "mapNotNull",
+        "mapValues",
+        "all",
+        "any",
+        "none",
+        "count",
+        "find",
+        "first",
+        "sumBy",
+        "sumOf",
+        "maxOf",
+        "minOf",
+        "repeat",
+        "use",
+        "replaceFirstChar",
+        "joinToString",
+        "associate",
+        "groupBy",
+        "takeWhile",
+        "withDefault",
+        "buildString",
+        "flatMap",
+        "mapIndexed",
+        "forEachIndexed",
+        "indexOfFirst",
+    ];
+    INLINED.iter().any(|name| {
+        line.match_indices(name).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let after = line[at + name.len()..].trim_start();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && (after.starts_with('{')
+                    || after.starts_with('(') && after.contains("::")
+                    || after.starts_with('(') && line.contains('{'))
+        })
+    })
+}
+
 /// What PIT made that no source can say, by the compiler construct it came
 /// from: a disagreement explained rather than a missed mutant.
 pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static str {
@@ -648,12 +723,25 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
         return "inlined code (a line past the file's end)";
     };
     let kotlin = mutant.file.ends_with(".kt");
-    if mutant.method.starts_with("get")
-        && (mutant.mutator.ends_with("ReturnVals") || mutant.mutator == "PrimitiveReturns")
+    let returns = mutant.mutator.ends_with("ReturnVals") || mutant.mutator == "PrimitiveReturns";
+    if (mutant.method.starts_with("get") || mutant.method.starts_with("is"))
+        && returns
         && kotlin
         && (line.contains("val ") || line.contains("var "))
     {
         return "a Kotlin property's generated getter";
+    }
+    if mutant.description.contains("SpreadBuilder") {
+        return "a Kotlin spread operator's copying";
+    }
+    // A lambda or a function reference kotlinc compiles to a class of its
+    // own (`FileSpec$emit$1::invoke`, `$suggestedTypeImports$1::get`).
+    if kotlin
+        && returns
+        && (mutant.method == "invoke" || mutant.method == "get")
+        && mutant.class.contains('$')
+    {
+        return "a Kotlin lambda's or function reference's own return";
     }
     if mutant.description.contains("Intrinsics") {
         return "a Kotlin null check the compiler wrote";
@@ -669,19 +757,65 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
         return "a Kotlin array constructor's loop";
     }
     let code = line.trim_start();
+    let conditional = mutant.mutator.contains("Conditionals");
     if kotlin
         && ((line.contains("->") && !line.contains('{'))
             || code.starts_with("is ")
-            || code.starts_with("!is "))
+            || code.starts_with("!is ")
+            || (conditional && (code.contains("when (") || code.ends_with("-> {"))))
     {
         return "a `when` branch's comparison with its subject";
     }
-    if kotlin && mutant.mutator.ends_with("Conditionals") {
+    // A property assigned (`builder.name = value`, `x += list`) is a call to
+    // its setter, or to an operator the standard library inlines
+    // (`putAll`, `add`): a call the source writes as no call.
+    if kotlin && mutant.mutator == "VoidMethodCall" {
+        let called = mutant.description.rsplit("::").next().unwrap_or("");
+        let called = called.strip_prefix("access$").unwrap_or(called);
+        // `setOpen` sets `open`, or `isOpen`: a Boolean property's name.
+        let sets_it = called
+            .strip_prefix("set")
+            .and_then(|name| name.split('$').next())
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| {
+                let mut chars = name.chars();
+                let lower = chars
+                    .next()
+                    .map(|first| first.to_lowercase().chain(chars).collect::<String>());
+                [lower.unwrap_or_default(), format!("is{name}")]
+                    .iter()
+                    .any(|property| {
+                        code.starts_with(&format!("{property} = "))
+                            || code.contains(&format!(".{property} = "))
+                    })
+            });
+        // `counts[i] = n` and `counts[i]--` call an operator `set`.
+        let indexed = called == "set"
+            && (code.contains("] = ") || code.contains("]--") || code.contains("]++"));
+        let operator = indexed
+            || (called.starts_with("putAll") || called.starts_with("add"))
+                && (code.contains(" += ") || code.contains(" -= "));
+        if sets_it || operator {
+            return "a Kotlin property assignment's setter or operator call";
+        }
+    }
+    if kotlin && inlines_a_lambda(line) {
+        return "code a standard library function inlines with its lambda";
+    }
+    if kotlin && conditional {
         // `require(c)` is `if (!c) throw`: a jump of its own beside the
-        // comparison's, the same mutant where `c` is one comparison.
-        if ["require(", "check(", "require (", "check ("]
-            .iter()
-            .any(|call| line.contains(call))
+        // comparison's, the same mutant where `c` is one comparison; and
+        // `requireNotNull(x)` is `if (x == null) throw`.
+        if [
+            "require(",
+            "check(",
+            "require (",
+            "check (",
+            "requireNotNull(",
+            "checkNotNull(",
+        ]
+        .iter()
+        .any(|call| line.contains(call))
         {
             return "a Kotlin require or check's own jump";
         }
@@ -697,6 +831,7 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
         // `isNotEmpty()` and the like are inlined `!isEmpty()`: the negation
         // is a jump of their own beside the condition's.
         if [
+            "isEmpty()",
             "isNotEmpty()",
             "isNullOrEmpty()",
             "isNotBlank()",
@@ -1035,6 +1170,143 @@ mod tests {
             pit_only_category(&mutant(1, "Math"), None),
             "inlined code (a line past the file's end)"
         );
+
+        // Code kotlinc writes for an assignment, an inlined lambda, a
+        // spread, a lambda's class, a `when`, a `requireNotNull`.
+        let more = "class B {
+    fun f(b: B, c: IntArray, a: List<String>) {
+        b.isOpen = true
+        name = \"x\"
+        c[0]--
+        tags += a
+        a.forEach { g(it) }
+        a.forEach(::g)
+        a.map(String::length).filter({ it > 1 })
+        h(*a.toTypedArray())
+        when (a.size) {
+        val x = requireNotNull(a.firstOrNull())
+        if (name.isEmpty()) {}
+        b.isOpen = g(\"y\")
+    }
+}
+";
+        let called = |line: u32, method: &str| {
+            let mut call = mutant(line, "VoidMethodCall");
+            call.description = format!("removed call to a/B::{method}");
+            pit_only_category(&call, Some(more))
+        };
+        let assignment = "a Kotlin property assignment's setter or operator call";
+        assert_eq!(called(3, "setOpen$module"), assignment);
+        assert_eq!(called(4, "access$setName$p"), assignment);
+        assert_eq!(called(5, "set"), assignment);
+        assert_eq!(called(6, "putAll"), assignment);
+        assert_eq!(called(14, "setOpen"), assignment);
+        // A setter of another name, and a call that is no setter.
+        assert_eq!(called(3, "setName"), "other");
+        assert_eq!(called(3, "set"), "other");
+        assert_eq!(called(13, "setOpen"), "other");
+        assert_eq!(called(6, "remove"), "other");
+        let inlined = "code a standard library function inlines with its lambda";
+        assert_eq!(called(7, "g"), inlined);
+        assert_eq!(called(8, "g"), inlined);
+        assert_eq!(called(9, "g"), inlined);
+        let mut spread = mutant(10, "VoidMethodCall");
+        spread.description = "removed call to kotlin/jvm/internal/SpreadBuilder::add".into();
+        assert_eq!(
+            pit_only_category(&spread, Some(more)),
+            "a Kotlin spread operator's copying"
+        );
+        let returned = |method: &str, class: &str| {
+            let mut returned = mutant(13, "NullReturnVals");
+            returned.method = method.into();
+            returned.class = class.into();
+            pit_only_category(&returned, Some(more))
+        };
+        let lambda = "a Kotlin lambda's or function reference's own return";
+        assert_eq!(returned("invoke", "a.B$f$1"), lambda);
+        assert_eq!(returned("get", "a.B$f$ref$1"), lambda);
+        assert_eq!(returned("invoke", "a.B"), "other");
+        assert_eq!(returned("f", "a.B$f$1"), "other");
+        let mut boolean = mutant(13, "BooleanTrueReturnVals");
+        boolean.method = "invoke".into();
+        boolean.class = "a.B$1".into();
+        assert_eq!(pit_only_category(&boolean, Some(more)), lambda);
+        let mut primitive = mutant(13, "PrimitiveReturns");
+        primitive.method = "invoke".into();
+        primitive.class = "a.B$1".into();
+        assert_eq!(pit_only_category(&primitive, Some(more)), lambda);
+        let mut flag = mutant(1, "BooleanFalseReturnVals");
+        flag.method = "isOpen".into();
+        assert_eq!(
+            pit_only_category(&flag, Some("val isOpen: Boolean = true\n")),
+            "a Kotlin property's generated getter"
+        );
+        let conditional =
+            |line: u32, mutator: &str| pit_only_category(&mutant(line, mutator), Some(more));
+        assert_eq!(
+            conditional(11, "ConditionalsBoundary"),
+            "a `when` branch's comparison with its subject"
+        );
+        assert_eq!(
+            conditional(12, "NegateConditionals"),
+            "a Kotlin require or check's own jump"
+        );
+        assert_eq!(
+            conditional(13, "ConditionalsBoundary"),
+            "an inlined standard library function's own condition"
+        );
+        assert_eq!(conditional(13, "Math"), "other");
+        let java = PitMutant {
+            file: "a/B.java".into(),
+            ..mutant(3, "VoidMethodCall")
+        };
+        assert_eq!(pit_only_category(&java, Some(more)), "other");
+    }
+
+    /// A name inlining is not: a word that holds one, a call without a
+    /// lambda.
+    #[test]
+    fn only_a_call_given_a_lambda_or_reference_inlines_one() {
+        assert!(inlines_a_lambda("xs.forEach { }"));
+        assert!(inlines_a_lambda("xs.use(::close)"));
+        assert!(inlines_a_lambda("repeat(3) { }"));
+        assert!(!inlines_a_lambda("xs.forEach(g)"));
+        assert!(!inlines_a_lambda("mapper { }"));
+        assert!(!inlines_a_lambda("remap { }"));
+        assert!(!inlines_a_lambda("val count = 3"));
+    }
+
+    /// kotlinc names a call or a method after its module where it is
+    /// `internal`, after the function around it where it is local, and so
+    /// on: PIT's mutant is joined by every name its method's holds.
+    #[test]
+    fn a_mangled_method_is_joined_by_each_name_it_holds() {
+        let mutant = |mutator: &str, key: &str| PitMutant {
+            file: "a/B.kt".into(),
+            line: 1,
+            mutator: mutator.into(),
+            key: key.into(),
+            class: String::new(),
+            method: String::new(),
+            description: String::new(),
+            status: "KILLED".into(),
+            killing_tests: Vec::new(),
+            index: 0,
+        };
+        assert_eq!(
+            pit_keys(&mutant("VoidMethodCall", "access$emit$module$default")),
+            ["access$emit$module$default", "emit", "module"]
+        );
+        assert_eq!(
+            pit_keys(&mutant("BooleanTrueReturnVals", "isOpen$module")),
+            ["isOpen$module", "isOpen", "module"]
+        );
+        assert_eq!(
+            pit_keys(&mutant("PrimitiveReturns", "size$module")),
+            ["size$module", "size", "module"]
+        );
+        assert_eq!(pit_keys(&mutant("VoidMethodCall", "emit")), ["emit"]);
+        assert_eq!(pit_keys(&mutant("Math", "+$>-")), ["+$>-"]);
     }
 
     /// kotlinc increments a local with `IINC` (PIT's `Increments`) unless a

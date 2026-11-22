@@ -4266,6 +4266,16 @@ impl Enumerator<'_> {
             .is_some_and(|class| class.initializing.contains(&key));
         let modifiers = modifiers_text(node, self.source);
         let abstract_or_external = body.is_none();
+        // `Any`'s own members return what `Any` declares, whatever the
+        // expression body's type reads as here (`hash(a, b)`, a function
+        // of the project's or a library's).
+        let any_member = match (name.as_str(), arity) {
+            ("hashCode", Some(0)) => Some("Int"),
+            ("equals", Some(1)) => Some("Boolean"),
+            ("toString", Some(0)) => Some("String"),
+            _ => None,
+        }
+        .filter(|_| modifiers.contains("override"));
         self.methods.push(Method {
             name,
             returns: None,
@@ -4282,8 +4292,9 @@ impl Enumerator<'_> {
         }
         // An expression body's type is the expression's where none is
         // written; known once the parameters are in scope.
-        let returns = match (&declared, expression_body) {
-            (Ty::Unknown, Some(expression)) => self.kotlin_type_of(expression),
+        let returns = match (&declared, expression_body, any_member) {
+            (Ty::Unknown, Some(_), Some(declared_by_any)) => kotlin_type(declared_by_any),
+            (Ty::Unknown, Some(expression), None) => self.kotlin_type_of(expression),
             _ => declared,
         };
         // Kotlin marks a non-null reference return `@NotNull`, which PIT
