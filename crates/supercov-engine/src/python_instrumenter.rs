@@ -1103,7 +1103,7 @@ pub fn build_python_obligations(
 }
 
 /// Ruff's offsets are `u32`: a longer source cannot be parsed.
-fn within_text_size(length: usize) -> Result<(), PythonInstrumenterError> {
+pub(crate) fn within_text_size(length: usize) -> Result<(), PythonInstrumenterError> {
     u32::try_from(length)
         .map(|_| ())
         .map_err(|_| PythonInstrumenterError::SourceTooLarge)

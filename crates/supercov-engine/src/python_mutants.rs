@@ -145,9 +145,7 @@ pub struct Enumeration {
 
 /// mutmut's mutants of `source`, in mutmut's order.
 pub fn enumerate(source: &str) -> Result<Enumeration, PythonInstrumenterError> {
-    if u32::try_from(source.len()).is_err() {
-        return Err(PythonInstrumenterError::SourceTooLarge);
-    }
+    crate::python_instrumenter::within_text_size(source.len())?;
     let parsed =
         parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
     let comments = parsed
