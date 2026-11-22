@@ -3,6 +3,7 @@ import { relative, resolve, sep } from "node:path";
 import { afterAll, afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, coverageSnapshotColumns as localCoverageSnapshotColumns, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
+import { strongJob } from "./strongJob.mjs";
 import { appendEvidenceRecord, installCompileCache, saveCompileCache } from "./atomic.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
@@ -99,6 +100,13 @@ afterAll(() => {
 beforeEach((context) => {
     const task = context.task;
     currentFile = task.file;
+    // A strong pass's job (strongJobs.mjs, where the run also had browser
+    // tests): its own tests, none after its first failure.
+    const job = strongJob();
+    if (job && (job.stopped || !job.selects(task.file.filepath, `vitest:${task.id}`))) {
+        context.skip();
+        return;
+    }
     const testFile = relative(process.cwd(), task.file.filepath)
         .split(sep)
         .join("/");
@@ -150,6 +158,8 @@ beforeEach((context) => {
 });
 afterEach((context) => {
     const task = context.task;
+    if (task.result?.state === "fail")
+        strongJob()?.fail();
     const testFile = relative(process.cwd(), task.file.filepath)
         .split(sep)
         .join("/");

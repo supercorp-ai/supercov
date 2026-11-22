@@ -39,6 +39,8 @@ const CANCEL_FORCE_AFTER_MS = 3_000;
 const CANCEL_GRACE_MS = 15_000;
 // The pass summary keeps this many stages' figures.
 const PROFILED_STAGES = 50;
+// How much each of a mutant's batches of later files grows over the one before.
+const BATCH_GROWTH = Math.max(1, Number(process.env["SUPERCOV_STRONG_BATCH_GROWTH"]) || 4);
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
@@ -125,6 +127,7 @@ function readOutcome(out) {
             outcome.pid = record.pid;
             outcome.up = record.up;
             outcome.skipped = Boolean(record.skipped);
+            outcome.notRun = Boolean(record.notRun);
         }
         else if (record.started)
             outcome.startedAt = record.at;
@@ -165,8 +168,10 @@ const handedAt = new Map();
 let spawnerStats;
 let askStats = async () => undefined;
 // While a stage runs: which of its assignments a copy of a test file takes
-// (vitestStrongSpawner.mjs's stand-ins ask as Vitest tells them the file).
+// (vitestStrongSpawner.mjs's stand-ins ask as Vitest tells them the file),
+// and whether any copy got its assignment this way.
 let claimRun;
+let mainClaims = false;
 
 // Vitest's workers forked by a small process of their own instead of
 // Vitest's: forking copies the parent's memory map, and Vitest's process
@@ -397,6 +402,17 @@ function forkThroughSpawner(ahead) {
             if (this.attached)
                 this.spawner.process?.send({ id: this.id, disconnect: true });
         }
+        // Vitest waits for "exit" when stopping a worker whose `exitCode` is
+        // null, as it is for a process a signal ended: one the pass stopped
+        // already (a copy a failed test decided) has emitted it, and would
+        // hold Vitest's close for its teardown limit.
+        once(event, listener) {
+            if (event === "exit" && this.ended) {
+                process.nextTick(listener, this.exitCode, this.signalCode);
+                return this;
+            }
+            return super.once(event, listener);
+        }
         ref() { }
         unref() { }
     }
@@ -603,6 +619,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
     }
     const placed = (mutant) => {
+        // A Rust mutant (Rust compiled to wasm) by its index, as the pass's build placed it.
+        if (mutant.language === "rust")
+            return { index: mutant.index };
         const found = indexes.get(mutant.id);
         if (!found)
             return { error: "the copy lists no such mutant: the source changed since the run" };
@@ -631,7 +650,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (!byFile.has(test.file))
                 byFile.set(test.file, { file: test.file, tests: [], cost: 0, whole: false });
             const group = byFile.get(test.file);
-            group.tests.push(test.id);
+            // A Rust wasm run names a test by its file too (`<file>::vitest:<id>`).
+            group.tests.push(test.id.startsWith(`${test.file}::`) ? test.id.slice(test.file.length + 2) : test.id);
             group.cost += test.durationMs ?? 1_000;
         }
         for (const file of mutant.wholeFiles ?? []) {
@@ -662,7 +682,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let running;
     // Where the pass's time goes: each stage's wall time against the copies'
     // own (claim to end) and when its last copy started.
-    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
+    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
     // Runs one stage. `early(at, outcome)` is offered each copy's outcome as
     // soon as the copy ends, and says whether it took it; a stage's copies
     // are otherwise judged when its run has ended. `limitOf(assignment)` is
@@ -694,16 +714,30 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // decided meanwhile (recorded as its setup file would), or it is
         // beyond its file's assignments.
         const nextOf = new Map();
+        // A copy held back (`gated`: a mutant's next files, listed after the
+        // stage's other work) runs only once its mutant's other copies in the
+        // stage have ended with every test passing, else it goes back to its
+        // mutant's files to run later.
+        const ended = (position) => stopped.has(position) || deferred.has(position) || decided.has(position) || readOutcome(outs[position]).done;
         claimRun = (filepath) => {
+            mainClaims = true;
             const key = keyOf(toRelative(root, String(filepath)));
             const index = nextOf.get(key) ?? 0;
             nextOf.set(key, index + 1);
             const at = `${directory}/${key}/${index}`;
             if (!existsSync(`${at}.json`))
                 return { nothingToRun: true };
-            if (existsSync(`${at}.skip`)) {
+            const position = positionOf.get(`${key}/${index}`);
+            const assignment = assignments[position];
+            const skipped = existsSync(`${at}.skip`);
+            // Held back too where a copy before it failed a test: most such
+            // failures kill the mutant, which the stage judges a moment later.
+            const notRun = !skipped && assignment?.gated &&
+                assignment.job.positions.some((other) => !assignments[other].gated &&
+                    (!ended(other) || decided.has(other) || readOutcome(outs[other]).tests.some((test) => test.failed)));
+            if (skipped || notRun) {
                 const now = Date.now();
-                appendFileSync(`${at}.out`, `${JSON.stringify({ claimed: true, at: now, up: 0, skipped: true })}\n${JSON.stringify({ done: true, at: now })}\n`);
+                appendFileSync(`${at}.out`, `${JSON.stringify({ claimed: true, at: now, up: 0, skipped: true, notRun })}\n${JSON.stringify({ done: true, at: now })}\n`);
                 appendFileSync(`${directory}/claimed`, `${key}/${index}\n`);
                 return { nothingToRun: true };
             }
@@ -739,6 +773,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const going = new Map();
         const handled = new Set();
         const stopped = new Map();
+        // Copies stopped once a failed test decided them.
+        const decided = new Map();
+        const settles = (at, outcome) => {
+            const assignment = assignments[at];
+            return Boolean(assignment.job && assignment.claim.mutant && known(assignment.file) &&
+                failedTest(outcome) && ownWorker(outcome.pid));
+        };
         // Copies stopped at the stage's end, to run again in the next.
         const deferred = new Map();
         let claimedCount = 0;
@@ -797,6 +838,24 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     reported = true;
                 }
                 seen.outcome = outcome;
+                // A mutant's copy that has failed a test its file's known
+                // baseline passed is decided by that test: the rest of its
+                // tests are skipped, and what it does from here on cannot
+                // change its verdict. Its worker stops now, rather than at
+                // its file's end, which a timed-out test can leave a runaway
+                // loop holding (on tRPC such copies held 2 GB each).
+                if (!outcome.done && settles(at, outcome)) {
+                    try {
+                        process.kill(outcome.pid, "SIGKILL");
+                    }
+                    catch {
+                        // It ended meanwhile.
+                    }
+                    outcome = { ...outcome, done: true, doneAt: now };
+                    decided.set(at, outcome);
+                    seen.outcome = outcome;
+                    profile.settledCopies += 1;
+                }
                 if (outcome.done) {
                     going.delete(at);
                     if (early(at, outcome))
@@ -882,7 +941,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const stageEnded = Date.now();
         const outcomes = assignments.map((assignment, at) => {
             let outcome;
-            if (stopped.has(at))
+            if (decided.has(at))
+                outcome = decided.get(at);
+            else if (stopped.has(at))
                 outcome = { ...stopped.get(at), hung: true };
             else if (deferred.has(at))
                 outcome = { ...deferred.get(at), deferred: true };
@@ -1040,7 +1101,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     const nextBatch = (job) => {
         job.later.sort((a, b) => killScore(b) - killScore(a));
         const batch = job.later.splice(0, job.batch);
-        job.batch *= 4;
+        job.batch *= BATCH_GROWTH;
         return batch;
     };
     // A mutant's copies of the stage running that no worker has taken yet
@@ -1148,6 +1209,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         job.open -= 1;
         if (job.done)
             return;
+        // Held back: its mutant's other copies had not ended.
+        if (outcome.notRun) {
+            job.later.unshift(group);
+            return;
+        }
         // Skipped while a kill waits on its confirmation.
         if (outcome.skipped) {
             (job.deferred ??= []).push(group);
@@ -1289,6 +1355,19 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         for (const job of pending) {
             job.waiting.forEach((group, rank) => work.push({ job, group, rank }));
         }
+        // Where the reporter gives copies their assignments (Supercov's
+        // spawner), each mutant in the stage also takes its next batch of
+        // files, held back (`gated`) until its copies before them end: a
+        // mutant they leave alive goes on in the same stage, in what would
+        // be the stage's idle end, instead of waiting for the next stage.
+        // One its other copies killed skips them, and costs no process.
+        if (mainClaims && !oneAtATime) {
+            for (const job of pending) {
+                if (!job.waiting.length || !job.later.length || job.confirming?.length)
+                    continue;
+                nextBatch(job).forEach((group, rank) => work.push({ job, group, rank: rank + job.waiting.length, gated: true }));
+            }
+        }
         // Where files are not isolated, one copy at a time: its file's
         // baseline first.
         const stage = oneAtATime ? work.slice(0, 1) : work;
@@ -1309,7 +1388,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 return { ...item, file: check.file, estimate: work, claim: { ...check.claim, testTimeout: Math.ceil(budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) } };
             }
             const { job, group } = item;
-            job.waiting.splice(job.waiting.indexOf(group), 1);
+            if (!item.gated)
+                job.waiting.splice(job.waiting.indexOf(group), 1);
             job.open += 1;
             if (!job.started)
                 job.started = Date.now();
@@ -1350,7 +1430,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // long copies early, so that the stage does not end waiting on a
         // long copy that started last: by the copy's estimate over its rank.
         const priority = (assignment) => assignment.estimate / (Math.max(assignment.rank, 0) + 1);
-        assignments.sort((a, b) => Number(b.rank < 0) - Number(a.rank < 0) || priority(b) - priority(a));
+        assignments.sort((a, b) => Number(b.rank < 0) - Number(a.rank < 0) || Number(Boolean(a.gated)) - Number(Boolean(b.gated)) || priority(b) - priority(a));
         profile.checkCopies += assignments.filter((assignment) => assignment.check).length;
         for (const assignment of assignments) {
             if (assignment.job)

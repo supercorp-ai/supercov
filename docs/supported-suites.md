@@ -260,6 +260,12 @@ is credited exactly with its own lines and decisions. The crate's coverage is
 a Rust run beside the JavaScript run. What the copy built (`target/`, and the
 generated `pkg/` with its instrumented wasm) stays in the copy.
 
+`supercov runs <rust run> mutants test` runs the crate's mutants under the
+tests that load it, in Node (node:test, Vitest, Jest and the other job
+runners) and in Playwright's pages: the command builds the wasm from the
+crate with the mutants switched in, and each wasm instance is handed the
+mutant to run.
+
 ### A Rust Worker under browser tests
 
 A Playwright suite that starts a Cloudflare Worker written in Rust with

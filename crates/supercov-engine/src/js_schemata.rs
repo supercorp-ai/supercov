@@ -163,6 +163,7 @@ enum NodeKind {
     Unary,
     BooleanLiteral,
     StringLiteral,
+    RegExp,
     Template,
     Call,
     New,
@@ -216,6 +217,7 @@ fn accepts(mutant: &LedgerMutant, kind: NodeKind) -> bool {
             }
         }
         "StringLiteral" => matches!(kind, NodeKind::StringLiteral | NodeKind::Template),
+        "Regex" => matches!(kind, NodeKind::RegExp | NodeKind::StringLiteral),
         "MethodExpression" => kind == NodeKind::Call,
         "OptionalChaining" => match descriptor {
             "()" => kind == NodeKind::Call,
@@ -249,6 +251,7 @@ fn ast_kind(kind: &AstKind<'_>) -> NodeKind {
         AstKind::UnaryExpression(_) => NodeKind::Unary,
         AstKind::BooleanLiteral(_) => NodeKind::BooleanLiteral,
         AstKind::StringLiteral(_) => NodeKind::StringLiteral,
+        AstKind::RegExpLiteral(_) => NodeKind::RegExp,
         AstKind::TemplateLiteral(_) => NodeKind::Template,
         AstKind::CallExpression(_) => NodeKind::Call,
         AstKind::NewExpression(_) => NodeKind::New,
@@ -261,7 +264,6 @@ fn ast_kind(kind: &AstKind<'_>) -> NodeKind {
         AstKind::NullLiteral(_)
         | AstKind::NumericLiteral(_)
         | AstKind::BigIntLiteral(_)
-        | AstKind::RegExpLiteral(_)
         | AstKind::IdentifierReference(_)
         | AstKind::MetaProperty(_)
         | AstKind::ThisExpression(_)
@@ -298,6 +300,7 @@ fn expression_kind(expression: &Expression<'_>) -> NodeKind {
         Expression::UnaryExpression(_) => NodeKind::Unary,
         Expression::BooleanLiteral(_) => NodeKind::BooleanLiteral,
         Expression::StringLiteral(_) => NodeKind::StringLiteral,
+        Expression::RegExpLiteral(_) => NodeKind::RegExp,
         Expression::TemplateLiteral(_) => NodeKind::Template,
         Expression::CallExpression(_) => NodeKind::Call,
         Expression::NewExpression(_) => NodeKind::New,
@@ -905,6 +908,18 @@ fn expression_replacement<'a>(
                 "Stryker was here!"
             };
             ast.expression_string_literal(span, ast.str(value), None)
+        }
+        // The pattern weapon-regex made, with the literal's own flags, or
+        // the string `new RegExp` is given.
+        ("Regex", Expression::RegExpLiteral(literal)) => {
+            let mut clone = literal.clone_in(allocator);
+            clone.regex.pattern.text = ast.str(descriptor);
+            clone.regex.pattern.pattern = None;
+            clone.raw = None;
+            Expression::RegExpLiteral(clone)
+        }
+        ("Regex", Expression::StringLiteral(_)) => {
+            ast.expression_string_literal(span, ast.str(descriptor), None)
         }
         ("MethodExpression", Expression::CallExpression(call)) => {
             method_replacement(ast, span, call, descriptor)?
@@ -2206,11 +2221,10 @@ mod tests {
             &mutant("OptionalChaining", ".#p"),
             NodeKind::StaticMember
         ));
-        // Regex mutants are never written into the program.
-        assert!(!accepts(
-            &mutant("Regex", "removed"),
-            NodeKind::StringLiteral
-        ));
+        // A Regex mutant is written where its pattern is.
+        assert!(accepts(&mutant("Regex", "a"), NodeKind::RegExp));
+        assert!(accepts(&mutant("Regex", "a"), NodeKind::StringLiteral));
+        assert!(!accepts(&mutant("Regex", "a"), NodeKind::Call));
     }
 
     /// Next.js reads `config` from every file under a `pages` directory,

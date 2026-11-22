@@ -336,6 +336,8 @@ const mainProfile = firstProfile || args.variant === 'prof' || args.variant === 
 if (args.variant === 'prof-direct' || args.variant === 'direct') process.env.SUPERCOV_STRONG_DIRECT_FORK = '1';
 // ahead0: no workers started ahead of Vitest's requests (each copy's worker starts when Vitest asks).
 if (args.variant === 'ahead0') process.env.SUPERCOV_STRONG_WORKERS_AHEAD = '0';
+// bgN: a mutant's batches of later files grow N times (4 by default).
+if (/^bg\d+$/.test(args.variant ?? '')) process.env.SUPERCOV_STRONG_BATCH_GROWTH = args.variant.slice(2);
 // prof-arena: prof with glibc's malloc held to two arenas in every process of the strong pass.
 if (args.variant === 'prof-arena') process.env.MALLOC_ARENA_MAX = '2';
 
@@ -402,7 +404,7 @@ async function supercovStrong(name, flags, { first = false } = {}) {
   const out = join(out_, `${name}.result.json`);
   const command = first
     ? `${supercov} mutants --json ${flags.join(' ')} -- node_modules/.bin/${project.test}${firstWorkers ? ` --maxWorkers=${firstWorkers}` : ''}`
-    : `${supercov} runs latest mutants test --json ${flags.join(' ')}${strongWorkers ? ` -- node_modules/.bin/${project.test} --maxWorkers=${strongWorkers}` : ''}`;
+    : `${process.env.SUPERCOV_BENCH_STRONG_WRAP ? `${process.env.SUPERCOV_BENCH_STRONG_WRAP} ` : ''}${supercov} runs latest mutants test --json ${flags.join(' ')}${strongWorkers ? ` -- node_modules/.bin/${project.test} --maxWorkers=${strongWorkers}` : ''}`;
   const record = await phase(name, `${command} > ${out}`, { allowFail: true });
   record.result = existsSync(out) ? `${name}.result.json` : null;
   const run = latestRunDir();

@@ -1,7 +1,7 @@
 {
 "mutantSet": "stryker-js@10.1.1",
 "file": "module.mjs",
-"skipped": {"Regex":4,"ignored":0},
+"skipped": {"ignored":0},
 "mutants": [
   {"file":"module.mjs","mutator":"MethodExpression","start":[6,14],"end":[6,27],"replacement":"removed","text":"argv"},
   {"file":"module.mjs","mutator":"ObjectLiteral","start":[7,17],"end":[7,87],"replacement":"{}","text":"{}"},
@@ -71,6 +71,10 @@
   {"file":"module.mjs","mutator":"EqualityOperator","start":[76,23],"end":[76,50],"replacement":"!==","text":"typeof options !== \"object\""},
   {"file":"module.mjs","mutator":"StringLiteral","start":[76,42],"end":[76,50],"replacement":"empty","text":"\"\""},
   {"file":"module.mjs","mutator":"ArithmeticOperator","start":[77,23],"end":[77,31],"replacement":"/","text":"10n / 2n"},
+  {"file":"module.mjs","mutator":"Regex","start":[78,22],"end":[78,36],"replacement":"[a-z]\\d?","text":"/[a-z]\\d?/giu"},
+  {"file":"module.mjs","mutator":"Regex","start":[78,22],"end":[78,36],"replacement":"[^a-z]+\\d?","text":"/[^a-z]+\\d?/giu"},
+  {"file":"module.mjs","mutator":"Regex","start":[78,22],"end":[78,36],"replacement":"[a-z]+\\d","text":"/[a-z]+\\d/giu"},
+  {"file":"module.mjs","mutator":"Regex","start":[78,22],"end":[78,36],"replacement":"[a-z]+\\D?","text":"/[a-z]+\\D?/giu"},
   {"file":"module.mjs","mutator":"LogicalOperator","start":[78,42],"end":[78,55],"replacement":"&&","text":"args[0] && \"\""},
   {"file":"module.mjs","mutator":"StringLiteral","start":[78,53],"end":[78,55],"replacement":"Stryker was here!","text":"\"Stryker was here!\""}
 ]

@@ -12,7 +12,7 @@
 
 use crate::fault_fs as fs;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -344,6 +344,62 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
         regions.push((crate_key, bytes));
     }
     Some(regions)
+}
+
+/// A strong pass's copy: each Cargo workspace's wasm crates get the plan's
+/// Rust mutants behind switches instead of probes
+/// (`rust_strong::switch_wasm_workspace`), and the test processes the
+/// environment that hands each wasm instance the active mutant
+/// (`SUPERCOV_WASM_STRONG`, the workspaces' directories in the project).
+/// `None` where the copy has no wasm crate.
+pub fn switch_for_strong_pass(
+    root: &Path,
+    workspace: &Path,
+    strong: &crate::strong_driver::StrongRun,
+    diagnostics: &mut dyn Write,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let mut cargo_roots = BTreeSet::new();
+    for manifest in wasm_crates(workspace) {
+        let crate_directory = manifest.parent().unwrap_or(workspace).to_owned();
+        cargo_roots.insert(
+            crate::rust_worker::cargo_workspace_root(&crate_directory).unwrap_or(crate_directory),
+        );
+    }
+    if cargo_roots.is_empty() {
+        return Ok(None);
+    }
+    let cargo = crate::rust_strong::WasmCargo {
+        program: std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()),
+        rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
+    };
+    let mut prefixes = Vec::new();
+    for cargo_root in cargo_roots {
+        let Ok(relative) = cargo_root.strip_prefix(workspace) else {
+            continue;
+        };
+        let prefix = relative.to_string_lossy().replace('\\', "/");
+        crate::rust_strong::switch_wasm_workspace(
+            root,
+            &prefix,
+            &cargo_root,
+            &strong.plan,
+            &strong.results,
+            &cargo,
+            diagnostics,
+        )?;
+        prefixes.push(if prefix.is_empty() {
+            prefix
+        } else {
+            format!("{prefix}/")
+        });
+    }
+    let mut environment = wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default());
+    environment.remove("SUPERCOV_WASM_REGIONS");
+    environment.insert(
+        "SUPERCOV_WASM_STRONG".into(),
+        serde_json::to_string(&prefixes).expect("plain data serializes"),
+    );
+    Ok(Some(environment))
 }
 
 #[cfg(test)]

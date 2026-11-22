@@ -56,12 +56,13 @@ export async function adaptMocha(entrypoint) {
     // One snapshot per test, as under Jest; the server transport would only
     // repeat it, unattributed.
     runtime.enableRuntimeSnapshotEvidence();
-    const directory = resolve(process.cwd(), evidenceDirectory);
-    const write = (payload) => appendEvidenceRecord(directory, "mocha", payload);
+    // Read as each record is written: a resident Mocha (strongMochaHost.mjs)
+    // writes each job's into the job's own directory.
+    const write = (payload) => appendEvidenceRecord(resolve(process.cwd(), process.env.SUPERCOV_EVIDENCE_DIR ?? evidenceDirectory), "mocha", payload);
     // A --parallel parent overrides run() and never reaches this: its workers
     // run the tests, each with a Runner of its own.
-    const job = strongJob();
     Runner.prototype.run = function supercovMochaRun(...args) {
+        const job = strongJob();
         observe(this, runtime, write);
         if (job) {
             keepJobTests(this.suite, job);
@@ -76,8 +77,8 @@ export async function adaptMocha(entrypoint) {
     };
     Runner.prototype.run.supercovMocha = true;
     // A strong pass's job loads only its own test file, of the run's.
-    if (job)
-        await keepJobFiles(root, job);
+    if (strongJob())
+        await keepJobFiles(root);
     // Mocha takes its working directory off the front of each frame and
     // prints the rest. Under Supercov that is the copy, while an application
     // frame names the project's own file, so it printed whole:
@@ -122,7 +123,7 @@ function keepJobTests(root, job) {
 
 // Leaves out the run's other test files before Mocha loads them; under
 // --parallel, before it hands them to its workers.
-async function keepJobFiles(root, job) {
+async function keepJobFiles(root) {
     let loaded;
     try {
         loaded = await import(pathToFileURL(join(root, "lib", "mocha.js")).href);
@@ -140,7 +141,8 @@ async function keepJobFiles(root, job) {
         if (typeof original !== "function")
             continue;
         prototype[name] = function supercovJobFiles(...args) {
-            if (Array.isArray(this.files))
+            const job = strongJob();
+            if (job && Array.isArray(this.files))
                 this.files = this.files.filter((file) => job.runsFile(file));
             return Reflect.apply(original, this, args);
         };
