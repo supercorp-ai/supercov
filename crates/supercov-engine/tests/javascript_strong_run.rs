@@ -167,7 +167,7 @@ fn a_pass_that_cannot_write_or_start_what_it_needs_fails() {
         // The list of the plan's files, for the processes that instrument.
         ("fs.write#javascript_run.rs:988", "strong-files.json"),
         // A restart's job.
-        ("fs.write#javascript_run.rs:2837", "restart-0.json"),
+        ("fs.write#javascript_run.rs:2848", "restart-0.json"),
         // The run's state, read back to say it is complete.
         ("fs.read#javascript_run.rs:1250", "state.json"),
         // The first restart's command, after the pass's own.

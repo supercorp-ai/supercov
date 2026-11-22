@@ -1367,6 +1367,9 @@ fn run_javascript(
 
     let publication_started = Instant::now();
     // Read before the evidence is archived and removed.
+    servers
+        .iter_mut()
+        .for_each(|server| server.read_evidence(&run_id));
     let served = if servers.is_empty() && !support_directory.is_dir() {
         Vec::new()
     } else {
@@ -2113,6 +2116,14 @@ impl Server {
             Self::Jvm(server) => server.environment(),
             Self::RustWorker(server) => server.environment(),
             Self::RustWasm(server) => server.environment(),
+        }
+    }
+
+    /// Read what the tests left before the run archives and removes it:
+    /// only a wasm crate's server reads it later.
+    fn read_evidence(&mut self, evidence_run_id: &str) {
+        if let Self::RustWasm(server) = self {
+            server.read_evidence(evidence_run_id);
         }
     }
 
