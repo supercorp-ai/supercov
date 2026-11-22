@@ -803,18 +803,26 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
     //
     // It is recorded as its own record, under a role that is not a test,
     // holding only what the tests did not claim: reached, by nobody nameable.
-    let claimed = evidence
-        .tests
-        .iter()
-        .filter(|test| !test.unattributed)
-        .flat_map(|test| test.probes.keys().copied())
-        .collect::<BTreeSet<_>>();
+    // By bit, not by slot: a comparison probe's slot holds the relations its
+    // operands were seen in, and an Example that saw them equal where every
+    // claimed test saw them apart left an `eq` no test claimed. Dropping it
+    // called btree's `len(n.children) > 0` to `>=` not infected, though
+    // `ExampleBTreeG` kills it.
+    let mut claimed = BTreeMap::<u32, u32>::new();
+    for test in evidence.tests.iter().filter(|test| !test.unattributed) {
+        for (probe, bits) in &test.probes {
+            *claimed.entry(*probe).or_default() |= bits;
+        }
+    }
     let unclaimed = evidence
         .global
         .iter()
         .enumerate()
-        .filter(|(index, mask)| **mask != 0 && !claimed.contains(&(*index as u32)))
-        .map(|(index, mask)| (index as u32, *mask))
+        .map(|(index, mask)| {
+            let left = mask & !claimed.get(&(index as u32)).copied().unwrap_or(0);
+            (index as u32, left)
+        })
+        .filter(|(_, left)| *left != 0)
         .collect::<BTreeMap<_, _>>();
     if !unclaimed.is_empty() {
         // Whether this counts as coverage turns on whether it was produced by
@@ -1379,6 +1387,70 @@ mod tests {
         assert_eq!(result.test, "TestSilent");
         assert_eq!(result.test_id.as_deref(), Some("example.com/p::TestSilent"));
         assert!(result.runtime[0].hits.is_empty());
+    }
+
+    #[test]
+    fn a_relation_only_unclaimed_work_saw_is_the_background_s() {
+        // A test saw the operands apart (`lt`), an Example nobody can claim
+        // saw them equal: the run-wide record holds the `eq`.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let probes = BTreeMap::from([(
+            1,
+            GoProbe {
+                id: 1,
+                target: GoProbeTarget::Comparison {
+                    site: "a.go:3:9".into(),
+                },
+                at: 0,
+            },
+        )]);
+        let evidence = OwnedEvidence {
+            global: vec![0, 1 | 2],
+            tests: vec![OwnedTestEvidence {
+                name: "TestA".into(),
+                status: "passed".into(),
+                probes: BTreeMap::from([(1, 1)]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[OwnedTestOutcome {
+                name: "TestA".into(),
+                runner: String::new(),
+                package: String::new(),
+                file: None,
+                status: "passed".into(),
+                attributed: true,
+            }],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        });
+        let outcomes = |index: usize| {
+            run.request.raw_results[index].runtime[0].comparisons[0]
+                .outcomes
+                .clone()
+        };
+        assert_eq!(run.request.raw_results.len(), 2);
+        assert_eq!(outcomes(0), ["lt"]);
+        assert_eq!(outcomes(1), ["eq"]);
+        assert!(run.request.raw_results[1].runtime[0].hits.is_empty());
     }
 
     #[test]
