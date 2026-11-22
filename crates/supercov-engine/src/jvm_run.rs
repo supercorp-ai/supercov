@@ -77,6 +77,37 @@ const SERVICES_FILE: &str = "META-INF/services/org.junit.platform.launcher.TestE
 const LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovListener";
 
 /// Where TestNG looks for listeners to register.
+/// The strong pass's driver (`SupercovStrong.java`) and the Kotlin helper
+/// its switches call.
+const STRONG_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrong.java");
+const STRONG_PASS_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongPass.java");
+const STRONG_TESTNG_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongTestNG.java");
+const STRONG_TESTNG_CLASS: &str = "com.supercorp.supercov.SupercovStrongTestNG";
+const STRONG_JUNIT4_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongJUnit4.java");
+const STRONG_ANT_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongAnt.java");
+const STRONG_LISTENER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongListener.java");
+const STRONG_TESTNG_LISTENER_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovStrongTestNGListener.java");
+const KOTLIN_SWITCH_SOURCE: &str =
+    include_str!("../runtime-assets/jvm/com/supercorp/supercov/SupercovSwitch.kt");
+const STRONG_CLASS: &str = "com.supercorp.supercov.SupercovStrong";
+const FILTER_SERVICES_FILE: &str =
+    "META-INF/services/org.junit.platform.launcher.PostDiscoveryFilter";
+
+/// What a strong copy holds in place of probes: each switched file's text,
+/// and the modules whose Kotlin needs the helper with the contract.
+#[derive(Debug, Clone, Default)]
+pub struct StrongWorkspace {
+    pub switched: BTreeMap<String, String>,
+    pub kotlin_modules: BTreeSet<String>,
+}
+
 const TESTNG_SERVICES_FILE: &str = "META-INF/services/org.testng.ITestNGListener";
 
 const TESTNG_LISTENER_CLASS: &str = "com.supercorp.supercov.SupercovTestNGListener";
@@ -197,8 +228,20 @@ fn frameworks(build_file: &str) -> Frameworks {
     // by what is on the classpath -- so adding the launcher to a JUnit 4
     // project makes surefire switch to the platform provider, find no engine
     // there, and fail the suite outright.
+    // `kotlin-test-junit` (Kotlin's assertions on JUnit 4) brings JUnit 4;
+    // `kotlin-test-junit5` brings Jupiter.
+    let kotlin_junit4 = ["kotlin-test-junit", "kotlin(\"test-junit\")"]
+        .iter()
+        .any(|name| {
+            build_file.match_indices(name).any(|(at, _)| {
+                !build_file[at + name.len()..].starts_with('5')
+                    && !build_file[at + name.len()..].starts_with("5\"")
+            })
+        });
     let junit4 = !platform
-        && (build_file.contains("<groupId>junit</groupId>") || build_file.contains("'junit:junit"))
+        && (build_file.contains("<groupId>junit</groupId>")
+            || build_file.contains("'junit:junit")
+            || kotlin_junit4)
         || build_file.contains("\"junit:junit");
     Frameworks {
         // A TestNG-only or JUnit-4-only project would fail on a platform
@@ -835,17 +878,15 @@ fn gradle_with_launcher(
         // on every OS: the same spelling `junit4` uses.
         let relative =
             "rootDir.toPath().relativize(projectDir.toPath()).toString().replace('\\\\', '/')";
-        let (list, test_tasks, still_junit4) = if kotlin {
+        let (list, test_tasks) = if kotlin {
             (
                 format!("listOf({projects})"),
                 "tasks.withType<Test>().configureEach",
-                "options is JUnitOptions",
             )
         } else {
             (
                 format!("[{projects}]"),
                 "tasks.withType(Test).configureEach",
-                "options instanceof JUnitOptions",
             )
         };
         body.push_str(&format!("        if ({relative} in {list}) {{\n"));
@@ -861,8 +902,11 @@ fn gradle_with_launcher(
             ),
         ));
         body.push_str("            }\n");
+        // Unconditionally: these projects are on neither TestNG nor the
+        // platform, and Gradle 8 finalizes a task's framework when its
+        // options are read, so a check of `options` would refuse the switch.
         body.push_str(&format!(
-            "            {test_tasks} {{\n                if ({still_junit4}) useJUnitPlatform()\n            }}\n"
+            "            {test_tasks} {{\n                useJUnitPlatform()\n            }}\n"
         ));
         body.push_str("        }\n");
     }
@@ -1152,21 +1196,46 @@ fn instrument_workspace(
     evidence_directory: &Path,
     exact_attribution: bool,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    strong: Option<&StrongWorkspace>,
 ) -> Result<InstrumentedWorkspace, String> {
-    let project = prepare_jvm_project(workspace, roots)?;
+    let mut project = prepare_jvm_project(workspace, roots)?;
     let build = detect_build(workspace);
 
+    // A strong copy holds no probe: each file with a mutant the pass runs
+    // holds its switches, and every other file is as written.
+    if let Some(strong) = strong {
+        for (relative, instrumented) in &mut project.instrumented {
+            *instrumented = match strong.switched.get(relative) {
+                Some(switched) => switched.clone(),
+                None => fs::read_to_string(workspace.join(relative.as_str()))
+                    .map_err(|error| format!("{relative}: {error}"))?,
+            };
+        }
+        project.probes.clear();
+        project.decision_widths.clear();
+    }
     for (relative, instrumented) in &project.instrumented {
         write(&workspace.join(relative), instrumented)?;
     }
 
+    if strong.is_some() {
+        project.value_sites.clear();
+        project.mutants = None;
+    }
     let probe_count = project
         .probes
         .keys()
+        .chain(project.value_sites.keys())
         .max()
         .map_or(0, |highest| *highest as usize + 1);
     if build == JvmBuild::Ant {
-        return instrument_ant(workspace, evidence_directory, project, probe_count);
+        return instrument_ant(
+            workspace,
+            evidence_directory,
+            project,
+            probe_count,
+            strong.is_some(),
+        );
     }
 
     // Which frameworks a module runs is a question about that module. A
@@ -1284,10 +1353,38 @@ fn instrument_workspace(
             let test = at("test");
             write(
                 &test.join("SupercovConfig.java"),
-                &configuration(probe_count, &project.decision_widths, &module.evidence),
+                &configuration(probe_count, &project.decision_widths, &module.evidence)
+                    .replace(
+                        "  public static final String EVIDENCE",
+                        &format!(
+                            "  public static final String MODULE = {};\n  public static final String EVIDENCE",
+                            java_literal(&module.directory)
+                        ),
+                    ),
             )?;
             if frameworks.platform || frameworks.junit4 {
                 write(&test.join("SupercovListener.java"), LISTENER_SOURCE)?;
+                if strong.is_some() {
+                    write(&test.join("SupercovStrong.java"), STRONG_SOURCE)?;
+                }
+            }
+            if strong.is_some() {
+                write(&test.join("SupercovStrongPass.java"), STRONG_PASS_SOURCE)?;
+                if frameworks.testng {
+                    write(&test.join("SupercovStrongTestNG.java"), STRONG_TESTNG_SOURCE)?;
+                }
+            }
+            if let Some(strong) = strong
+                && strong.kotlin_modules.contains(&module.directory)
+            {
+                write(
+                    &workspace
+                        .join(&module.directory)
+                        .join("src/main/kotlin")
+                        .join(PACKAGE_DIRECTORY)
+                        .join("SupercovSwitch.kt"),
+                    KOTLIN_SWITCH_SOURCE,
+                )?;
             }
             if frameworks.testng {
                 write(
@@ -1417,7 +1514,15 @@ fn instrument_workspace(
         let resources = workspace.join(&module.directory).join("src/test/resources");
         // A JUnit 4 module runs on the platform by now, through the Vintage
         // engine added above, and reads as a platform module.
-        if frameworks.platform {
+        if frameworks.platform && strong.is_some() {
+            // A strong pass's driver in place of the listener: it measures
+            // nothing, and its filter leaves the build's own run empty.
+            write(&resources.join(SERVICES_FILE), &format!("{STRONG_CLASS}\n"))?;
+            write(
+                &resources.join(FILTER_SERVICES_FILE),
+                &format!("{STRONG_CLASS}\n"),
+            )?;
+        } else if frameworks.platform {
             write(
                 &resources.join(SERVICES_FILE),
                 &format!("{LISTENER_CLASS}\n"),
@@ -1448,7 +1553,14 @@ fn instrument_workspace(
         if frameworks.testng {
             write(
                 &resources.join(TESTNG_SERVICES_FILE),
-                &format!("{TESTNG_LISTENER_CLASS}\n"),
+                &format!(
+                    "{}\n",
+                    if strong.is_some() {
+                        STRONG_TESTNG_CLASS
+                    } else {
+                        TESTNG_LISTENER_CLASS
+                    }
+                ),
             )?;
         }
     }
@@ -1726,6 +1838,7 @@ fn instrument_ant(
     evidence_directory: &Path,
     project: PreparedJvmProject,
     probe_count: usize,
+    strong: bool,
 ) -> Result<InstrumentedWorkspace, String> {
     // The root the build compiles most of the product from: a stray example
     // tree sorting first is not where the runtime belongs.
@@ -1802,6 +1915,49 @@ fn instrument_ant(
             .join("SupercovConfig.java"),
         &config,
     )?;
+    if strong {
+        // A strong pass's drivers, under the class names the patched build
+        // gives its formatter and listeners.
+        for (directory, name, text) in [
+            (&sources, "SupercovAntFormatter.java", STRONG_ANT_SOURCE),
+            (&sources, "SupercovStrongJUnit4.java", STRONG_JUNIT4_SOURCE),
+            (&sources, "SupercovStrongPass.java", STRONG_PASS_SOURCE),
+            (
+                &listener_sources,
+                "SupercovListener.java",
+                STRONG_LISTENER_SOURCE,
+            ),
+            (&listener_sources, "SupercovStrong.java", STRONG_SOURCE),
+            (
+                &listener_sources,
+                "SupercovStrongPass.java",
+                STRONG_PASS_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovTestNGListener.java",
+                STRONG_TESTNG_LISTENER_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovStrongTestNG.java",
+                STRONG_TESTNG_SOURCE,
+            ),
+            (
+                &testng_sources,
+                "SupercovStrongPass.java",
+                STRONG_PASS_SOURCE,
+            ),
+        ] {
+            write(&directory.join(PACKAGE_DIRECTORY).join(name), text)?;
+        }
+        // `<junitlauncher>` reads discovery filters from its class path,
+        // which holds the drivers' classes.
+        write(
+            &classes.join(FILTER_SERVICES_FILE),
+            &format!("{STRONG_CLASS}\n"),
+        )?;
+    }
 
     let build = crate::ant_build::read_ant_build(workspace, &BTreeMap::new());
     // Everything changed outside the project is changed within the copy's
@@ -2041,6 +2197,7 @@ pub fn run_direct_jvm(
             &evidence_directory,
             request.exact_attribution,
             roots.as_ref(),
+            None,
         )?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
@@ -2312,7 +2469,7 @@ pub fn run_direct_jvm(
         }
         let evidence = merge_evidence(parts);
         measured.set(true);
-        let run = build_frontend_run(OwnedRunInputs {
+        let mut run = build_frontend_run(OwnedRunInputs {
             declaration: jvm_declaration(),
             environment: "jvm",
             manifest: &instrumented.project.manifest,
@@ -2324,11 +2481,25 @@ pub fn run_direct_jvm(
             test_exit_code: exit_code,
             coverage_model: jvm_coverage_model(),
         });
+        add_values(&mut run, &evidence, &instrumented.project.value_sites);
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
         let archive_path = work_directory.join("evidence.raw.gz");
+        let mut entries = run.archive_entries();
+        if let Some(mutants) = &instrumented.project.mutants {
+            // The run's mutants, as it listed them, beside its evidence.
+            let list = crate::mutant_list::MutantsFile::listed(
+                crate::mutant_list::JVM,
+                crate::jvm_mutants::MUTANT_SET,
+                mutants.clone(),
+            );
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&list).expect("plain data serializes"),
+            });
+        }
         let raw = write_archive(
-            crate::source_capture::append(run.archive_entries(), &source_inputs),
+            crate::source_capture::append(entries, &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
@@ -2402,6 +2573,49 @@ pub fn run_direct_jvm(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Each test's value probes, as its snapshot's comparisons: the outcomes a
+/// mutant's weak verdict reads (`jvm_strong::value_outcomes`).
+fn add_values(
+    run: &mut crate::owned_evidence::OwnedFrontendRun,
+    evidence: &crate::owned_evidence::OwnedEvidence,
+    sites: &BTreeMap<u64, crate::jvm_strong::ValueSite>,
+) {
+    if sites.is_empty() {
+        return;
+    }
+    let mut by_name = BTreeMap::<&str, BTreeMap<u64, u32>>::new();
+    for test in evidence.tests.iter().filter(|test| !test.unattributed) {
+        let values = by_name.entry(test.name.as_str()).or_default();
+        for (probe, bits) in &test.probes {
+            if sites.contains_key(&u64::from(*probe)) {
+                *values.entry(u64::from(*probe)).or_default() |= *bits;
+            }
+        }
+    }
+    for raw in run
+        .request
+        .raw_results
+        .iter_mut()
+        .filter(|raw| raw.role == "test")
+    {
+        let Some(values) = by_name.get(raw.test.as_str()) else {
+            continue;
+        };
+        let Some(snapshot) = raw.runtime.first_mut() else {
+            continue;
+        };
+        for (probe, bits) in values {
+            let site = &sites[probe];
+            snapshot
+                .comparisons
+                .push(crate::coverage_report::ComparisonSnapshot {
+                    id: site.site.clone(),
+                    outcomes: crate::jvm_strong::value_outcomes(site.kind, *bits),
+                });
+        }
     }
 }
 
@@ -2577,6 +2791,115 @@ impl JvmServer {
                 diagnostics,
             )
         })))
+    }
+}
+
+#[cfg(test)]
+mod strong_tests {
+    use super::*;
+
+    #[test]
+    fn kotlin_s_junit_4_assertions_bring_junit_4() {
+        let catalog = "kotlin-junit = { module = \"org.jetbrains.kotlin:kotlin-test-junit\", version.ref = \"kotlin\" }";
+        assert!(frameworks(catalog).junit4);
+        assert!(frameworks("testImplementation(kotlin(\"test-junit\"))").junit4);
+        let jupiter = "testImplementation(\"org.jetbrains.kotlin:kotlin-test-junit5\")";
+        assert!(!frameworks(jupiter).junit4);
+        assert!(!frameworks("testImplementation(kotlin(\"test-junit5\"))").junit4);
+    }
+
+    #[test]
+    fn a_build_s_compiler_errors_are_read_in_every_format() {
+        let workspace = Path::new("/w/copy");
+        let output = "\
+[ERROR] /w/copy/src/main/java/a/A.java:[12,34] no suitable method found for add(int,int,java.lang.String,int)
+/w/copy/src/main/java/a/B.java:7: error: incompatible types: int cannot be converted to String
+        return com.supercorp.supercov.Supercov.rZ(0, 3, s);
+                                                 ^
+e: file:///w/copy/src/main/kotlin/a/C.kt:3:9 Unresolved reference 'minus'.
+e: /w/copy/src/main/kotlin/a/D.kt: (4, 2): Type mismatch
+[ERROR] /elsewhere/E.java:[1,1] not the copy's
+";
+        assert_eq!(
+            compile_errors(output, workspace),
+            [
+                (
+                    "src/main/java/a/A.java".to_owned(),
+                    12,
+                    34,
+                    "no suitable method found for add(int,int,java.lang.String,int)".to_owned()
+                ),
+                (
+                    "src/main/java/a/B.java".to_owned(),
+                    7,
+                    50,
+                    "incompatible types: int cannot be converted to String".to_owned()
+                ),
+                (
+                    "src/main/kotlin/a/C.kt".to_owned(),
+                    3,
+                    9,
+                    "Unresolved reference 'minus'.".to_owned()
+                ),
+                (
+                    "src/main/kotlin/a/D.kt".to_owned(),
+                    4,
+                    2,
+                    "Type mismatch".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_class_named_by_its_simple_name_is_found_from_its_file() {
+        assert_eq!(
+            class_of_file("src/test/java/net/x/FooTest.java", "FooTest"),
+            "net.x.FooTest"
+        );
+        assert_eq!(
+            class_of_file("module/src/test/kotlin/a/BarTest.kt", "BarTest"),
+            "a.BarTest"
+        );
+        assert_eq!(class_of_file("Top.java", "Top"), "Top");
+    }
+
+    #[test]
+    fn the_jvm_plan_names_runnable_candidates_and_their_modules() {
+        let tests = vec![
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#one()".into(),
+                module: ".".into(),
+                limit_ms: 5,
+                runnable: true,
+            },
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#t\two()".into(),
+                module: "core".into(),
+                limit_ms: 0,
+                runnable: true,
+            },
+            StrongTest {
+                class: "a.T".into(),
+                name: "a.T#failed()".into(),
+                module: ".".into(),
+                limit_ms: 0,
+                runnable: false,
+            },
+        ];
+        let mutants = vec![StrongMutant {
+            id: "src/A.java:1:1-1:5:Math:-".into(),
+            file: "src/A.java".into(),
+            index: 3,
+            candidates: vec![0, 1, 2],
+        }];
+        let slots = BTreeMap::from([("src/A.java".to_owned(), 7)]);
+        assert_eq!(
+            strong_plan_text(&tests, &mutants, &slots),
+            "T\t0\ta.T\ta.T#one()\t5\t.\nT\t1\ta.T\ta.T#t\\two()\t0\tcore\nM\t0\tsrc/A.java:1:1-1:5:Math:-\t7\t3\t.,core\t0,1\n"
+        );
     }
 }
 
@@ -3390,8 +3713,8 @@ mod tests {
         );
         assert!(updated.contains("in listOf(\"\", \"moshi\")"), "{updated}");
         assert!(
-            updated.contains("if (options is JUnitOptions) useJUnitPlatform()"),
-            "only a task still on Gradle's JUnit 4 framework is switched:\n{updated}"
+            updated.contains("configureEach {\n                useJUnitPlatform()\n"),
+            "the tasks are switched without reading their options (Gradle 8 finalizes them):\n{updated}"
         );
 
         // Already compiling against the launcher, Vintage is still added.
@@ -3503,7 +3826,8 @@ mod tests {
         .unwrap();
 
         let evidence = root.join("evidence");
-        let instrumented = instrument_workspace(&root, &evidence, false, None).expect("instrument");
+        let instrumented =
+            instrument_workspace(&root, &evidence, false, None, None).expect("instrument");
         assert_eq!(instrumented.modular, ["boundaries"]);
 
         // The listener goes into the ordinary module and not the named one.
@@ -3873,8 +4197,8 @@ mod tests {
     fn a_tree_without_tests_gets_no_listener() {
         let root = temporary_root("no-tests");
         java_module(&root, "docs", false);
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), true, None, None)
+            .expect("instrument");
         assert!(instrumented.modules.iter().all(|module| !module.has_tests));
         assert!(!root.join("docs/src/test").exists());
         fs::remove_dir_all(&root).ok();
@@ -3898,8 +4222,8 @@ mod tests {
             "module app.boundaries {}\n",
         )
         .unwrap();
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), true, None, None)
+            .expect("instrument");
         assert_eq!(instrumented.build, JvmBuild::Plain);
         assert_eq!(instrumented.unmeasurable, ["legacy"]);
         assert_eq!(instrumented.modular, ["boundaries"]);
@@ -3977,13 +4301,13 @@ mod tests {
             root
         };
         let root = make();
-        instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1293, 1313, 1402, 1438, 1449] {
+        for line in [1390, 1410, 1499, 1543, 1554] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
-                instrument_workspace(&root, &root.join("evidence"), true, None)
+                instrument_workspace(&root, &root.join("evidence"), true, None, None)
             });
             assert!(failed.is_err(), "{fault}");
             fs::remove_dir_all(&root).ok();
@@ -4040,23 +4364,23 @@ mod tests {
                 .exists()
         };
         let root = make();
-        instrument_workspace(&root, &root.join("evidence"), true, None).expect("instrument");
+        instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         assert!(runtime_in(&root, "b/src") && !runtime_in(&root, "a/src"));
         fs::remove_dir_all(&root).ok();
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1734@2", || {
-            instrument_workspace(&root, &root.join("evidence"), true, None)
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1847@2", || {
+            instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1751, 1771, 1777, 1781, 1787, 1793, 1799, 1873] {
+        for line in [1864, 1884, 1890, 1894, 1900, 1906, 1912, 2029] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
-                instrument_workspace(&root, &root.join("evidence"), true, None)
+                instrument_workspace(&root, &root.join("evidence"), true, None, None)
             });
             assert!(failed.is_err(), "{fault}");
             fs::remove_dir_all(&root).ok();
@@ -4128,7 +4452,7 @@ mod tests {
         };
         for wrapper in [false, true] {
             let (top, copy, workspace) = make(wrapper, &beside);
-            instrument_workspace(&workspace, &top.join("evidence"), true, None)
+            instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
                 .expect("instrument");
             assert!(changed(&copy), "{wrapper}");
             assert!(
@@ -4142,7 +4466,7 @@ mod tests {
         // Named by its absolute path, the harness is outside the copy.
         let absolute = |top: &Path| top.join("real/tools/common.xml").display().to_string();
         let (top, _, workspace) = make(false, &absolute);
-        let _ = instrument_workspace(&workspace, &top.join("evidence"), true, None);
+        let _ = instrument_workspace(&workspace, &top.join("evidence"), true, None, None);
         assert!(
             !fs::read_to_string(top.join("real/tools/common.xml"))
                 .unwrap()
@@ -4152,19 +4476,19 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1842", || {
-            instrument_workspace(&workspace, &top.join("evidence"), true, None)
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1998", || {
+            instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1819",
+            "fs.read_dir#jvm_run.rs:1975",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {
             let (top, _, workspace) = make(false, &beside);
             let failed = crate::fault::during(fault, || {
-                instrument_workspace(&workspace, &top.join("evidence"), true, None)
+                instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
             });
             assert!(failed.is_err(), "{fault}");
             fs::remove_dir_all(top).ok();
@@ -4182,8 +4506,8 @@ mod tests {
             "package app;\nclass ApiTest { void t() {} }\n",
         )
         .unwrap();
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None, None)
+            .expect("instrument");
         assert!(instrumented.project.instrumented.is_empty());
         assert!(instrumented.modules.iter().any(|module| module.has_tests));
         fs::remove_dir_all(&root).ok();
@@ -4211,8 +4535,8 @@ mod tests {
         java_module(&root, "only", false);
         java_module(&root, "plain", true);
         write(&root.join("plain/build.gradle"), junit4).unwrap();
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None, None)
+            .expect("instrument");
         assert!(instrumented.added_vintage);
         assert_eq!(instrumented.added_launcher, Some("build.gradle"));
         let build = fs::read_to_string(root.join("build.gradle")).unwrap();
@@ -4245,8 +4569,9 @@ mod tests {
             write(&root.join(settings), "include 'app'\n").unwrap();
             write(&root.join("app/build.gradle"), "plugins { id 'java' }\n").unwrap();
             java_module(&root, "app", true);
-            let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None)
-                .expect("instrument");
+            let instrumented =
+                instrument_workspace(&root, &root.join("evidence"), false, None, None)
+                    .expect("instrument");
             assert_eq!(instrumented.added_launcher, Some(build));
             let made = fs::read_to_string(root.join(build)).unwrap();
             assert!(made.contains(LAUNCHER_ARTIFACT), "{made}");
@@ -4271,8 +4596,8 @@ mod tests {
             "dependencies { testImplementation 'org.testng:testng:7.10.2' }\n",
         )
         .unwrap();
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None, None)
+            .expect("instrument");
         assert_eq!(instrumented.added_launcher, None);
         assert_eq!(
             fs::read_to_string(root.join("build.gradle")).unwrap(),
@@ -4289,8 +4614,8 @@ mod tests {
         let declared = "dependencies { testImplementation 'org.junit.platform:junit-platform-launcher:1.10.2' }\n";
         write(&root.join("build.gradle"), declared).unwrap();
         java_module(&root, ".", true);
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None, None)
+            .expect("instrument");
         assert_eq!(instrumented.added_launcher, None);
         assert_eq!(
             fs::read_to_string(root.join("build.gradle")).unwrap(),
@@ -4312,8 +4637,8 @@ mod tests {
         // A module of the tree with no build file of its own takes the
         // root's frameworks and has nothing to add the launcher to.
         java_module(&root, "loose", true);
-        let instrumented =
-            instrument_workspace(&root, &root.join("evidence"), false, None).expect("instrument");
+        let instrumented = instrument_workspace(&root, &root.join("evidence"), false, None, None)
+            .expect("instrument");
         assert!(!root.join("loose/pom.xml").exists());
         assert_eq!(instrumented.added_launcher, Some("pom.xml"));
         assert!(
@@ -4535,7 +4860,7 @@ mod tests {
             )
             .unwrap();
             java_module(&root, ".", true);
-            instrument_workspace(&root, &root.join("evidence"), exact_attribution, None)
+            instrument_workspace(&root, &root.join("evidence"), exact_attribution, None, None)
                 .expect("instrument");
             let resources = root.join("src/test/resources");
             assert!(resources.join(SERVICES_FILE).exists());
@@ -4574,4 +4899,667 @@ mod tests {
             Some(RatSkip::MavenOpts("-Drat.skip=true".into()))
         );
     }
+}
+
+// --- Strong mutation ---------------------------------------------------------------
+
+/// A strong pass over a JVM project (`docs/design/strong-mutation.md`):
+/// the plan's undecided mutants switched into one copy, which the build
+/// compiles once; its test JVM runs them (`SupercovStrong.java`) and writes
+/// each verdict to `results`.
+#[derive(Debug, Clone)]
+pub struct StrongJvmRequest {
+    pub root: PathBuf,
+    pub command: Vec<String>,
+    pub run_id: String,
+    pub started_at: String,
+    /// The plan `mutants test` writes (`plan.json`).
+    pub plan: PathBuf,
+    /// Where verdicts go, one JSON line each.
+    pub results: PathBuf,
+}
+
+/// How many times the build is started at most: each start after the first
+/// either drops the switches the compiler refused or runs the mutants a
+/// JVM left (one that timed out or that a mutant left broken).
+const STRONG_STARTS: usize = 12;
+
+#[derive(Debug, Clone)]
+struct StrongTest {
+    class: String,
+    name: String,
+    module: String,
+    limit_ms: u64,
+    runnable: bool,
+}
+
+#[derive(Debug, Clone)]
+struct StrongMutant {
+    id: String,
+    file: String,
+    index: usize,
+    candidates: Vec<usize>,
+}
+
+/// Runs a strong pass; returns the last build's exit code.
+pub fn run_strong_jvm(
+    request: &StrongJvmRequest,
+    diagnostics: &mut dyn Write,
+) -> Result<i32, String> {
+    let root = canonicalize_simplified(&request.root)
+        .map_err(|error| format!("{}: {error}", request.root.display()))?;
+    let plan_text = fs::read_to_string(&request.plan)
+        .map_err(|error| format!("{}: {error}", request.plan.display()))?;
+    let plan: serde_json::Value =
+        serde_json::from_str(&plan_text).map_err(|error| format!("the plan: {error}"))?;
+    let tests = plan["tests"]
+        .as_array()
+        .map(|tests| {
+            tests
+                .iter()
+                .map(|test| {
+                    let name = test["name"].as_str().unwrap_or_default().to_owned();
+                    let file = test["file"].as_str().unwrap_or_default();
+                    let duration = test["durationMs"].as_u64();
+                    let class = class_of(&name).unwrap_or_default();
+                    StrongTest {
+                        // TestNG names a class by its simple name: its file
+                        // says the rest.
+                        class: if class.contains('.') || file.is_empty() {
+                            class.to_owned()
+                        } else {
+                            class_of_file(file, class)
+                        },
+                        module: if file.is_empty() {
+                            ".".to_owned()
+                        } else {
+                            module_of(file)
+                        },
+                        // What the measured run took, where it said: the
+                        // driver's limit is the longer of it and the test's
+                        // baseline, × 3 and 10 s.
+                        limit_ms: duration.unwrap_or(0),
+                        runnable: test["runnable"].as_bool().unwrap_or(false),
+                        name,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut mutants = plan["mutants"]
+        .as_array()
+        .map(|mutants| {
+            mutants
+                .iter()
+                .filter(|mutant| mutant["decided"].is_null())
+                .map(|mutant| StrongMutant {
+                    id: mutant["id"].as_str().unwrap_or_default().to_owned(),
+                    file: mutant["file"].as_str().unwrap_or_default().to_owned(),
+                    index: mutant["index"].as_u64().unwrap_or(0) as usize,
+                    candidates: mutant["candidates"]
+                        .as_array()
+                        .map(|candidates| {
+                            candidates
+                                .iter()
+                                .filter_map(|candidate| candidate["test"].as_u64())
+                                .map(|test| test as usize)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
+        .map_err(|error| error.to_string())?;
+    let work = request
+        .results
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join(".supercov/strong"));
+    let result = (|| -> Result<i32, String> {
+        let mut results = Results::new(&request.results);
+        // Each file the pass switches, enumerated again: its list must be
+        // the one the plan addresses by index.
+        let files = crate::jvm_project::discover_jvm_files(&root)?;
+        let sources = files
+            .sources
+            .iter()
+            .map(|(file, _)| file.clone())
+            .collect::<Vec<_>>();
+        let index = crate::jvm_strong::index_of(&root, &sources);
+        let mut enumerated =
+            BTreeMap::<String, (String, Vec<crate::jvm_mutants::JvmMutant>)>::new();
+        let wanted = mutants
+            .iter()
+            .map(|mutant| mutant.file.clone())
+            .collect::<BTreeSet<_>>();
+        for file in &wanted {
+            let listed = fs::read_to_string(root.join(file))
+                .map_err(|error| error.to_string())
+                .and_then(|source| {
+                    crate::jvm_strong::file_mutants(file, &source, &index)
+                        .map(|listed| (source, listed.mutants))
+                });
+            match listed {
+                Ok(listed) => {
+                    enumerated.insert(file.clone(), listed);
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] could not list {file}'s mutants: {error}"
+                    );
+                }
+            }
+        }
+        mutants.retain(|mutant| {
+            let same = enumerated.get(&mutant.file).is_some_and(|(_, listed)| {
+                listed.get(mutant.index).is_some_and(|listed| {
+                    crate::jvm_strong::mutant_id(&mutant.file, listed) == mutant.id
+                })
+            });
+            if !same {
+                results.verdict(
+                    &mutant.id,
+                    "error",
+                    "its file's mutants are not the ones the plan lists: measure the run again",
+                );
+            }
+            same
+        });
+        let slots = enumerated
+            .keys()
+            .cloned()
+            .enumerate()
+            .map(|(slot, file)| (file, slot))
+            .collect::<BTreeMap<_, _>>();
+        // Switched so far, by file: the mutants the compiler has not refused.
+        let mut placed = BTreeMap::<String, Vec<usize>>::new();
+        for mutant in &mutants {
+            placed
+                .entry(mutant.file.clone())
+                .or_default()
+                .push(mutant.index);
+        }
+
+        recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
+        let workspace =
+            prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
+        let switch = |placed: &BTreeMap<String, Vec<usize>>| {
+            placed
+                .iter()
+                .filter_map(|(file, indices)| {
+                    let (source, listed) = enumerated.get(file)?;
+                    let language = crate::jvm_strong::language_of(file)?;
+                    Some((
+                        file.clone(),
+                        crate::jvm_schemata::switch_source(
+                            source,
+                            language,
+                            slots[file],
+                            listed,
+                            indices,
+                        ),
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut switched = switch(&placed);
+        let strong = StrongWorkspace {
+            switched: switched
+                .iter()
+                .map(|(file, switched)| (file.clone(), switched.source.clone()))
+                .collect(),
+            kotlin_modules: switched
+                .keys()
+                .filter(|file| file.ends_with(".kt"))
+                .map(|file| module_of(file))
+                .collect(),
+        };
+        let evidence = work.join("jvm");
+        fs::create_dir_all(&evidence).map_err(|error| error.to_string())?;
+        let instrumented = instrument_workspace(&workspace, &evidence, true, None, Some(&strong))?;
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] strong pass: switches in {} of {} source file(s), {} mutant(s) in one build",
+            switched.len(),
+            instrumented.project.instrumented.len(),
+            mutants.len()
+        );
+        let (mut command, _) = command_with_fresh_results(instrumented.build, &request.command);
+        let mut maven_opts = None;
+        if instrumented.license_check
+            && let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok())
+        {
+            match skip {
+                RatSkip::Argument => command.push("-Drat.skip=true".into()),
+                RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
+            }
+        }
+        let jvm_plan = work.join("plan.jvm.tsv");
+        let claims = work.join("claims");
+        let supervisor = crate::process_supervision::ProcessSupervisor::new()
+            .map_err(|error| error.to_string())?;
+        let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+        let mut exit_code = 0;
+        let mut remaining = mutants.clone();
+        for start in 0..STRONG_STARTS {
+            remaining.retain(|mutant| !results.decided(&mutant.id));
+            remaining.retain(|mutant| {
+                placed
+                    .get(&mutant.file)
+                    .is_some_and(|indices| indices.contains(&mutant.index))
+            });
+            if remaining.is_empty() {
+                break;
+            }
+            write(&jvm_plan, &strong_plan_text(&tests, &remaining, &slots))?;
+            let _ = fs::remove_dir_all(&claims);
+            let log = work.join(format!("build-{start}.log"));
+            let mut environment = crate::rust_runtime::measured_environment(
+                std::env::vars_os(),
+                maven_opts.clone().map(|value| ("MAVEN_OPTS", value)),
+                &request.run_id,
+            );
+            // JVMs that share the pass: half the machine's processors, at
+            // most eight, unless asked.
+            if std::env::var_os("SUPERCOV_STRONG_JVMS").is_none() {
+                let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+                environment.push((
+                    OsString::from("SUPERCOV_STRONG_JVMS"),
+                    OsString::from((processors / 2).clamp(1, 8).to_string()),
+                ));
+            }
+            for (name, value) in [
+                ("SUPERCOV_STRONG_JVM_PLAN", jvm_plan.as_os_str()),
+                ("SUPERCOV_STRONG_RESULTS", request.results.as_os_str()),
+                ("SUPERCOV_STRONG_CLAIMS", claims.as_os_str()),
+            ] {
+                environment.push((OsString::from(name), value.to_owned()));
+            }
+            let spec = CommandSpec {
+                program: command[0].clone().into(),
+                arguments: command[1..].iter().map(OsString::from).collect(),
+                cwd: workspace.clone(),
+                environment: Some(environment),
+                captured_output: Some(log.clone()),
+                console: None,
+            };
+            let before = remaining.len();
+            let outcome = supervisor
+                .supervise(&spec, options, diagnostics)
+                .map_err(|error| error.to_string())?;
+            exit_code = outcome.exit_code();
+            if let Some(signal) = outcome.interrupted_signal {
+                return Err(format!(
+                    "the strong pass was interrupted by {}",
+                    signal.name()
+                ));
+            }
+            let output = fs::read_to_string(&log).unwrap_or_default();
+            // Switches the compiler refused: those mutants are unviable,
+            // and the build runs again without them.
+            let errors = compile_errors(&output, &workspace);
+            if !errors.is_empty() {
+                let mut refused = Vec::new();
+                let mut unexplained = Vec::new();
+                for (file, line, column, message) in &errors {
+                    let Some(switched_file) = switched.get(file) else {
+                        unexplained.push(format!("{file}:{line}:{column}: {message}"));
+                        continue;
+                    };
+                    let mutant =
+                        crate::jvm_schemata::offset_of(&switched_file.source, *line, *column)
+                            .and_then(|offset| {
+                                crate::jvm_schemata::mutant_at(switched_file, offset)
+                            });
+                    match mutant {
+                        // A refused switch often has several errors: its
+                        // mutant is unviable once.
+                        Some(index)
+                            if refused.iter().any(|(f, i, _): &(String, usize, String)| {
+                                f == file && *i == index
+                            }) => {}
+                        Some(index) => refused.push((file.clone(), index, message.clone())),
+                        None => unexplained.push(format!("{file}:{line}:{column}: {message}")),
+                    }
+                }
+                if refused.is_empty() {
+                    let _ = writeln!(
+                        diagnostics,
+                        "[supercov] the strong copy did not compile, at code that holds no switch:\n  {}\n(build output: {})",
+                        unexplained.join("\n  "),
+                        log.display()
+                    );
+                    break;
+                }
+                for (file, index, message) in refused {
+                    if let Some(indices) = placed.get_mut(&file) {
+                        indices.retain(|placed| *placed != index);
+                    }
+                    if let Some((_, listed)) = enumerated.get(&file)
+                        && let Some(mutant) = listed.get(index)
+                    {
+                        results.verdict(
+                            &crate::jvm_strong::mutant_id(&file, mutant),
+                            "unviable",
+                            &format!("the compiler refused it: {}", message.trim()),
+                        );
+                    }
+                }
+                switched = switch(&placed);
+                for (file, switched) in &switched {
+                    write(&workspace.join(file), &switched.source)?;
+                }
+                continue;
+            }
+            results.merge_partials(&remaining, &tests);
+            remaining.retain(|mutant| !results.decided(&mutant.id));
+            if remaining.len() == before {
+                let _ = writeln!(
+                    diagnostics,
+                    "[supercov] the build (exit {exit_code}) gave no verdict for {} mutant(s); build output: {}",
+                    remaining.len(),
+                    log.display()
+                );
+                break;
+            }
+        }
+        Ok(exit_code)
+    })();
+    let release = lock.release().map_err(|error| error.to_string());
+    match (result, release) {
+        (Ok(code), Ok(())) => Ok(code),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// The class a test file declares, by its path below a source root
+/// (`src/test/java/com/x/FooTest.java` declares `com.x.FooTest`), for a
+/// class a framework named by its simple name.
+fn class_of_file(file: &str, simple: &str) -> String {
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    let package = ["/java/", "/kotlin/", "/groovy/", "/scala/"]
+        .iter()
+        .find_map(|root| stem.split_once(root).map(|(_, rest)| rest))
+        .unwrap_or(stem);
+    let package = package.rsplit_once('/').map_or("", |(package, _)| package);
+    if package.is_empty() {
+        simple.to_owned()
+    } else {
+        format!("{}.{simple}", package.replace('/', "."))
+    }
+}
+
+/// The plan as the JVM driver reads it: a line per test (`T`) and per
+/// mutant (`M`), tab-separated, with tabs, newlines and backslashes escaped.
+fn strong_plan_text(
+    tests: &[StrongTest],
+    mutants: &[StrongMutant],
+    slots: &BTreeMap<String, usize>,
+) -> String {
+    let escape = |text: &str| {
+        text.replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+    };
+    let mut used = BTreeSet::new();
+    let mut lines = Vec::new();
+    for (row, mutant) in mutants.iter().enumerate() {
+        let candidates = mutant
+            .candidates
+            .iter()
+            .copied()
+            .filter(|test| tests.get(*test).is_some_and(|test| test.runnable))
+            .collect::<Vec<_>>();
+        used.extend(candidates.iter().copied());
+        let modules = candidates
+            .iter()
+            .map(|test| tests[*test].module.clone())
+            .collect::<BTreeSet<_>>();
+        lines.push(format!(
+            "M\t{row}\t{}\t{}\t{}\t{}\t{}",
+            escape(&mutant.id),
+            slots.get(&mutant.file).copied().unwrap_or(usize::MAX),
+            mutant.index,
+            modules.into_iter().collect::<Vec<_>>().join(","),
+            candidates
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    let mut text = used
+        .into_iter()
+        .map(|index| {
+            let test = &tests[index];
+            format!(
+                "T\t{index}\t{}\t{}\t{}\t{}\n",
+                escape(&test.class),
+                escape(&test.name),
+                test.limit_ms,
+                escape(&test.module)
+            )
+        })
+        .collect::<String>();
+    for line in lines {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
+/// A strong pass's verdicts so far: those in `results`, which the engine
+/// and the JVM driver both append to.
+struct Results {
+    path: PathBuf,
+}
+
+impl Results {
+    fn new(path: &Path) -> Self {
+        Results {
+            path: path.to_owned(),
+        }
+    }
+
+    fn lines(&self) -> Vec<serde_json::Value> {
+        fs::read_to_string(&self.path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    fn decided(&self, id: &str) -> bool {
+        self.lines()
+            .iter()
+            .any(|line| line["id"].as_str() == Some(id))
+    }
+
+    fn append(&self, value: &serde_json::Value) {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{value}");
+        }
+    }
+
+    fn verdict(&mut self, id: &str, status: &str, reason: &str) {
+        self.append(&serde_json::json!({
+            "id": id,
+            "status": status,
+            "tests": 0,
+            "durationMs": 0,
+            "reason": reason,
+        }));
+    }
+
+    /// A mutant whose candidates are in several modules has a partial
+    /// verdict from each module's JVM: killed (or timed out) in any is its
+    /// verdict, survived in all is survived.
+    fn merge_partials(&mut self, mutants: &[StrongMutant], tests: &[StrongTest]) {
+        let lines = self.lines();
+        for mutant in mutants {
+            if lines
+                .iter()
+                .any(|line| line["id"].as_str() == Some(&mutant.id))
+            {
+                continue;
+            }
+            let partials = lines
+                .iter()
+                .filter(|line| {
+                    line["partial"] == true && line["mutant"].as_str() == Some(&mutant.id)
+                })
+                .collect::<Vec<_>>();
+            if partials.is_empty() {
+                continue;
+            }
+            let detected = partials
+                .iter()
+                .find(|line| matches!(line["status"].as_str(), Some("killed" | "timeout")));
+            let modules = mutant
+                .candidates
+                .iter()
+                .filter_map(|test| tests.get(*test))
+                .filter(|test| test.runnable)
+                .map(|test| test.module.clone())
+                .collect::<BTreeSet<_>>();
+            let reported = partials
+                .iter()
+                .filter_map(|line| line["module"].as_str().map(str::to_owned))
+                .collect::<BTreeSet<_>>();
+            let verdict = match detected {
+                Some(line) => (*line).clone(),
+                None if reported.is_superset(&modules) => {
+                    let mut line = partials[0].clone();
+                    line["tests"] = serde_json::json!(
+                        partials
+                            .iter()
+                            .map(|line| line["tests"].as_u64().unwrap_or(0))
+                            .sum::<u64>()
+                    );
+                    line
+                }
+                None => continue,
+            };
+            let mut verdict = verdict;
+            if let Some(object) = verdict.as_object_mut() {
+                object.remove("partial");
+                object.remove("row");
+                object.remove("module");
+                object.remove("mutant");
+                object.insert("id".into(), serde_json::json!(mutant.id));
+            }
+            self.append(&verdict);
+        }
+    }
+}
+
+/// The compiler errors a build printed, at files of the copy: the file
+/// relative to the copy, the line and column (1-based), and the message.
+/// javac through Maven (`[ERROR] /x/A.java:[12,34] msg`), javac through
+/// Gradle (`/x/A.java:12: error: msg`, the column from the caret line under
+/// it), and kotlinc (`e: file:///x/A.kt:12:34 msg`, `e: /x/A.kt: (12, 34):
+/// msg`).
+fn compile_errors(output: &str, workspace: &Path) -> Vec<(String, usize, usize, String)> {
+    let base = workspace.to_string_lossy().trim_end_matches('/').to_owned();
+    let relative = |path: &str| -> Option<String> {
+        let path = path.trim().trim_start_matches("file://");
+        let stripped = path
+            .strip_prefix(&base)
+            .or_else(|| {
+                std::fs::canonicalize(path)
+                    .ok()
+                    .and_then(|canonical| {
+                        canonical
+                            .strip_prefix(workspace)
+                            .ok()
+                            .map(|rest| rest.to_string_lossy().into_owned())
+                    })
+                    .map(|_| path)
+            })?
+            .trim_start_matches('/')
+            .to_owned();
+        Some(stripped)
+    };
+    let lines = output.lines().collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        let line = line.trim_start_matches("[ERROR] ").trim();
+        // kotlinc: `e: file:///x/A.kt:12:34 message`
+        if let Some(rest) = line.strip_prefix("e: ") {
+            let rest = rest.trim_start_matches("file://");
+            if let Some((path, tail)) = rest.split_once(".kt:") {
+                let mut parts = tail.splitn(3, [':', ' ']);
+                let line_number = parts.next().and_then(|n| n.parse().ok());
+                let column = parts.next().and_then(|n| n.trim().parse().ok());
+                if let (Some(line_number), Some(column), Some(file)) =
+                    (line_number, column, relative(&format!("{path}.kt")))
+                {
+                    errors.push((
+                        file,
+                        line_number,
+                        column,
+                        parts.next().unwrap_or("").to_owned(),
+                    ));
+                    continue;
+                }
+            }
+            // kotlinc's older form: `e: /x/A.kt: (12, 34): message`
+            if let Some((path, tail)) = rest.split_once(".kt: (")
+                && let Some((position, message)) = tail.split_once("):")
+                && let Some((line_number, column)) = position.split_once(',')
+                && let (Ok(line_number), Ok(column), Some(file)) = (
+                    line_number.trim().parse(),
+                    column.trim().parse(),
+                    relative(&format!("{path}.kt")),
+                )
+            {
+                errors.push((file, line_number, column, message.trim().to_owned()));
+            }
+            continue;
+        }
+        // Maven's javac: `/x/A.java:[12,34] message`
+        if let Some((path, tail)) = line.split_once(".java:[")
+            && let Some((position, message)) = tail.split_once(']')
+            && let Some((line_number, column)) = position.split_once(',')
+            && let (Ok(line_number), Ok(column), Some(file)) = (
+                line_number.trim().parse(),
+                column.trim().parse(),
+                relative(&format!("{path}.java")),
+            )
+        {
+            errors.push((file, line_number, column, message.trim().to_owned()));
+            continue;
+        }
+        // javac itself: `/x/A.java:12: error: message`, then the line, then
+        // a caret under the column.
+        if let Some((path, tail)) = line.split_once(".java:")
+            && let Some((line_number, message)) = tail.split_once(": error:")
+            && let (Ok(line_number), Some(file)) = (
+                line_number.trim().parse::<usize>(),
+                relative(&format!("{path}.java")),
+            )
+        {
+            let column = lines
+                .iter()
+                .skip(at + 1)
+                .take(4)
+                .find_map(|caret| {
+                    let trimmed = caret.trim_end();
+                    (trimmed.ends_with('^') && trimmed.trim() == "^")
+                        .then(|| trimmed.chars().count())
+                })
+                .unwrap_or(1);
+            errors.push((file, line_number, column, message.trim().to_owned()));
+        }
+    }
+    errors
 }

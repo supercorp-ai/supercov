@@ -1,0 +1,1386 @@
+[
+ {
+  "file": "fixture/Ops.kt",
+  "line": 5,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "getName",
+  "description": "replaced return value with \"\" for fixture/Ops::getName",
+  "method": "getName"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 6,
+  "mutator": "PrimitiveReturns",
+  "key": "getTotal",
+  "description": "replaced long return with 0 for fixture/Ops::getTotal",
+  "method": "getTotal"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 9,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "lt",
+  "description": "replaced boolean return with true for fixture/Ops::lt",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 9,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 9,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lt"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 10,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "le",
+  "description": "replaced boolean return with true for fixture/Ops::le",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 10,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 10,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "le"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 11,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "gtL",
+  "description": "replaced boolean return with true for fixture/Ops::gtL",
+  "method": "gtL"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 11,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "gtL"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 11,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "gtL"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 12,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "geD",
+  "description": "replaced boolean return with true for fixture/Ops::geD",
+  "method": "geD"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 12,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "geD"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 12,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "geD"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 13,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "eq",
+  "description": "replaced boolean return with true for fixture/Ops::eq",
+  "method": "eq"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 13,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "eq"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 14,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "eqObj",
+  "description": "replaced boolean return with false for fixture/Ops::eqObj",
+  "method": "eqObj"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 14,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "eqObj",
+  "description": "replaced boolean return with true for fixture/Ops::eqObj",
+  "method": "eqObj"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 15,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "ident",
+  "description": "replaced boolean return with true for fixture/Ops::ident",
+  "method": "ident"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 15,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ident"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 16,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "ne",
+  "description": "replaced boolean return with true for fixture/Ops::ne",
+  "method": "ne"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 16,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "ne"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 17,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "isNull",
+  "description": "replaced boolean return with true for fixture/Ops::isNull",
+  "method": "isNull"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 17,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "isNull"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 18,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "flag",
+  "description": "replaced boolean return with false for fixture/Ops::flag",
+  "method": "flag"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 18,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "flag",
+  "description": "replaced boolean return with true for fixture/Ops::flag",
+  "method": "flag"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 19,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "notFlag",
+  "description": "replaced boolean return with true for fixture/Ops::notFlag",
+  "method": "notFlag"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 19,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "notFlag"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 20,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "and",
+  "description": "replaced boolean return with true for fixture/Ops::and",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 20,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 20,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "and"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 21,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "or",
+  "description": "replaced boolean return with true for fixture/Ops::or",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 21,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 21,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "or"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 22,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "inst",
+  "description": "replaced boolean return with false for fixture/Ops::inst",
+  "method": "inst"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 22,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "inst",
+  "description": "replaced boolean return with true for fixture/Ops::inst",
+  "method": "inst"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 23,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "cmp",
+  "description": "replaced boolean return with true for fixture/Ops::cmp",
+  "method": "cmp"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 23,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "cmp"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 23,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "cmp"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 28,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 28,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 29,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 31,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 31,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 31,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 31,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 32,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 34,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 34,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 37,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 37,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 38,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 40,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 40,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 40,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 40,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 41,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 44,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 45,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 45,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 46,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 46,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 46,
+  "mutator": "PrimitiveReturns",
+  "key": "branch",
+  "description": "replaced int return with 0 for fixture/Ops::branch",
+  "method": "branch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 50,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 51,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 52,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 53,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced integer division with multiplication",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 53,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 54,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced integer modulus with multiplication",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 55,
+  "mutator": "Math",
+  "key": "&>|",
+  "description": "Replaced bitwise AND with OR",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 56,
+  "mutator": "Math",
+  "key": "|>&",
+  "description": "Replaced bitwise OR with AND",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 57,
+  "mutator": "Math",
+  "key": "^>&",
+  "description": "Replaced XOR with AND",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 58,
+  "mutator": "Math",
+  "key": "<<>>>",
+  "description": "Replaced Shift Left with Shift Right",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 59,
+  "mutator": "Math",
+  "key": ">>><<",
+  "description": "Replaced Shift Right with Shift Left",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 60,
+  "mutator": "Math",
+  "key": ">>>><<",
+  "description": "Replaced Unsigned Shift Right with Shift Left",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 61,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 62,
+  "mutator": "Increments",
+  "key": "-2",
+  "description": "Changed increment from -2 to 2",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 63,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 64,
+  "mutator": "PrimitiveReturns",
+  "key": "math",
+  "description": "replaced int return with 0 for fixture/Ops::math",
+  "method": "math"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 67,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced long multiplication with division",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 67,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 67,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced long subtraction with addition",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 67,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced long division with multiplication",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 67,
+  "mutator": "PrimitiveReturns",
+  "key": "lmath",
+  "description": "replaced long return with 0 for fixture/Ops::lmath",
+  "method": "lmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 68,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "mixed"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 68,
+  "mutator": "PrimitiveReturns",
+  "key": "mixed",
+  "description": "replaced long return with 0 for fixture/Ops::mixed",
+  "method": "mixed"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "Math",
+  "key": "%>*",
+  "description": "Replaced float modulus with multiplication",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced double multiplication with division",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced double addition with subtraction",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced double subtraction with addition",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "Math",
+  "key": "/>*",
+  "description": "Replaced float division with multiplication",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 69,
+  "mutator": "PrimitiveReturns",
+  "key": "dmath",
+  "description": "replaced double return with 0.0d for fixture/Ops::dmath",
+  "method": "dmath"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 70,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "concat",
+  "description": "replaced return value with \"\" for fixture/Ops::concat",
+  "method": "concat"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 71,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "template",
+  "description": "replaced return value with \"\" for fixture/Ops::template",
+  "method": "template"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 71,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "template"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 72,
+  "mutator": "InvertNegs",
+  "key": "",
+  "description": "removed negation",
+  "method": "neg"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 72,
+  "mutator": "PrimitiveReturns",
+  "key": "neg",
+  "description": "replaced int return with 0 for fixture/Ops::neg",
+  "method": "neg"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 73,
+  "mutator": "InvertNegs",
+  "key": "",
+  "description": "removed negation",
+  "method": "dneg"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 73,
+  "mutator": "PrimitiveReturns",
+  "key": "dneg",
+  "description": "replaced double return with 0.0d for fixture/Ops::dneg",
+  "method": "dneg"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 77,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 78,
+  "mutator": "Increments",
+  "key": "-1",
+  "description": "Changed increment from -1 to 1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 79,
+  "mutator": "Increments",
+  "key": "1",
+  "description": "Changed increment from 1 to -1",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 80,
+  "mutator": "Increments",
+  "key": "5",
+  "description": "Changed increment from 5 to -5",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 81,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 82,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 83,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 85,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced long addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 86,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 86,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 86,
+  "mutator": "PrimitiveReturns",
+  "key": "increments",
+  "description": "replaced int return with 0 for fixture/Ops::increments",
+  "method": "increments"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 91,
+  "mutator": "VoidMethodCall",
+  "key": "clear",
+  "description": "removed call to java/util/List::clear",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 92,
+  "mutator": "VoidMethodCall",
+  "key": "println",
+  "description": "removed call to java/io/PrintStream::println",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 93,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 94,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 95,
+  "mutator": "VoidMethodCall",
+  "key": "helper",
+  "description": "removed call to fixture/Ops::helper",
+  "method": "voids"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 102,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "str",
+  "description": "replaced return value with \"\" for fixture/Ops::str",
+  "method": "str"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 103,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "strN",
+  "description": "replaced return value with \"\" for fixture/Ops::strN",
+  "method": "strN"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 103,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "strN"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 104,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "boxedInt",
+  "description": "replaced Integer return value with 0 for fixture/Ops::boxedInt",
+  "method": "boxedInt"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 106,
+  "mutator": "NullReturnVals",
+  "key": "objN",
+  "description": "replaced return value with null for fixture/Ops::objN",
+  "method": "objN"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 107,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "list",
+  "description": "replaced return value with Collections.emptyList for fixture/Ops::list",
+  "method": "list"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 108,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "mlist",
+  "description": "replaced return value with Collections.emptyList for fixture/Ops::mlist",
+  "method": "mlist"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 109,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "set",
+  "description": "replaced return value with Collections.emptySet for fixture/Ops::set",
+  "method": "set"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 110,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "map",
+  "description": "replaced return value with Collections.emptyMap for fixture/Ops::map",
+  "method": "map"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 111,
+  "mutator": "PrimitiveReturns",
+  "key": "ch",
+  "description": "replaced char return with 0 for fixture/Ops::ch",
+  "method": "ch"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 112,
+  "mutator": "PrimitiveReturns",
+  "key": "fl",
+  "description": "replaced float return with 0.0f for fixture/Ops::fl",
+  "method": "fl"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 114,
+  "mutator": "BooleanFalseReturnVals",
+  "key": "t",
+  "description": "replaced boolean return with false for fixture/Ops::t",
+  "method": "t"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 115,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "inferred"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 115,
+  "mutator": "PrimitiveReturns",
+  "key": "inferred",
+  "description": "replaced int return with 0 for fixture/Ops::inferred",
+  "method": "inferred"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 119,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 120,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 120,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 121,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 121,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 121,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 121,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 121,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 122,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 123,
+  "mutator": "PrimitiveReturns",
+  "key": "whenSubject",
+  "description": "replaced int return with 0 for fixture/Ops::whenSubject",
+  "method": "whenSubject"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 126,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "whenBare"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 126,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenBare"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 127,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "whenBare"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 129,
+  "mutator": "EmptyObjectReturnVals",
+  "key": "whenBare",
+  "description": "replaced return value with \"\" for fixture/Ops::whenBare",
+  "method": "whenBare"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 131,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "safe"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 131,
+  "mutator": "PrimitiveReturns",
+  "key": "safe",
+  "description": "replaced int return with 0 for fixture/Ops::safe",
+  "method": "safe"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 132,
+  "mutator": "PrimitiveReturns",
+  "key": "bang",
+  "description": "replaced int return with 0 for fixture/Ops::bang",
+  "method": "bang"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 132,
+  "mutator": "VoidMethodCall",
+  "key": "checkNotNull",
+  "description": "removed call to kotlin/jvm/internal/Intrinsics::checkNotNull",
+  "method": "bang"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 133,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "smart"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 135,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "nullCheck"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 136,
+  "mutator": "PrimitiveReturns",
+  "key": "nullCheck",
+  "description": "replaced int return with 0 for fixture/Ops::nullCheck",
+  "method": "nullCheck"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 139,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 139,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 139,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 139,
+  "mutator": "PrimitiveReturns",
+  "key": "lambda",
+  "description": "replaced int return with 0 for fixture/Ops::lambda",
+  "method": "lambda"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 143,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "forEach"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 145,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "forEach"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 146,
+  "mutator": "PrimitiveReturns",
+  "key": "forEach",
+  "description": "replaced int return with 0 for fixture/Ops::forEach",
+  "method": "forEach"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 149,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "withDefault"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 149,
+  "mutator": "PrimitiveReturns",
+  "key": "withDefault",
+  "description": "replaced int return with 0 for fixture/Ops::withDefault",
+  "method": "withDefault"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 153,
+  "mutator": "PrimitiveReturns",
+  "key": "getStart",
+  "description": "replaced int return with 0 for fixture/Single::getStart",
+  "method": "getStart"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 154,
+  "mutator": "PrimitiveReturns",
+  "key": "compute",
+  "description": "replaced int return with 0 for fixture/Single::compute",
+  "method": "compute"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 155,
+  "mutator": "BooleanTrueReturnVals",
+  "key": "go",
+  "description": "replaced boolean return with true for fixture/Single::go",
+  "method": "go"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 155,
+  "mutator": "ConditionalsBoundary",
+  "key": "",
+  "description": "changed conditional boundary",
+  "method": "go"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 155,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "go"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 158,
+  "mutator": "PrimitiveReturns",
+  "key": "getX",
+  "description": "replaced int return with 0 for fixture/Point::getX",
+  "method": "getX"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 158,
+  "mutator": "PrimitiveReturns",
+  "key": "getY",
+  "description": "replaced int return with 0 for fixture/Point::getY",
+  "method": "getY"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 159,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "dist"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 159,
+  "mutator": "Math",
+  "key": "*>/",
+  "description": "Replaced integer multiplication with division",
+  "method": "dist"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 159,
+  "mutator": "Math",
+  "key": "+>-",
+  "description": "Replaced integer addition with subtraction",
+  "method": "dist"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 159,
+  "mutator": "PrimitiveReturns",
+  "key": "dist",
+  "description": "replaced int return with 0 for fixture/Point::dist",
+  "method": "dist"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 162,
+  "mutator": "Math",
+  "key": "->+",
+  "description": "Replaced integer subtraction with addition",
+  "method": "topLevel"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 162,
+  "mutator": "PrimitiveReturns",
+  "key": "topLevel",
+  "description": "replaced int return with 0 for fixture/OpsKt::topLevel",
+  "method": "topLevel"
+ },
+ {
+  "file": "fixture/Ops.kt",
+  "line": 165,
+  "mutator": "NegateConditionals",
+  "key": "",
+  "description": "negated conditional",
+  "method": "lambda"
+ }
+]

@@ -119,6 +119,11 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "minitest",
     "test-unit",
     "cucumber",
+    // Java and Kotlin: the build's test JVM drives itself through the JUnit
+    // Platform, TestNG or Ant's `<junit>` (`SupercovStrongPass.java`).
+    "junit-platform",
+    "testng",
+    "ant-junit",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
@@ -177,6 +182,7 @@ pub fn has_driver(language: &str) -> bool {
             | crate::python_mutants::PYTHON
             | crate::go_mutants::GO
             | crate::ruby_mutants::RUBY
+            | crate::mutant_list::JVM
     )
 }
 
@@ -222,6 +228,22 @@ pub fn run_strong_pass(
             crate::go_strong::run_go_strong(&request, diagnostics).map(|_| 0)
         }
         crate::ruby_mutants::RUBY => crate::ruby_run::run_strong_ruby(pass, diagnostics),
+        crate::mutant_list::JVM => crate::jvm_run::run_strong_jvm(
+            &crate::jvm_run::StrongJvmRequest {
+                root: pass.root.clone(),
+                command: pass.command.clone(),
+                run_id: pass.run_id.clone(),
+                started_at: format!(
+                    "unix-ms-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_millis())
+                ),
+                plan: pass.strong.plan.clone(),
+                results: pass.strong.results.clone(),
+            },
+            diagnostics,
+        ),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }

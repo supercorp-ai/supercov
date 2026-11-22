@@ -1,0 +1,69 @@
+{
+  "commons-cli": {
+    "repository": "https://github.com/apache/commons-cli.git",
+    "tag": "rel/commons-cli-1.9.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip",
+    "targets": "org.apache.commons.cli.*",
+    "junit5": true,
+    "jdk": "21"
+  },
+  "commons-csv": {
+    "repository": "https://github.com/apache/commons-csv.git",
+    "tag": "rel/commons-csv-1.12.0",
+    "build": "maven",
+    "flags": "-Drat.skip -Dcheckstyle.skip -Dspotbugs.skip -Dpmd.skip -Djapicmp.skip -Danimal.sniffer.skip -Djacoco.skip -Dmaven.javadoc.skip",
+    "targets": "org.apache.commons.csv.*",
+    "junit5": true,
+    "jdk": "21"
+  },
+  "typetools": {
+    "repository": "https://github.com/jhalterman/typetools.git",
+    "tag": "typetools-0.6.3",
+    "build": "maven",
+    "flags": "-Dmaven.javadoc.skip",
+    "targets": "net.jodah.typetools.*",
+    "testng": true,
+    "jdk": "11",
+    "surefire": "2.22.2"
+  },
+  "kotlinpoet": {
+    "repository": "https://github.com/square/kotlinpoet.git",
+    "tag": "1.14.2",
+    "build": "gradle",
+    "module": "kotlinpoet",
+    "flags": "-x spotlessCheck -x apiCheck",
+    "targets": "com.squareup.kotlinpoet.*",
+    "junit5": false,
+    "jdk": "17",
+    "shards": 12
+  },
+  "picnic": {
+    "repository": "https://github.com/JakeWharton/picnic.git",
+    "tag": "0.5.0",
+    "build": "gradle",
+    "module": "picnic",
+    "flags": "",
+    "targets": "com.jakewharton.picnic.*",
+    "junit5": false,
+    "jdk": "11",
+    "gradlePlugin": "1.5.2"
+  },
+  "ant": {
+    "repository": "https://github.com/apache/ant.git",
+    "tag": "rel/1.10.15",
+    "build": "ant",
+    "antVersion": "1.10.15",
+    "antTarget": "junit-tests",
+    "antCompile": "compile-tests",
+    "flags": "-Djunit.includes=org/apache/tools/ant/util/*Test.java -Doffline=true",
+    "sources": "src/main/org/apache/tools/ant/util",
+    "targets": "org.apache.tools.ant.util.*",
+    "targetTests": "org.apache.tools.ant.util.*Test",
+    "antClasspath": "build/classes,build/testcases,src/tests/junit,src/etc/testcases,lib/optional/*.jar",
+    "antSourceDir": "src/main",
+    "antJvmArgs": "-Droot=ROOT,-Dbuild.tests.value=ROOT/build/testcases,-Dbuild.classes.value=ROOT/build/classes,-Dant.home=ANTHOME,-Doffline=true",
+    "junit5": false,
+    "jdk": "17"
+  }
+}

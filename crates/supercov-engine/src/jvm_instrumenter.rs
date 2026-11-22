@@ -72,6 +72,9 @@ pub struct JvmFileObligations {
     pub probes: BTreeMap<u64, GoProbe>,
     pub edits: Vec<GoEdit>,
     pub decision_widths: Vec<u8>,
+    /// Each statement and function point's id, kind and byte range: what a
+    /// mutant is linked to (`jvm_mutants`).
+    pub point_spans: Vec<(String, PointKind, usize, usize)>,
 }
 
 /// Statements Java nests directly inside a block. A declaration that cannot
@@ -139,6 +142,7 @@ struct Collector<'a> {
     probes: BTreeMap<u64, GoProbe>,
     limitations: Vec<serde_json::Value>,
     widths: Vec<u8>,
+    point_spans: Vec<(String, PointKind, usize, usize)>,
     /// How many decisions the project already numbered before this file. The
     /// runtime holds one decision-state array for the whole run, so an index
     /// that meant "the first decision in this file" would land on every other
@@ -242,6 +246,8 @@ impl Collector<'_> {
         } else {
             self.store(at, probe);
         }
+        self.point_spans
+            .push((id.clone(), kind.clone(), node.start_byte(), node.end_byte()));
         self.points.push(PointMeta {
             id,
             kind,
@@ -654,6 +660,7 @@ pub fn build_jvm_obligations(
         probes: BTreeMap::new(),
         limitations: Vec::new(),
         widths: Vec::new(),
+        point_spans: Vec::new(),
     };
     walk(&mut collector, tree.root_node());
     *next_decision += collector.widths.len() as u32;
@@ -671,6 +678,7 @@ pub fn build_jvm_obligations(
         probes: collector.probes,
         edits: collector.edits,
         decision_widths: collector.widths,
+        point_spans: collector.point_spans,
     })
 }
 
@@ -1119,6 +1127,48 @@ fn in_statement_position(node: Node, _language: JvmLanguage) -> bool {
 /// Apply edits right to left so earlier offsets stay valid.
 pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
     crate::go_instrumenter::rewrite(source, edits)
+}
+
+/// `rewrite` without the position comments Go's rewrite leaves at each
+/// edit, which Java and Kotlin do not read: a value probe keeps the operator
+/// it stands for in a comment, and a comment placed inside it would end it.
+pub fn rewrite_plain(source: &str, edits: &[GoEdit]) -> String {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
+    let mut out = source.to_owned();
+    for edit in ordered {
+        out.insert_str(edit.at, &edit.text);
+    }
+    out
+}
+
+#[cfg(test)]
+mod kotlin_scanner_tests {
+    use super::*;
+
+    /// A name that starts with `import` after `return` is the value
+    /// returned, not a new statement: the scanner checked the keyword
+    /// without its word boundary, and `return importedType` lost its value.
+    #[test]
+    fn a_name_starting_with_import_continues_a_return() {
+        let source = "fun f(importedType: Int): Int {\n  return importedType\n}\n";
+        let tree = parse(source, JvmLanguage::Kotlin).unwrap();
+        let block = tree
+            .root_node()
+            .named_child(0)
+            .and_then(|function| {
+                let mut cursor = function.walk();
+                function
+                    .named_children(&mut cursor)
+                    .find(|child| child.kind() == "function_body")
+            })
+            .and_then(|body| body.named_child(0))
+            .unwrap();
+        assert_eq!(block.named_child_count(), 1, "{}", block.to_sexp());
+        let returned = block.named_child(0).unwrap();
+        assert_eq!(returned.kind(), "return_expression");
+        assert_eq!(&source[returned.byte_range()], "return importedType");
+    }
 }
 
 #[cfg(test)]

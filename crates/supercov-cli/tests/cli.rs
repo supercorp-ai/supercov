@@ -18088,18 +18088,18 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
 fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
     for (fault, place) in [
         // The project's tree walked, then the copy's: the seventh listing.
-        ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
-        ("fs.read_dir#jvm_project.rs:281@7", "jvm_project.rs:281"),
+        ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
+        ("fs.read_dir#jvm_project.rs:287@7", "jvm_project.rs:287"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.create_dir_all#jvm_run.rs:2505", "jvm_run.rs:2505"),
-        ("fs.create_dir_all#jvm_run.rs:2515", "jvm_run.rs:2515"),
-        ("fs.write#jvm_run.rs:2489", "jvm_run.rs:2489"),
-        ("fs.write#jvm_run.rs:2505", "jvm_run.rs:2505"),
+        ("fs.create_dir_all#jvm_run.rs:2703", "jvm_run.rs:2703"),
+        ("fs.create_dir_all#jvm_run.rs:2719", "jvm_run.rs:2719"),
+        ("fs.create_dir_all#jvm_run.rs:2729", "jvm_run.rs:2729"),
+        ("fs.write#jvm_run.rs:2703", "jvm_run.rs:2703"),
+        ("fs.write#jvm_run.rs:2719", "jvm_run.rs:2719"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19279,6 +19279,149 @@ fn standalone_doctests_named_alike_are_each_run_alone() {
     );
 }
 
+/// Java mutants through Maven, end to end: the run lists PIT's mutants
+/// and records their values, the strong pass runs each in the build's own
+/// test JVM against its candidates, a switch javac refuses is `unviable`
+/// and the rest of the pass goes on, and a boundary whose operands were
+/// never equal is decided without running.
+#[test]
+fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-mutants");
+    small_maven_project(&project);
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static boolean small(int n) {\n        return n < 10;\n    }\n\n    public static String named(String s) {\n        return System.getProperty(\"w\") + System.getenv(\"w\");\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n\n    @Test\n    void named() {\n        assertEquals(\"nullnull\", W.named(\"\"));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let status = |id: &str| {
+        verdicts["mutants"][id]["status"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let file = "src/main/java/w/W.java";
+    assert_eq!(verdicts["mutantSet"], "pitest@1.17.1", "{verdicts}");
+    // `n * 2` is told from `n / 2` by twice(2), and its return from 0.
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:Math:/")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:5:16-5:21:PrimitiveReturns:0")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // `n < 10` with n = 3 never had its operands equal: the boundary
+    // mutant survives without running.
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:ConditionalsBoundary:<=")).as_deref(),
+        Some("survived"),
+        "{tested}"
+    );
+    assert_eq!(
+        status(&format!("{file}:9:16-9:22:NegateConditionals:negated")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+    // A `+` of a call whose type the source does not show was taken for an
+    // addition: javac refuses its switch, and the mutant is unviable.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:60:Math:-")).as_deref(),
+        Some("unviable"),
+        "{tested}"
+    );
+    // named() returns "nullnull" without the properties: "" is caught.
+    assert_eq!(
+        status(&format!("{file}:13:16-13:60:EmptyObjectReturnVals:\"\"")).as_deref(),
+        Some("killed"),
+        "{tested}"
+    );
+}
+
+/// A JUnit 4 parameterized test whose parameters print as Object's
+/// toString does, an identity hash in each name, is found again in the
+/// strong pass's JVM, where the hashes differ, and decides its mutants. A
+/// random hash stands in for the identity hash, which a small program may
+/// happen to repeat.
+#[test]
+fn a_junit_4_parameter_named_by_its_identity_hash_decides_its_mutants() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-junit4-hash");
+    small_maven_project(&project);
+    let pom = std::fs::read_to_string(project.root.join("pom.xml"))
+        .unwrap()
+        .replace(
+            "<groupId>org.junit.jupiter</groupId>\n      <artifactId>junit-jupiter</artifactId>\n      <version>5.10.2</version>",
+            "<groupId>junit</groupId>\n      <artifactId>junit</artifactId>\n      <version>4.13.2</version>",
+        );
+    project.write("pom.xml", &pom);
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.Assert.assertEquals;\n\nimport java.util.Arrays;\nimport java.util.Collection;\nimport java.util.concurrent.ThreadLocalRandom;\nimport org.junit.Test;\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Parameterized;\n\n@RunWith(Parameterized.class)\npublic class WTest {\n    static class Case {\n        final int n;\n        final int twice;\n        final String hash = Integer.toHexString(ThreadLocalRandom.current().nextInt(1 << 28, Integer.MAX_VALUE));\n\n        Case(int n, int twice) {\n            this.n = n;\n            this.twice = twice;\n        }\n    }\n\n    static class Small extends Case {\n        Small() {\n            super(2, 4);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Small@\" + hash;\n        }\n    }\n\n    static class Large extends Case {\n        Large() {\n            super(5, 10);\n        }\n\n        @Override\n        public String toString() {\n            return \"w.WTest$Large@\" + hash;\n        }\n    }\n\n    @Parameterized.Parameters(name = \"{0}\")\n    public static Collection<Object[]> cases() {\n        return Arrays.asList(new Object[] {new Small()}, new Object[] {new Large()});\n    }\n\n    private final Case value;\n\n    public WTest(Case value) {\n        this.value = value;\n    }\n\n    @Test\n    public void twice() {\n        assertEquals(value.twice, W.twice(value.n));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let tested = project
+        .supercov(&["mutants", "--json", "--", "mvn", "-q", "test"])
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let file = "src/main/java/w/W.java";
+    // `n * 2` against `n / 2`: both cases tell them apart.
+    assert_eq!(
+        verdicts["mutants"][format!("{file}:5:29-5:34:Math:/")]["status"],
+        "killed",
+        "{tested}\n{verdicts}"
+    );
+    let errors = verdicts["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, mutant)| mutant["status"] == "error")
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(errors, Vec::<String>::new(), "{verdicts}");
+}
+
 /// A Maven project with one class and its test.
 /// A JVM test whose class is declared in a file of another name has no
 /// file to name, and is listed without evidence all the same.
@@ -19465,8 +19608,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:1962", "jvm_run.rs:1962"),
-                ("fs.read_dir#jvm_project.rs:281", "jvm_project.rs:281"),
+                ("fs.canonicalize#jvm_run.rs:2118", "jvm_run.rs:2118"),
+                ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -23888,12 +24031,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:839",
+            "fs.write#mutants_test_command.rs:844",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:839"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:844"),
         "{}",
         unwritten.stderr()
     );

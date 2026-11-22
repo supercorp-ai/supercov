@@ -19,6 +19,9 @@ pub const JAVASCRIPT: &str = "javascript";
 /// Rust's name in a mutant list.
 pub const RUST: &str = "rust";
 
+/// Java and Kotlin, which share PIT's mutant set (`jvm_mutants`).
+pub const JVM: &str = "jvm";
+
 /// The version of `mutants.json`. It leaves out what a reader works out
 /// again: a mutant's `id`, from its file, span, mutator and descriptor, and
 /// of a long `original` all but what is shown of it (see
@@ -271,6 +274,13 @@ pub(crate) fn list_from_sources(
             crate::python_mutants::PYTHON => crate::python_mutants::list_mutants(root, &files),
             crate::go_mutants::GO => crate::go_mutants::list_mutants(root, &files),
             crate::ruby_mutants::RUBY => crate::ruby_mutants::list_mutants(root, &files),
+            JVM => {
+                let (files, changed) = crate::jvm_strong::list_mutants(root, &files);
+                ListedMutants {
+                    mutants: MutantsFile::listed(JVM, crate::jvm_mutants::MUTANT_SET, files),
+                    changed,
+                }
+            }
             _ => continue,
         };
         listed.changed.extend(one.changed);

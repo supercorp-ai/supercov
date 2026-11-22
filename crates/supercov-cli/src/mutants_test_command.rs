@@ -339,6 +339,11 @@ fn refuse_without_a_driver(run: &str, plan: &StrongPlan) -> Result<(), String> {
     ))
 }
 
+/// The run's plan, as `mutants test` makes it.
+pub(crate) fn plan_of(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
+    run_plan(root, run)
+}
+
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
     let planned = plan_for_archive(
         &ArchiveReportRequest {
