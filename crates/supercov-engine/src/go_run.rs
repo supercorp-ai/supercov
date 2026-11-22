@@ -298,7 +298,7 @@ fn instrument_sources(
     workspace: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<InstrumentedSources, String> {
-    let project = prepare_go_project(workspace, roots)?;
+    let project = prepare_go_project(workspace, project_root, roots)?;
 
     // A go.work repository has several modules and no module at its root, so
     // each gets a runtime of its own: an import is resolved against the module
@@ -1720,7 +1720,7 @@ mod tests {
             "package m\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tt.Parallel()\n}\n",
         )
         .unwrap();
-        let probes = crate::go_project::prepare_go_project(&root, None)
+        let probes = crate::go_project::prepare_go_project(&root, &root, None)
             .unwrap()
             .probes
             .len();

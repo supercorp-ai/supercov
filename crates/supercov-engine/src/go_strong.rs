@@ -324,6 +324,7 @@ fn vet_one(
 /// operation.
 pub(crate) fn site_facts(
     root: &Path,
+    project: &Path,
     files: &[String],
 ) -> Option<HashMap<String, HashMap<usize, SiteFacts>>> {
     let mut sources = Vec::new();
@@ -348,7 +349,9 @@ pub(crate) fn site_facts(
         return Some(HashMap::new());
     }
     let key = facts_key(root, &sources);
-    let cache = root.join(".supercov/cache/go-facts.json");
+    // In the project's own `.supercov`, which the next run keeps: `root` is
+    // the run's workspace, made afresh.
+    let cache = project.join(".supercov/cache/go-facts.json");
     let cached = fs::read(&cache)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CachedFacts>(&bytes).ok())
@@ -356,7 +359,7 @@ pub(crate) fn site_facts(
     if let Some(cached) = cached {
         return Some(cached.facts);
     }
-    let helper = helper(root, "go").ok()?;
+    let helper = helper(project, "go").ok()?;
     let patterns = files
         .iter()
         .map(|file| pattern(&directory_of(file)))
@@ -1942,15 +1945,19 @@ mod tests {
         // A file that is gone or does not parse asks nothing.
         let root = with_helper("asked", "/bin/cat");
         std::fs::write(root.join("bad.go"), "package p\n\nfunc (").unwrap();
-        let facts = site_facts(&root, &["gone.go".into(), "bad.go".into()]).unwrap();
+        let facts = site_facts(&root, &root, &["gone.go".into(), "bad.go".into()]).unwrap();
         assert!(facts.is_empty());
         // Comparisons alone ask nothing: their probes need no type.
         std::fs::write(root.join("c.go"), "package p\n\nvar x = 1 < 2\n").unwrap();
-        assert!(site_facts(&root, &["c.go".into()]).unwrap().is_empty());
+        assert!(
+            site_facts(&root, &root, &["c.go".into()])
+                .unwrap()
+                .is_empty()
+        );
         // An answer that is not one.
         let source = "package p\n\nvar x = 1 + 2\n";
         std::fs::write(root.join("a.go"), source).unwrap();
-        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
         // What the last run of the same sources was told, it is told again;
         // what a run of other sources was, it is not.
         let facts = HashMap::from([(
@@ -1976,9 +1983,12 @@ mod tests {
             .unwrap();
         };
         cache(facts_key(&root, &[("a.go".into(), source.into())]));
-        assert_eq!(site_facts(&root, &["a.go".into()]), Some(facts.clone()));
+        assert_eq!(
+            site_facts(&root, &root, &["a.go".into()]),
+            Some(facts.clone())
+        );
         cache("another".into());
-        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
         let _ = std::fs::remove_dir_all(&root);
         // No helper: its cache cannot be made, `.supercov` being a file.
         let root =
@@ -1986,7 +1996,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(".supercov"), "").unwrap();
         std::fs::write(root.join("a.go"), source).unwrap();
-        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

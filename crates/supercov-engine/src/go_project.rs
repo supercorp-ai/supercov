@@ -347,8 +347,11 @@ pub(crate) fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Va
     })
 }
 
+/// `root`'s sources measured; `project` is where the run's caches are (the
+/// project the workspace `root` is a copy of).
 pub fn prepare_go_project(
     root: &Path,
+    project: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
 ) -> Result<PreparedGoProject, String> {
     let mut files = discover_go_files(root)?;
@@ -399,7 +402,7 @@ pub fn prepare_go_project(
     let requested = crate::go_run::mutants_requested();
     let mut mutants = std::collections::BTreeMap::new();
     let facts = requested
-        .then(|| crate::go_strong::site_facts(root, &files.sources))
+        .then(|| crate::go_strong::site_facts(root, project, &files.sources))
         .flatten()
         .unwrap_or_default();
     for relative in &files.sources {
@@ -722,7 +725,8 @@ mod tests {
             "package extra\n\nfunc G() int {\n\treturn 1\n}\n",
         );
 
-        let project = prepare_go_project(&root, Some(&explicit_roots(&root, &["app.go"]))).unwrap();
+        let project =
+            prepare_go_project(&root, &root, Some(&explicit_roots(&root, &["app.go"]))).unwrap();
         assert_eq!(project.files.sources, ["app.go"], "{:?}", project.files);
         assert!(
             project
@@ -783,7 +787,7 @@ mod tests {
             &format!("package lib{function}"),
         );
 
-        let project = prepare_go_project(&root, None).unwrap();
+        let project = prepare_go_project(&root, &root, None).unwrap();
         assert_eq!(
             project.files.sources,
             ["app.go", "doc/gen.go", "internal/examples/kept.go"]
@@ -823,7 +827,8 @@ mod tests {
         );
 
         // A root someone named is what they say it is.
-        let named = prepare_go_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
+        let named =
+            prepare_go_project(&root, &root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
         assert_eq!(named.files.sources, ["examples/echo/main.go"]);
         fs::remove_dir_all(root).ok();
     }
@@ -894,7 +899,7 @@ mod tests {
         );
         write(&root, "broken.go", "package main\n\nfunc f( {\n");
 
-        let project = prepare_go_project(&root, None).unwrap();
+        let project = prepare_go_project(&root, &root, None).unwrap();
         assert_eq!(project.unparseable.len(), 1);
         assert_eq!(project.unparseable[0].0, "broken.go");
         // And the hole it leaves is declared, not merely printed: a
@@ -927,7 +932,7 @@ mod tests {
         // measure has to say so instead of reporting success.
         let root = fixture("empty");
         write(&root, "go.mod", "module example.com/app\n");
-        assert!(prepare_go_project(&root, None).is_err());
+        assert!(prepare_go_project(&root, &root, None).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
