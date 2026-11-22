@@ -1911,6 +1911,9 @@ fn listed_with(
                     at: at - mutant.span.0,
                 }),
             value_used: false,
+            // A Python conditional's test still runs in its mutant (`(test)
+            // and False`): nothing of it is skipped.
+            effects: false,
             // A parameter's default is used where its function is called:
             // reached by the function's first statement, which runs then.
             statement: known(match &mutant.default_of {
