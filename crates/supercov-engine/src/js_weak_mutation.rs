@@ -817,6 +817,16 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
         return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
     };
     let Some(outcomes) = records.comparisons(site) else {
+        // A Python value the mutant replaces with `None` records nothing
+        // where its own evaluation raised, which the mutant skips: its
+        // silence is no sign the mutant changes nothing.
+        if site.ends_with("#none") {
+            return verdict_of(
+                Status::Unknown,
+                "value-not-recorded",
+                "no value recorded: never evaluated, or its evaluation raised, which the mutant skips",
+            );
+        }
         // A method probe records nothing for a receiver that is not a
         // built-in, so its silence is no sign the call never ran.
         if mutant.mutator == "MethodExpression" {
@@ -2334,6 +2344,19 @@ mod tests {
             ..mutant("MethodExpression", "every", "xs.some(f)")
         };
         expect(&method, &ran(), UNKNOWN, "no-method-record");
+        // A Python value made `None` records nothing where its evaluation
+        // raised, which the mutant skips.
+        let none = CandidateMutant {
+            probe: Some("m.py:1:5-1:9#none".into()),
+            ..mutant("AssignmentValue", "None", "x = f()")
+        };
+        expect(&none, &ran(), UNKNOWN, "value-not-recorded");
+        expect(
+            &none,
+            &with_outcomes("m.py:1:5-1:9#none", &["same"]),
+            NOT_INFECTED,
+            "replacement-same",
+        );
         let (status, reason) = verdict(&method, &with_outcomes("p", &["same"]));
         assert_eq!(status, NOT_INFECTED);
         assert_eq!(

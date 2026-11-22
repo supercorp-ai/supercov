@@ -1282,7 +1282,20 @@ impl<'t, 'a> Walker<'t, 'a> {
                 "None",
                 &[at],
             );
-            self.note_probe(before, none_probe(value));
+            // A generator that is a call's only argument has the call's
+            // parentheses in Python's own positions, which the probe finds it
+            // by.
+            let target = match value {
+                Expr::Generator(ast::ExprGenerator {
+                    parenthesized: false,
+                    ..
+                }) => ProbeTarget {
+                    range: range_of(arguments.range),
+                    ..none_probe(value)
+                },
+                _ => none_probe(value),
+            };
+            self.note_probe(before, target);
         }
         if ordered.len() > 1 {
             for index in 0..ordered.len() {
@@ -2450,6 +2463,47 @@ mod tests {
             .map(|probe| &probe.site)
             .collect::<BTreeSet<_>>();
         assert_eq!(sites.len(), probes.len());
+    }
+
+    /// Every value probe of a directory's Python files, as JSON lines, for
+    /// `scripts/python-probe-spans.py` to check against CPython's own
+    /// positions: `SUPERCOV_PROBE_SPANS=<dir> cargo test -p supercov-engine
+    /// --lib python_mutants -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs a directory of Python files"]
+    fn a_directory_s_probes_are_printed() {
+        let directory = std::env::var("SUPERCOV_PROBE_SPANS").expect("a directory");
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("py") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let file = path.display().to_string();
+            let Ok((_, probes)) = probed(&file, &source) else {
+                continue;
+            };
+            for probe in probes {
+                println!("PROBE {}", serde_json::to_string(&probe).unwrap());
+            }
+        }
+    }
+
+    /// A generator that is a call's only argument is where Python puts it:
+    /// at the call's parentheses.
+    #[test]
+    fn a_lone_generator_argument_is_probed_at_the_call_s_parentheses() {
+        let (mutants, probes) =
+            probed("m.py", "def f(xs):\n    return any(x for x in xs)\n").unwrap();
+        let argument = mutants
+            .iter()
+            .find(|mutant| mutant.id == "m.py:2:12-2:30:CallArgument:None@1")
+            .unwrap();
+        assert_eq!(argument.probe.as_deref(), Some("m.py:2:15-2:30#none"));
+        assert_eq!(
+            (probes[0].span.start, probes[0].span.end),
+            ([2, 14], [2, 29])
+        );
     }
 
     /// A chain of comparisons gets no comparison probe: its operands are
