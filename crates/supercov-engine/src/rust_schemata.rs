@@ -265,27 +265,22 @@ fn spliced(source: &str, outer: TextRange, inner: TextRange, with: &str) -> Stri
 
 /// Where a body's switch goes: after its `{` and its inner attributes.
 fn body_entry(source: &str, list: TextRange) -> usize {
-    let text = &source[usize::from(list.start())..usize::from(list.end())];
-    let Some((tree, _)) = crate::rust_instrumenter::parse_source(&format!("fn f() {text}")) else {
-        return usize::from(list.start()) + 1;
-    };
-    let shift = "fn f() ".len();
-    tree.syntax()
+    let (tree, _) =
+        crate::rust_instrumenter::parse_source(source).expect("an enumerated file parses");
+    let list = tree
+        .syntax()
         .descendants()
-        .find_map(ast::StmtList::cast)
-        .map(|parsed| {
-            parsed
-                .syntax()
-                .children()
-                .filter(|child| child.kind() == SyntaxKind::ATTR)
-                .last()
-                .map_or(1, |attribute| {
-                    usize::from(attribute.text_range().end()) - shift
-                })
-        })
-        .map_or(usize::from(list.start()) + 1, |offset| {
-            usize::from(list.start()) + offset
-        })
+        .filter_map(ast::StmtList::cast)
+        .find(|candidate| candidate.syntax().text_range() == list)
+        .expect("a body the enumeration found");
+    list.syntax()
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::ATTR)
+        .last()
+        .map_or(
+            usize::from(list.syntax().text_range().start()) + 1,
+            |attribute| usize::from(attribute.text_range().end()),
+        )
 }
 
 /// The strong runtime a crate root gets, named `module`: `on`, the active
@@ -393,5 +388,25 @@ mod tests {
         assert!(reasons.contains(&None));
         assert!(runtime("rt", "k").contains("mod rt"));
         assert!(runtime("rt", "k").contains("__supercov_strong_activate_k"));
+    }
+
+    #[test]
+    fn a_guard_of_one_token_and_a_file_with_no_mutant_are_switched() {
+        let source = "fn g(n: u8, b: bool) -> u8 {\n    match n {\n        0 if b => 1,\n        _ => 2,\n    }\n}\n";
+        let mutants = crate::rust_mutants::enumerate(source).unwrap();
+        let (tree, _) = crate::rust_instrumenter::parse_source(source).unwrap();
+        let guard = mutants
+            .iter()
+            .find(|mutant| mutant.genre == "MatchArmGuard")
+            .unwrap();
+        assert_eq!(placeable(tree.syntax(), guard), None);
+        let file = switch(source, "crate::rt", "a.rs", &[(4, guard)]);
+        assert!(
+            file.code
+                .contains("0 if (if crate::rt::on(\"a.rs\", 4) { true } else { b }) => 1,"),
+            "{}",
+            file.code
+        );
+        assert_eq!(switch(source, "crate::rt", "a.rs", &[]).code, source);
     }
 }

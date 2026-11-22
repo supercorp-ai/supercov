@@ -1148,7 +1148,10 @@ mod __SUPERCOV_MODULE__ {
 
     /// A comparison's operands: `ids` are its `lt`, `eq`, `gt`, `unordered`
     /// and `unknown` outcomes.
-    pub fn compare(left: Num, right: Num, ids: &[u32; 5]) {
+    pub fn compare(left: Num, right: Num, ids: &[u32; 5], state: &AtomicU32) {
+        if state.load(Ordering::Relaxed) == DECIDED {
+            return;
+        }
         let outcome = match pair(left, right) {
             Some((Num::Int { value: a, wide: x, signed, bits }, Num::Int { value: b, wide: y, .. })) => {
                 let order = if bits == 128 && !signed { x.cmp(&y) } else { a.cmp(&b) };
@@ -1161,6 +1164,21 @@ mod __SUPERCOV_MODULE__ {
             _ => 4,
         };
         hit(ids[outcome as usize]);
+        // Every replacement of a comparison differs somewhere once its
+        // operands have been less, equal and greater: nothing more to learn.
+        settle(state, 1 << outcome, |seen| seen & 0b111 == 0b111 || seen & 0b10000 != 0);
+    }
+
+    /// What a probe site's state holds once more evaluations cannot change
+    /// the weak verdict of any of its mutants in this process.
+    const DECIDED: u32 = u32::MAX;
+
+    /// Adds `bits` to a site's outcomes, and marks it decided where `done`.
+    fn settle(state: &AtomicU32, bits: u32, done: impl std::ops::Fn(u32) -> bool) {
+        let seen = state.fetch_or(bits, Ordering::Relaxed) | bits;
+        if seen != DECIDED && done(seen) {
+            state.store(DECIDED, Ordering::Relaxed);
+        }
     }
 
     /// What an integer operator gives, `None` where it panics (overflow,
@@ -1224,9 +1242,19 @@ mod __SUPERCOV_MODULE__ {
     /// An operator `op` and each of its mutants' `(operator, same, differs)`
     /// ids: whether the mutant's value is the original's here. `unknown` is
     /// each mutant's id for operands no probe reads.
-    pub fn arithmetic(left: Num, right: Num, op: u8, mutants: &[(u8, u32, u32, u32)]) {
+    pub fn arithmetic(
+        left: Num,
+        right: Num,
+        op: u8,
+        mutants: &[(u8, u32, u32, u32)],
+        state: &AtomicU32,
+    ) {
+        if state.load(Ordering::Relaxed) == DECIDED {
+            return;
+        }
         let pair = pair(left, right);
-        for &(mutant, same, differs, unknown) in mutants {
+        let mut infected = 0u32;
+        for (at, &(mutant, same, differs, unknown)) in mutants.iter().enumerate() {
             let equal = match pair {
                 Some((Num::Int { value: a, wide: x, signed, bits }, Num::Int { value: b, wide: y, .. })) => {
                     int_op(op, a, b, x, y, signed, bits) == int_op(mutant, a, b, x, y, signed, bits)
@@ -1236,16 +1264,26 @@ mod __SUPERCOV_MODULE__ {
                 }
                 _ => {
                     hit(unknown);
+                    infected |= 1 << at;
                     continue;
                 }
             };
             hit(if equal { same } else { differs });
+            if !equal {
+                infected |= 1 << at;
+            }
         }
+        // A mutant that differed once is infected here, whatever follows.
+        let all = (1u32 << mutants.len()) - 1;
+        settle(state, infected, |seen| seen & all == all);
     }
 
     /// `-x`'s operand: whether it is zero, where deleting the `-` changes
     /// nothing. `ids`: zero, nonzero, unknown.
-    pub fn negated(operand: Num, ids: &[u32; 3]) {
+    pub fn negated(operand: Num, ids: &[u32; 3], state: &AtomicU32) {
+        if state.load(Ordering::Relaxed) == DECIDED {
+            return;
+        }
         let outcome = match operand {
             Num::Int { value, wide, .. } => usize::from(value != 0 || wide != 0),
             // `-0.0` is not `0.0` to every operation: always counted as differing.
@@ -1253,11 +1291,15 @@ mod __SUPERCOV_MODULE__ {
             _ => 2,
         };
         hit(ids[outcome]);
+        settle(state, 1 << outcome, |seen| seen & 0b110 != 0);
     }
 
     /// What a function returning a built-in number or `bool` returned:
     /// `ids` are `0`, `1`, `-1`, any other value, and `unknown`.
-    pub fn returned<T>(value: T, ids: &[u32; 5]) -> T {
+    pub fn returned<T>(value: T, ids: &[u32; 5], state: &AtomicU32) -> T {
+        if state.load(Ordering::Relaxed) == DECIDED {
+            return value;
+        }
         let outcome = match num(&value) {
             Num::Int { value: v, wide, signed, bits } => {
                 if v == 0 { 0 } else if v == 1 { 1 } else if signed && v == -1 { 2 } else { let _ = (wide, bits); 3 }
@@ -1268,6 +1310,8 @@ mod __SUPERCOV_MODULE__ {
             _ => 4,
         };
         hit(ids[outcome]);
+        // Two values returned differ from each of `0`, `1` and `-1`.
+        settle(state, 1 << outcome, |seen| (seen & 0b1111).count_ones() >= 2 || seen & 0b10000 != 0);
         value
     }
 

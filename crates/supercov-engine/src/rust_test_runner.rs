@@ -2748,6 +2748,18 @@ impl ArtifactLauncher {
             _ => {
                 let mut command = self.command(executable, None);
                 command.envs(variables.iter().map(|(name, value)| (*name, value)));
+                // A browser's page reads no variable: the driver proxy
+                // switches its modules' mutant on.
+                if let Some(browser) = &self.browser {
+                    let mutant = variables
+                        .iter()
+                        .find(|(name, _)| *name == "SUPERCOV_ACTIVE_MUTANT")
+                        .map(|(_, value)| value.as_str());
+                    command.env(
+                        "CHROMEDRIVER_REMOTE",
+                        browser.remote_url_for(&std::env::temp_dir(), mutant),
+                    );
+                }
                 command
             }
         }

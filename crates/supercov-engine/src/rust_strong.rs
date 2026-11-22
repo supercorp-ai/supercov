@@ -53,6 +53,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+use crate::fault_process::Launch;
+
 use crate::{
     rust_mutants::RustMutant,
     rust_schemata::{ACTIVE_MUTANT_ENV, HIT_LIMIT_ENV, TIMEOUT_MARKER},
@@ -172,11 +174,9 @@ struct Results {
 
 impl Results {
     fn create(path: &Path) -> Result<Self, String> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let file =
+            crate::fault_fs::open_with(std::fs::OpenOptions::new().create(true).append(true), path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self {
             file: Mutex::new(file),
         })
@@ -236,11 +236,12 @@ pub fn run_strong_rust(
 ) -> Result<i32, String> {
     let started = Instant::now();
     let plan: Value = serde_json::from_slice(
-        &std::fs::read(&request.plan).map_err(|e| format!("{}: {e}", request.plan.display()))?,
+        &crate::fault_fs::read(&request.plan)
+            .map_err(|e| format!("{}: {e}", request.plan.display()))?,
     )
     .map_err(|error| format!("{}: {error}", request.plan.display()))?;
     let results = Results::create(&request.results)?;
-    let root = std::fs::canonicalize(&request.root)
+    let root = crate::fault_fs::canonicalize(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let mut tests = planned_tests(&plan);
     // A doctest runs by its package, the one whose manifest is nearest its
@@ -263,7 +264,7 @@ pub fn run_strong_rust(
         let file = planned["file"].as_str().unwrap_or_default().to_owned();
         let index = planned["index"].as_u64().unwrap_or(u64::MAX) as usize;
         let listed = sources.entry(file.clone()).or_insert_with(|| {
-            let source = std::fs::read_to_string(root.join(&file)).ok()?;
+            let source = crate::fault_fs::read_to_string(root.join(&file)).ok()?;
             let mutants = crate::rust_mutants::enumerate(&source)?;
             Some((source, mutants))
         });
@@ -330,8 +331,8 @@ pub fn run_strong_rust(
     let invocation = crate::rust_test_runner::cargo_invocation(&root, command)
         .map_err(|error| error.to_string())?;
     let build_invocation = build_invocation(&invocation);
-    // Tests that run in a browser take their mutant from no environment and
-    // no Node process: not yet.
+    // Tests run in Chrome get their mutant from the driver proxy; another
+    // browser's page has no way in yet.
     if runner_environment.iter().any(|(name, _)| {
         matches!(
             name.as_str(),
@@ -346,7 +347,7 @@ pub fn run_strong_rust(
                 0,
                 started,
                 Some(
-                    "a strong pass cannot switch mutants in wasm tests run in a browser yet".into(),
+                    "a strong pass switches mutants in wasm tests run in Chrome only, not yet in this browser".into(),
                 ),
             );
         }
@@ -577,7 +578,7 @@ pub fn run_strong_rust(
 fn package_of(root: &Path, file: &str) -> Option<String> {
     let mut directory = root.join(file);
     while directory.pop() && directory.starts_with(root) {
-        let Ok(text) = std::fs::read_to_string(directory.join("Cargo.toml")) else {
+        let Ok(text) = crate::fault_fs::read_to_string(directory.join("Cargo.toml")) else {
             continue;
         };
         let manifest = text.parse::<toml::Table>().ok()?;
@@ -657,8 +658,8 @@ fn build_invocation(invocation: &CargoTestInvocation) -> CargoTestInvocation {
 /// rebuilds only what changed.
 fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
     fn walk(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
-        std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
+        crate::fault_fs::create_dir_all(to)?;
+        for entry in crate::fault_fs::read_dir(from)? {
             let entry = entry?;
             let name = entry.file_name();
             let text = name.to_string_lossy();
@@ -675,11 +676,11 @@ fn sync_project(root: &Path, copy: &Path) -> Result<(), String> {
             if kind.is_dir() {
                 walk(&entry.path(), &target, false)?;
             } else if kind.is_file() || kind.is_symlink() {
-                let Ok(bytes) = std::fs::read(entry.path()) else {
+                let Ok(bytes) = crate::fault_fs::read(entry.path()) else {
                     continue;
                 };
-                if std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
-                    std::fs::write(&target, &bytes)?;
+                if crate::fault_fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
+                    crate::fault_fs::write(&target, &bytes)?;
                 }
             }
         }
@@ -730,7 +731,8 @@ fn cargo_build(
                 ) else {
                     continue;
                 };
-                let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.into());
+                let source =
+                    crate::fault_fs::canonicalize(source).unwrap_or_else(|_| source.into());
                 let Ok(relative) = source.strip_prefix(workspace) else {
                     continue;
                 };
@@ -776,7 +778,7 @@ fn compile_error(message: &Value, workspace: &Path) -> CompileError {
             };
             let path = Path::new(file);
             let relative = if path.is_absolute() {
-                std::fs::canonicalize(path)
+                crate::fault_fs::canonicalize(path)
                     .ok()
                     .and_then(|path| path.strip_prefix(workspace).ok().map(Path::to_path_buf))
             } else {
@@ -1043,8 +1045,9 @@ fn build_alone(
         &source[range.end..]
     );
     let path = places.plain.join(&job.file);
-    std::fs::write(&path, mutated).map_err(|error| format!("{}: {error}", path.display()))?;
-    let workspace = std::fs::canonicalize(&places.plain)
+    crate::fault_fs::write(&path, mutated)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let workspace = crate::fault_fs::canonicalize(&places.plain)
         .map_err(|error| format!("{}: {error}", places.plain.display()))?;
     let mut project = crate::rust_project::PreparedRustProject::plain(workspace);
     project.target_directory = places.plain_target.clone();
@@ -1150,7 +1153,8 @@ impl Nextest {
             }
         }
         let metadata = target.join("supercov-nextest");
-        std::fs::create_dir_all(&metadata).map_err(|e| format!("{}: {e}", metadata.display()))?;
+        crate::fault_fs::create_dir_all(&metadata)
+            .map_err(|e| format!("{}: {e}", metadata.display()))?;
         let binaries = metadata.join("binaries.json");
         let cargo = metadata.join("cargo.json");
         let listed = crate::child_signal_guard::output(
@@ -1175,7 +1179,7 @@ impl Nextest {
                 String::from_utf8_lossy(&listed.stderr).trim()
             ));
         }
-        std::fs::write(&binaries, &listed.stdout)
+        crate::fault_fs::write(&binaries, &listed.stdout)
             .map_err(|e| format!("{}: {e}", binaries.display()))?;
         let described = crate::child_signal_guard::output(
             Command::new(&invocation.program)
@@ -1189,7 +1193,7 @@ impl Nextest {
                 .current_dir(&project.workspace_root),
         )
         .map_err(|error| format!("cargo metadata: {error}"))?;
-        std::fs::write(&cargo, &described.stdout)
+        crate::fault_fs::write(&cargo, &described.stdout)
             .map_err(|e| format!("{}: {e}", cargo.display()))?;
         let parsed: Value = serde_json::from_slice(&listed.stdout)
             .map_err(|error| format!("cargo nextest list: {error}"))?;
@@ -1198,7 +1202,7 @@ impl Nextest {
             .into_iter()
             .flatten()
             .filter_map(|(id, binary)| {
-                let path = std::fs::canonicalize(binary["binary-path"].as_str()?).ok()?;
+                let path = crate::fault_fs::canonicalize(binary["binary-path"].as_str()?).ok()?;
                 Some((path, id.clone()))
             })
             .collect();
@@ -1220,7 +1224,7 @@ impl Nextest {
     fn command(&self, executable: &Path, name: &str) -> Option<Command> {
         let id = self
             .binary_ids
-            .get(&std::fs::canonicalize(executable).ok()?)?;
+            .get(&crate::fault_fs::canonicalize(executable).ok()?)?;
         let mut command = Command::new(&self.program);
         command
             .args(&self.arguments)
@@ -1401,7 +1405,7 @@ fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, S
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn();
+        .launch();
     let Ok(mut child) = child else {
         return (
             Ran {
@@ -1514,6 +1518,31 @@ fn run_job(
     results: &Results,
 ) -> &'static str {
     let started = Instant::now();
+    // Tests of another runner (JavaScript tests over the crate's wasm) are
+    // the JavaScript pass's to run (`docs/design/mutation-drivers.md`).
+    let foreign = job
+        .candidates
+        .iter()
+        .map(|test| tests[*test].runner.as_str())
+        .find(|runner| !matches!(*runner, "rust-libtest" | "nextest" | "rustdoc"));
+    if let Some(runner) = foreign
+        && job
+            .candidates
+            .iter()
+            .all(|test| tests[*test].runner == runner)
+    {
+        results.verdict(
+            &job.id,
+            "error",
+            None,
+            0,
+            started,
+            Some(format!(
+                "its tests run under {runner}, which the Rust pass does not drive"
+            )),
+        );
+        return "error";
+    }
     let mut candidates = job
         .candidates
         .iter()
@@ -1659,13 +1688,13 @@ mod tests {
     fn a_doctest_runs_by_the_package_nearest_its_file() {
         let root =
             std::env::temp_dir().join(format!("supercov-rust-strong-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("inner/src")).unwrap();
-        std::fs::write(
+        crate::fault_fs::create_dir_all(root.join("inner/src")).unwrap();
+        crate::fault_fs::write(
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"inner\"]\n",
         )
         .unwrap();
-        std::fs::write(
+        crate::fault_fs::write(
             root.join("inner/Cargo.toml"),
             "[package]\nname = \"inner\"\n",
         )
@@ -1679,19 +1708,19 @@ mod tests {
         let copy = root.join("copy");
         sync_project(&root.join("inner"), &copy).unwrap();
         assert!(copy.join("Cargo.toml").exists());
-        let written = std::fs::metadata(copy.join("Cargo.toml"))
+        let written = crate::fault_fs::metadata(copy.join("Cargo.toml"))
             .unwrap()
             .modified()
             .unwrap();
         sync_project(&root.join("inner"), &copy).unwrap();
         assert_eq!(
-            std::fs::metadata(copy.join("Cargo.toml"))
+            crate::fault_fs::metadata(copy.join("Cargo.toml"))
                 .unwrap()
                 .modified()
                 .unwrap(),
             written
         );
-        std::fs::remove_dir_all(&root).unwrap();
+        crate::fault_fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1719,5 +1748,178 @@ mod tests {
         assert!(libtest_ran_nothing("running 0 tests\n"));
         assert!(!libtest_ran_nothing("running 1 test\n"));
         assert_eq!(first_line("a\nb"), "a");
+    }
+
+    /// A small crate and a plan over every mutant of its library.
+    fn fixture(label: &str) -> (PathBuf, StrongRustRequest) {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-strong-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "/// ```\n/// assert_eq!(fixture::double(3), 6);\n/// ```\n",
+            "pub fn double(v: u32) -> u32 {\n    v * 2\n}\n",
+            "pub fn greet(name: &str) -> String {\n    let mut out = String::from(\"hi \");\n    out += name;\n    out\n}\n",
+            "pub const fn c() -> u8 {\n    1 + 1\n}\n",
+            "pub fn spin(n: u32) -> u32 {\n    let mut i = 0;\n    while i < n {\n        i += 1;\n    }\n    i\n}\n",
+        );
+        std::fs::write(root.join("src/lib.rs"), source).unwrap();
+        std::fs::write(
+            root.join("tests/t.rs"),
+            "#[test]\nfn d() { assert_eq!(fixture::double(2), 4); }\n#[test]\nfn g() { assert_eq!(fixture::greet(\"a\"), \"hi a\"); }\n#[test]\nfn c() { assert_eq!(fixture::c(), 2); }\n#[test]\nfn s() { assert!(fixture::spin(3) >= 3); }\n#[test]\nfn broken() { panic!(\"always\"); }\n",
+        )
+        .unwrap();
+        let mutants = crate::rust_mutants::enumerate(source).unwrap();
+        let tests = [
+            "tests/t.rs::d",
+            "tests/t.rs::g",
+            "tests/t.rs::c",
+            "tests/t.rs::s",
+            "tests/t.rs::broken",
+            "src/lib.rs - double (line 1)",
+            "tests/t.rs::gone",
+            "web/a.test.js > a",
+        ];
+        let plan = json!({
+            "tests": tests.iter().map(|id| {
+                let (runner, name) = if id.contains(" - ") { ("rustdoc", *id) } else if id.ends_with(" > a") { ("vitest", *id) } else { ("rust-libtest", *id) };
+                json!({"id": id, "file": id.split("::").next().unwrap().split(" - ").next().unwrap(), "name": name, "title": name, "runner": runner, "runnable": !id.ends_with("broken")})
+            }).collect::<Vec<_>>(),
+            "mutants": mutants.iter().enumerate().map(|(index, mutant)| {
+                let candidates = match (mutant.start.0, mutant.descriptor()) {
+                    // A candidate that failed in the measured run, and one
+                    // the build does not have.
+                    (5, "1") if mutant.genre == "FnValue" => vec![4],
+                    (5, "0") if mutant.genre == "FnValue" => vec![6],
+                    // Only a JavaScript test over the crate's wasm.
+                    (16, "1") if mutant.genre == "FnValue" => vec![7],
+                    (4..=6, _) => vec![0, 5],
+                    (7..=11, _) => vec![1],
+                    (12..=14, _) => vec![2],
+                    _ => vec![3],
+                };
+                json!({"id": mutant_id("src/lib.rs", mutant), "file": "src/lib.rs", "index": index, "decided": null,
+                    "candidates": candidates.iter().map(|test| json!({"test": test})).collect::<Vec<_>>()})
+            })
+            .chain([
+                json!({"id": "src/lib.rs:1:1-1:2:FnValue:gone", "file": "src/lib.rs", "index": 99, "decided": null, "candidates": []}),
+                json!({"id": "decided", "file": "src/lib.rs", "index": 0, "decided": "survived"}),
+            ])
+            .collect::<Vec<_>>(),
+        });
+        std::fs::write(root.join("plan.json"), serde_json::to_vec(&plan).unwrap()).unwrap();
+        let request = StrongRustRequest {
+            root: root.clone(),
+            command: vec!["cargo".into(), "test".into()],
+            plan: root.join("plan.json"),
+            results: root.join("results.jsonl"),
+        };
+        (root, request)
+    }
+
+    fn verdicts(request: &StrongRustRequest) -> BTreeMap<String, Value> {
+        std::fs::read_to_string(&request.results)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|record| Some((record["id"].as_str()?.to_owned(), record)))
+            .collect()
+    }
+
+    /// The driver kills, keeps, times out and finds unviable and
+    /// unswitchable mutants, from one switched build; and wherever its I/O
+    /// fails it ends with an error or the affected mutants' errors, never a
+    /// panic or a verdict it did not earn.
+    #[test]
+    fn a_pass_over_a_crate_and_every_place_it_can_fail() {
+        let (root, request) = fixture("pass");
+        let mut said = Vec::new();
+        assert_eq!(run_strong_rust(&request, &mut said).unwrap(), 0);
+        let found = verdicts(&request);
+        let status = |id: &str| found.get(id).map(|record| record["status"].clone());
+        for (id, expected) in [
+            ("src/lib.rs:5:7-5:8:BinaryOperator:/", "killed"),
+            ("src/lib.rs:5:7-5:8:BinaryOperator:+", "killed"),
+            ("src/lib.rs:9:9-9:11:BinaryOperator:-=", "unviable"),
+            ("src/lib.rs:13:7-13:8:BinaryOperator:-", "killed"),
+            ("src/lib.rs:17:13-17:14:BinaryOperator:<=", "survived"),
+            ("src/lib.rs:18:11-18:13:BinaryOperator:*=", "timeout"),
+            ("src/lib.rs:1:1-1:2:FnValue:gone", "error"),
+            ("src/lib.rs:5:5-5:10:FnValue:1", "survived"),
+            ("src/lib.rs:5:5-5:10:FnValue:0", "error"),
+            ("src/lib.rs:16:5-20:6:FnValue:1", "error"),
+        ] {
+            assert_eq!(status(id).unwrap(), expected, "{id}: {found:?}");
+        }
+        // The doctest kills `*` to `+`: 3 + 2 is not 6.
+        assert_eq!(
+            found["src/lib.rs:5:7-5:8:BinaryOperator:+"]["killedBy"],
+            "src/lib.rs - double (line 1)"
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert!(said.contains("to build on their own"), "{said}");
+
+        // Each place the pass reads, writes or starts something, failing.
+        let text = include_str!("rust_strong.rs");
+        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
+        let mut sites = Vec::new();
+        for (number, line) in body.lines().enumerate() {
+            for (pattern, kind) in [("crate::fault_fs::", "fs."), (".launch()", "spawn")] {
+                if let Some(at) = line.find(pattern) {
+                    let operation = line[at + pattern.len()..]
+                        .split('(')
+                        .next()
+                        .unwrap_or_default();
+                    let id = if kind == "spawn" {
+                        format!("spawn#rust_strong.rs:{}", number + 1)
+                    } else {
+                        format!("fs.{operation}#rust_strong.rs:{}", number + 1)
+                    };
+                    sites.push(id);
+                }
+            }
+        }
+        assert!(sites.len() > 10, "{sites:?}");
+        // One copy for every fault, its plan without the mutant that runs to
+        // its time limit, each fault with results of its own.
+        let (fault_root, mut request) = fixture("fault");
+        let plan: Value = serde_json::from_slice(&std::fs::read(&request.plan).unwrap()).unwrap();
+        let mut small = plan.clone();
+        small["mutants"] = Value::Array(
+            plan["mutants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|mutant| !mutant["id"].as_str().unwrap().contains(":18:"))
+                .cloned()
+                .collect(),
+        );
+        std::fs::write(&request.plan, serde_json::to_vec(&small).unwrap()).unwrap();
+        for (number, site) in sites.iter().enumerate() {
+            request.results = fault_root.join(format!("results-{number}.jsonl"));
+            let outcome = crate::contained::contained(|| {
+                crate::fault::during(site, || run_strong_rust(&request, &mut Vec::new()))
+            });
+            let outcome = outcome.unwrap_or_else(|panic| panic!("{site} panicked: {panic}"));
+            if outcome.is_ok() {
+                assert!(
+                    !verdicts(&request).is_empty(),
+                    "{site}: no verdict and no error"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(fault_root);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

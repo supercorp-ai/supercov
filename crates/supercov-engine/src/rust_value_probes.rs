@@ -34,6 +34,11 @@ use ra_ap_syntax::{
 
 use crate::rust_mutants::{arithmetic_code, binary_replacements, value_site};
 
+/// A probe site's own state (`settle` in the runtime): once more
+/// evaluations cannot change its mutants' verdicts in this process, the
+/// probe does nothing there.
+const STATE: &str = "{ static STATE: ::core::sync::atomic::AtomicU32 = ::core::sync::atomic::AtomicU32::new(0); &STATE }";
+
 /// Code a probe adds around a range, or at an offset.
 pub(crate) enum ValueEdit {
     Wrap {
@@ -91,7 +96,7 @@ pub(crate) fn place(
                     edits.push(ValueEdit::Wrap {
                         range,
                         prefix: format!(
-                            "({runtime}::compare({left}, {right}, &[{}]), ",
+                            "({runtime}::compare({left}, {right}, &[{}], {STATE}), ",
                             outcomes.join(", ")
                         ),
                         suffix: ").1".into(),
@@ -116,7 +121,7 @@ pub(crate) fn place(
                     edits.push(ValueEdit::Wrap {
                         range,
                         prefix: format!(
-                            "({runtime}::arithmetic({left}, {right}, b'{}', &[{}]), ",
+                            "({runtime}::arithmetic({left}, {right}, b'{}', &[{}], {STATE}), ",
                             op_code(op),
                             mutants.join(", ")
                         ),
@@ -138,7 +143,10 @@ pub(crate) fn place(
             let outcomes = ids(&site, &["zero", "nonzero", "unknown"]);
             edits.push(ValueEdit::Wrap {
                 range,
-                prefix: format!("({runtime}::negated({read}, &[{}]), ", outcomes.join(", ")),
+                prefix: format!(
+                    "({runtime}::negated({read}, &[{}], {STATE}), ",
+                    outcomes.join(", ")
+                ),
                 suffix: ").1".into(),
                 outer: false,
             });
@@ -156,19 +164,23 @@ fn operand(runtime: &str, expression: &ast::Expr) -> Option<String> {
     match expression {
         ast::Expr::Literal(literal) => {
             let text = literal.syntax().text().to_string();
-            let token = literal.syntax().first_token()?;
-            match token.kind() {
-                SyntaxKind::INT_NUMBER
-                    if text
-                        .chars()
-                        .all(|c| c.is_ascii_hexdigit() || "xob_".contains(c)) =>
-                {
+            // A suffix (`1u8`, `2f32`) names the literal's own type; a
+            // literal without one takes the other operand's. A hex literal
+            // that ends like a suffix (`0xf32`) is read as typed, and so as
+            // `i32`: no more than `unknown` against another type.
+            let suffixed = [
+                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+                "isize", "f32", "f64",
+            ]
+            .iter()
+            .any(|suffix| text.ends_with(suffix));
+            match literal.syntax().first_token()?.kind() {
+                SyntaxKind::INT_NUMBER if !suffixed => {
                     Some(format!("{runtime}::Num::LitInt({text})"))
                 }
-                SyntaxKind::FLOAT_NUMBER if !text.ends_with("f32") && !text.ends_with("f64") => {
+                SyntaxKind::FLOAT_NUMBER if !suffixed => {
                     Some(format!("{runtime}::Num::LitFloat({text})"))
                 }
-                // A suffixed number names its own type.
                 SyntaxKind::INT_NUMBER | SyntaxKind::FLOAT_NUMBER | SyntaxKind::CHAR => {
                     Some(format!("{runtime}::num(&({text}))"))
                 }
@@ -277,7 +289,7 @@ fn returns(
     };
     let site = value_site(file, function.syntax().text_range(), "return");
     let outcomes = ids(&site, &["0", "1", "-1", "other", "unknown", "unwound"]);
-    let table = format!("&[{}]", outcomes[..5].join(", "));
+    let table = format!("&[{}], {STATE}", outcomes[..5].join(", "));
     let mut edits = Vec::new();
     let entry = list
         .syntax()
@@ -352,7 +364,7 @@ mod tests {
         );
         let all = edits.join("\n");
         assert!(
-            all.contains("rt::compare(rt::num(&(a)), rt::Num::LitInt(3), &[7, 8, 9, 10, 11])"),
+            all.contains("rt::compare(rt::num(&(a)), rt::Num::LitInt(3), &[7, 8, 9, 10, 11], {"),
             "{all}"
         );
         assert!(
@@ -374,11 +386,72 @@ mod tests {
         assert!(!all.contains("returned::<String>"), "{all}");
         assert!(!all.contains("returned::<u8>"), "{all}");
         assert!(
-            all.contains("b'*', &[(b'+', 26, 27, 28), (b'/', 29, 30, 31)]"),
+            all.contains("b'*', &[(b'+', 26, 27, 28), (b'/', 29, 30, 31)], {"),
             "{all}"
         );
         let negative = placed("fn n(a: i8) -> i8 { a * -2 }\n").join("\n");
         assert!(negative.contains("rt::Num::LitInt(-2)"), "{negative}");
         assert!(placed("fn broken( {").is_empty());
+    }
+
+    /// Every operand and operator kind, and every function kind.
+    #[test]
+    fn each_kind_of_operand_operator_and_function() {
+        let source = concat!(
+            "fn a(x: f64, y: u8, z: &u8, w: (u8,)) -> u8 {\n",
+            "    let _ = (x < 1.5, x < 2f32, 'a' < 'b', \"s\" < \"t\", y as u16 > 1, *z > (y), w.0 / 2, y % 2, y << 1, y >> 1, y ^ 1, y | 1, y & 1, y == 1, !true, -g(), -1u8 > y, -1.5 < x, -'a', x * 0x1F);\n",
+            "    let c = || { return 1u8; };\n",
+            "    return y + 1;\n",
+            "}\n",
+            "async fn b() -> u8 { 1 }\n",
+            "const fn c() -> u8 { 1 }\n",
+            "fn d() -> bool { return true; }\n",
+            "fn e() -> u8;\n",
+            "fn f() -> u8 { #![allow(unused)] 1 }\n",
+            "fn g() -> u8 { async { return 2u8; }; 1 }\n",
+        );
+        let all = placed(source).join("\n");
+        for expected in [
+            "rt::Num::LitFloat(1.5)",
+            "rt::num(&(2f32))",
+            "rt::num(&('a'))",
+            "rt::num(&(y as u16))",
+            "rt::num(&(*z)), rt::num(&((y)))",
+            "rt::num(&(w.0)), rt::Num::LitInt(2), b'/'",
+            "b'%'",
+            "b'<'",
+            "b'>'",
+            "b'^'",
+            "b'|'",
+            "b'&'",
+            "rt::num(&(-1u8))",
+            "rt::Num::LitFloat(-1.5)",
+            "rt::Num::LitInt(0x1F)",
+            "returned::<u8>(…",
+            "returned::<bool>(…",
+        ] {
+            assert!(all.contains(expected), "{expected}: {all}");
+        }
+        // A string, a call, a `char` negated, `==`, `!`: no probe. Neither
+        // an `async fn` nor a `const fn`, nor a closure's or an async
+        // block's `return`.
+        for absent in [
+            "\"s\"",
+            "g()",
+            "-'a'",
+            "== 1",
+            "!true",
+            "return 1u8",
+            "return 2u8",
+        ] {
+            assert!(
+                !all.contains(&format!("({absent}")) && !all.contains(&format!("{absent})")),
+                "{absent}: {all}"
+            );
+        }
+        assert_eq!(all.matches("__supercov_unwound").count(), 4, "{all}");
+        // A node the caller skips has no probe.
+        let skipped = place("src/a.rs", source, "rt", &|_| true, &mut |_| 0);
+        assert!(skipped.is_empty());
     }
 }

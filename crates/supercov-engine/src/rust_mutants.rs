@@ -26,10 +26,7 @@
 
 use ra_ap_syntax::{
     AstNode, NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
-    ast::{
-        self, ArithOp, AstToken, BinaryOp, CmpOp, HasAttrs, HasGenericArgs, HasName, LogicOp,
-        UnaryOp,
-    },
+    ast::{self, ArithOp, AstToken, BinaryOp, CmpOp, HasGenericArgs, HasName, LogicOp, UnaryOp},
 };
 
 /// The operator set, as `mutants.json` names it.
@@ -119,8 +116,8 @@ pub(crate) fn list(
     recorded: &std::collections::BTreeSet<String>,
 ) -> Option<Vec<crate::js_mutant_links::CandidateMutant>> {
     use crate::rust_instrumenter::stable_id;
-    let mutants = enumerate(source)?;
     let (tree, _) = crate::rust_instrumenter::parse_source(source)?;
+    let mutants = enumerate(source).expect("a file that parses is enumerated");
     let root = tree.syntax();
     // Every statement and function the instrumenter can name, with its
     // range; the run's own points must be among them.
@@ -152,7 +149,8 @@ pub(crate) fn list(
     }
     // The instrumenter reads the arguments of macros it knows as code, so
     // its points are its manifest's, not only those above.
-    let manifest = crate::rust_instrumenter::build_rust_manifest(file, source).ok()?;
+    let manifest = crate::rust_instrumenter::build_rust_manifest(file, source)
+        .expect("a file that parses has a manifest");
     let known = manifest
         .points
         .iter()
@@ -386,7 +384,7 @@ impl Walker<'_> {
         let original = block_tokens(&list);
         for replacement in replacements {
             // A replacement that is the body as written changes nothing.
-            if tokens_of_code(&replacement).is_some_and(|tokens| tokens == original) {
+            if tokens_of_code(&replacement) == original {
                 continue;
             }
             self.push(
@@ -623,19 +621,15 @@ fn trivia(token: &SyntaxToken) -> bool {
         || (token.kind() == SyntaxKind::COMMENT && !doc_comment(token))
 }
 
-/// The `,` after a node, past whitespace and comments.
+/// The `,` after a node, past whitespace and comments. A field before a
+/// `..base` always has one.
 fn next_comma(node: &SyntaxNode) -> Option<SyntaxToken> {
-    let mut next = node.next_sibling_or_token();
-    while let Some(element) = next {
-        match element {
-            NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => return Some(token),
-            NodeOrToken::Token(token) if token.kind().is_trivia() => {
-                next = token.next_sibling_or_token();
-            }
-            _ => return None,
-        }
-    }
-    None
+    std::iter::successors(node.next_sibling_or_token(), |element| {
+        element.next_sibling_or_token()
+    })
+    .find(|element| !element.kind().is_trivia())
+    .and_then(NodeOrToken::into_token)
+    .filter(|token| token.kind() == SyntaxKind::COMMA)
 }
 
 fn last_name(path: &ast::Path) -> Option<String> {
@@ -648,17 +642,9 @@ fn last_name(path: &ast::Path) -> Option<String> {
 /// an attribute whose path ends in `test` (`#[test]`, `#[tokio::test]`), or
 /// `#[mutants::skip]`, alone or in a `cfg_attr`.
 fn excluded(node: &SyntaxNode) -> bool {
-    let attributes: Vec<ast::Attr> = if node.kind() == SyntaxKind::SOURCE_FILE {
-        node.children().filter_map(ast::Attr::cast).collect()
-    } else {
-        match ast::AnyHasAttrs::cast(node.clone()) {
-            Some(item) => item.attrs().collect(),
-            None => return false,
-        }
-    };
-    attributes
-        .iter()
-        .any(|attribute| attribute_excludes(attribute.syntax()))
+    node.children()
+        .filter(|child| child.kind() == SyntaxKind::ATTR)
+        .any(|attribute| attribute_excludes(&attribute))
 }
 
 fn attribute_excludes(attribute: &SyntaxNode) -> bool {
@@ -836,12 +822,17 @@ fn block_tokens(list: &ast::StmtList) -> Vec<Token> {
     tokens
 }
 
-/// The tokens of `{ code }`, parsed as a function body.
-fn tokens_of_code(code: &str) -> Option<Vec<Token>> {
+/// The tokens of `{ code }`, parsed as a function body: a replacement this
+/// module writes, which always parses.
+fn tokens_of_code(code: &str) -> Vec<Token> {
     let source = format!("fn f() {{ {code} }}");
-    let (tree, _) = crate::rust_instrumenter::parse_source(&source)?;
-    let list = tree.syntax().descendants().find_map(ast::StmtList::cast)?;
-    Some(block_tokens(&list))
+    let (tree, _) = crate::rust_instrumenter::parse_source(&source).expect("a replacement parses");
+    let list = tree
+        .syntax()
+        .descendants()
+        .find_map(ast::StmtList::cast)
+        .expect("a function body");
+    block_tokens(&list)
 }
 
 /// A token stream printed as cargo-mutants' `ToPrettyString` prints it.
@@ -1360,7 +1351,7 @@ mod tests {
 
     #[test]
     fn pretty_prints_as_cargo_mutants_does() {
-        let printed = |code: &str| pretty(&tokens_of_code(code).unwrap());
+        let printed = |code: &str| pretty(&tokens_of_code(code));
         assert_eq!(printed("match x { a => b }"), "{match x{a => b}}");
         assert_eq!(printed("fair || foul"), "{fair || foul}");
         assert_eq!(
@@ -1468,5 +1459,196 @@ mod tests {
         // A run that measured a point the source no longer has: changed.
         recorded.insert("rs:statement:gone".into());
         assert!(list(file, source, &recorded).is_none());
+    }
+
+    /// What cargo-mutants skips is skipped wherever it is, and each kind of
+    /// node is walked through.
+    #[test]
+    fn skipped_code_and_every_kind_of_node_are_walked_as_cargo_mutants_walks_them() {
+        assert_eq!(
+            enumerate("#![cfg(test)]\nfn f() -> u8 { 1 + 1 }\n").unwrap(),
+            vec![]
+        );
+        assert_eq!(enumerate("struct S;\n").unwrap(), vec![]);
+        let source = concat!(
+            "#[cfg(test)] impl S { fn a() -> u8 { 1 + 1 } }\n",
+            "#[mutants::skip] trait T { fn b() -> u8 { 1 + 1 } }\n",
+            "#[cfg_attr(feature = \"x\", mutants::skip)] mod m { fn c() -> u8 { 1 + 1 } }\n",
+            "#[cfg(all(test, unix))] fn d() -> u8 { 1 + 1 }\n",
+            "#[cfg_attr(test, inline)] fn d2() -> u8 { 1 + 1 }\n",
+            "#[cfg_attr(test, ::x, y::z)] fn d3() -> u8 { 1 + 1 }\n",
+            "#[path = \"x\"] mod n {}\n",
+            "#[allow(::bad)] fn d4() {}\n",
+            "fn e(a: u8, s: S) -> u8 {\n",
+            "    let mut x = 0;\n",
+            "    x = 1;\n",
+            "    fn nested() {}\n",
+            "    #[cfg(test)] f(a + 1);\n",
+            "    #[cfg(test)] s.g(a + 1);\n",
+            "    (|v: u8| v + 1)(a);\n",
+            "    S::with_capacity(a + 1);\n",
+            "    s.with_capacity(a + 1);\n",
+            "    (s.f)(a + 1);\n",
+            "    #[cfg(test)] { a + 1 };\n",
+            "    #[cfg(test)] -a;\n",
+            "    *&a;\n",
+            "    #[cfg(test)] match a { _ => 1 };\n",
+            "    match a { 1 => 2, _ if a > 3 => 4, (_) => 5 };\n",
+            "    #[cfg(test)] S { a, ..s };\n",
+            "    S { a: 1, ..s };\n",
+            "    S { /* first */ a // trailing\n        , 0: 1, b: 2 /* last */, ..s };\n",
+            "    S { a: 1 };\n",
+            "    x\n",
+            "}\n",
+            "unsafe fn u() -> u8 { 1 + 1 }\n",
+            "trait U { fn new() -> u8 { 1 } fn empty() {} fn declared(); fn given() -> bool { true && false } }\n",
+            "impl S { fn new() -> u8 { 1 + 1 } fn empty() {} }\n",
+            "extern \"C\" { fn x(); }\n",
+        );
+        let mutants = enumerate(source).unwrap();
+        let named = mutants
+            .iter()
+            .map(|mutant| {
+                format!(
+                    "{}:{} {} {}",
+                    mutant.start.0,
+                    mutant.start.1,
+                    mutant.genre,
+                    mutant.descriptor()
+                )
+            })
+            .collect::<Vec<_>>();
+        // Skipped: the `cfg(test)` impl, the skipped trait and module, the
+        // attributed call, method call, block, negation, match and literal,
+        // the `with_capacity` calls, `unsafe fn`, `new` and empty bodies.
+        for line in [1, 2, 13, 14, 16, 17, 20, 22, 24, 30, 31, 33] {
+            assert!(
+                !named
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{line}:"))),
+                "line {line}: {named:?}"
+            );
+        }
+        // Not skipped: a `cfg` with more than names, `cfg_attr` of no skip.
+        for line in [3, 4, 5, 6, 19] {
+            assert!(
+                named
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{line}:"))),
+                "line {line}: {named:?}"
+            );
+        }
+        assert!(
+            named.contains(&"15:16 BinaryOperator -".to_owned()),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"18:13 BinaryOperator -".to_owned()),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"23:15 MatchArm removed".to_owned()),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"23:28 MatchArmGuard true".to_owned()),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"25:9 StructField removed".to_owned()),
+            "{named:?}"
+        );
+        // A field's span runs past comments to its comma; `0: 1` is not a
+        // named field; the last field without a comma ends at itself.
+        let fields = mutants
+            .iter()
+            .filter(|mutant| mutant.genre == "StructField" && mutant.start.0 >= 26)
+            .map(|mutant| &source[mutant.range])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            ["a // trailing\n        ,", "b: 2 /* last */,"],
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"32:87 BinaryOperator ||".to_owned()),
+            "{named:?}"
+        );
+        assert!(
+            named.contains(&"23:40 MatchArm removed".to_owned()),
+            "{named:?}"
+        );
+        assert_eq!(
+            named.len(),
+            37,
+            "cargo-mutants 27.1.0 lists 37 of this source: {named:?}"
+        );
+    }
+
+    /// The pretty printer spaces what cargo-mutants' printer spaces.
+    #[test]
+    fn every_spacing_rule_of_the_printer() {
+        let printed = |code: &str| pretty(&tokens_of_code(code));
+        assert_eq!(printed("a | b; c"), "{a | b; c}");
+        assert_eq!(printed("f::<u8>(a, 1) - -1"), "{f::<u8>(a, 1)--1}");
+        assert_eq!(printed("b!(); a.c"), "{b!(); a.c}");
+        assert_eq!(printed("fn g() -> T {}"), "{fn g()-> T{}}");
+    }
+
+    /// Links are made only to what the run recorded, and every kind of site
+    /// is linked.
+    #[test]
+    fn a_mutant_is_linked_only_to_what_the_run_recorded() {
+        let file = "src/lib.rs";
+        let source = "pub fn f(a: u8, b: bool) -> u8 {\n    let c = |x: u8| x == a;\n    match a { 0 => 1, x if b => 2, _ => S { y: -1, ..S::d() }.y }\n}\n";
+        assert!(list(file, "fn broken( {", &Default::default()).is_none());
+        // Nothing recorded: no link at all.
+        let bare = list(file, source, &Default::default()).unwrap();
+        assert!(bare.iter().all(|mutant| mutant.statement.is_none()
+            && mutant.function.is_none()
+            && mutant.decision.is_none()
+            && mutant.probe.is_none()
+            && mutant.compare.is_none()));
+        // A decision the run recorded is not a point: no change is read
+        // from it.
+        let decisions = crate::rust_instrumenter::build_rust_manifest(file, source)
+            .unwrap()
+            .decisions
+            .iter()
+            .map(|decision| decision.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let linked = list(file, source, &decisions).unwrap();
+        assert!(linked.iter().any(|mutant| mutant.decision.is_some()));
+        let mut gone = decisions.clone();
+        gone.insert("rs:function:gone".into());
+        assert!(list(file, source, &gone).is_none());
+        // Value sites recorded link the probes.
+        let mutants = enumerate(source).unwrap();
+        let mut sites = std::collections::BTreeSet::new();
+        for mutant in &mutants {
+            if let Site::Operator { expression } = &mutant.site {
+                sites.insert(value_site(file, *expression, "negate"));
+                sites.insert(value_site(file, *expression, "compare"));
+                sites.insert(value_site(file, *expression, &mutant.replacement));
+            }
+            if let (Site::Body { .. }, Some(function)) = (&mutant.site, mutant.function) {
+                sites.insert(value_site(file, function, "return"));
+            }
+        }
+        let probed = list(file, source, &sites).unwrap();
+        let negation = probed
+            .iter()
+            .find(|m| m.mutator == "UnaryOperator")
+            .unwrap();
+        assert!(negation.probe.is_some());
+        let equality = probed.iter().find(|m| m.replacement == "!=").unwrap();
+        assert!(equality.probe.is_none() && equality.compare.is_none());
+        assert!(
+            probed
+                .iter()
+                .any(|m| m.mutator == "FnValue" && m.probe.is_some())
+        );
+        assert!(probed.iter().any(|m| m.mutator == "StructField"));
+        assert_eq!(arithmetic_code(""), ' ');
     }
 }
