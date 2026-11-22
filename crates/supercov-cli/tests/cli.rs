@@ -24181,12 +24181,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1402",
+            "fs.write#mutants_test_command.rs:1407",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1402"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1407"),
         "{}",
         unwritten.stderr()
     );
@@ -25219,6 +25219,77 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         .unwrap_or_else(|| panic!("{listed}"))
         .clone();
     assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
+
+/// Ctrl-C during a JavaScript strong pass, sent to Supercov's process group
+/// as a terminal sends it: the resident runners and what their jobs started
+/// stop, though each runs in a process group of its own, Supercov exits as
+/// the signal does, and what the pass decided is saved.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_javascript_pass_leaves_no_process_running() {
+    use std::os::unix::process::CommandExt;
+    let project = mutants_project("js-strong-interrupted");
+    // Under a mutant, the test starts a process and waits: its pid and the
+    // runner's to the marker.
+    project.write(
+        "test/slow.test.js",
+        "import assert from \"node:assert/strict\";\nimport { spawn } from \"node:child_process\";\nimport { readFileSync, renameSync, writeFileSync } from \"node:fs\";\nimport { shipping } from \"../src/cart.js\";\ndescribe(\"slow\", () => {\n  it(\"waits under a mutant\", async function () {\n    this.timeout(0);\n    assert.equal(shipping(80), 0);\n    const job = process.env.SUPERCOV_STRONG_JOB ? JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_JOB, \"utf8\")) : null;\n    if (!job?.mutant) return;\n    const sleeper = spawn(\"sleep\", [\"120\"], { stdio: \"ignore\" });\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    writeFileSync(`${marker}.tmp`, `${process.pid} ${sleeper.pid}`);\n    renameSync(`${marker}.tmp`, marker);\n    await new Promise((done) => setTimeout(done, 120000));\n  });\n});\n",
+    );
+    project.commit("slow");
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let run = project.latest();
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["runs", "latest", "mutants", "test"])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    let status = supercov.wait().unwrap();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+    assert_eq!(status.code(), Some(130), "{status:?}");
+    assert!(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json"))
+            .is_file()
+    );
 }
 
 /// Ctrl-C during a Go strong pass, sent to Supercov's process group as a

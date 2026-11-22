@@ -939,53 +939,58 @@ fn survivors(
         })
         .map(|(id, _)| id.as_str())
         .collect::<BTreeSet<_>>();
-    let shown = (|| {
-        let container = crate::open_query_index_for(run, None).ok()?;
-        let index = supercov_engine::coverage_index::CoverageIndex::new(&container).ok()?;
-        let options = supercov_engine::mutants_query::MutantsOptions {
-            strong_statuses: vec!["survived".into()],
-            strong: Some(
-                verdicts
-                    .iter()
-                    .map(|(id, verdict)| {
-                        (
-                            id.clone(),
-                            serde_json::to_value(verdict).expect("plain data"),
-                        )
-                    })
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-        let (data, _) = supercov_engine::mutants_query::coverage_mutants_query(
-            &index,
-            supercov_engine::mutants_query::CoverageMutantsQueryOptions {
-                run: &run.id,
-                file: None,
-                line: None,
-                options: &options,
-                offset: 0,
-                limit: usize::MAX,
-            },
-        )
-        .ok()?;
-        Some(
-            data.mutants
+    let options = supercov_engine::mutants_query::MutantsOptions {
+        strong_statuses: vec!["survived".into()],
+        strong: Some(
+            verdicts
                 .iter()
-                .filter(|mutant| survived.contains(mutant.id.as_str()))
-                .take(SURVIVORS_SHOWN)
-                .map(|mutant| {
-                    json!({
-                        "id": mutant.id,
-                        "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
-                        "mutator": mutant.mutator,
-                        "change": crate::human_query::mutant_change(mutant),
-                    })
+                .map(|(id, verdict)| {
+                    (
+                        id.clone(),
+                        serde_json::to_value(verdict).expect("plain data"),
+                    )
                 })
-                .collect::<Vec<_>>(),
-        )
-    })()
-    .unwrap_or_default();
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    // Shown as the listing shows them, where the run's index reads; else
+    // only counted.
+    let listed = crate::open_query_index_for(run, None)
+        .ok()
+        .and_then(|container| {
+            supercov_engine::coverage_index::CoverageIndex::new(&container)
+                .ok()
+                .and_then(|index| {
+                    supercov_engine::mutants_query::coverage_mutants_query(
+                        &index,
+                        supercov_engine::mutants_query::CoverageMutantsQueryOptions {
+                            run: &run.id,
+                            file: None,
+                            line: None,
+                            options: &options,
+                            offset: 0,
+                            limit: usize::MAX,
+                        },
+                    )
+                    .ok()
+                })
+        })
+        .map(|(data, _)| data.mutants)
+        .unwrap_or_default();
+    let shown = listed
+        .iter()
+        .filter(|mutant| survived.contains(mutant.id.as_str()))
+        .take(SURVIVORS_SHOWN)
+        .map(|mutant| {
+            json!({
+                "id": mutant.id,
+                "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
+                "mutator": mutant.mutator,
+                "change": crate::human_query::mutant_change(mutant),
+            })
+        })
+        .collect::<Vec<_>>();
     json!({"total": survived.len(), "shown": shown})
 }
 
@@ -996,14 +1001,14 @@ fn survivors_text(run: &str, survivors: &Value) -> String {
         return String::new();
     }
     let mut text = String::from("Survived:\n");
-    for mutant in &shown {
-        text.push_str(&format!(
+    text.extend(shown.iter().map(|mutant| {
+        format!(
             "  {}  {}  {}\n",
             mutant["place"].as_str().unwrap_or(""),
             mutant["mutator"].as_str().unwrap_or(""),
             mutant["change"].as_str().unwrap_or("")
-        ));
-    }
+        )
+    }));
     let total = survivors["total"].as_u64().unwrap_or(0) as usize;
     if total > shown.len() {
         text.push_str(&format!(
@@ -1951,6 +1956,19 @@ mod tests {
             ["fileless", "kept", "timeout-kept"]
         );
         assert!(kept_verdicts(&undecided, &tests, &earlier, &json!({})).is_empty());
+        assert!(kept_verdicts(&[], &tests, &earlier, &affected).is_empty());
+    }
+
+    /// The summary names the first survivors and counts the rest.
+    #[test]
+    fn the_survivors_beyond_those_shown_are_counted() {
+        let shown =
+            json!({"total": 12, "shown": [{"place": "a.js:1", "mutator": "M", "change": "x → y"}]});
+        assert_eq!(
+            survivors_text("r1", &shown),
+            "Survived:\n  a.js:1  M  x → y\n  and 11 more: supercov runs r1 mutants --status survived\n"
+        );
+        assert_eq!(survivors_text("r1", &json!({"total": 0, "shown": []})), "");
     }
 
     #[test]

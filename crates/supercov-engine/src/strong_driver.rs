@@ -367,6 +367,7 @@ mod tests {
         assert_eq!(driver_of(&mutant(javascript, &[2]), &tests), javascript);
         // Which runners each driver runs.
         assert!(drives(javascript, "jest") && !drives(javascript, "nextest"));
+        assert!(!drives(javascript, "pytest"));
         assert!(drives(rust, "nextest") && !drives(rust, "jest"));
         assert!(!drives("python", "pytest"));
     }
