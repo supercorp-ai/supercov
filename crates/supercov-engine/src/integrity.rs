@@ -778,10 +778,10 @@ fn not_a_change(root: &Path, line: &str) -> bool {
         .iter()
         .any(|directory| path == *directory || path.ends_with(&format!("/{directory}")))
         || (path.ends_with('/')
+            // Git lists no empty directory.
             && fs::read_dir(root.join(path)).is_ok_and(|entries| {
-                let mut entries = entries.flatten().peekable();
-                entries.peek().is_some()
-                    && entries.all(|entry| {
+                let mut entries = entries.flatten();
+                entries.all(|entry| {
                         let inner = format!("{path}{}/", entry.file_name().to_string_lossy());
                         entry.path().is_dir()
                             && INSTALL_DIRECTORIES
@@ -1098,7 +1098,9 @@ mod tests {
         fs::create_dir_all(root.join("app/node_modules/x")).unwrap();
         fs::write(root.join("app/node_modules/x/index.js"), "").unwrap();
         fs::write(root.join("yarn.lock"), "# v1\n").unwrap();
-        git(&["add", "yarn.lock"]);
+        // A tracked directory's own install directory is named in it.
+        fs::write(root.join("app/keep.txt"), "").unwrap();
+        git(&["add", "yarn.lock", "app/keep.txt"]);
         git(&[
             "-c",
             "user.name=R",

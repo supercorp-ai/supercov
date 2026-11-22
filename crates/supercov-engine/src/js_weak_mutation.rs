@@ -408,23 +408,30 @@ fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reas
             _ if matches!(operator, "==" | "!=") => Some((relation == "eq") == (operator == "==")),
             _ => relational_value(operator, relation),
         };
-        let mut unknown = false;
-        for relation in relations {
-            match (value(operator, relation), value(replacement, relation)) {
-                (Some(original), Some(mutated)) if original != mutated => {
-                    return verdict_of(
-                        INFECTED,
-                        "comparison-differs",
-                        format!(
-                            "the operands were {relation}, where `{replacement}` gives the other value"
-                        ),
-                    );
-                }
-                (Some(_), Some(_)) => {}
-                _ => unknown = true,
-            }
+        // Each evaluation's two values; `None` where the operands could not
+        // be ordered. (A comparison site that ran has an evaluation.)
+        let values = relations
+            .iter()
+            .map(|relation| {
+                (
+                    relation,
+                    value(operator, relation).zip(value(replacement, relation)),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some((relation, _)) = values
+            .iter()
+            .find(|(_, values)| values.is_some_and(|(original, mutated)| original != mutated))
+        {
+            return verdict_of(
+                INFECTED,
+                "comparison-differs",
+                format!(
+                    "the operands were {relation}, where `{replacement}` gives the other value"
+                ),
+            );
         }
-        if unknown {
+        if values.iter().any(|(_, values)| values.is_none()) {
             return verdict_of(
                 Status::Unknown,
                 "non-primitive-operands",
@@ -437,9 +444,11 @@ fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reas
             format!("`{operator}` and `{replacement}` gave the same value at every evaluation"),
         );
     }
-    let Some(site) = &mutant.probe else {
-        return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
-    };
+    // Sent here with a comparison site, handled above, or a probe.
+    let site = mutant
+        .probe
+        .as_ref()
+        .expect("a Rust mutant read through its values has a probe or a comparison site");
     if mutant.mutator == RUST_FN_VALUE {
         // The body replaced also skips what it does: a return value that
         // matches proves nothing, one that differs infects.

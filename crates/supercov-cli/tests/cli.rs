@@ -26031,42 +26031,6 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
     assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
 }
 
-/// A file the command builds only with a tag (`go test -tags tagged`) gets
-/// value probes as any other: the type checker is asked with the tag.
-#[test]
-fn a_go_file_behind_a_build_tag_gets_value_probes() {
-    let Some(go) = go() else {
-        eprintln!("skipping: no Go toolchain found");
-        return;
-    };
-    let project = Project::empty("go-probes-tagged");
-    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
-    project.write(
-        "double.go",
-        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
-    );
-    project.write(
-        "double_test.go",
-        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
-    );
-    project
-        .supercov_with(
-            &["--", go, "test", "-tags", "tagged", "./..."],
-            &[("SUPERCOV_MUTANTS", "1")],
-        )
-        .succeeds();
-    let listed = project
-        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
-        .json();
-    let mutant = &listed["data"]["mutants"][0];
-    assert_eq!(
-        mutant["id"], "double.go:5:35-5:36:ArithmeticOperator:/",
-        "{listed}"
-    );
-    // `3 * 2` and `3 / 2` differ, and the probe saw it.
-    assert_eq!(mutant["status"], "infected", "{listed}");
-}
-
 /// Ctrl-C during a JavaScript strong pass, sent to Supercov's process group
 /// as a terminal sends it: the resident runners and what their jobs started
 /// stop, though each runs in a process group of its own, Supercov exits as
@@ -26138,6 +26102,42 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
             .join(format!(".supercov/runs/{run}/strong-mutation.json"))
             .is_file()
     );
+}
+
+/// A file the command builds only with a tag (`go test -tags tagged`) gets
+/// value probes as any other: the type checker is asked with the tag.
+#[test]
+fn a_go_file_behind_a_build_tag_gets_value_probes() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-probes-tagged");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["--", go, "test", "-tags", "tagged", "./..."],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = &listed["data"]["mutants"][0];
+    assert_eq!(
+        mutant["id"], "double.go:5:35-5:36:ArithmeticOperator:/",
+        "{listed}"
+    );
+    // `3 * 2` and `3 / 2` differ, and the probe saw it.
+    assert_eq!(mutant["status"], "infected", "{listed}");
 }
 
 /// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
