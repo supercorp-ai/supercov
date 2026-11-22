@@ -92,7 +92,7 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
-Test the tests with mutants (JavaScript, TypeScript and Python):
+Test the tests with mutants (every language Supercov measures):
   supercov mutants                     which mutants the tests kill, run by run
   supercov mutants --diff main         only the mutants on changed lines
 

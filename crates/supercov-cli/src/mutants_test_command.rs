@@ -37,12 +37,12 @@ Options:
   --critical <glob> source files where every mutant must be killed or
                     accepted (repeatable); a survivor there fails the command
   --json            the answer as JSON
+  -- <command>      run this command instead of the run's own
 
 Accepted mutants: supercov.accepted.json at the project root, a list of
 { \"id\": <mutant id>, \"reason\": <why no test can tell it apart> }. An
 accepted mutant still runs; it is shown as accepted and never fails the
 command. An entry whose mutant is killed or gone is listed as stale.
-  -- <command>      run this command instead of the run's own
 ";
 
 #[derive(Debug, Default)]
@@ -131,8 +131,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
 pub(crate) const MUTANTS_HELP: &str = "\
 Usage: supercov mutants [options] [-- <test command>]
 
-Mutation-tests the project: lists the mutants of every JavaScript,
-TypeScript and Python source the tests ran, runs each against only the tests
+Mutation-tests the project: lists the mutants of every source the tests ran,
+as each language's established tool makes them (StrykerJS for JavaScript and
+TypeScript, mutmut for Python, cargo-mutants for Rust, Gremlins for Go,
+mutant for Ruby, PIT for Java and Kotlin), runs each against only the tests
 that run its code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,

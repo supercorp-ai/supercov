@@ -23832,9 +23832,37 @@ fn mutants_test_names_each_mistake_in_its_options_before_it_reads_a_run() {
     ] {
         contains_all(
             &project.supercov(help).succeeds(),
-            &["Usage: supercov mutants [options] [-- <test command>]"],
+            &[
+                "Usage: supercov mutants [options] [-- <test command>]",
+                // Every language with mutants is named, with its tool.
+                "StrykerJS",
+                "mutmut",
+                "cargo-mutants",
+                "Gremlins",
+                "mutant for Ruby",
+                "PIT",
+            ],
         );
     }
+    // The run's own command is an option, listed with the others.
+    let test_help = project
+        .supercov(&["runs", "latest", "mutants", "test", "--help"])
+        .succeeds();
+    let options = test_help
+        .split("Options:")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_default();
+    assert!(options.contains("-- <command>"), "{test_help}");
+    let weak_help = project
+        .supercov(&["runs", "latest", "mutants", "--help"])
+        .succeeds();
+    contains_all(&weak_help, &["cargo-mutants", "Gremlins", "PIT"]);
+    let overview = project.supercov(&["--help"]).succeeds();
+    assert!(
+        overview.contains("Test the tests with mutants (every language Supercov measures)"),
+        "{overview}"
+    );
 
     // Options that parse, and no run to read: said on the standard error
     // with exit 1, or as a JSON error with --json.
