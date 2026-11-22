@@ -980,6 +980,30 @@ mod tests {
         );
     }
 
+    /// kotlinc increments a local with `IINC` (PIT's `Increments`) unless a
+    /// lambda reads it, inlined or not: then it loads, adds and stores
+    /// (`Math`), as kotlinpoet's `CodeBlock` showed.
+    #[test]
+    fn a_kotlin_local_a_lambda_reads_is_incremented_by_math() {
+        let file = "fixture/Step.kt";
+        let source = "fun f(s: String): Int {\n    var p = 0\n    var q = 0\n    while (p < s.length) {\n        require(p >= 0) { \"at $q\" }\n        p++\n        q++\n        g()\n    }\n    return p + q\n}\n\nfun g() {}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let ids = file_mutants(file, source, &index)
+            .unwrap()
+            .mutants
+            .iter()
+            .map(|mutant| mutant_id(file, mutant))
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&format!("{file}:6:9-6:12:Increments:--")),
+            "{ids:#?}"
+        );
+        assert!(
+            ids.contains(&format!("{file}:7:9-7:12:Math:--")),
+            "{ids:#?}"
+        );
+    }
+
     #[test]
     fn java_mutants_pit_made_on_public_projects() {
         let file = "fixture/Reach.java";

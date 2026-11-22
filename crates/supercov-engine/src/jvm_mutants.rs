@@ -3793,6 +3793,37 @@ fn kotlin_chain_receiver(node: Node) -> bool {
     })
 }
 
+/// Whether `name`, declared by `declaration`, is read in a lambda among the
+/// statements after it.
+fn kotlin_read_in_a_later_lambda(declaration: Node, name: &str, source: &str) -> bool {
+    fn names_it(node: Node, name: &str, source: &str, in_lambda: bool) -> bool {
+        let in_lambda = in_lambda || node.kind() == "lambda_literal";
+        if in_lambda && node.kind() == "identifier" && text(node, source) == name {
+            return true;
+        }
+        // `"$name"`: the grammar leaves a bare template in the string.
+        if in_lambda && node.kind().ends_with("string_literal") {
+            let template = format!("${name}");
+            let string = text(node, source);
+            if string.match_indices(&template).any(|(at, _)| {
+                !string[at + template.len()..]
+                    .starts_with(|c: char| c.is_alphanumeric() || c == '_')
+            }) {
+                return true;
+            }
+        }
+        named_children(node).any(|child| names_it(child, name, source, in_lambda))
+    }
+    let mut next = declaration.next_named_sibling();
+    while let Some(statement) = next {
+        if names_it(statement, name, source, false) {
+            return true;
+        }
+        next = statement.next_named_sibling();
+    }
+    false
+}
+
 /// Kotlin's standard library functions that are `inline`: a call of one is
 /// not a call in the bytecode, so PIT has no call to remove.
 const KOTLIN_INLINE: &[&str] = &[
@@ -4381,11 +4412,15 @@ impl Enumerator<'_> {
                     .and_then(|variable| named_children(variable).next())
                 {
                     let name = text(name, self.source).to_owned();
+                    // A local a lambda reads (inlined or not) is one kotlinc
+                    // increments by loading, adding and storing, never with
+                    // `IINC`: no local `int` for PIT's `Increments`.
+                    let captured = kotlin_read_in_a_later_lambda(node, &name, self.source);
                     self.declare(
                         &name,
                         Var {
                             ty,
-                            local: true,
+                            local: !captured,
                             constant: None,
                         },
                     );
