@@ -82,6 +82,13 @@ function query(args, environment, cwd = project) {
 // by `killer`, the runner's own id for the test.
 function assertStrongPass(runner, killed, killer, environment) {
   const ran = supercov(['runs', 'latest', 'mutants', 'test', '--json'], { ...environment, SUPERCOV_STRONG_JOBS: '2' });
+  // The driver forks the loaded suite, which Windows cannot: there no mutant
+  // runs, each is counted not run under its runner, and the pass exits 2.
+  if (process.platform === 'win32') {
+    assert.equal(ran.status, 2, `${runner} strong pass\n${ran.stdout}\n${ran.stderr}`);
+    assert.ok(JSON.parse(ran.stdout).summary.notRun[runner] > 0, `${runner}: ${ran.stdout}`);
+    return;
+  }
   assert.equal(ran.status, 0, `${runner} strong pass\n${ran.stdout}\n${ran.stderr}`);
   const reply = JSON.parse(ran.stdout);
   assert.equal(reply.summary.error, 0, `${runner}: ${ran.stdout}\n${ran.stderr}`);

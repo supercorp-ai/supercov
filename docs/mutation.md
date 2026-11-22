@@ -21,7 +21,10 @@ counts and verdicts can be compared with that tool's:
 A preview language works end to end and was validated against its tool on
 public projects (see [Compared with the established tools](#compared-with-the-established-tools)),
 but has been run on fewer projects than JavaScript and may change in a later
-release. Java and Kotlin have no mutants in this release.
+release. Java and Kotlin have no mutants in this release. On Windows,
+Python's and Ruby's mutants are listed and the weak report reads them, but
+the strong pass does not run them: their drivers fork the loaded suite, which
+Windows cannot, so each is counted "not run" under its runner.
 
 ```sh supercov-example
 npx supercov mutants -- npm test

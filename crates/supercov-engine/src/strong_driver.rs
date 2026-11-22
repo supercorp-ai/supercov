@@ -194,11 +194,36 @@ pub fn drives(language: &str, runner: &str) -> bool {
         }
         crate::mutant_list::RUST => matches!(runner, "rust-libtest" | "nextest" | "rustdoc"),
         crate::go_mutants::GO => runner == "go-test",
+        // Python's and Ruby's drivers fork the loaded suite for each job,
+        // which Windows cannot: there their mutants are not run.
+        #[cfg(unix)]
         crate::python_mutants::PYTHON => matches!(runner, "pytest" | "unittest"),
+        #[cfg(unix)]
         crate::ruby_mutants::RUBY => {
             matches!(runner, "rspec" | "minitest" | "test-unit" | "cucumber")
         }
         _ => false,
+    }
+}
+
+/// Where a runner's driver exists but cannot run on this platform, what the
+/// summary adds to "no strong driver for <runner>": Python's and Ruby's
+/// drivers fork, which Windows cannot.
+#[cfg(unix)]
+pub fn platform_note(_runner: &str) -> &'static str {
+    ""
+}
+
+/// See the Unix one: here Python's and Ruby's runners are noted.
+#[cfg(not(unix))]
+pub fn platform_note(runner: &str) -> &'static str {
+    if matches!(
+        runner,
+        "pytest" | "unittest" | "rspec" | "minitest" | "test-unit" | "cucumber"
+    ) {
+        " on Windows"
+    } else {
+        ""
     }
 }
 
@@ -403,9 +428,16 @@ mod tests {
         assert!(drives(javascript, "jest") && !drives(javascript, "nextest"));
         assert!(!drives(javascript, "pytest"));
         assert!(drives(rust, "nextest") && !drives(rust, "jest"));
-        assert!(drives("python", "pytest") && !drives("python", "jest"));
+        assert_eq!(drives("python", "pytest"), cfg!(unix));
+        assert!(!drives("python", "jest"));
+        assert_eq!(drives("ruby", "rspec"), cfg!(unix));
+        assert_eq!(
+            platform_note("pytest"),
+            if cfg!(unix) { "" } else { " on Windows" }
+        );
+        assert_eq!(platform_note("jest"), "");
         assert!(drives("go", "go-test") && !drives("javascript", "go-test"));
-        assert!(drives("ruby", "rspec") && !drives("javascript", "minitest"));
+        assert!(!drives("javascript", "minitest"));
         assert!(!drives("cobol", "jest"));
     }
 

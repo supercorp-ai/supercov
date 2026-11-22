@@ -718,7 +718,8 @@ fn plan_text(data: &Value) -> String {
         };
         for (runner, count) in summary["notRun"].as_object().into_iter().flatten() {
             extra.push_str(&format!(
-                "  {count} mutant(s) not run: no strong driver for {runner}\n"
+                "  {count} mutant(s) not run: no strong driver for {runner}{}\n",
+                supercov_engine::strong_driver::platform_note(runner)
             ));
         }
         // The mutants asked about, where they are not the run's all.
