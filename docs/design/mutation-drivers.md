@@ -317,8 +317,14 @@ A job that starts the command (node:test, AVA, tap, bun:test) builds the
 wasm again, writing it where every other job's tests load it: two such jobs
 side by side made a test file break off as it loaded the half-written glue,
 a kill that was none (gl-matrix-wasm: one to seven of 249 mutants a pass, a
-different few each time). Where a pass switches wasm mutants and any test
-file's jobs start the command, its jobs run one at a time; Jest and Mocha's
+different few each time). So such jobs find `wasm-bindgen` and `wasm-pack`
+first on their `PATH` as a wrapper (`strongWasmOut.cjs`): the tool writes
+into a fresh directory beside its output directory, and each file is renamed
+into place only where its bytes changed. A rebuild of the same wasm changes
+nothing in place, and a test never reads a file half written. Jobs start one
+at a time until a wrapper has run; a build that writes its wasm some other
+way keeps them so. On gl-matrix-wasm the pass takes 40 s (84 s one at a
+time), with every verdict the same over two passes. Jest and Mocha's
 resident runners, Vitest and Playwright start the command once.
 
 A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
