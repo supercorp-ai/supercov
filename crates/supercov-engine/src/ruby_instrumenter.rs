@@ -5392,6 +5392,11 @@ end
             .map(|path| (path.display().to_string(), std::fs::read(&path).unwrap()))
             .collect();
         sources.push((
+            "forms".into(),
+            b"def f(list, a, b)\n  list.each { }\n  for x in list; end\n  begin\n    a.call\n  rescue ArgumentError then\n  end\n  unless true then a else b end\n  unless nil then a end\n  return a rescue nil if b\n  c = if 2i then a end\n  d = if 1r then b end\n  e = /a/ == b\n  g = a + b\n  Ractor.new { a + b }\n  h = case a when 1 then 2 else return 3 end\n  return *list if a\n  [c, d, e, g, h]\nend\n"
+                .to_vec(),
+        ));
+        sources.push((
             "writes".into(),
             b"LIMIT ||= 1\nCount &&= 2\n@@total = 1\n$total = 2\ndef w(a, x)\n  @a &&= x\n  $g ||= x\n  a.b ||= x\n  a.b &&= x\n  a[0] &&= x\n  @@c = x\n  $d = x\n  case a\n  in Integer unless x then 1\n  in String if x then 2\n  end\nend\n"
                 .to_vec(),

@@ -194,9 +194,7 @@ fn method_mutants(source: &[u8], tree: &Rc<N>, into: &mut Enumeration) {
             continue;
         }
         let (located, replacement) = localize(tree, &mutated);
-        let Some((start, end)) = located.span else {
-            continue;
-        };
+        let (start, end) = located.span.expect("a node of the method has its span");
         // A mutant whose code cannot be written in place (one in a line
         // holding a heredoc's opening) is still a mutant: its descriptor is
         // its replacement's code.
@@ -658,10 +656,6 @@ impl Scope {
                     .is_none_or(|arguments| inner.walk(arguments))
                     && value.node(body).is_none_or(|body| inner.walk(body))
             }
-            "class" | "module" | "sclass" => {
-                let mut inner = Scope::default();
-                inner.walk_children(value)
-            }
             "block" | "numblock" | "itblock" => {
                 if let Some(call) = value.node(0)
                     && !self.walk(call)
@@ -727,9 +721,8 @@ fn named_captures(body: &str) -> Vec<String> {
         if rest.starts_with('=') || rest.starts_with('!') {
             continue;
         }
-        if let Some(end) = rest.find('>') {
-            names.push(rest[..end].to_owned());
-        }
+        // A name ends at `>` (Ruby refuses a regexp where it does not).
+        names.extend(rest.find('>').map(|end| rest[..end].to_owned()));
     }
     names
 }

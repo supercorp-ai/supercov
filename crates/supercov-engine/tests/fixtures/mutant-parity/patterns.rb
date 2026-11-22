@@ -30,6 +30,11 @@ class Patterns
     text =~ /((a|b)|(c))+/
   end
 
+  def captures(text)
+    /(?<=a)(?<!b)(?<word>c)/ =~ text
+    word
+  end
+
   def anchors(text)
     text.match?(/^foo/)
     text.match?(/foo$/)

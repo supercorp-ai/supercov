@@ -467,6 +467,8 @@ impl Parser<'_> {
                     {
                         index += 1;
                     }
+                    // A name without its `>` is not read.
+                    self.chars.get(index)?;
                     self.at = index + 1;
                     (
                         Kind::Named,
@@ -724,4 +726,55 @@ fn mutate(expression: &Expr) -> Vec<Expr> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pattern this parser does not read, or one Ruby would refuse, has
+    /// no mutations; one it reads past its edges keeps them.
+    #[test]
+    fn ruby_regexps_read_to_their_edges() {
+        for unread in [
+            "*a",
+            "(a",
+            "a)",
+            "(?(1)a|b)",
+            "[a&&b]",
+            "[a",
+            "\\",
+            "(?",
+            "[\\",
+            "[a-",
+            "a|(",
+        ] {
+            assert!(mutations(unread).is_empty(), "{unread}");
+        }
+        for read in [
+            "a{1,2,3}",
+            "a{",
+            "a{x}",
+            "[[:alpha:",
+            "(?<name",
+            "(?#comment",
+            "\\k",
+            "(?<a>x)\\1",
+            "(?<a>x)\\g<1>",
+            "\\cx\\C-x\\M-x\\x4",
+            "[a-\\d]",
+            "(?i)(?i-m:a)",
+        ] {
+            let _ = mutations(read);
+        }
+        assert_eq!(mutations("a{2}{3}"), ["a{3}", "a{2}"]);
+        assert_eq!(quantifiers("{1,2}?"), ["{1,2}?"]);
+        assert_eq!(quantifiers("{2}?"), ["{2}", "?"]);
+        assert_eq!(quantifiers("*+"), ["*+"]);
+        assert!(matches!(anchored_literal("\\Afoo"), Some(Anchored::Start(text)) if text == "foo"));
+        assert!(matches!(anchored_literal("foo\\z"), Some(Anchored::End(text)) if text == "foo"));
+        for neither in ["^foo", "foo$", "\\Afoo\\z", "(a", "\\Gfoo", "foo\\b"] {
+            assert!(anchored_literal(neither).is_none(), "{neither}");
+        }
+    }
 }

@@ -692,12 +692,13 @@ fn preorder(tree: &Rc<N>, into: &mut Vec<Rc<N>>) {
     }
 }
 
-/// The printer and the mutators never panic on a tree they do not expect:
-/// each fixture method, printed from its children, with one node made one
-/// the printer has no code for, or one child of a node made `nil`, a symbol
-/// or a node where the other was, or left out with those after it; and
-/// each such node mutated. Such trees are refused, or printed and mutated
-/// as well as their parts allow.
+/// The printer, the mutators and the checks on a mutant never panic on a
+/// tree they do not expect: each fixture method, printed from its
+/// children, with one node made one the printer has no code for, or one
+/// child of a node made `nil`, a symbol or a node where the other was, or
+/// left out with those after it, also validated, located and edited as a
+/// mutant of the method; and each such node mutated. Such trees are
+/// refused, or handled as well as their parts allow.
 #[test]
 fn printing_and_mutating_never_panic_on_a_malformed_tree() {
     let unknown = |_: &N| N::new("unknown", Vec::new());
@@ -740,6 +741,11 @@ fn printing_and_mutating_never_panic_on_a_malformed_tree() {
                     for change in malformed {
                         let broken = changed_at(&bare, target, &mut 0, change);
                         let _ = print::one_line(&source, &method, &broken);
+                        // As a mutant of the method: validated, located and
+                        // edited.
+                        let _ = validates(&broken);
+                        let _ = localize(&method, &broken);
+                        let _ = edit(&source, &method, &broken);
                         // Small nodes: each kind is small somewhere, and a
                         // node's mutations are its subtree's.
                         if small {
@@ -887,4 +893,112 @@ fn every_ruby_node_printed_in_its_own_place_parses_back() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// A file with no mutants gets no switches; a strong pass that wants some
+/// mutants gets their switches alone; a mutant of a method's parameters
+/// (a destructuring flattened) has no switch, and says why.
+#[test]
+fn ruby_switches_go_to_the_mutants_wanted_and_name_those_with_none() {
+    let none = schemata::switches(b"# nothing\n", 1, None);
+    assert!(none.edits.is_empty() && none.unplaceable.is_empty());
+    let source = b"def m(a)\n  a + 1\nend\n";
+    let all = schemata::switches(source, 1, None);
+    let wanted: std::collections::BTreeSet<usize> = [0].into();
+    let one = schemata::switches(source, 1, Some(&wanted));
+    assert!(!one.edits.is_empty() && one.edits.len() < all.edits.len());
+    assert!(one.edits.iter().all(|(_, text)| !text.contains("1000001")));
+    let flattened = b"def m((a, b))\n  a\nend\n";
+    let switches = schemata::switches(flattened, 1, None);
+    assert_eq!(
+        switches.unplaceable.values().collect::<Vec<_>>(),
+        ["arguments"]
+    );
+}
+
+/// A mutant's id names mutant's mutator class for the node it changes,
+/// including the nodes a mutant rarely lands on.
+#[test]
+fn ruby_mutants_name_mutant_s_mutator_classes() {
+    for (ty, name) in [
+        ("pair", "Pair"),
+        ("block_pass", "BlockPass"),
+        ("procarg0", "ProcargZero"),
+        ("in_pattern", "InPattern"),
+        ("if_guard", "Guard"),
+        ("unless_guard", "Guard"),
+        ("match_pattern_p", "MatchPatternP"),
+        ("resbody", "Resbody"),
+        ("ensure", "Ensure"),
+        ("redo", "Generic"),
+    ] {
+        assert_eq!(mutator_name(ty), name, "{ty}");
+    }
+}
+
+/// mutant's results where nothing matches: no subjects at all, a file not
+/// under this project, a subject without its line, a result without its
+/// mutation's code or without its results; each evil mutation is kept as
+/// unmatched, and the rest are left out.
+#[test]
+fn ruby_mutant_sessions_keep_what_they_cannot_match() {
+    let read =
+        |file: &str| (file == "lib/calc.rb").then(|| b"def big?(n)\n  n > 10\nend\n".to_vec());
+    let path = |path: &str| path.trim_start_matches('/').to_owned();
+    let empty = serde_json::json!({ "subject_results": [] });
+    let empty = serde_json::to_vec(&empty).unwrap();
+    assert!(parse_mutant_session(&empty, path, read).unwrap().is_empty());
+    let session = serde_json::json!({
+        "subject_results": [
+            {
+                "source_path": "/nowhere/missing.rb",
+                "identification": "Calc#gone",
+                "coverage_results": [
+                    { "mutation_result": { "mutation_type": "evil", "mutation_source": "def gone\nend" }, "criteria_result": {} },
+                ],
+            },
+            {
+                "source_path": "/lib/calc.rb",
+                "identification": "Calc#big?",
+                "coverage_results": [
+                    { "mutation_result": { "mutation_type": "evil", "mutation_identification": "evil:x" }, "criteria_result": {} },
+                    { "mutation_result": { "mutation_type": "evil", "mutation_source": "def big?(n)\n  n == 10\nend" }, "criteria_result": { "test_result": false } },
+                ],
+            },
+            { "source_path": "/lib/calc.rb" },
+        ],
+    });
+    let bytes = serde_json::to_vec(&session).unwrap();
+    let joined = parse_mutant_session(&bytes, path, read).unwrap();
+    let kinds: Vec<(&str, &str)> = joined
+        .iter()
+        .map(|mutant| (mutant.mutator.as_str(), mutant.status.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("Unmatched", "Survived"),
+            ("Unmatched", "Survived"),
+            ("Send", "Survived")
+        ]
+    );
+}
+
+/// Every fixture's mutants are linked to value probes where a probe
+/// computes them, and to none elsewhere, without failing on any.
+#[test]
+fn ruby_mutants_of_every_fixture_link_to_value_probes_or_none() {
+    let mut linked = 0;
+    for path in fixtures() {
+        let source = fs::read(&path).unwrap();
+        let mut next = 0;
+        let obligations =
+            crate::ruby_instrumenter::build_ruby_obligations_with("a.rb", &source, &mut next, true)
+                .unwrap();
+        linked += candidates("a.rb", &source, &obligations)
+            .into_iter()
+            .filter(|mutant| mutant.probe.is_some())
+            .count();
+    }
+    assert!(linked > 100, "{linked}");
 }
