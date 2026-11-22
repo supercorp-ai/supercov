@@ -31,17 +31,22 @@ order over tree-sitter's tree:
 | `INVERT_LOOPCTRL` | `break` `continue` | `INVERT_LOOPCTRL` |
 | `INVERT_ASSIGNMENTS` | `+=` `-=` `*=` `/=` `%=` | `AssignmentOperator` |
 | `REMOVE_SELF_ASSIGNMENTS` | every `op=` to `=` | `AssignmentOperator` |
+| `INVERT_BITWISE` | `&` `|` `^` `&^` `<<` `>>`, unary `&x` `^x`, a type union's `|` | `INVERT_BITWISE` |
+| `INVERT_BWASSIGN` | `&=` `|=` `^=` `&^=` `<<=` `>>=` | `INVERT_BWASSIGN` |
 
 A mutant carries StrykerJS's mutator name where the mutation is one of
 StrykerJS's, because the weak rules are keyed by those names; Gremlins' name
 is worked out again from the mutator, the token and the replacement
 (`go_mutants::gremlins_name`). `INVERT_NEGATIVES` keeps Gremlins' name:
 its `+` for a `-` is also `ARITHMETIC_BASE`'s, and the two are two mutants
-there, as Gremlins lists them. `INVERT_BITWISE` and `INVERT_BWASSIGN`, off by
-default in Gremlins, are not listed; the rest are, including the four
-Gremlins leaves off by default (its flags for the same set:
+there, as Gremlins lists them. The bitwise mutators have no StrykerJS twin
+and keep Gremlins' names. Every Gremlins mutator is listed, the six Gremlins
+leaves off by default among them (its flags for the same set:
 `--invert-assignments --invert-logical --invert-loopctrl
---remove-self-assignments`).
+--remove-self-assignments --invert-bitwise --invert-bwassign`). Gremlins
+mutates a type union in a constraint (`~int | ~float64`, which go/ast reads
+as a binary expression) and `&x` to `|x`, and neither mutant is a program Go
+accepts: both are `unviable`.
 
 A mutant's id is its token's span (1-based line, 1-based byte column, as Go
 and Gremlins report positions), its mutator and the token it becomes:
@@ -53,7 +58,8 @@ under `INVERT_ASSIGNMENTS`; that mutant is the program as written and is
 dry run, and the tests compare the enumeration with it: same mutants, same
 positions and mutators, on the fixture in
 `crates/supercov-engine/test-assets/go-mutants` (81 mutants) and, through
-`SUPERCOV_GREMLINS_PARITY`, on the validation modules below (995 mutants).
+`SUPERCOV_GREMLINS_PARITY`, on the validation modules below (1,124 mutants
+of four of them).
 Gremlins also mutates files no `go test ./...` builds: a nested module
 (`golang-lru/arc`) and files behind `//go:build ignore` (`btree_mem.go`).
 Supercov lists the files the run measures.
@@ -79,6 +85,20 @@ the comparison, and where both operands are literals; a file that has one is
 compiled as Go 1.21 (its `//go:build` line gains `go1.21`, and an old `//
 +build` line becomes `//`), whose inference of untyped arguments the call
 needs, and no later, so a loop variable keeps the meaning it had.
+
+It also probes the integer operations a mutant changes, where the module's
+type checker (below, run once before instrumenting) says the operation is
+not a constant and names its type: `x + y` becomes
+`__supercov.Arith[int](<slot>, 0, x, y)`, `-x` `__supercov.Unary[int](...)`,
+`x <<= n` `x <<= __supercov.AssignShift[uint](<slot>, 0, x, n)`. The
+program's own operation runs first (it panics where the program does), then
+the mutant's (a division by zero counts as a value that differs), and the
+slot records whether they gave the same value: `<site>#0` for the operator's
+swap, `<site>#1` for `x op= y` to `x = y`. An assignment's left operand is
+read again by the probe only where reading it does nothing (a name, a field,
+an element at a name or a literal). Floating-point operations are not
+probed: `-0` and `+0` compare equal and a program can tell them apart. A
+mutant no evaluation gave another value is `not-infected`.
 
 ## Which mutants compile
 
@@ -154,8 +174,13 @@ alone, all constant declarations; no switch was refused.
 5. Confirms a kill whose tests up to the failing one are not the baseline's:
    they run again without the mutant, and a kill they fail without it too
    is overturned and the mutant runs with every candidate of its package.
-6. A run's time limit is three times its package's baseline and ten
-   seconds. Past it the process group is killed: `timeout`. The runtime
+6. A mutant's first attempt at a package has one and a half times the
+   package's baseline and a second. A run past it is stopped, and the
+   mutant runs again after every other has, in a round of retries alone,
+   with three times the baseline and ten seconds; past that the process
+   group is killed: `timeout`. A test that failed before the limit makes the
+   mutant killed either way. A mutant that hangs holds a worker for a second
+   or two in the main round, not for ten. The runtime
    counts the active mutant's evaluations; past the hit limit it panics
    (`SUPERCOV_MUTANT_TIMEOUT`) and appends the mutant to the results'
    `.timeouts.jsonl`, so a recovered panic is still a timeout. The Go driver
@@ -165,6 +190,33 @@ alone, all constant declarations; no switch was refused.
    three of its mutants Gremlins calls survived were timeouts.
 7. A mutant with no switch gets builds of its own: `go test -c -overlay`
    with its file replaced by the source with only its token changed.
+
+## The command's own flags
+
+A Go suite is often behind `make test`, a script or gotestsum, which give
+`go test` flags of their own. A run with mutants puts a `go` of its own
+first on PATH for the command (on Unix): it notes every `go test` it is
+asked for and starts the real one. The notes are kept under
+`.supercov/go-invocations/` by the command's digest, and the strong pass
+builds and runs with their flags: `-tags`, `-race`, `-mod`, `-ldflags`,
+`-gcflags`, `-asmflags`, `-trimpath`, `-asan` and `-msan` for `go test -c`,
+`-short`, `-cpu` and `-parallel` for the test binary. A `go test` the
+command names itself is read from the command as well.
+
+## `go vet`
+
+`go test` runs a subset of `go vet` (atomic, bools, buildtag, directive,
+errorsas, ifaceassert, nilfunc, printf, stdversion, stringintconv, tests)
+before it runs any test, and a finding fails the package as a compile error
+does. A mutant vet rejects is a program `go test` refuses, so Supercov calls
+it `unviable`, as it calls one that does not compile, with vet's finding;
+Gremlins calls it killed. Of those checks, only two read what a token
+mutation changes: `bools`, of the operands of an `&&` or `||` chain (`x !=
+1 && x != 2` to `x != 1 || x != 2`, "suspect or"), and `atomic`, of an
+assignment of an `atomic` call to its own operand. Each mutant there is
+vetted alone (`go vet -atomic -bools -overlay`), the package with only that
+mutant in place. A command that turns `go test`'s vet off (`-vet=off`)
+turns this off too.
 
 Examples are candidates: a command that passed passed each of its
 Examples, whose own outcome no record sees (it is checked after the
@@ -248,11 +300,6 @@ and btree's Example-only kills).
 
 ## Not yet
 
-- `INVERT_BITWISE` and `INVERT_BWASSIGN`.
-- Value probes for arithmetic and assignments (they are `unknown`, so every
-  test that reaches them is a candidate).
-- `go vet`'s checks: Gremlins' `go test` refuses a mutant vet flags (`a != 1
-  || a != 2`) and counts it killed; the strong pass runs it.
-- A test binary built by a command other than `go test` (a Makefile that
-  passes its own flags): the pass reads `-tags` and the rest from a `go
-  test` in the command, and builds with none where there is none.
+- Value probes for floating-point operations.
+- The recording `go` on Windows: there the pass reads flags only from a `go
+  test` the command names itself.
