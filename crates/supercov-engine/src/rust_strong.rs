@@ -333,12 +333,12 @@ pub fn run_strong_rust(
     let build_invocation = build_invocation(&invocation);
     // Tests run in Chrome get their mutant from the driver proxy; another
     // browser's page has no way in yet.
-    if runner_environment.iter().any(|(name, _)| {
-        matches!(
-            name.as_str(),
-            "CHROMEDRIVER" | "GECKODRIVER" | "SAFARIDRIVER"
-        )
-    }) {
+    let names = |wanted: &[&str]| {
+        runner_environment
+            .iter()
+            .any(|(name, _)| wanted.contains(&name.as_str()))
+    };
+    if names(&["GECKODRIVER", "SAFARIDRIVER", "MSEDGEDRIVER"]) && !names(&["CHROMEDRIVER"]) {
         for job in &jobs {
             results.verdict(
                 &job.id,
