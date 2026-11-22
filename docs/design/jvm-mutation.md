@@ -260,7 +260,7 @@ compiled, since PIT's Ant task launches the same.
 
 ### Results
 
-Measured on 16-CPU SoroCI machines (c8a/m8a/r8a), 16 threads for PIT and
+Measured on 16-CPU Linux machines (c8a/m8a/r8a), 16 threads for PIT and
 16 JVMs for the strong pass, PIT 1.17.1; times are seconds, summed over a
 project's shards. "PIT" is PIT as a team runs it (it stops at a mutant's
 first kill); "PIT matrix" runs every test against every mutant, the ground
