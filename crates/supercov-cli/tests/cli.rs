@@ -21947,6 +21947,320 @@ fn mutants_test_kills_and_keeps_what_the_vitest_tests_can_and_cannot_tell() {
     assert_eq!(again["summary"]["killed"], 8, "{again}");
 }
 
+/// The cart of `mutants_project`, and a countdown whose `i--` made `i++`
+/// never ends, tested by `test/cart.test.*` and `test/count.test.*` under
+/// another runner. `module` is the package's `type`.
+#[cfg(unix)]
+fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Project {
+    let project = Project::empty(label);
+    project.write(
+        "package.json",
+        &format!(r#"{{ "name": "cart", "type": "{module}" }}"#),
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    let exports = if module == "module" {
+        ("export function", "")
+    } else {
+        (
+            "function",
+            "\nmodule.exports = { shipping, label, refund, countdown };\n",
+        )
+    };
+    project.write(
+        "src/cart.js",
+        &format!(
+            "{0} shipping(sum) {{\n  if (sum >= 50) {{\n    return 0;\n  }}\n  return 5;\n}}\n\n{0} label(name) {{\n  return name.trim().toUpperCase();\n}}\n\n{0} refund(sum) {{\n  return sum > 100 ? sum * 0.9 : sum;\n}}\n\n{0} countdown(n) {{\n  let i = n;\n  while (i > 0) {{\n    i--;\n  }}\n  return i;\n}}\n{1}",
+            exports.0, exports.1
+        ),
+    );
+    for (file, source) in tests {
+        project.write(file, source);
+    }
+    project.git(&["init", "-q"]);
+    project.commit("cart");
+    project
+}
+
+/// Each mutant's strong verdict in a `mutants --json` reply, by id.
+#[cfg(unix)]
+fn strong_statuses(project: &Project) -> std::collections::BTreeMap<String, String> {
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| {
+            (
+                mutant["id"].as_str().unwrap().to_owned(),
+                mutant["strong"]["status"]
+                    .as_str()
+                    .unwrap_or("-")
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The verdicts every runner's cart gives: the tests tell `trim()` and the
+/// shipping condition apart, never give `shipping` 50, never call `refund`,
+/// and a countdown that never ends is a timeout. Only the jobs driver ran.
+#[cfg(unix)]
+fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
+    let mut measure = vec!["--"];
+    measure.extend_from_slice(command);
+    project
+        .supercov_with(&measure, &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{runner}: {reply}\n{said}");
+    assert_eq!(reply["passes"][0]["driver"], "jobs", "{runner}: {reply}");
+    let statuses = strong_statuses(project);
+    for (id, status) in [
+        ("src/cart.js:9:10-9:21:MethodExpression:removed", "killed"),
+        ("src/cart.js:2:7-2:16:ConditionalExpression:true", "killed"),
+        ("src/cart.js:2:7-2:16:EqualityOperator:>", "survived"),
+        (
+            "src/cart.js:13:10-13:19:ConditionalExpression:true",
+            "no-coverage",
+        ),
+        ("src/cart.js:19:5-19:8:UpdateOperator:++", "timeout"),
+    ] {
+        assert_eq!(
+            statuses.get(id).map(String::as_str),
+            Some(status),
+            "{runner} {id}: {statuses:?}\n{said}"
+        );
+    }
+}
+
+/// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
+/// run's command for one test file with the mutant on and only its tests.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
+    let esm_cart = |import: &str, describe: bool| {
+        let (open, close) = if describe {
+            ("describe(\"cart\", () => {\n", "});\n")
+        } else {
+            ("", "")
+        };
+        format!(
+            "{import}import {{ shipping, label }} from \"../src/cart.js\";\n{open}it(\"ships big orders free\", () => assert.equal(shipping(80), 0));\nit(\"charges small orders\", () => assert.equal(shipping(10), 5));\nit(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n{close}"
+        )
+    };
+    let node = job_runner_project(
+        "strong-jobs-node-test",
+        "module",
+        &[
+            (
+                "test/cart.test.js",
+                &esm_cart(
+                    "import assert from \"node:assert/strict\";\nimport { it } from \"node:test\";\n",
+                    false,
+                ),
+            ),
+            (
+                "test/count.test.js",
+                "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { countdown } from \"../src/cart.js\";\ntest(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&node, &["node", "--test"], "node:test");
+    let mocha = job_runner_project(
+        "strong-jobs-mocha",
+        "module",
+        &[
+            (
+                "test/cart.test.js",
+                &esm_cart("import assert from \"node:assert/strict\";\n", true),
+            ),
+            (
+                "test/count.test.js",
+                "import assert from \"node:assert/strict\";\nimport { countdown } from \"../src/cart.js\";\nit(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&mocha, &["npx", "mocha", "--check-leaks"], "mocha");
+    let jest = job_runner_project(
+        "strong-jobs-jest",
+        "commonjs",
+        &[
+            (
+                "test/cart.test.js",
+                "const { shipping, label } = require(\"../src/cart.js\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+            ),
+            (
+                "test/count.test.js",
+                "const { countdown } = require(\"../src/cart.js\");\ntest(\"counts down\", () => expect(countdown(3)).toBe(0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&jest, &["npx", "jest"], "jest");
+    let ava = job_runner_project(
+        "strong-jobs-ava",
+        "module",
+        &[
+            (
+                "test/cart.test.js",
+                "import test from \"ava\";\nimport { shipping, label } from \"../src/cart.js\";\ntest(\"ships big orders free\", (t) => t.is(shipping(80), 0));\ntest(\"charges small orders\", (t) => t.is(shipping(10), 5));\ntest(\"labels\", (t) => t.is(label(\" a \"), \"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import test from \"ava\";\nimport { countdown } from \"../src/cart.js\";\ntest(\"counts down\", (t) => t.is(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&ava, &["npx", "ava"], "ava");
+}
+
+/// `mutants test` under bun:test: Bun's runner loads every test file it is
+/// given into one process, so each job names its file.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_bun_test_mutants_one_job_at_a_time() {
+    if std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BUN").is_none(),
+            "Bun is required"
+        );
+        eprintln!("skipping: Bun is unavailable");
+        return;
+    }
+    let bun = job_runner_project(
+        "strong-jobs-bun",
+        "module",
+        &[
+            (
+                "test/cart.test.js",
+                "import { expect, test } from \"bun:test\";\nimport { shipping, label } from \"../src/cart.js\";\ntest(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\ntest(\"charges small orders\", () => expect(shipping(10)).toBe(5));\ntest(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import { expect, test } from \"bun:test\";\nimport { countdown } from \"../src/cart.js\";\ntest(\"counts down\", () => expect(countdown(3)).toBe(0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&bun, &["bun", "test"], "bun:test");
+}
+
+/// `mutants test` under node-tap, installed from the registry as the
+/// failure-output check installs it: each test file is a process of tap's.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
+    let tap = Project::empty("strong-jobs-tap");
+    tap.write("package.json", r#"{ "name": "cart", "type": "module" }"#);
+    let installed = std::process::Command::new("npm")
+        .args(["install", "--no-audit", "--no-fund", "--silent", "tap@21"])
+        .current_dir(&tap.root)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !installed {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_TAP").is_none(),
+            "tap could not be installed"
+        );
+        eprintln!("skipping: tap could not be installed");
+        return;
+    }
+    let project = job_runner_project(
+        "strong-jobs-tap-cart",
+        "module",
+        &[
+            (
+                "test/cart.test.js",
+                "import t from \"tap\";\nimport { shipping, label } from \"../src/cart.js\";\nt.test(\"ships big orders free\", async (t) => t.equal(shipping(80), 0));\nt.test(\"charges small orders\", async (t) => t.equal(shipping(10), 5));\nt.test(\"labels\", async (t) => t.equal(label(\" a \"), \"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import t from \"tap\";\nimport { countdown } from \"../src/cart.js\";\nt.test(\"counts down\", async (t) => t.equal(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    // tap's own packages beside the repository's.
+    std::fs::remove_file(project.root.join("node_modules")).unwrap();
+    std::os::unix::fs::symlink(
+        tap.root.join("node_modules"),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    assert_cart_verdicts(&project, &["npx", "tap"], "tap");
+}
+
+/// `mutants test` under Vitest's Browser Mode: the job's mutant is switched
+/// on in the page, before the test file loads, and the browser's tests are
+/// planned under `vitest-browser`.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let browser = job_runner_project(
+        "strong-jobs-vitest-browser",
+        "module",
+        &[
+            (
+                "vitest.config.js",
+                "import { defineConfig } from \"vitest/config\";\nimport { playwright } from \"@vitest/browser-playwright\";\nexport default defineConfig({ test: { browser: { enabled: true, provider: playwright(), headless: true, instances: [{ browser: \"chromium\" }] } } });\n",
+            ),
+            (
+                "test/cart.test.js",
+                "import { expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\nit(\"charges small orders\", () => expect(shipping(10)).toBe(5));\nit(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import { expect, it } from \"vitest\";\nimport { countdown } from \"../src/cart.js\";\nit(\"counts down\", () => expect(countdown(3)).toBe(0));\n",
+            ),
+        ],
+    );
+    let plan = {
+        browser
+            .supercov_with(
+                &["--", "npx", "vitest", "run"],
+                &[("SUPERCOV_MUTANTS", "1")],
+            )
+            .succeeds();
+        browser
+            .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+            .json()
+    };
+    assert!(
+        plan["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|test| test["runner"] == "vitest-browser"),
+        "{plan}"
+    );
+    assert_cart_verdicts(&browser, &["npx", "vitest", "run"], "vitest-browser");
+}
+
 /// Two inline snapshots in one file, and a test that fakes the clock: the
 /// measured run passes as the suite does alone (the snapshots keep their own
 /// places; a duration is read from the real clock), and the strong pass runs.
