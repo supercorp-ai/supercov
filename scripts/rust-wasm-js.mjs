@@ -2,9 +2,10 @@
 //
 //   node scripts/rust-wasm-js.mjs
 //
-// Two suites build a wasm-bindgen crate in their own test command and load
-// it: node:test, through the `nodejs` glue, and Playwright, from a web page
-// that loads the `web` glue. Supercov instruments the crate in the copy; the
+// Suites build a wasm-bindgen crate in their own test command and load it:
+// node:test, Vitest and Jest through the `nodejs` glue (node:test also in a
+// project with JavaScript of its own), and Playwright, from a web page that
+// loads the `web` glue. Supercov instruments the crate in the copy; the
 // JavaScript runtime remembers each wasm instance, in the test process and
 // in each page, and takes what the module ran at every test's end. Each test
 // must be credited exactly its own lines and decision vectors, the run must
@@ -74,6 +75,21 @@ const suites = [
     generated: 'pkg',
   },
   {
+    // A project with JavaScript of its own beside the crate: the
+    // JavaScript run is published first, and the run archives the tests'
+    // evidence before it builds the crate's run beside it.
+    suite: 'node:test with JavaScript',
+    files: {
+      ...crate,
+      'package.json': '{ "name": "grades-mixed", "private": true, "scripts": { "test": "sh build.sh && node --test" } }\n',
+      'build.sh': build('nodejs', '../pkg'),
+      'lib/curve.js': 'exports.curved = (score) => score + 5;\n',
+      'test/grades.test.js': 'const test = require("node:test");\nconst assert = require("node:assert/strict");\nconst { grade } = require("../pkg/grades.js");\nconst { curved } = require("../lib/curve.js");\n\ntest("a curved score is an A", () => {\n  assert.equal(grade(curved(82), true), "A");\n});\n\ntest("a low score fails", () => {\n  assert.equal(grade(10, false), "fail");\n});\n',
+    },
+    command: ['npm', 'test'],
+    generated: 'pkg',
+  },
+  {
     // Vitest runs each file in a worker thread of its own.
     suite: 'Vitest',
     files: {
@@ -134,6 +150,8 @@ test('a low score fails', async ({ page }) => {
   },
 ];
 
+// The first suite's strong verdicts: the others run the same tests.
+let expectedVerdicts;
 try {
   for (const entry of suites) {
     if (process.env.ONLY && entry.suite !== process.env.ONLY) continue;
@@ -165,6 +183,22 @@ try {
     const decision = run(cwd, binary, ['runs', rust.id, 'decision', 'rust/src/lib.rs:5']).stdout;
     assert.match(decision, /FF- -> F +tests=1/u, `${entry.suite}\n${decision}`);
     assert.match(decision, /FTT -> T +tests=1/u, `${entry.suite}\n${decision}`);
+    // A strong pass runs the crate's mutants under the JavaScript tests
+    // that load its wasm: the wasm is built from the switched crate, and
+    // each instance is handed the active mutant through its exports.
+    {
+      const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
+      assert.equal(tested.status, 0, `${entry.suite}\n${tested.stdout}${tested.stderr}`);
+      const { summary } = JSON.parse(tested.stdout);
+      const verdicts = JSON.parse(readFileSync(resolve(cwd, '.supercov/runs', rust.id, 'strong-mutation.json'), 'utf8')).mutants;
+      const statuses = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id.replace(/^rust\/src\/lib\.rs:/u, ''), verdict.status]));
+      console.log(`[rust-wasm-js] ${entry.suite} strong pass: ${JSON.stringify(summary)}\n${JSON.stringify(statuses, null, 1)}`);
+      const reasons = Object.entries(verdicts).filter(([, verdict]) => verdict.status === 'error').map(([id, verdict]) => `${id}: ${verdict.reason}`);
+      assert.equal(summary.error, 0, `${entry.suite}\n${reasons.join('\n')}\n${tested.stderr}`);
+      assert.ok(summary.killed > 0 && summary.survived > 0, `${entry.suite}\n${JSON.stringify(summary)}`);
+      expectedVerdicts ??= statuses;
+      assert.deepEqual(statuses, expectedVerdicts, `${entry.suite}: its verdicts are not node:test's`);
+    }
     // Each step of preparing the crate in the copy, and of reading back
     // what the tests took from it, that fails ends the run, saying where:
     // the project's inputs listed, its sources captured, its integrity
@@ -189,7 +223,7 @@ try {
         ['fs.read_dir#rust_run.rs:88', 'rust_run.rs:88'],
         ['fs.canonicalize#source_capture.rs:25@2', 'source_capture.rs:25'],
         ['fs.open#integrity.rs:427@3', 'integrity.rs:427'],
-        ['fs.read_to_string#rust_wasm.rs:291', 'rust_wasm.rs:291'],
+        ['fs.read_to_string#rust_wasm.rs:309', 'rust_wasm.rs:309'],
         // The wasm run's own publication: its work directory.
         ['fs.create_dir_all#rust_wasm_evidence.rs:377', 'rust_wasm_evidence.rs:377'],
       ]) {
@@ -200,7 +234,7 @@ try {
       }
     }
   }
-  console.log('[rust-wasm-js] Rust wasm loaded by node:test, Vitest, Jest and a Playwright page is measured, each test credited exactly, and its build kept out of the project');
+  console.log('[rust-wasm-js] Rust wasm loaded by node:test (with and without JavaScript of the project\'s own), Vitest, Jest and a Playwright page is measured, each test credited exactly, and its build kept out of the project');
 } finally {
   if (!process.env.KEEP && root.startsWith(resolve(repository, 'target', 'rust-wasm-js-')))
     rmSync(root, { recursive: true, force: true });

@@ -74,11 +74,11 @@
       "repo": "https://github.com/vercel/ms",
       "commit": "4ff48cec099f0514c3e9bbca18706c9c21122bfb",
       "install": [
-        "npx",
-        "-y",
-        "pnpm@10.33.0",
+        "npm",
         "install",
-        "--frozen-lockfile"
+        "--no-audit",
+        "--no-fund",
+        "--ignore-scripts"
       ],
       "test": [
         "npx",
@@ -98,7 +98,8 @@
           }
         },
         "coverageAnalysis": "perTest"
-      }
+      },
+      "note": "Installed with npm: StrykerJS's Jest runner needs jest-environment-node where pnpm's layout does not hoist it"
     },
     {
       "name": "cron-parser",
@@ -210,9 +211,7 @@
           "command": "npx ava"
         },
         "coverageAnalysis": "off"
-      },
-      "note": "Measured without the mutants' value probes, whose run ran out of memory in AVA's worker: the plan reads reach alone",
-      "values": false
+      }
     },
     {
       "name": "p-map",
@@ -320,6 +319,64 @@
         "coverageAnalysis": "perTest"
       },
       "note": "StrykerJS's command runner switches a mutant on through the environment, which the browser never reads: every mutant survives under it. Its Vitest runner switches it on in the page."
+    },
+    {
+      "name": "deep-eql",
+      "runner": "mocha",
+      "repo": "https://github.com/chaijs/deep-eql",
+      "commit": "c6791c2967fda91822f37a73fd2448e817e14711",
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "mocha"
+      ],
+      "sources": "index.js",
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "mocha",
+        "mochaOptions": {
+          "spec": [
+            "test/**/*.js"
+          ]
+        },
+        "coverageAnalysis": "perTest"
+      }
+    },
+    {
+      "name": "pathval",
+      "runner": "mocha",
+      "repo": "https://github.com/chaijs/pathval",
+      "commit": "820590ed322d9deca69c0c1c2827d57d2e6daaff",
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "mocha"
+      ],
+      "sources": "index.js",
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "mocha",
+        "mochaOptions": {
+          "spec": [
+            "test/**/*.js"
+          ]
+        },
+        "coverageAnalysis": "perTest"
+      }
     }
   ]
 }

@@ -110,6 +110,30 @@ copies of its other files that no worker has started yet end before their test
 file loads. Should the confirmation overturn the kill, those files run in the
 next stage.
 
+A stage used to end before a mutant's next batch could start, so a mutant left
+alive early in a stage waited for the stage's slowest copy (hono's workers were
+busy 61% of the pass). Where the reporter gives each copy its assignment (see
+below), each mutant in a stage also lists its next batch, after all the
+stage's other work and held back: a held-back copy runs only if every other
+copy of its mutant in the stage has ended with no failed test by the time a
+worker takes it (and its mutant is still undecided); otherwise its file goes back to the mutant's
+later files. So a mutant its first copy leaves alive goes on in the same
+stage, in what used to be the stage's idle end, and a held-back copy that does
+not run costs no process. Paired on hono's six shards and tRPC's shards 1-11:
+hono 73 to 64 ms a mutant (workers busy 61% to 71%), tRPC 1,142 to 1,084 ms.
+Running a mutant's later files one at a time in the stage instead (all of them
+listed, each held back while another copy of its mutant runs) was slower:
+most were taken while their mutant's copy still ran, and went back to the next
+stage (hono 102 ms a mutant).
+
+A mutant's copy that fails a test its file's known baseline passed is decided
+by it: its later tests are skipped, and nothing it does after can change its
+verdict. Its worker is stopped as soon as the failure is reported, not at the
+end of its file. A test that timed out can leave a runaway loop going in its
+worker until then: on tRPC twelve such workers held 2 GB each at once, and the
+16-vCPU, 32 GB machine's job was ended with SIGTERM in about one shard run in
+three. The profile counts them as `settledCopies`.
+
 ## Running many mutants at once without restarting anything (Vitest)
 
 A Vitest run evaluates each test file in an isolated module graph (the
@@ -173,6 +197,47 @@ spawners sharing the workers were no faster than one. Vitest 1-3 fork
 through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
 from Vitest's process. The pass summary counts `spawnedWorkers`.
 
+A copy's worker spends its first few hundred milliseconds before it can
+claim anything: Node starting, Vitest's worker loading, and in a DOM
+environment that environment's package (jsdom took 300 ms on tRPC, where every
+file runs in jsdom). On the public benchmark that was 75 ms of a hono copy's
+205 and 430 ms of a tRPC copy's 860, and tRPC listed 46% of its copies for
+mutants another copy had decided by the time they started: each paid the
+whole start and then ended in its setup file. Two changes take that cost off
+the copies without sharing anything between them:
+
+- **Workers started ahead.** The spawner keeps one worker per Vitest worker
+  started ahead of Vitest's requests, with the entry, arguments and options
+  Vitest gives every worker of the project. Each loads what a fresh worker
+  loads before Vitest tells it anything, in the order it would: Vitest's
+  worker entry, then the package of the built-in environment Vitest named in
+  its first message to a worker (`jsdom`, `happy-dom`), resolved as Vitest
+  resolves it. Then it waits. Its script (`process.argv[1]`) is Vitest's
+  entry and Supercov's variable is gone from its environment before the entry
+  loads, so a test sees the process a fresh worker is; the spawner's own
+  argument list stays in the operating system's view of the process only.
+  Workers started before Vitest named the environment are stopped and
+  started again with it. `SUPERCOV_STRONG_WORKERS_AHEAD=<n>` sets how many
+  (0: each worker starts when Vitest asks). The profile counts
+  `startedAhead` and `usedAhead`.
+- **A process only once the file is known.** A stand-in answers Vitest's
+  first message ("start") itself and keeps it. Vitest's next message ("run")
+  names the test file; the strong reporter then gives the copy its file's
+  next assignment, in the order Vitest starts them, and tells it which
+  through the run's provided context (the setup file's claims race stays for
+  Vitest 1-3 and direct forks). A copy whose mutant was decided meanwhile, or
+  that is beyond its file's assignments, ends there with no process: the
+  reporter records it as its setup file would have. Any other copy takes a
+  worker, which gets the kept "start", answers it, and then gets the "run":
+  the same messages in the same order as a worker forked for it.
+
+Paired on the same machines (hono's six shards, tRPC's shards 1-12), with
+nothing else changed: hono 81 to 73 ms a mutant, tRPC 1,443 to 1,142 ms; a
+copy's start (handover to claim) 76 to 26 ms on hono and 411 to 201 ms on
+tRPC; no mutant changed between detected and not (one hono and one tRPC
+mutant went from timeout to killed, which flips between runs). The five
+libraries took the same time (14-26 ms a mutant) with the same verdicts.
+
 Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
 between test files (`isolate: false` for the pass), and the copy's setup file
 reset the modules and mocks Vitest had evaluated, so only the packages Node
@@ -188,16 +253,33 @@ used 2.3-2.6× less CPU on hono and tRPC, but hono's and tRPC's wall time did
 not drop, because their copies wait on their tests' own timers, not on
 starting.
 
+Nor does the pass choose warm workers per suite. What a run knows of a suite
+(its module graph's size, each file's setup time, its isolation settings, a
+first stage timed cold and warm) says how much warm workers would save, not
+whether a suite's files leave nothing behind in their process: pathe's,
+hono's and tRPC's leaks came from ordinary test files with nothing in their
+configuration to tell them apart, and one leak changes a verdict. A rule that
+picks warm workers where they pay would pick them where they are wrong. The
+sound part of what they saved, a worker's start, is what workers started
+ahead save.
+
 Node's compile cache (`NODE_COMPILE_CACHE`, which Vitest does not turn on) was
 tried as a sound way to start copies faster, and also dropped: the strong pass
 was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
 the measured run the same everywhere. What warm workers saved is starting a
 process and Vitest for each copy, not compiling.
 
+The last version with warm workers (`SUPERCOV_STRONG_WARM=1`) is kept on the
+branch `archive/strong-warm-workers`, for a later attempt to make them exact:
+resetting what a test file leaves behind in its process, or proving per file
+that it leaves nothing.
+
 The pass summary's `profile` records its copies (of mutants, confirmations,
 and those that skipped), the copies stopped and hung, and for each stage its
-copies, its wall time, the copies' own time (claim to end), and when its last
-copy started. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
+copies, its wall time, the copies' own time (claim to end), when its last
+copy started and, on Linux, the share of the machine's CPU time that was busy
+(`cpuBusy`, also for the whole pass). A copy's start (`startMs`) counts from
+when its worker was handed to Vitest. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
 Vitest's own process for the whole pass.
 
 ## Baselines
@@ -621,8 +703,38 @@ time per mutant and its files cheapest first:
   that throws as it loads, a process that exits) killed the mutant: the test
   file did not finish.
 - A mutant whose candidates ran under a runner this pass does not run (a
-  plan mixing Vitest's node tests and its browser tests) is an `error`, never
-  `survived`.
+  Playwright test beside them) is an `error`, never `survived`. A Vitest run
+  of node and browser tests runs both here: a node test's job runs Vitest
+  with the job's file, its other tests skipped (`context.skip()`), as a
+  browser test's does.
+
+**Resident runners.** Jest and CommonJS Mocha suites run their jobs in
+resident processes, one per worker, as StrykerJS's runners do, instead of
+starting the runner for each job:
+
+- `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
+  (`runCLI` with `runTestsByPath`), in the fresh module registry and
+  environment Jest gives every test file; the job's mutant is switched on
+  before the file's modules load.
+- `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
+  project's CommonJS modules out of `require.cache` before each job and
+  loads the job's file with `require`, so it and the code it tests load
+  afresh with the mutant on.
+- A suite of ES modules cannot be loaded again in one thread: the host runs
+  each job in a worker thread of its own, which has a module graph of its
+  own, and makes and readies the next job's thread (Mocha and what
+  `--require` loads) while a job runs. On deep-eql (426 mutants) and
+  pathval (123) every verdict is that of a process per job
+  (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
+  against 7.2 s on a 16-CPU Linux machine, where jobs side by side hide most of a
+  process's start, and 9 s against 27 s on a laptop.
+
+The adapters write each job's evidence into the job's own directory, read
+when each record is written (a journal kept per directory: a resident
+process that kept the first job's wrote every later job's there, and their
+mutants read as survivors). A host that cannot start leaves its jobs to a
+process each; a job past its limit stops its host, and the next job starts
+another.
 
 The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
 confirmations, overturned kills, stopped jobs and their time.
@@ -635,13 +747,80 @@ projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
 command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
 its own), then Supercov, and joins every mutant's verdicts.
 
-RESULTS
+Measured on Linux (2026-11-22), one project per 16-CPU machine (c8a/m8a.4xlarge), both
+tools with 15 workers. Times in seconds; Supercov's are its measured run
+(with the mutants' values) and its strong pass. "Joined" counts the mutants
+both list, Regex mutants included.
+
+| project | runner | StrykerJS runner | joined | disagreements | StrykerJS | Supercov measure + strong |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| bytes.js | Mocha | mocha | 146 | 0 | 3.0 | 1.1 + 0.4 |
+| negotiator | Mocha | mocha | 544 | 0 | 3.4 | 1.2 + 1.0 |
+| ms | Jest | jest | 227 | 0 | 4.6 | 1.8 + 3.2 |
+| cron-parser | Jest | jest | 460 | 1 (error) | 31.8 | 2.4 + 22.4 |
+| classnames | node:test | command | 161 | 0 | 7.8 | 0.6 + 2.8 |
+| camelcase | node:test | command | 234 | 0 | 10.1 | 1.2 + 3.9 |
+| dot-prop | AVA | command | 590 | 0 | 46.4 | 2.7 + 26.7 |
+| p-map | AVA | command | 512 | 1 | 354.6 | 25.9 + 118.4 |
+| ini | tap | tap | 413 | 0 (28 StrykerJS errors) | 13.6 | 1.6 + 6.5 |
+| remix-auth | bun:test | command | 625 | 0 | 7.3 | 0.4 + 1.9 |
+| mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
+| pathval | Mocha (ES modules) | mocha | 123 | 13 | 1.6 | 0.9 + 1.3 |
+| deep-eql | Mocha (ES modules) | mocha | (StrykerJS cannot run it) | | | 1.1 + 5.9 |
+
+No mutant StrykerJS detected (killed or timed out) is `survived` or
+`no-coverage` in Supercov, and none it let live is detected by Supercov but
+the ones explained here, each applied by hand:
+
+- p-map, `index.js:426` `preserveOrder` to `true`: Supercov kills it with
+  "with `preserveOrder: false`, a mapper error drops pending input while the
+  consumer is busy". Applied by hand, that test fails run alone (`ava --match`)
+  and passes in the whole suite, where AVA runs every test of the file at
+  once and the consumer is never busy at that moment. StrykerJS's command
+  runner runs the whole suite. A kill of the subset, as on hono.
+- ini: StrykerJS's tap runner ended 28 mutants in `RuntimeError`, which its
+  score leaves out; Supercov kills 22 and times out 6. Applied by hand
+  (`ini.js:52` `&&` to `||`), `bar.js`, `foo.js` and `win32.js` fail.
+- cron-parser `CronExpressionParser.ts:454` and mini-throttle `index.ts:25`,
+  a function body emptied: no switch could be placed
+  (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
+  An error is no verdict either way.
+- pathval: StrykerJS kills 13 mutants Supercov says survive, each by one
+  test alone, `exclude __proto__`, which first asserts that no global
+  `polluted` exists. StrykerJS runs every mutant in one process: once a
+  mutant let `setPathValue(obj, '__proto__.polluted', true)` through, the
+  global stayed, and that test failed for every mutant after it. Applied by
+  hand (`index.js:84` without `^`, `index.js:174` `===` to `!==`), each
+  survives `npx mocha`. StrykerJS's Mocha runner cannot run deep-eql at all:
+  it needs Mocha's `lib/cli/run-helpers`, which Mocha 12 no longer has.
+- Verdicts StrykerJS and Supercov both detect differ in kind 52 times
+  (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
+  wrong is whichever the runner sees first.
+
+The validation found three soundness bugs, fixed before these numbers:
+assertions at a tap or node:test file's top level belonged to no test (ini:
+14 mutants only `win32.js` and `proto.js` killed survived); a condition that
+calls something was decided `survived` from its value alone (dot-prop
+`index.js:167`, `processSegment` in an `if`); and Mocha's module setup named
+no file, so a module-level mutant had no candidate (bytes.js `index.js:28`).
+
+**Time.** Where StrykerJS has no runner of its own (node:test, AVA, Bun) it
+runs the whole command per mutant, and Supercov's jobs of one file and its
+candidates are 2.5-3.5 times faster (p-map 355 s against 144 s). Jest and
+CommonJS Mocha jobs run in resident runners (see above), as StrykerJS's
+runners do: ms takes 4.6 s under StrykerJS and 3.2 s in Supercov's strong
+pass (5.0 s with its measured run), cron-parser 31.8 s and 22.4 s (24.8 s),
+negotiator 3.4 s and 1.0 s. Before the resident runners each job started
+Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
+tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
+13.6 s against 8.1 s.
 
 ## Not yet
 
 - Reuse of verdicts across commits: kept out until a shadow run shows it
   never disagrees with a fresh run.
-- A Vitest run whose tests run both in node and in the browser: the browser's
-  mutants are run by the jobs pass, and those with candidates in node too are
-  `error`.
-- StrykerJS's `Regex` mutator: its mutants are not listed (bytes.js: 20 of 146).
+- Rust compiled to wasm that Vitest Browser Mode's pages load: not measured,
+  so not planned. Under Node and in Playwright's pages its mutants run
+  (`mutation-drivers.md`).
+- A mutant of Rust compiled to wasm that a switch cannot hold: `error`, as the
+  command builds the wasm once.

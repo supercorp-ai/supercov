@@ -820,7 +820,13 @@ fn run_javascript(
             .map(Server::RustWorker),
         );
     }
-    if serves_rust_wasm {
+    // A strong pass switches the wasm crates' mutants in where a run
+    // instruments them.
+    let mut wasm_strong = None;
+    if serves_rust_wasm && let Some(strong) = &request.strong {
+        wasm_strong =
+            crate::rust_wasm::switch_for_strong_pass(&root, &workspace, strong, diagnostics)?;
+    } else if serves_rust_wasm {
         servers.extend(
             crate::rust_wasm::RustWasmServer::prepare(
                 &root,
@@ -833,7 +839,7 @@ fn run_javascript(
             .map(Server::RustWasm),
         );
     }
-    if project.source_files.is_empty() && servers.is_empty() {
+    if project.source_files.is_empty() && servers.is_empty() && wasm_strong.is_none() {
         return Err(
             crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
@@ -981,6 +987,7 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
+        overrides.extend(wasm_strong.clone().unwrap_or_default());
         if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
@@ -1367,6 +1374,9 @@ fn run_javascript(
 
     let publication_started = Instant::now();
     // Read before the evidence is archived and removed.
+    servers
+        .iter_mut()
+        .for_each(|server| server.read_evidence(&run_id));
     let served = if servers.is_empty() && !support_directory.is_dir() {
         Vec::new()
     } else {
@@ -2116,6 +2126,14 @@ impl Server {
         }
     }
 
+    /// Read what the tests left before the run archives and removes it:
+    /// only a wasm crate's server reads it later.
+    fn read_evidence(&mut self, evidence_run_id: &str) {
+        if let Self::RustWasm(server) = self {
+            server.read_evidence(evidence_run_id);
+        }
+    }
+
     /// The server's run, built and waiting for the metadata it is published
     /// under, when it has one.
     fn build_run<'a>(
@@ -2326,6 +2344,64 @@ mod tests {
             failed(run_strong_javascript(&request(&[], true), &mut Vec::new()).map(drop)),
             "test command must not be empty"
         );
+    }
+
+    /// A strong pass starts the command itself, or the jobs driver before
+    /// it where a mutant's candidate ran under a job runner, on Bun where
+    /// the command is Bun's.
+    #[test]
+    fn a_strong_pass_starts_the_jobs_driver_for_a_job_runner_s_candidates() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-strong-command-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let strong = StrongRun {
+            plan: directory.join("plan.json"),
+            results: directory.join("results.jsonl"),
+        };
+        let workspace = Path::new("/copy");
+        let command = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let driver = workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string();
+        // No plan to read: the command.
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["npx", "jest"])
+        );
+        let plan = |runner: &str| {
+            serde_json::json!({
+                "tests": [{"runner": runner}],
+                "mutants": [
+                    {"candidates": [{"test": 0}, {"test": 9}]},
+                    {"decided": "survived", "candidates": [{"test": 0}]}
+                ]
+            })
+        };
+        std::fs::write(&strong.plan, plan("jest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["node", &driver, "--", "npx", "jest"])
+        );
+        assert_eq!(
+            strong_command(&strong, &command(&["/usr/bin/bun", "test"]), workspace),
+            command(&["/usr/bin/bun", &driver, "--", "/usr/bin/bun", "test"])
+        );
+        // Vitest drives itself from within the command.
+        std::fs::write(&strong.plan, plan("vitest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "vitest"]), workspace),
+            command(&["npx", "vitest"])
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     /// The files a strong pass switches are those of the plan's mutants it
@@ -2912,7 +2988,7 @@ fn strong_command(strong: &StrongRun, command: &[String], workspace: &Path) -> V
         .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
         .flat_map(|mutant| mutant["candidates"].as_array().cloned().unwrap_or_default())
         .filter_map(|candidate| candidate["test"].as_u64())
-        .filter_map(|test| tests.get(usize::try_from(test).ok()?))
+        .filter_map(|test| tests.get(test as usize))
         .any(|test| {
             crate::strong_driver::JAVASCRIPT_JOB_RUNNERS
                 .contains(&test["runner"].as_str().unwrap_or_default())

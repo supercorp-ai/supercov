@@ -168,10 +168,21 @@ pub(crate) fn markdown(
     } else {
         request.mutants.statuses.clone()
     };
+    // Where a strong pass ran, what it let survive (or the verdicts
+    // `--status` asked for): the mutants the tests are known to leave alive.
+    let strong = crate::human_query::strong_verdict;
+    let wanted_strong = match (&summary.strong, request.mutants.statuses.is_empty()) {
+        _ if !request.mutants.strong_statuses.is_empty() => request.mutants.strong_statuses.clone(),
+        (Some(_), true) => vec!["survived".to_owned()],
+        _ => Vec::new(),
+    };
     let mut rows = data
         .mutants
         .iter()
-        .filter(|mutant| wanted.contains(&mutant.status))
+        .filter(|mutant| match wanted_strong.is_empty() {
+            true => wanted.contains(&mutant.status),
+            false => wanted_strong.contains(&strong(mutant)),
+        })
         .collect::<Vec<_>>();
     // What the tests leave alive first, as `--diff` lists them.
     rows.sort_by_key(|mutant| wanted.iter().position(|status| *status == mutant.status));
@@ -190,6 +201,22 @@ pub(crate) fn markdown(
         })
         .collect::<Vec<_>>()
         .join(" · ");
+    // The strong pass's score and verdicts, where one ran.
+    let counts = match &summary.strong {
+        Some(verdicts) => format!(
+            "{counts}{}mutation score **{}** ({})",
+            if counts.is_empty() { "" } else { " · " },
+            summary
+                .mutation_score
+                .map_or_else(|| "—".to_owned(), |score| format!("{:.1}%", score * 100.0)),
+            verdicts
+                .iter()
+                .map(|(status, n)| format!("{n} {}", status.replace('-', " ")))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ),
+        None => counts,
+    };
     let mut text = String::new();
     match &data.diff {
         Some(diff) => {
@@ -213,11 +240,17 @@ pub(crate) fn markdown(
             ));
         }
     }
-    let names = wanted
-        .iter()
-        .map(|status| status.name().replace('-', " "))
-        .collect::<Vec<_>>()
-        .join(" or ");
+    let names = match wanted_strong.is_empty() {
+        true => wanted
+            .iter()
+            .map(|status| status.name().replace('-', " "))
+            .collect::<Vec<_>>(),
+        false => wanted_strong
+            .iter()
+            .map(|status| status.replace('-', " "))
+            .collect(),
+    }
+    .join(" or ");
     if rows.is_empty() {
         text.push_str(&format!("\nNo mutant is {names}.\n"));
         return text;
@@ -232,19 +265,28 @@ pub(crate) fn markdown(
             )),
             code(&crate::human_query::mutant_change(mutant)),
             cell(&format!(
-                "{}{}",
+                "{}{}{}",
+                match strong(mutant) {
+                    verdict if verdict.is_empty() => String::new(),
+                    verdict => format!("{} (weak: ", verdict.replace('-', " ")),
+                },
                 mutant.status.name().replace('-', " "),
                 mutant
                     .weak
                     .untestable
                     .map_or_else(String::new, |kind| format!(" ({} boundary)", kind.name()))
+                    + if strong(mutant).is_empty() { "" } else { ")" }
             )),
             cell(&mutant.weak.reason),
         )
     }));
     if rows.len() > MARKDOWN_ROWS {
         let mut asked = request.clone();
-        asked.mutants.statuses = wanted.clone();
+        if wanted_strong.is_empty() {
+            asked.mutants.statuses = wanted.clone();
+        } else {
+            asked.mutants.strong_statuses = wanted_strong.clone();
+        }
         text.push_str(&format!(
             "\n_…and {} more: `{}`_\n",
             rows.len() - MARKDOWN_ROWS,

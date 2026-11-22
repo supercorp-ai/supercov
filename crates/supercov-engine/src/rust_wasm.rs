@@ -12,7 +12,7 @@
 
 use crate::fault_fs as fs;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -121,7 +121,13 @@ pub struct RustWasmServer {
     records: PathBuf,
     /// `.supercov/work/<run>/rust-wasm-<n>`.
     directory: PathBuf,
+    /// What the tests left, read before the run archives and removes it:
+    /// every runner's attempts, and the takes.
+    evidence: Option<TestsEvidence>,
 }
+
+/// Every runner's attempts, and the takes (or why they could not be read).
+type TestsEvidence = (Vec<ServedTest>, Result<Vec<WasmRecord>, String>);
 
 impl RustWasmServer {
     /// Whether `root` holds a wasm library JavaScript tests could load.
@@ -185,6 +191,7 @@ impl RustWasmServer {
                 workspace: workspace.to_owned(),
                 records: server_evidence_root.join("wasm"),
                 directory,
+                evidence: None,
             });
         }
         Ok(servers)
@@ -206,17 +213,10 @@ impl RustWasmServer {
         wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default())
     }
 
-    /// Build what the tests' wasm ran as a Rust run, to be published under
-    /// the metadata the returned step is given: each take credited to the
-    /// attempt it was taken at the end of. None when no wasm ran.
-    pub fn build_run<'a>(
-        self,
-        root: &'a Path,
-        evidence_run_id: &str,
-        _run: &RunMetadata,
-        _served: &[ServedTest],
-        _diagnostics: &mut dyn Write,
-    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
+    /// Read what the tests left, while it is there: a run with JavaScript
+    /// source of its own archives and removes the evidence before it builds
+    /// the servers' runs.
+    pub fn read_evidence(&mut self, evidence_run_id: &str) {
         // Every runner's attempts: a Node suite reports none of Playwright's.
         let tests = crate::served_tests::read_attempts(
             &self
@@ -224,8 +224,26 @@ impl RustWasmServer {
                 .join(".supercov/evidence")
                 .join(evidence_run_id),
         );
+        self.evidence = Some((tests, read_records(&self.records)));
+    }
+
+    /// Build what the tests' wasm ran as a Rust run, to be published under
+    /// the metadata the returned step is given: each take credited to the
+    /// attempt it was taken at the end of. None when no wasm ran.
+    pub fn build_run<'a>(
+        mut self,
+        root: &'a Path,
+        evidence_run_id: &str,
+        _run: &RunMetadata,
+        _served: &[ServedTest],
+        _diagnostics: &mut dyn Write,
+    ) -> Result<Option<crate::served_tests::PreparedRun<'a>>, String> {
+        let (tests, read) = self
+            .evidence
+            .take()
+            .expect("the evidence is read before it is archived");
         let hint = format!("{evidence_run_id}-rust-wasm");
-        let records = match read_records(&self.records) {
+        let records = match read {
             Ok(records) if !records.is_empty() && !tests.is_empty() => records,
             other => {
                 let result = other
@@ -326,6 +344,62 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
         regions.push((crate_key, bytes));
     }
     Some(regions)
+}
+
+/// A strong pass's copy: each Cargo workspace's wasm crates get the plan's
+/// Rust mutants behind switches instead of probes
+/// (`rust_strong::switch_wasm_workspace`), and the test processes the
+/// environment that hands each wasm instance the active mutant
+/// (`SUPERCOV_WASM_STRONG`, the workspaces' directories in the project).
+/// `None` where the copy has no wasm crate.
+pub fn switch_for_strong_pass(
+    root: &Path,
+    workspace: &Path,
+    strong: &crate::strong_driver::StrongRun,
+    diagnostics: &mut dyn Write,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    let mut cargo_roots = BTreeSet::new();
+    for manifest in wasm_crates(workspace) {
+        let crate_directory = manifest.parent().unwrap_or(workspace).to_owned();
+        cargo_roots.insert(
+            crate::rust_worker::cargo_workspace_root(&crate_directory).unwrap_or(crate_directory),
+        );
+    }
+    if cargo_roots.is_empty() {
+        return Ok(None);
+    }
+    let cargo = crate::rust_strong::WasmCargo {
+        program: std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()),
+        rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
+    };
+    let mut prefixes = Vec::new();
+    for cargo_root in cargo_roots {
+        let Ok(relative) = cargo_root.strip_prefix(workspace) else {
+            continue;
+        };
+        let prefix = relative.to_string_lossy().replace('\\', "/");
+        crate::rust_strong::switch_wasm_workspace(
+            root,
+            &prefix,
+            &cargo_root,
+            &strong.plan,
+            &strong.results,
+            &cargo,
+            diagnostics,
+        )?;
+        prefixes.push(if prefix.is_empty() {
+            prefix
+        } else {
+            format!("{prefix}/")
+        });
+    }
+    let mut environment = wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default());
+    environment.remove("SUPERCOV_WASM_REGIONS");
+    environment.insert(
+        "SUPERCOV_WASM_STRONG".into(),
+        serde_json::to_string(&prefixes).expect("plain data serializes"),
+    );
+    Ok(Some(environment))
 }
 
 #[cfg(test)]

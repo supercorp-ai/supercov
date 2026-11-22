@@ -47,14 +47,18 @@ function claim() {
         return undefined;
     const key = createHash("sha256").update(file).digest("hex").slice(0, 24);
     const directory = `${provided.stage}/${key}`;
-    const token = randomBytes(12).toString("hex");
-    let index;
-    try {
-        appendFileSync(`${directory}/claims`, `${token}\n`);
-        index = readFileSync(`${directory}/claims`, "utf8").split("\n").indexOf(token);
-    }
-    catch {
-        return undefined;
+    // Where Supercov's spawner starts the workers, the strong reporter told
+    // this copy its assignment already.
+    let index = provided.claim;
+    if (index === undefined) {
+        const token = randomBytes(12).toString("hex");
+        try {
+            appendFileSync(`${directory}/claims`, `${token}\n`);
+            index = readFileSync(`${directory}/claims`, "utf8").split("\n").indexOf(token);
+        }
+        catch {
+            return undefined;
+        }
     }
     // A copy beyond its file's assignments has nothing to run.
     if (index < 0 || !existsSync(`${directory}/${index}.json`))
@@ -74,7 +78,7 @@ const claimed = claim();
 if (claimed?.surplus || claimed?.skip) {
     if (claimed.skip) {
         const at = Date.now();
-        appendFileSync(claimed.out, `${JSON.stringify({ claimed: true, at, up: Math.round(performance.now()), skipped: true })}\n${JSON.stringify({ done: true, at })}\n`);
+        appendFileSync(claimed.out, `${JSON.stringify({ claimed: true, at, up: Math.round(performance.now()), pid: isMainThread ? process.pid : undefined, skipped: true })}\n${JSON.stringify({ done: true, at })}\n`);
         try {
             appendFileSync(claimed.claimed.log, `${claimed.claimed.line}\n`);
         }

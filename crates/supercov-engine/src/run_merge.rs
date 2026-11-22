@@ -340,7 +340,8 @@ fn merged_mutants(
     let mut sets = BTreeMap::<String, (usize, String)>::new();
     let mut languages = BTreeMap::<String, String>::new();
     for (index, file) in std::iter::once(first).chain(others) {
-        for (language, set) in file.sets() {
+        // A listed run lists at least one language's set.
+        file.sets().into_iter().try_for_each(|(language, set)| {
             match sets.get(&language) {
                 Some((kept, kept_set)) if *kept_set != set => {
                     return Err(format!(
@@ -353,7 +354,8 @@ fn merged_mutants(
                     sets.insert(language, (*index, set));
                 }
             }
-        }
+            Ok(())
+        })?;
         for (path, language) in &file.languages {
             languages
                 .entry(path.clone())
@@ -396,22 +398,26 @@ fn merged_mutants(
     for index in unlisted {
         without_values.extend(measured_tests(&archives[index]).into_keys());
     }
-    let mut merged = MutantsFile::unlisted();
-    for (language, (_, set)) in sets {
-        let files = files
-            .iter()
-            .filter(|(path, _)| {
-                languages
-                    .get(*path)
-                    .map_or(crate::mutant_list::JAVASCRIPT, String::as_str)
-                    == language
-            })
-            .map(|(path, (_, mutants))| (path.clone(), mutants.clone()))
-            .collect::<BTreeMap<_, _>>();
-        merged = merged
-            .merge(MutantsFile::listed(&language, &set, files))
-            .expect("each language is merged once");
-    }
+    // Each language's files under its set; one run listed, so one set at
+    // least.
+    let mut merged = sets
+        .into_iter()
+        .map(|(language, (_, set))| {
+            let files = files
+                .iter()
+                .filter(|(path, _)| {
+                    languages
+                        .get(*path)
+                        .map_or(crate::mutant_list::JAVASCRIPT, String::as_str)
+                        == language
+                })
+                .map(|(path, (_, mutants))| (path.clone(), mutants.clone()))
+                .collect::<BTreeMap<_, _>>();
+            MutantsFile::listed(&language, &set, files)
+        })
+        .fold(MutantsFile::unlisted(), |merged, one| {
+            merged.merge(one).expect("each language is merged once")
+        });
     merged.tests_without_values = without_values.into_iter().collect();
     Ok(Some(
         serde_json::to_vec(&merged).expect("plain data serializes"),

@@ -648,8 +648,8 @@ fn oldest_and_newest_javascript() -> Vec<&'static Recording> {
 /// the same answers whichever release measured it. Every query still
 /// answers with the list beside the run, and its shards still merge, the
 /// merge listing what the whole suite does. A strong pass then runs and
-/// saves a verdict for each mutant into the run, or is refused with the
-/// reason where no driver runs the fixtures' runner.
+/// saves a verdict for each mutant into the run (an older Supercov refused
+/// a pass where no driver ran the fixtures' runner).
 #[test]
 fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
     let summary = |installed: &Installed, id: &str| {
@@ -766,6 +766,9 @@ fn old_runs_list_their_mutants_and_answer_a_strong_pass() {
         // shards does not have: everything else is the same.
         let without_score = |mut summary: Value| {
             summary["mutationScore"] = Value::Null;
+            if let Some(summary) = summary.as_object_mut() {
+                summary.remove("strong");
+            }
             summary
         };
         assert_eq!(

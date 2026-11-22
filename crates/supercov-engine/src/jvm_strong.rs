@@ -254,6 +254,7 @@ pub(crate) fn candidate(
             at: *at,
         }),
         value_used: false,
+        effects: false,
         statement: own(PointKind::Statement),
         function: own(PointKind::Function),
         decision: None,

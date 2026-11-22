@@ -96,7 +96,7 @@ by how many no test reaches; with a file, its mutants by line; with
 file:line, that line's mutants and why.
 
 Options:
-  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent
+  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent, or strong verdicts: survived, killed, timeout, no-coverage, error, unviable
   --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
@@ -207,6 +207,8 @@ struct QueryOptions {
     sort: DecisionSort,
     /// `mutants --status`, `--mutator`, `--stryker`, `--stryker-root`.
     statuses: Vec<supercov_engine::coverage_index::MutantStatus>,
+    /// `mutants --status` with strong verdicts.
+    strong_statuses: Vec<String>,
     mutator: Option<String>,
     stryker: Vec<String>,
     stryker_root: Option<String>,
@@ -239,6 +241,7 @@ impl Default for QueryOptions {
             gained: false,
             sort: DecisionSort::Location,
             statuses: Vec::new(),
+            strong_statuses: Vec::new(),
             mutator: None,
             stryker: Vec::new(),
             stryker_root: None,
@@ -494,19 +497,32 @@ fn parse_options(
                             .filter(|name| !name.is_empty())
                         {
                             let name = name.to_lowercase();
+                            let strong = matches!(
+                                name.as_str(),
+                                "killed"
+                                    | "survived"
+                                    | "timeout"
+                                    | "no-coverage"
+                                    | "error"
+                                    | "unviable"
+                            );
+                            // A strong verdict, which `mutants test` saved into the run.
+                            if strong && flag == "--status" {
+                                if !options.strong_statuses.contains(&name) {
+                                    options.strong_statuses.push(name);
+                                }
+                                continue;
+                            }
                             let Some(status) =
                                 supercov_engine::coverage_index::MutantStatus::parse(&name)
                             else {
-                                let message = if matches!(
-                                    name.as_str(),
-                                    "killed" | "survived" | "timeout"
-                                ) {
+                                let message = if strong {
                                     format!(
-                                        "{flag} {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is a strong verdict: gate on it with supercov runs <run-id> mutants test --fail-on {name}; here use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 } else {
                                     format!(
-                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, timeout, no-coverage, error or unviable"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(
@@ -721,6 +737,7 @@ pub(crate) fn coverage_request(
                 }
             }
             request.mutants.statuses = options.statuses.clone();
+            request.mutants.strong_statuses = options.strong_statuses.clone();
             request.mutants.mutator = options.mutator.clone();
             request.mutants.diff_base = options.diff_base.clone();
             // A change's mutants for a reader: what its tests leave alive.
@@ -1218,14 +1235,27 @@ mod tests {
         assert_eq!((file.file.as_deref(), file.line), (Some("src/a.ts"), None));
         let run = request(&["run-1", "mutants"]);
         assert_eq!((run.file, run.line), (None, None));
+        // A strong verdict picks mutants by what a strong pass said, beside
+        // the weak statuses.
+        let strong = request(&[
+            "run-1",
+            "mutants",
+            "--status",
+            "survived,not-infected,Survived",
+        ]);
+        assert_eq!(strong.mutants.strong_statuses, ["survived"]);
+        assert_eq!(
+            strong.mutants.statuses,
+            [supercov_engine::coverage_index::MutantStatus::NotInfected]
+        );
         for (arguments, message) in [
             (
                 &["run-1", "mutants", "--status", "nope"][..],
                 "is not a status",
             ),
             (
-                &["run-1", "mutants", "--status", "survived"],
-                "reserved for strong mutation",
+                &["run-1", "mutants", "--fail-on", "survived"],
+                "is a strong verdict: gate on it with supercov runs <run-id> mutants test --fail-on survived",
             ),
             (
                 &["run-1", "gaps", "--status", "infected"],

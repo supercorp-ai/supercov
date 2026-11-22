@@ -154,14 +154,44 @@ var builtinSetHas = Set.prototype.has;
 var builtinWeakMapGet = WeakMap.prototype.get;
 var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
-// The runtime's own globals are not the suite's: kept out of a listing of
-// the global object, as Mocha's --check-leaks takes one before and after each
-// test and failed every first test with "global leak(s) detected".
-function setRuntimeGlobal(name, value) {
-  if (Object.prototype.hasOwnProperty.call(runtimeGlobal, name))
-    runtimeGlobal[name] = value;
-  else
-    Object.defineProperty(runtimeGlobal, name, { value, writable: true, configurable: true, enumerable: false });
+// Supercov keeps its state on globals, some first set while a test runs
+// (the test's id, an async scope). A suite that checks for globals its tests
+// add (Mocha's --check-leaks) lists the global object's enumerable keys, so
+// each is made here, before any test, and never enumerable.
+for (const name of [
+  "__SUPERCOV_ACTIVATE_PROBE_CONTEXT__",
+  "__SUPERCOV_ACTIVE_SCOPE__",
+  "__SUPERCOV_ASSERTION_PHASE_BRIDGE__",
+  "__SUPERCOV_ASSERTION_PHASE_OPENER__",
+  "__SUPERCOV_ASSERTION_PHASE_STARTED__",
+  "__SUPERCOV_ATTEMPT__",
+  "__SUPERCOV_BROWSER_FETCH_PATCHED__",
+  "__SUPERCOV_BUFFER_EXIT_INSTALLED__",
+  "__SUPERCOV_BUFFER_FLUSHERS__",
+  "__SUPERCOV_CHILD_PATCHED__",
+  "__SUPERCOV_COMPACT_SNAPSHOT__",
+  "__SUPERCOV_COVERAGE_SNAPSHOT__",
+  "__SUPERCOV_DIRECT_RUNTIME__",
+  "__SUPERCOV_EMITTER_CONTEXT_MAPS__",
+  "__SUPERCOV_EMITTER_PATCHED_INSTANCES__",
+  "__SUPERCOV_FETCH_PATCHED__",
+  "__SUPERCOV_MCDC_SNAPSHOT__",
+  "__SUPERCOV_MCDC_STATES__",
+  "__SUPERCOV_MCDC_TEST_ID__",
+  "__SUPERCOV_MODULE_LOADS__",
+  "__SUPERCOV_PHASE_ID__",
+  "__SUPERCOV_RESET__",
+  "__SUPERCOV_SERVER_PHASE_STORAGES__",
+  "__SUPERCOV_TERMINATION_FLUSHERS__",
+  "__SUPERCOV_TERMINATION_INSTALLED__",
+  "__SUPERCOV_WASM_REGIONS__",
+  "__SUPERCOV_WASM_REGISTRY__",
+  "__SUPERCOV_WASM_STRONG__",
+  "__SUPERCOV_WORKER_EVIDENCE__",
+  "__SUPERCOV_WORKER_TOKEN__",
+]) {
+  if (!Object.prototype.hasOwnProperty.call(runtimeGlobal, name))
+    Object.defineProperty(runtimeGlobal, name, { value: void 0, writable: true, configurable: true, enumerable: false });
 }
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
@@ -532,7 +562,7 @@ function resetCoverage(testId2) {
   if (!state.probeV2Clock.fast)
     state.probeV2Clock.e = NaN;
   if (testId2)
-    setRuntimeGlobal("__SUPERCOV_MCDC_TEST_ID__", testId2);
+    runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
   if (isBrowser) {
     try {
       localStorage.removeItem(storageKey);
@@ -1123,8 +1153,22 @@ function wasmRegionsWanted() {
     return true;
   return typeof process !== "undefined" && process.env != null && process.env.SUPERCOV_WASM_REGIONS === "1";
 }
+// A strong pass over Rust compiled to wasm: the mutant each instance runs is
+// handed to it through its exports (SUPERCOV_WASM_STRONG names the crates'
+// directories, `docs/design/mutation-drivers.md`).
+function wasmStrongRoots() {
+  if (Array.isArray(runtimeGlobal.__SUPERCOV_WASM_STRONG__))
+    return runtimeGlobal.__SUPERCOV_WASM_STRONG__;
+  const named = typeof process !== "undefined" && process.env != null ? process.env.SUPERCOV_WASM_STRONG : void 0;
+  if (typeof named !== "string" || named === "")
+    return void 0;
+  if (parsedWasmRoots === void 0 || parsedWasmRoots[0] !== named)
+    parsedWasmRoots = [named, JSON.parse(named)];
+  return parsedWasmRoots[1];
+}
+var parsedWasmRoots;
 function installWasmRegistry() {
-  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !wasmRegionsWanted())
+  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !(wasmRegionsWanted() || wasmStrongRoots()))
     return;
   runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ = true;
   if (!runtimeGlobal.__supercovWasm)
@@ -1148,6 +1192,7 @@ function registerWasmRealm(realm) {
   function Recorded(module, imports) {
     const instance = new Instance(module, imports);
     instances.push(instance);
+    activateWasm(instance);
     return instance;
   }
   Recorded.prototype = Instance.prototype;
@@ -1162,13 +1207,59 @@ function registerWasmRealm(realm) {
     try {
       wasm[name] = function() {
         return original.apply(wasm, arguments).then(function(result) {
-          instances.push(result instanceof Instance ? result : result.instance);
+          const instance = result instanceof Instance ? result : result.instance;
+          instances.push(instance);
+          activateWasm(instance);
           return result;
         });
       };
     } catch (e) {
     }
   });
+}
+/**
+ * Switches the active mutant on in a wasm instance, as the Rust strong
+ * runtime exports it: the mutant's file, relative to its crate's Cargo
+ * workspace, written into `__supercov_strong_buffer_<key>`, and its index
+ * given to `__supercov_strong_activate_<key>`. A mutant of no crate's (or
+ * none) switches every crate's off.
+ */
+function activateWasm(instance) {
+  const roots = wasmStrongRoots();
+  const exports = instance && instance.exports;
+  if (!roots || !exports || !exports.memory)
+    return;
+  const strong = strongState();
+  let file = "";
+  let index = BigInt.asUintN(64, BigInt(-1));
+  for (const root of roots) {
+    if (typeof strong.file === "string" && strong.index >= 0 && strong.file.startsWith(root)) {
+      file = strong.file.slice(root.length);
+      index = BigInt(strong.index);
+      break;
+    }
+  }
+  const bytes = new TextEncoder().encode(file);
+  for (const name of Object.keys(exports)) {
+    if (name.indexOf("__supercov_strong_activate_") !== 0)
+      continue;
+    const buffer = exports["__supercov_strong_buffer_" + name.slice("__supercov_strong_activate_".length)];
+    if (typeof buffer !== "function" || bytes.length > 4096)
+      continue;
+    try {
+      new Uint8Array(exports.memory.buffer, Number(buffer()), bytes.length).set(bytes);
+      exports[name](bytes.length, index);
+    } catch (e) {
+    }
+  }
+}
+/** Every instance the runtime remembers runs the active mutant. */
+function activateWasmInstances() {
+  const instances = runtimeGlobal.__supercovWasm;
+  if (!instances || !wasmStrongRoots())
+    return;
+  for (const instance of instances)
+    activateWasm(instance);
 }
 installWasmRegistry();
 function wasmBase64(bytes) {
@@ -1421,9 +1512,9 @@ function currentRequestContext() {
 function activateCoverageScope(scope) {
   switchWasmOwner(scope);
   if (scope)
-    setRuntimeGlobal("__SUPERCOV_ACTIVE_SCOPE__", scope);
+    runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
   else
-    delete runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
+    runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = void 0;
   activateProbeV2Context(scope ? { scope } : {});
 }
 function coverageCarrier() {
@@ -2588,6 +2679,12 @@ function probeArithmetic(left, right, op) {
 }
 function probeCounterpart(result, left, right, op) {
   if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  // `+` with a string operand gives a string, and `-` always a number (and
+  // the reverse): they differ, whatever the operands. Working the other out
+  // would also turn a string the program builds by `+` (which V8 keeps as a
+  // rope) flat at every step: a path built a segment at a time copied every
+  // prefix of itself, and dot-prop's test of 100,000 levels ran out of memory.
+  if ((op === 0 || op === 1) && (typeof left === "string" || typeof right === "string")) return "differs";
   let other;
   try {
     other = probeArithmetic(left, right, probeArithmeticSwap[op]);
@@ -2814,6 +2911,7 @@ function setActiveMutant(file, index) {
   const slot = strong.slots.get(file);
   if (slot !== void 0)
     slot.a = index;
+  activateWasmInstances();
 }
 function clearActiveMutant() {
   setActiveMutant(void 0, -1);

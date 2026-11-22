@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { commandFor, drive, outcomes, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { spawnSync } from "node:child_process";
+import { delimiter } from "node:path";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -43,7 +45,7 @@ const tests = [
     test_("b1", "t/b.test.js", 2_000), test_("b2", "t/b.test.js", 2_000),
     test_("c1", "t/c.test.js"), test_("c2", "t/c.test.js"),
     test_("d1", "t/d.test.js"),
-    test_("v1", "t/v.test.js", 1, "vitest"),
+    test_("v1", "t/v.spec.js", 1, "playwright"),
 ];
 const at = (id) => tests.findIndex((one) => one.id === id);
 const mutant = (id, candidates, extra = {}) => ({ id, file: "src/a.js", candidates: candidates.map((name) => ({ test: at(name), reason: "infected" })), ...extra });
@@ -119,8 +121,8 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.equal(verdicts["second-file"].killedBy, "t/c.test.js > c2");
     assert.match(verdicts.d.reason, /t\/d\.test\.js does not finish without a mutant/);
     assert.match(verdicts.unplaceable.reason, /function-source/);
-    assert.match(verdicts.elsewhere.reason, /ran under vitest/);
-    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under vitest/);
+    assert.match(verdicts.elsewhere.reason, /ran under playwright/);
+    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under playwright/);
     assert.equal(verdicts.nothing.reason, "no-runnable-candidate");
     // b2 alone fails without the mutant too: the kill was no kill, and the
     // whole file let the mutant live.
@@ -178,4 +180,61 @@ test("a job's command names its file where the runner takes one, and runs a proj
     finally {
         rmSync(root, { recursive: true, force: true });
     }
+});
+
+test("a command that starts Jest or Mocha itself names its arguments to them", () => {
+    assert.deepEqual(jestArguments(["/p/node_modules/.bin/jest", "--env", "node"]), ["--env", "node"]);
+    assert.deepEqual(jestArguments(["node", "node_modules/jest-cli/bin/jest.js", "-c", "x.js"]), ["-c", "x.js"]);
+    assert.equal(jestArguments(["npm", "test"]), undefined);
+    assert.deepEqual(mochaArguments(["/p/node_modules/.bin/mocha", "--check-leaks"]), ["--check-leaks"]);
+    assert.deepEqual(mochaArguments(["node", "node_modules/mocha/bin/_mocha"]), []);
+    assert.equal(mochaArguments(["npm", "test"]), undefined);
+    const root = mkdtempSync(join(tmpdir(), "supercov-package-"));
+    try {
+        assert.equal(packageIsCommonJs(root), true);
+        writeFileSync(join(root, "package.json"), '{"type":"module"}');
+        assert.equal(packageIsCommonJs(root), false);
+        writeFileSync(join(root, "package.json"), '{"type":"commonjs"}');
+        assert.equal(packageIsCommonJs(root), true);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+// The wasm output wrapper (strongWasmOut.cjs, embedded in strongJobs.mjs):
+// the tool writes elsewhere, each file is renamed into place only where it
+// changed, and the wrapper notes that it ran.
+test("a rebuild of the same wasm glue changes nothing in place", () => {
+  assert.equal(WASM_OUT, readFileSync(resolve(import.meta.dirname, "../../runtime/javascript/strongWasmOut.cjs"), "utf8"));
+  const root = mkdtempSync(join(tmpdir(), "supercov-wasm-out-"));
+  try {
+    const real = join(root, "real");
+    const wrappers = join(root, "wrappers");
+    mkdirSync(real);
+    mkdirSync(wrappers);
+    // A stand-in wasm-bindgen: writes its glue, and a snippet, into --out-dir.
+    writeFileSync(join(real, "wasm-bindgen"), `#!/bin/sh\nwhile [ "$1" != "--out-dir" ]; do shift; done\nmkdir -p "$2/snippets"\nprintf "glue $GLUE" > "$2/glue.js"\nprintf snippet > "$2/snippets/a.js"\n`, { mode: 0o755 });
+    writeFileSync(join(wrappers, "wasm-bindgen"), WASM_OUT, { mode: 0o755 });
+    const build = (glue) => spawnSync(join(wrappers, "wasm-bindgen"), ["--target", "nodejs", "--out-dir", "pkg", "a.wasm"], {
+      cwd: root,
+      env: { ...process.env, GLUE: glue, PATH: `${wrappers}${delimiter}${real}${delimiter}${process.env.PATH}` },
+      encoding: "utf8",
+    });
+    assert.equal(build("one").status, 0);
+    assert.equal(readFileSync(join(root, "pkg/glue.js"), "utf8"), "glue one");
+    assert.equal(readFileSync(join(root, "pkg/snippets/a.js"), "utf8"), "snippet");
+    assert.ok(existsSync(join(wrappers, "used")));
+    const before = statSync(join(root, "pkg/glue.js")).ino;
+    // The same glue again: the file in place is the one there before.
+    assert.equal(build("one").status, 0);
+    assert.equal(statSync(join(root, "pkg/glue.js")).ino, before);
+    // Other glue: renamed into place.
+    assert.equal(build("two").status, 0);
+    assert.equal(readFileSync(join(root, "pkg/glue.js"), "utf8"), "glue two");
+    assert.deepEqual(spawnSync("ls", [root], { encoding: "utf8" }).stdout.split("\n").filter((name) => name.includes("supercov")), []);
+  }
+  finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

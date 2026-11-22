@@ -1033,6 +1033,17 @@ pub(crate) fn mutant_change(mutant: &supercov_engine::mutants_query::MutantEntry
     }
 }
 
+/// A mutant's strong verdict, where a strong pass gave it one; empty
+/// otherwise.
+pub(crate) fn strong_verdict(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    mutant
+        .strong
+        .as_ref()
+        .and_then(|verdict| verdict["status"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// The hint that a mutant not infected is practically untestable.
 fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
     match mutant.weak.untestable {
@@ -1066,12 +1077,13 @@ pub(crate) fn mutants_command(
         command.push_str(&format!(" {}", shell_quote(location)));
     }
     let options = &request.mutants;
-    if !options.statuses.is_empty() {
-        let names = options
-            .statuses
-            .iter()
-            .map(|status| status.name())
-            .collect::<Vec<_>>();
+    let names = options
+        .statuses
+        .iter()
+        .map(|status| status.name())
+        .chain(options.strong_statuses.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    if !names.is_empty() {
         command.push_str(&format!(" --status {}", names.join(",")));
     }
     if let Some(mutator) = &options.mutator {
@@ -1350,6 +1362,17 @@ fn mutants_text(
                 count(summary.status.equivalent),
             ),
         ]);
+        if let Some(strong) = &summary.strong {
+            lines.push(format!(
+                "  Strong       score {} · {}",
+                score(summary.mutation_score),
+                strong
+                    .iter()
+                    .map(|(status, n)| format!("{} {status}", count(*n)))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ));
+        }
     }
     if let Some(diff) = &data.diff {
         return diff_mutants_text(request, data, page, diff, lines);
@@ -1417,7 +1440,9 @@ fn mutants_text(
             }
         }
     }
-    let unfiltered = request.mutants.statuses.is_empty() && request.mutants.mutator.is_none();
+    let unfiltered = request.mutants.statuses.is_empty()
+        && request.mutants.strong_statuses.is_empty()
+        && request.mutants.mutator.is_none();
     if data.file.is_none() && unfiltered {
         // The files by how many mutants their tests reach and do not infect,
         // then by how many no test reaches (`mutants_query` orders them).
@@ -1498,6 +1523,16 @@ fn mutants_text(
                 mutants_command(request, data, None)
             ));
         }
+        if summary
+            .strong
+            .as_ref()
+            .is_some_and(|strong| strong.contains_key("survived"))
+        {
+            lines.push(format!(
+                "list the mutants the tests let survive: {} --status survived",
+                mutants_command(request, data, None)
+            ));
+        }
         return lines.join("\n");
     }
     lines.push(String::new());
@@ -1520,11 +1555,15 @@ fn mutants_text(
         data.mutants.iter().for_each(|mutant| {
             lines.extend([
                 format!(
-                    "{}:{}  {}  {}{}{}",
+                    "{}:{}  {}  {}{}{}{}",
                     mutant.span.start[0],
                     mutant.span.start[1],
                     mutant.mutator,
                     mutant.status.name(),
+                    match strong_verdict(mutant) {
+                        verdict if verdict.is_empty() => String::new(),
+                        verdict => format!("  strong: {verdict}"),
+                    },
                     untestable_suffix(mutant),
                     stryker(&mutant.stryker)
                 ),
@@ -1566,9 +1605,21 @@ fn mutants_text(
             ]
         });
         let [at, mutator, code, status] = widths;
+        // The strong verdict beside the weak status, where a pass gave one.
+        let strong_width = data
+            .mutants
+            .iter()
+            .map(|mutant| strong_verdict(mutant).chars().count())
+            .max()
+            .unwrap_or(0);
         lines.extend(data.mutants.iter().map(|mutant| {
+            let strong = if strong_width == 0 {
+                String::new()
+            } else {
+                format!("{:<strong_width$}  ", strong_verdict(mutant))
+            };
             format!(
-                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {}{}{}",
+                "{:<at$}  {:<mutator$}  {:<code$}  {:<status$}  {strong}{}{}{}",
                 position(mutant),
                 mutant.mutator,
                 change(mutant),

@@ -5759,7 +5759,7 @@ public class J {
 }
 "#;
         let listed = ids(file, source);
-        let mut sorted = |line: u32| {
+        let sorted = |line: u32| {
             let mut found = on_line(&listed, file, line);
             found.sort();
             found
@@ -5841,7 +5841,7 @@ class K(var count: Int) {
 }
 "#;
         let listed = ids(file, source);
-        let mut sorted = |line: u32| {
+        let sorted = |line: u32| {
             let mut found = on_line(&listed, file, line);
             found.sort();
             found
@@ -5933,7 +5933,7 @@ public class M {
 }
 "#;
         let listed = ids(file, source);
-        let mut sorted = |line: u32| {
+        let sorted = |line: u32| {
             let mut found = on_line(&listed, file, line);
             found.sort();
             found

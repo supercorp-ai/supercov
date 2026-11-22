@@ -1,0 +1,234 @@
+{
+  "project": "hono",
+  "scenario": "pr-stryker",
+  "shard": null,
+  "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+  "startedAt": "2026-11-20T00:09:51.199Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.6.0",
+    "vitest": "5.0.1",
+    "vitestProject": "5.0.1"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/honojs/hono 75ff8e3ea18485589816881c6278bc9783e56602 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.472,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.05,
+        "sysS": 0.02,
+        "cpuS": 0.07,
+        "cpuPercent": "16%",
+        "maxRssKiB": 19040,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.6.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.48,
+      "wallS": 1.955,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.74,
+        "sysS": 0.17,
+        "cpuS": 0.91,
+        "cpuPercent": "46%",
+        "maxRssKiB": 188980,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.44,
+      "wallS": 0.755,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.92,
+        "sysS": 0.74,
+        "cpuS": 3.66,
+        "cpuPercent": "487%",
+        "maxRssKiB": 242284,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 3.19,
+      "wallS": 0.999,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.99,
+        "sysS": 0.43,
+        "cpuS": 1.42,
+        "cpuPercent": "143%",
+        "maxRssKiB": 337724,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "stryker-incremental-base",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental-base.json",
+      "startOffsetS": 4.22,
+      "wallS": 257.906,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2730.22,
+        "sysS": 105.95,
+        "cpuS": 2836.17,
+        "cpuPercent": "1099%",
+        "maxRssKiB": 1544836,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/*.ts",
+          "src/router/**/*.ts",
+          "src/utils/**/*.ts",
+          "!src/**/*.test.ts",
+          "!src/**/types.ts",
+          "!src/utils/http-status.ts",
+          "!src/**/*.d.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental-base.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental-base.json"
+    },
+    {
+      "name": "stryker-lines",
+      "command": "node_modules/.bin/stryker run stryker.stryker-lines.json",
+      "startOffsetS": 262.14,
+      "wallS": 27.624,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 33.51,
+        "sysS": 2.72,
+        "cpuS": 36.23,
+        "cpuPercent": "131%",
+        "maxRssKiB": 661004,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/utils/url.ts:144-144"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-lines.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-lines.json"
+    },
+    {
+      "name": "stryker-incremental",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental.json",
+      "startOffsetS": 289.76,
+      "wallS": 37.86,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 53.42,
+        "sysS": 3.38,
+        "cpuS": 56.8,
+        "cpuPercent": "150%",
+        "maxRssKiB": 951764,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/*.ts",
+          "src/router/**/*.ts",
+          "src/utils/**/*.ts",
+          "!src/**/*.test.ts",
+          "!src/**/types.ts",
+          "!src/utils/http-status.ts",
+          "!src/**/*.d.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental.json"
+    }
+  ],
+  "changedLines": [
+    "src/utils/url.ts:144-144"
+  ],
+  "totalS": 327.62
+}
