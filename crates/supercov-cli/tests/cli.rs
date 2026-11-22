@@ -25230,11 +25230,13 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
 fn an_interrupted_javascript_pass_leaves_no_process_running() {
     use std::os::unix::process::CommandExt;
     let project = mutants_project("js-strong-interrupted");
-    // Under a mutant, the test starts a process and waits: its pid and the
-    // runner's to the marker.
+    // A function only this test runs: under a mutant (its value is not 4),
+    // the test starts a process and waits, its pid and the runner's to the
+    // marker.
+    project.write("src/twice.js", "export const twice = (n) => n * 2;\n");
     project.write(
         "test/slow.test.js",
-        "import assert from \"node:assert/strict\";\nimport { spawn } from \"node:child_process\";\nimport { readFileSync, renameSync, writeFileSync } from \"node:fs\";\nimport { shipping } from \"../src/cart.js\";\ndescribe(\"slow\", () => {\n  it(\"waits under a mutant\", async function () {\n    this.timeout(0);\n    assert.equal(shipping(80), 0);\n    const job = process.env.SUPERCOV_STRONG_JOB ? JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_JOB, \"utf8\")) : null;\n    if (!job?.mutant) return;\n    const sleeper = spawn(\"sleep\", [\"120\"], { stdio: \"ignore\" });\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    writeFileSync(`${marker}.tmp`, `${process.pid} ${sleeper.pid}`);\n    renameSync(`${marker}.tmp`, marker);\n    await new Promise((done) => setTimeout(done, 120000));\n  });\n});\n",
+        "import assert from \"node:assert/strict\";\nimport { spawn } from \"node:child_process\";\nimport { renameSync, writeFileSync } from \"node:fs\";\nimport { twice } from \"../src/twice.js\";\ndescribe(\"slow\", () => {\n  it(\"waits under a mutant\", async function () {\n    this.timeout(0);\n    if (twice(2) === 4) return;\n    const sleeper = spawn(\"sleep\", [\"120\"], { stdio: \"ignore\" });\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    writeFileSync(`${marker}.tmp`, `${process.pid} ${sleeper.pid}`);\n    renameSync(`${marker}.tmp`, marker);\n    await new Promise((done) => setTimeout(done, 120000));\n  });\n});\n",
     );
     project.commit("slow");
     project
