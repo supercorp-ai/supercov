@@ -629,6 +629,14 @@ Candidates under another runner (a Vitest test of the same run) are not run
 by this pass: a mutant no Playwright test kills is then an `error`, never a
 `survived` it has not earned.
 
+Validated on playwright-test-coverage (`910da570`, a Vite app served by
+`npm run dev`, three tests in `e2e/`, whose config names no `testDir`, where
+Supercov's own config from `.supercov/` used to find "No tests"): its 9
+mutants run are 7 `timeout` and 2 `survived`, and each applied by hand to
+the source with `npx playwright test` as written agrees: the 7 fail (their
+tests wait out Playwright's 30 s), the 2 pass. The pass takes 400 s, nearly
+all of it those tests' own waits and their retry with twice the budget.
+
 ## Runners that start a process per test file (jobs)
 
 Jest, node:test, Mocha, AVA, node-tap, bun:test and Vitest's Browser Mode have
