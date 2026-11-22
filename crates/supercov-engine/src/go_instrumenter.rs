@@ -1528,7 +1528,7 @@ pub struct StrongMutant {
 
 /// What the type checker says of the expression a token is the operator
 /// of (`go_mutants`' check), by the token's offset.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SiteFacts {
     pub constant: bool,

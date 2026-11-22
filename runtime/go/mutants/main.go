@@ -209,7 +209,13 @@ func run(req request) (answer, error) {
 }
 
 func list(req request) ([]listed, error) {
-	args := []string{"list", "-e", "-test", "-deps", "-export", "-json"}
+	// A type fact of a file is the same in its package's test variant: only
+	// a viability check, which must type-check as `go test` builds, needs
+	// the tests and their dependencies.
+	args := []string{"list", "-e", "-deps", "-export", "-json"}
+	if !req.FactsOnly {
+		args = append(args, "-test")
+	}
 	if req.Tags != "" {
 		args = append(args, "-tags", req.Tags)
 	}

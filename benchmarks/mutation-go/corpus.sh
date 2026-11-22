@@ -64,12 +64,21 @@ case $command in
     mkdir -p "$out"
     chmod +x "$binary"
     clock() { python3 -c 'import time; print(time.time())'; }
+    # Round 1 starts with no .supercov at all: the type checker's helper is
+    # built, and its facts asked. Later rounds keep .supercov/cache, as a
+    # project's next run does: the helper is built, and the facts of the
+    # same sources known. `probes-edited` changes a source first (a comment
+    # at its end), so the facts are asked again.
+    rm -rf "$dir/.supercov"
+    edited=$(cd "$dir" && find . -name '*.go' ! -name '*_test.go' ! -path './.supercov/*' | sort | head -1)
     {
       for round in 1 2 3; do
-        for mode in plain probes; do
-          rm -rf "$dir/.supercov"
+        for mode in plain probes probes-edited; do
+          [ "$round" = 1 ] && [ "$mode" = probes-edited ] && continue
+          find "$dir/.supercov" -mindepth 1 -maxdepth 1 ! -name cache -exec rm -rf {} + 2>/dev/null || true
+          [ "$mode" = probes-edited ] && printf '\n// edited %s\n' "$round" >> "$dir/$edited"
           start=$(clock)
-          if [ "$mode" = probes ]; then
+          if [ "$mode" != plain ]; then
             (cd "$dir" && SUPERCOV_MUTANTS=1 "$binary" -- go test ./... > /dev/null 2>&1) || true
           else
             (cd "$dir" && "$binary" -- go test ./... > /dev/null 2>&1) || true

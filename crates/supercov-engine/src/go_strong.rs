@@ -315,29 +315,48 @@ fn vet_one(
         .map(|(_, line, column, message)| format!("{}:{line}:{column}: {message}", mutant.file))
 }
 
-/// What the type checker says of every mutated token of `files` under
-/// `root`, by file and token offset: for a measured run's value probes,
-/// which need an operation's type. `None` where it cannot say (no `go`,
-/// a package that does not check).
+/// What the type checker says of every operation token of `files` under
+/// `root` (an arithmetic, bitwise or assignment operator's), by file and
+/// token offset: for a measured run's value probes, which need an
+/// operation's type, and only an operation's. `None` where it cannot say
+/// (no `go`, a package that does not check). Kept in `.supercov/cache` for
+/// the next run of the same sources, and asked only where there is an
+/// operation.
 pub(crate) fn site_facts(
     root: &Path,
     files: &[String],
 ) -> Option<HashMap<String, HashMap<usize, SiteFacts>>> {
+    let mut sources = Vec::new();
+    let mut asked = Vec::new();
+    for file in files {
+        let Ok(source) = fs::read_to_string(root.join(file)) else {
+            continue;
+        };
+        let Ok(tokens) = crate::go_mutants::listed_tokens(&source) else {
+            continue;
+        };
+        let mut offsets = BTreeSet::new();
+        for (token, _, replacement) in tokens {
+            // One question a token: its facts are its expression's.
+            if operation(&source[token.0..token.1]) && offsets.insert(token.0) {
+                asked.push((file.clone(), token.0, replacement));
+            }
+        }
+        sources.push((file.clone(), source));
+    }
+    if asked.is_empty() {
+        return Some(HashMap::new());
+    }
+    let key = facts_key(root, &sources);
+    let cache = root.join(".supercov/cache/go-facts.json");
+    let cached = fs::read(&cache)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CachedFacts>(&bytes).ok())
+        .filter(|cached| cached.key == key);
+    if let Some(cached) = cached {
+        return Some(cached.facts);
+    }
     let helper = helper(root, "go").ok()?;
-    let asked = files
-        .iter()
-        .filter_map(|file| {
-            let source = fs::read_to_string(root.join(file)).ok()?;
-            let tokens = crate::go_mutants::listed_tokens(&source).ok()?;
-            Some(
-                tokens
-                    .into_iter()
-                    .map(|(token, _, replacement)| (file.clone(), token.0, replacement))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .flatten()
-        .collect::<Vec<_>>();
     let patterns = files
         .iter()
         .map(|file| pattern(&directory_of(file)))
@@ -359,7 +378,49 @@ pub(crate) fn site_facts(
         .for_each(|((file, offset, _), checked)| {
             facts.entry(file).or_default().insert(offset, checked.facts);
         });
+    // A cache that cannot be written is asked again next time.
+    let _ = fs::write(
+        &cache,
+        serde_json::to_vec(&CachedFacts {
+            key,
+            facts: facts.clone(),
+        })
+        .expect("plain data serializes"),
+    );
     Some(facts)
+}
+
+/// Whether a token is an operation's, whose value probe needs its type.
+fn operation(token: &str) -> bool {
+    matches!(
+        token.trim_end_matches('='),
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "&^" | "<<" | ">>"
+    )
+}
+
+/// The facts of one run's sources, by what they were asked of.
+#[derive(Deserialize, serde::Serialize)]
+struct CachedFacts {
+    key: String,
+    facts: HashMap<String, HashMap<usize, SiteFacts>>,
+}
+
+/// What the type checker's facts depend on: the helper, the environment
+/// that picks the build, the module's requirements and every source of the
+/// run. A newer Go toolchain with the same sources keeps them.
+fn facts_key(root: &Path, sources: &[(String, String)]) -> String {
+    let environment = ["GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT"]
+        .map(|name| std::env::var(name).unwrap_or_default());
+    let requirements = ["go.mod", "go.sum", "go.work"]
+        .map(|name| fs::read_to_string(root.join(name)).unwrap_or_default());
+    let mut parts = vec![HELPER_SOURCE, HELPER_MODULE];
+    parts.extend(environment.iter().map(String::as_str));
+    parts.extend(requirements.iter().map(String::as_str));
+    sources.iter().for_each(|(file, source)| {
+        parts.push(file);
+        parts.push(source);
+    });
+    crate::stable_ids::digest(&parts)
 }
 
 /// The type checker's helper, built from the embedded source into the
@@ -385,7 +446,9 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
     fs::write(source.join("main.go"), HELPER_SOURCE).map_err(failed(&source))?;
     fs::write(source.join("go.mod"), HELPER_MODULE).map_err(failed(&source))?;
     let output = Command::new(go)
-        .args(["build", "-o"])
+        // Without its symbol table and paths: a third smaller, and the
+        // same program.
+        .args(["build", "-trimpath", "-ldflags=-s -w", "-o"])
         .arg(&binary)
         .arg(".")
         .current_dir(&source)
@@ -1881,16 +1944,60 @@ mod tests {
         std::fs::write(root.join("bad.go"), "package p\n\nfunc (").unwrap();
         let facts = site_facts(&root, &["gone.go".into(), "bad.go".into()]).unwrap();
         assert!(facts.is_empty());
+        // Comparisons alone ask nothing: their probes need no type.
+        std::fs::write(root.join("c.go"), "package p\n\nvar x = 1 < 2\n").unwrap();
+        assert!(site_facts(&root, &["c.go".into()]).unwrap().is_empty());
         // An answer that is not one.
-        std::fs::write(root.join("a.go"), "package p\n\nvar x = 1 + 2\n").unwrap();
+        let source = "package p\n\nvar x = 1 + 2\n";
+        std::fs::write(root.join("a.go"), source).unwrap();
+        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        // What the last run of the same sources was told, it is told again;
+        // what a run of other sources was, it is not.
+        let facts = HashMap::from([(
+            "a.go".to_owned(),
+            HashMap::from([(
+                source.find('+').unwrap(),
+                SiteFacts {
+                    integer: true,
+                    type_name: "int".into(),
+                    ..SiteFacts::default()
+                },
+            )]),
+        )]);
+        let cache = |key: String| {
+            std::fs::write(
+                root.join(".supercov/cache/go-facts.json"),
+                serde_json::to_vec(&CachedFacts {
+                    key,
+                    facts: facts.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        cache(facts_key(&root, &[("a.go".into(), source.into())]));
+        assert_eq!(site_facts(&root, &["a.go".into()]), Some(facts.clone()));
+        cache("another".into());
         assert_eq!(site_facts(&root, &["a.go".into()]), None);
         let _ = std::fs::remove_dir_all(&root);
-        // No helper: the project directory is a file.
-        let file =
+        // No helper: its cache cannot be made, `.supercov` being a file.
+        let root =
             std::env::temp_dir().join(format!("supercov-go-helper-file-{}", std::process::id()));
-        std::fs::write(&file, "").unwrap();
-        assert_eq!(site_facts(&file, &["a.go".into()]), None);
-        let _ = std::fs::remove_file(&file);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".supercov"), "").unwrap();
+        std::fs::write(root.join("a.go"), source).unwrap();
+        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_an_operation_s_token_needs_its_type() {
+        for token in ["+", "-=", "&^", "<<=", ">>", "|"] {
+            assert!(operation(token), "{token}");
+        }
+        for token in ["<", "<=", "==", "!=", "&&", "++", "break"] {
+            assert!(!operation(token), "{token}");
+        }
     }
 
     #[test]
