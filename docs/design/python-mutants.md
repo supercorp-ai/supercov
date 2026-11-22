@@ -223,7 +223,7 @@ Four public projects (`benchmarks/mutation-python/README.md`): python-slugify
 9.2.0, cachetools 8.0.2 (its `unittest.TestCase` suite run both by pytest
 and by `python -m unittest`), parse 1.22.4 and humanize 4.17.0. The ground
 truth is mutmut's full kill matrix: every test run against every one of
-mutmut's 5,438 mutants (`kill_matrix.py`), on the same SoroCI machines (16
+mutmut's 5,438 mutants (`kill_matrix.py`), on the same CI machines (16
 CPUs) as Supercov. Supercov measured the same sources mutmut mutates
 (`SUPERCOV_SOURCE_ROOTS`) with a plain run, and planned from reach alone.
 
@@ -275,7 +275,7 @@ made `None` whose evaluation raised read as never evaluated, and a generator
 that is a call's only argument was probed at the wrong span (12). The first matrix was also
 made on another machine, where a locale and gettext's tools changed what
 humanize's tests do (4), and without parse's README in mutmut's tree, whose
-doctests the suite runs (8): the matrix above was made again on SoroCI, with
+doctests the suite runs (8): the matrix above was made again on the CI machines, with
 the README copied.
 
 ### Speed
