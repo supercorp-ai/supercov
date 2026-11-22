@@ -86,6 +86,9 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
           TestPlan plan = launcher.discover(request);
           for (TestIdentifier root : plan.getRoots()) {
             collect(plan, root, byName);
+            if (!plan.getChildren(root).isEmpty()) {
+              byName.put(CLASS_FOUND, "");
+            }
           }
         } catch (ClassNotFoundException | LinkageError e) {
           // Another module's test.
@@ -119,6 +122,12 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         // invocation is selected by the template's id and its index.
         test.handle = invocationId(test.name, byName);
       }
+      if (test.handle == null && byName.containsKey(CLASS_FOUND)) {
+        // An engine that registers its tests only as it runs them (Kotest's
+        // specs, a Spock feature's iterations): the class runs, and the
+        // test is the one of that name among those it registered.
+        test.handle = new Object[] {test.className, test.name};
+      }
       return test.handle != null;
     }
 
@@ -145,6 +154,9 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
       String segment = template.contains("[test-factory:") ? "dynamic-test" : "test-template-invocation";
       return template + "/[" + segment + ":#" + index + "]";
     }
+
+    /** Marks a class the platform discovered, its tests or not. */
+    static final String CLASS_FOUND = "\u0005";
 
     /** A name that two tests share once their identity hashes are left out. */
     static final String AMBIGUOUS = "\u0003";
@@ -190,6 +202,10 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
 
     @Override
     public void execute(SupercovStrongPass.Test test, final SupercovStrongPass.Outcome outcome) {
+      if (test.handle instanceof Object[] && !(test.handle instanceof String[])) {
+        executeByClass(test, outcome);
+        return;
+      }
       LauncherDiscoveryRequest request;
       if (test.handle instanceof String[]) {
         final String key = ((String[]) test.handle)[1];
@@ -226,6 +242,50 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
       if (!ran[0] && test.handle instanceof String[] && !outcome.failed) {
         outcome.failed = true;
         outcome.reason = "the test did not run alone";
+      }
+    }
+
+    /**
+     * Runs the test's class and reads the outcome of the test of its name, as
+     * the engine registers it during the run: the class's other tests run
+     * too, and their outcomes say nothing of this one.
+     */
+    private void executeByClass(
+        SupercovStrongPass.Test test, final SupercovStrongPass.Outcome outcome) {
+      final Object[] handle = (Object[]) test.handle;
+      final String wanted = (String) handle[1];
+      final String wantedKey = stableKey(wanted);
+      final TestPlan[] running = {null};
+      final boolean[] ran = {false};
+      launcher.execute(
+          LauncherDiscoveryRequestBuilder.request()
+              .selectors(DiscoverySelectors.selectClass((String) handle[0]))
+              .build(),
+          new TestExecutionListener() {
+            @Override
+            public void testPlanExecutionStarted(TestPlan plan) {
+              running[0] = plan;
+            }
+
+            @Override
+            public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
+              if (!identifier.isTest()) {
+                return;
+              }
+              String name = name(running[0], identifier);
+              if (!name.equals(wanted)
+                  && (wantedKey == null || !wantedKey.equals(stableKey(name)))) {
+                return;
+              }
+              ran[0] = true;
+              if (result.getStatus() == TestExecutionResult.Status.FAILED) {
+                outcome.fail(result.getThrowable().orElse(null));
+              }
+            }
+          });
+      if (!ran[0] && !outcome.failed) {
+        outcome.failed = true;
+        outcome.reason = "the test did not run with its class";
       }
     }
   }

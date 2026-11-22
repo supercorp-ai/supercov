@@ -66,5 +66,25 @@
     "antJvmArgs": "-Droot=ROOT,-Dbuild.tests.value=ROOT/build/testcases,-Dbuild.classes.value=ROOT/build/classes,-Dant.home=ANTHOME,-Doffline=true,-Djava.io.tmpdir=ROOT/build/testcases/tmp",
     "junit5": false,
     "jdk": "17"
+  },
+  "java-diff-utils": {
+    "repository": "https://github.com/java-diff-utils/java-diff-utils.git",
+    "tag": "java-diff-utils-parent-4.12",
+    "build": "maven",
+    "flags": "",
+    "targets": "com.github.difflib.*",
+    "junit5": true,
+    "jdk": "17"
+  },
+  "aedile": {
+    "repository": "https://github.com/sksamuel/aedile.git",
+    "tag": "v3.0.4",
+    "build": "gradle",
+    "module": "aedile-core",
+    "flags": "",
+    "targets": "com.sksamuel.aedile.*",
+    "junit5": true,
+    "jdk": "11",
+    "pit": false
   }
 }
