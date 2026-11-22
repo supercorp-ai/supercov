@@ -175,6 +175,7 @@ try {
     if (entry.suite === 'Playwright') {
       const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
       const { summary } = JSON.parse(tested.stdout);
+      assert.ok(summary, `${entry.suite}\n${tested.stdout}\n${tested.stderr}`);
       assert.ok(summary.ran > 0 && summary.error === summary.ran, `${entry.suite}\n${JSON.stringify(summary)}\n${tested.stderr}`);
     } else {
       const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);

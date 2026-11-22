@@ -255,6 +255,26 @@ pub fn run_strong_rust(
 
     // Each mutant to run, found again in its file as the plan names it.
     let (jobs, sources) = planned_jobs(&plan, &root, &tests, &results, started);
+    // One whose tests all run under another runner (JavaScript tests over
+    // the crate's wasm in a browser page; under Node the JavaScript pass has
+    // them, `docs/design/mutation-drivers.md`) is an error here, before the
+    // command is read as Cargo's.
+    let (jobs, foreign): (Vec<Job>, Vec<Job>) = jobs
+        .into_iter()
+        .partition(|job| foreign_runner(job, &tests).is_none());
+    for job in &foreign {
+        let runner = foreign_runner(job, &tests).expect("partitioned");
+        results.verdict(
+            &job.id,
+            "error",
+            None,
+            0,
+            started,
+            Some(format!(
+                "its tests run under {runner}, which the Rust pass does not drive"
+            )),
+        );
+    }
     let _ = writeln!(
         diagnostics,
         "[supercov] strong pass: {} Rust mutant(s) to run",
@@ -586,6 +606,19 @@ fn planned_jobs(
         });
     }
     (jobs, sources)
+}
+
+/// The runner all of `job`'s candidates run under, where it is one and not
+/// Rust's.
+fn foreign_runner<'t>(job: &Job, tests: &'t [PlannedTest]) -> Option<&'t str> {
+    let first = tests[*job.candidates.first()?].runner.as_str();
+    let foreign = !matches!(first, "rust-libtest" | "nextest" | "rustdoc");
+    (foreign
+        && job
+            .candidates
+            .iter()
+            .all(|test| tests[*test].runner == first))
+    .then_some(first)
 }
 
 /// Each file a plan's mutants are in: its source and its mutants, or `None`
@@ -1775,31 +1808,6 @@ fn run_job(
     results: &Results,
 ) -> &'static str {
     let started = Instant::now();
-    // Tests of another runner (JavaScript tests over the crate's wasm) are
-    // the JavaScript pass's to run (`docs/design/mutation-drivers.md`).
-    let foreign = job
-        .candidates
-        .iter()
-        .map(|test| tests[*test].runner.as_str())
-        .find(|runner| !matches!(*runner, "rust-libtest" | "nextest" | "rustdoc"));
-    if let Some(runner) = foreign
-        && job
-            .candidates
-            .iter()
-            .all(|test| tests[*test].runner == runner)
-    {
-        results.verdict(
-            &job.id,
-            "error",
-            None,
-            0,
-            started,
-            Some(format!(
-                "its tests run under {runner}, which the Rust pass does not drive"
-            )),
-        );
-        return "error";
-    }
     let mut candidates = job
         .candidates
         .iter()
