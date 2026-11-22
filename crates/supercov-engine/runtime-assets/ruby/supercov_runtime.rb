@@ -420,6 +420,13 @@ module Supercov
       # Per context, the value probes whose every kind has differed there.
       @values_done = {}
       @value_counts = {}
+      # Per context, the value outcomes not written yet, as bits by id:
+      # written at the next boundary with the hits (see flush_hits).
+      @pending_values = {}
+      # By probe key, true where the probe has nothing left to find in the
+      # one context every thread runs in: `Probe` then gives the value back
+      # without a call here. Emptied whenever a context starts or ends.
+      @value_skip = []
       @builtins = {}
       @vector_counts = {}
       @open = {}
@@ -814,6 +821,7 @@ module Supercov
     # background and the run says so. Probe hits stay exact per thread.
     def switch(identity)
       @mutex.synchronize do
+        @value_skip.clear
         thread = Thread.current
         ending = thread[:__supercov_context] || @context
         settle_arrivals(ending)
@@ -1173,12 +1181,13 @@ module Supercov
     # The queued hits, one record per context; each id is named once per
     # process and numbered after that.
     def flush_hits
-      pending = @seen_lock.synchronize do
-        taken = @pending_hits
+      pending, values = @seen_lock.synchronize do
+        taken = [@pending_hits, @pending_values]
         @pending_hits = {}
+        @pending_values = {}
         taken
       end
-      return if pending.empty?
+      return if pending.empty? && values.empty?
 
       # Open (or, in a forked child, reopen) the evidence file first: that
       # decides which numbers the file has already named.
@@ -1193,6 +1202,19 @@ module Supercov
         end
         record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
         record("t" => "hits", "ctx" => context, "n" => numbers)
+      end
+      # Value outcomes the same way: a record apiece cost a suite that runs
+      # value probes in every test a third of its time.
+      values.each do |context, bits|
+        fresh = []
+        numbers = bits.each_key.map do |id|
+          @id_numbers[id] ||= begin
+            fresh << id
+            @id_numbers.size
+          end
+        end
+        record("t" => "ids", "first" => @id_numbers.size - fresh.size, "names" => fresh) unless fresh.empty?
+        record("t" => "cmps", "ctx" => context, "n" => numbers, "o" => bits.values)
       end
     end
 
@@ -1540,9 +1562,12 @@ module Supercov
         return if bits & bit != 0
 
         seen[id] = bits | bit
+        pending = (@pending_values[context] ||= {})
+        pending[id] = (pending[id] || 0) | bit
       end
-      record("t" => "cmp", "ctx" => context, "id" => id, "o" => outcome)
     end
+
+    attr_reader :value_skip
 
     # A probe every kind of which has differed in this context has nothing
     # left to find there: its call goes straight to the receiver.
@@ -1573,6 +1598,13 @@ module Supercov
 
     def note_values_done(context, key)
       (@values_done[context] || @seen_lock.synchronize { @values_done[context] ||= {} })[key] = true
+      # Skipped outright only where no thread can be in another context:
+      # `switch` empties the list whenever that changes.
+      return if @mutex.owned?
+
+      @mutex.synchronize do
+        @value_skip[key] = true if context == @context && @active_threads.each_value.all? { |each| each == context }
+      end
     end
 
     # while/until predicate: a decision plus the loop's zero/entered outcomes.
@@ -1804,6 +1836,7 @@ module Supercov
   class Probe
     def initialize(runtime)
       @runtime = runtime
+      @skip = runtime.value_skip
     end
 
     def c(key, index, value) = @runtime.probe_condition(key, index, value)
@@ -1823,9 +1856,9 @@ module Supercov
     def p(key) = @runtime.probe_propagated(key)
     def ok(key, value) = @runtime.probe_ok(key, value)
     def ok0(key) = @runtime.probe_ok0(key)
-    def bo(key, left) = @runtime.probe_operand(key, left)
-    def mc(key, receiver) = @runtime.probe_call(key, receiver)
-    def cv(key, value) = @runtime.probe_truth(key, value)
+    def bo(key, left) = @skip[key] ? left : @runtime.probe_operand(key, left)
+    def mc(key, receiver) = @skip[key] ? receiver : @runtime.probe_call(key, receiver)
+    def cv(key, value) = @skip[key] ? value : @runtime.probe_truth(key, value)
   end
 
   # The receiver of a project that uses Ractors. A non-main Ractor cannot
