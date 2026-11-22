@@ -229,6 +229,16 @@ used 2.3-2.6× less CPU on hono and tRPC, but hono's and tRPC's wall time did
 not drop, because their copies wait on their tests' own timers, not on
 starting.
 
+Nor does the pass choose warm workers per suite. What a run knows of a suite
+(its module graph's size, each file's setup time, its isolation settings, a
+first stage timed cold and warm) says how much warm workers would save, not
+whether a suite's files leave nothing behind in their process: pathe's,
+hono's and tRPC's leaks came from ordinary test files with nothing in their
+configuration to tell them apart, and one leak changes a verdict. A rule that
+picks warm workers where they pay would pick them where they are wrong. The
+sound part of what they saved, a worker's start, is what workers started
+ahead save.
+
 Node's compile cache (`NODE_COMPILE_CACHE`, which Vitest does not turn on) was
 tried as a sound way to start copies faster, and also dropped: the strong pass
 was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
