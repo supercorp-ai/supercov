@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The Go mutation corpus: public modules pinned at a tag, run under Gremlins
 # 0.6.0 (every test per mutant) and under Supercov's strong pass, for
-# scripts/gremlins-compare.mjs to join.
+# benchmarks/mutation-go/gremlins-compare.mjs to join.
 #
 #   go-mutation-corpus.sh clone <project> <dir>
 #   go-mutation-corpus.sh gremlins <dir> <out>

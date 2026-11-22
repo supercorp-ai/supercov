@@ -1,20 +1,20 @@
 //! The strong pass for Go (`docs/design/strong-mutation.md`, Go): every
-//! mutant a plan runs, against its candidate tests, in test binaries built
-//! once.
+//! mutant a plan runs, in test binaries built once.
 //!
 //! The pass copies the project, writes every mutant it runs into its file
 //! behind a switch (`go_instrumenter::strong_rewrite`), and builds each test
 //! package's binary once (`go test -c`). One mutant is active per process
-//! (`SUPERCOV_ACTIVE_MUTANT`), so a mutant's run is its candidate tests in
-//! the binary of each package they are in, by exact name (`-test.run
-//! '^(TestA|TestB)$'`), stopping at the first failure (`-test.failfast`).
+//! (`SUPERCOV_ACTIVE_MUTANT`), so a mutant's run is the binary of each
+//! package that holds one of its candidate tests, the package whole, as `go
+//! test` runs it, stopping at the first failure (`-test.failfast`).
 //!
 //! Before anything is built, the module's own type checker says which
 //! mutants compile (`runtime/go/mutants`, go/types over the package and its
-//! tests, as `go test` compiles them): a mutant that does not is `unviable`
-//! and gets no switch. A switch the compiler still refuses is found by
-//! building, at the site the error is in, and its mutants are built one
-//! each, from the file with only that mutant in place.
+//! tests, as `go test` compiles them), and `go vet` with the checks `go
+//! test` runs says which it refuses: such a mutant is `unviable` and gets no
+//! switch. A switch the compiler still refuses is found by building, at the
+//! site the error is in, and its mutants are built one each, from the file
+//! with only that mutant in place.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::fault_fs as fs;
 use crate::fault_process::Launch;
 use crate::go_instrumenter::{RUNTIME_IMPORT, SiteFacts, StrongFile, StrongMutant};
 
@@ -119,9 +120,10 @@ pub struct GoFlags {
 }
 
 /// The flags `command` gives `go test` that change what is built or how
-/// tests run: `-tags`, `-race`, `-mod`, `-trimpath`, `-ldflags`, and
-/// `-short`, `-cpu`, `-parallel` for the binary. The rest (`-run`, `-v`,
-/// `-count`, `-cover`, `-timeout`) the pass sets itself, or does not need.
+/// tests run: `-tags`, `-race`, `-mod`, `-trimpath`, `-ldflags`, `-gcflags`,
+/// `-asmflags`, `-asan`, `-msan`, `-vet`, and `-short`, `-cpu`, `-parallel`
+/// for the binary. The rest (`-run`, `-v`, `-count`, `-cover`, `-timeout`)
+/// the pass sets itself, or does not need.
 pub fn go_flags(command: &[String]) -> GoFlags {
     let mut flags = GoFlags {
         program: "go".into(),
@@ -134,41 +136,32 @@ pub fn go_flags(command: &[String]) -> GoFlags {
         return flags;
     };
     flags.program = command[test].clone();
-    let mut arguments = command[test + 2..].iter().peekable();
+    let mut arguments = command[test + 2..].iter();
     while let Some(argument) = arguments.next() {
-        let Some(flag) = argument.strip_prefix('-') else {
-            continue;
-        };
-        let flag = flag.strip_prefix('-').unwrap_or(flag);
+        let flag = argument.trim_start_matches('-');
         let (name, value) = match flag.split_once('=') {
             Some((name, value)) => (name, Some(value.to_owned())),
             None => (flag, None),
         };
-        let mut value_of = |value: Option<String>| value.or_else(|| arguments.next().cloned());
+        let mut value_of = || value.clone().or_else(|| arguments.next().cloned());
         match name {
             "tags" => {
-                if let Some(tags) = value_of(value) {
-                    flags.build.push(format!("-tags={tags}"));
-                    flags.tags = tags;
-                }
+                let tags = value_of().unwrap_or_default();
+                flags.build.push(format!("-tags={tags}"));
+                flags.tags = tags;
             }
-            "mod" | "ldflags" => {
-                if let Some(value) = value_of(value) {
-                    flags.build.push(format!("-{name}={value}"));
-                }
+            "mod" | "ldflags" | "gcflags" | "asmflags" => {
+                flags
+                    .build
+                    .push(format!("-{name}={}", value_of().unwrap_or_default()));
             }
-            "vet" => flags.vet_off |= value_of(value).as_deref() == Some("off"),
-            "gcflags" | "asmflags" => {
-                if let Some(value) = value_of(value) {
-                    flags.build.push(format!("-{name}={value}"));
-                }
-            }
-            "race" | "trimpath" | "asan" | "msan" => flags.build.push(argument.clone()),
+            "vet" => flags.vet_off |= value_of().as_deref() == Some("off"),
+            "race" | "trimpath" | "asan" | "msan" => flags.build.push(format!("-{name}")),
             "short" => flags.test.push("-test.short".into()),
             "cpu" | "parallel" => {
-                if let Some(value) = value_of(value) {
-                    flags.test.push(format!("-test.{name}={value}"));
-                }
+                flags
+                    .test
+                    .push(format!("-test.{name}={}", value_of().unwrap_or_default()));
             }
             _ => {}
         }
@@ -179,33 +172,63 @@ pub fn go_flags(command: &[String]) -> GoFlags {
 /// `flags` with those of each `go test` the command started, as its last
 /// run with mutants recorded them (`make test`, a script, gotestsum): each
 /// flag once, the first `-tags` kept.
-pub fn recorded_flags(mut flags: GoFlags, invocations: &[Vec<String>]) -> GoFlags {
-    for invocation in invocations {
+pub fn recorded_flags(flags: GoFlags, invocations: &[Vec<String>]) -> GoFlags {
+    invocations.iter().fold(flags, |mut flags, invocation| {
         let command = std::iter::once("go".to_owned())
             .chain(invocation.iter().cloned())
             .collect::<Vec<_>>();
         let seen = go_flags(&command);
-        for flag in seen.build {
-            let named = flag.split('=').next().unwrap_or_default().to_owned();
-            if !flags
-                .build
-                .iter()
-                .any(|kept| kept.split('=').next() == Some(named.as_str()))
-            {
-                flags.build.push(flag);
-            }
-        }
-        for flag in seen.test {
-            if !flags.test.contains(&flag) {
-                flags.test.push(flag);
-            }
-        }
+        let named = |flag: &str| flag.split('=').next().unwrap_or_default().to_owned();
+        let kept = flags
+            .build
+            .iter()
+            .map(|flag| named(flag))
+            .collect::<HashSet<_>>();
+        flags.build.extend(
+            seen.build
+                .into_iter()
+                .filter(|flag| !kept.contains(&named(flag))),
+        );
+        let kept = flags.test.clone();
+        flags
+            .test
+            .extend(seen.test.into_iter().filter(|flag| !kept.contains(flag)));
         if flags.tags.is_empty() {
             flags.tags = seen.tags;
         }
         flags.vet_off |= seen.vet_off;
+        flags
+    })
+}
+
+/// `work` on each of `items`, on `workers` threads at once, each taking the
+/// next as it is done; on this thread where `workers` is one.
+fn on_workers<T: Send, R: Send>(
+    workers: usize,
+    items: Vec<T>,
+    work: impl Fn(T) -> R + Sync,
+) -> Vec<R> {
+    if workers <= 1 {
+        return items.into_iter().map(work).collect();
     }
-    flags
+    let queue = Mutex::new(items.into_iter().collect::<std::collections::VecDeque<_>>());
+    let done = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        (0..workers).for_each(|_| {
+            scope.spawn(|| {
+                while let Some(item) = { queue.lock().expect("queue").pop_front() } {
+                    let result = work(item);
+                    done.lock().expect("done").push(result);
+                }
+            });
+        });
+    });
+    done.into_inner().expect("done")
+}
+
+/// An I/O failure, as the pass says it.
+fn failed(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
+    move |error| format!("{}: {error}", path.display())
 }
 
 /// The mutants `go vet` rejects with the checks `go test` runs, of those
@@ -216,44 +239,48 @@ pub fn recorded_flags(mut flags: GoFlags, invocations: &[Vec<String>]) -> GoFlag
 fn vet_rejections(
     pass: &Pass,
     files: &BTreeMap<String, FileMutants>,
-    runnable: &[&PlanMutant],
-    checked: &HashMap<(String, usize), Checked>,
+    viable: &[&PlanMutant],
 ) -> HashMap<(String, usize), String> {
-    if pass.flags.vet_off {
-        return HashMap::new();
-    }
-    let candidates = runnable
+    let candidates = viable
         .iter()
         .filter(|mutant| {
-            let viable = checked
-                .get(&(mutant.file.clone(), mutant.index))
-                .is_none_or(|answer| answer.status != "unviable");
             let listed = &files[&mutant.file];
-            viable
+            !pass.flags.vet_off
                 && crate::go_mutants::vet_candidate(&listed.source, listed.tokens[mutant.index].0)
         })
+        .copied()
         .collect::<Vec<_>>();
-    let found = Mutex::new(HashMap::new());
-    let queue = Mutex::new(candidates);
-    std::thread::scope(|scope| {
-        for _ in 0..pass.request.workers.max(1) {
-            scope.spawn(|| {
-                loop {
-                    let Some(mutant) = queue.lock().expect("queue").pop() else {
-                        break;
-                    };
-                    if let Some(finding) = vet_one(pass, files, mutant) {
-                        found
-                            .lock()
-                            .expect("found")
-                            .insert((mutant.file.clone(), mutant.index), finding);
-                    }
-                }
-            });
-        }
-    });
-    pass.profile.lock().expect("profile").vetted = found.lock().expect("found").len();
-    found.into_inner().expect("found")
+    let found = on_workers(pass.request.workers, candidates, |mutant| {
+        vet_one(pass, files, mutant).map(|finding| ((mutant.file.clone(), mutant.index), finding))
+    })
+    .into_iter()
+    .flatten()
+    .collect::<HashMap<_, _>>();
+    pass.profile.lock().expect("profile").vetted = found.len();
+    found
+}
+
+/// The source of `mutant`'s file with only it in place.
+fn mutated_source(files: &BTreeMap<String, FileMutants>, mutant: &PlanMutant) -> String {
+    let listed = &files[&mutant.file];
+    let (token, _, replacement) = listed.tokens[mutant.index];
+    format!(
+        "{}{replacement}{}",
+        &listed.source[..token.0],
+        &listed.source[token.1..]
+    )
+}
+
+/// An overlay for `go` (`-overlay`) that replaces `file` with `contents`,
+/// written in `directory`: the overlay's path.
+fn write_overlay(directory: &Path, file: &Path, contents: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory).map_err(failed(directory))?;
+    let replaced = directory.join("mutated.go");
+    let overlay = directory.join("overlay.json");
+    let document = json!({ "Replace": { file.to_string_lossy(): replaced } });
+    fs::write(&replaced, contents).map_err(failed(&replaced))?;
+    fs::write(&overlay, document.to_string()).map_err(failed(&overlay))?;
+    Ok(overlay)
 }
 
 /// `go vet -atomic -bools` of a mutant's package with only that mutant in
@@ -263,29 +290,13 @@ fn vet_one(
     files: &BTreeMap<String, FileMutants>,
     mutant: &PlanMutant,
 ) -> Option<String> {
-    let listed = &files[&mutant.file];
-    let (token, _, replacement) = listed.tokens[mutant.index];
     let directory = pass
         .scratch
         .join(format!("vet-{}", crate::stable_ids::digest(&[&mutant.id])));
-    std::fs::create_dir_all(&directory).ok()?;
-    let mutated = directory.join("mutated.go");
-    let overlay = directory.join("overlay.json");
-    std::fs::write(
-        &mutated,
-        format!(
-            "{}{replacement}{}",
-            &listed.source[..token.0],
-            &listed.source[token.1..]
-        ),
-    )
-    .ok()?;
-    std::fs::write(
-        &overlay,
-        serde_json::to_vec(&json!({
-            "Replace": { pass.request.root.join(&mutant.file).to_string_lossy(): mutated }
-        }))
-        .expect("plain data serializes"),
+    let overlay = write_overlay(
+        &directory,
+        &pass.request.root.join(&mutant.file),
+        &mutated_source(files, mutant),
     )
     .ok()?;
     let output = Command::new(&pass.flags.program)
@@ -296,23 +307,12 @@ fn vet_one(
         .current_dir(pass.request.root)
         .launch_output()
         .ok()?;
-    let _ = std::fs::remove_dir_all(&directory);
-    if output.status.success() {
-        return None;
-    }
     let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    // The overlay's file is reported by its own path: the mutant's.
     compile_errors(&text)
         .into_iter()
         .next()
-        .map(|(file, line, column, message)| {
-            // The overlay's file is reported by its own path: the mutant's.
-            let file = if file.ends_with("mutated.go") {
-                mutant.file.clone()
-            } else {
-                file.trim_start_matches("./").to_owned()
-            };
-            format!("{file}:{line}:{column}: {message}")
-        })
+        .map(|(_, line, column, message)| format!("{}:{line}:{column}: {message}", mutant.file))
 }
 
 /// What the type checker says of every mutated token of `files` under
@@ -324,18 +324,20 @@ pub(crate) fn site_facts(
     files: &[String],
 ) -> Option<HashMap<String, HashMap<usize, SiteFacts>>> {
     let helper = helper(root, "go").ok()?;
-    let mut asked = Vec::new();
-    for file in files {
-        let Ok(source) = std::fs::read_to_string(root.join(file)) else {
-            continue;
-        };
-        let Ok(tokens) = crate::go_mutants::listed_tokens(&source) else {
-            continue;
-        };
-        for (token, _, replacement) in tokens {
-            asked.push((file.clone(), token.0, replacement));
-        }
-    }
+    let asked = files
+        .iter()
+        .filter_map(|file| {
+            let source = fs::read_to_string(root.join(file)).ok()?;
+            let tokens = crate::go_mutants::listed_tokens(&source).ok()?;
+            Some(
+                tokens
+                    .into_iter()
+                    .map(|(token, _, replacement)| (file.clone(), token.0, replacement))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect::<Vec<_>>();
     let patterns = files
         .iter()
         .map(|file| pattern(&directory_of(file)))
@@ -350,11 +352,13 @@ pub(crate) fn site_facts(
     });
     let answer = run_helper(&helper, root, &request).ok()?;
     let mut facts = HashMap::<String, HashMap<usize, SiteFacts>>::new();
-    for ((file, offset, _), checked) in asked.into_iter().zip(answer.mutants) {
-        if checked.status != "unchecked" {
+    asked
+        .into_iter()
+        .zip(answer.mutants)
+        .filter(|(_, checked)| checked.status != "unchecked")
+        .for_each(|((file, offset, _), checked)| {
             facts.entry(file).or_default().insert(offset, checked.facts);
-        }
-    }
+        });
     Some(facts)
 }
 
@@ -363,21 +367,23 @@ pub(crate) fn site_facts(
 const HELPER_SOURCE: &str = include_str!("../runtime-assets/go/mutants/main.go");
 const HELPER_MODULE: &str = include_str!("../runtime-assets/go/mutants/go.mod");
 
+/// The helper's executable's name.
+#[cfg(windows)]
+const HELPER_NAME: &str = "supercov-mutants.exe";
+#[cfg(not(windows))]
+const HELPER_NAME: &str = "supercov-mutants";
+
 pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
     let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
     let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
-    let binary = directory.join(if cfg!(windows) {
-        "supercov-mutants.exe"
-    } else {
-        "supercov-mutants"
-    });
+    let binary = directory.join(HELPER_NAME);
     if binary.is_file() {
         return Ok(binary);
     }
     let source = directory.join("src");
-    crate::fault_fs::create_dir_all(&source).map_err(|error| error.to_string())?;
-    crate::fault_fs::write(source.join("main.go"), HELPER_SOURCE).map_err(|e| e.to_string())?;
-    crate::fault_fs::write(source.join("go.mod"), HELPER_MODULE).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&source).map_err(failed(&source))?;
+    fs::write(source.join("main.go"), HELPER_SOURCE).map_err(failed(&source))?;
+    fs::write(source.join("go.mod"), HELPER_MODULE).map_err(failed(&source))?;
     let output = Command::new(go)
         .args(["build", "-o"])
         .arg(&binary)
@@ -387,7 +393,7 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
         .env("GOFLAGS", "-mod=mod")
         .env("CGO_ENABLED", "0")
         .launch_output()
-        .map_err(|error| format!("go build: {error}"))?;
+        .map_err(failed(Path::new(go)))?;
     if !output.status.success() {
         return Err(format!(
             "could not build the Go type-check helper: {}",
@@ -413,8 +419,8 @@ struct CheckAnswer {
     mutants: Vec<Checked>,
 }
 
-/// Each file's mutants the pass runs: the file's list (every mutant, its
-/// token and replacement) and the indices the plan runs.
+/// A file's list as the pass reads it again: every mutant's token and
+/// replacement, in its list's order.
 struct FileMutants {
     source: String,
     tokens: Vec<crate::go_mutants::ListedToken>,
@@ -426,28 +432,25 @@ struct Profile {
     switched: usize,
     unplaceable: usize,
     unviable: usize,
+    vetted: usize,
     solo_builds: usize,
     build_rounds: usize,
     binaries: usize,
     baselines: usize,
-    confirmations: usize,
-    overturned: usize,
     runs: usize,
     retries: usize,
-    vetted: usize,
 }
 
 /// One package's test binary and what its baseline said.
 #[derive(Debug, Clone, Default)]
 struct Package {
     binary: PathBuf,
-    /// Tests that passed their baseline, with how long each took.
-    passed: HashMap<String, u64>,
     /// Tests that fail without a mutant: left out of every run.
     skip: Vec<String>,
     /// How long the baseline took.
     baseline_ms: u64,
-    /// The package's binary did not build.
+    /// Why the package cannot run its mutants: its binary did not build, or
+    /// its tests do not pass without one.
     broken: Option<String>,
     /// The directories (from the copy's root) of every package its test
     /// binary links: a binary that links no package of a mutant's cannot
@@ -461,53 +464,36 @@ struct RunOutcome {
     passed: bool,
     timed_out: bool,
     hit_limit: bool,
-    /// The first test reported failed, its top-level name.
-    failed: Option<String>,
-    /// Every top-level test reported failed.
+    /// Every top-level test reported failed, the first first.
     failures: Vec<String>,
-    /// Top-level tests in the order they started.
-    started: Vec<String>,
-    /// Each top-level test that passed, and its duration.
-    durations: HashMap<String, u64>,
+    /// How many top-level tests started.
+    started: u64,
     elapsed_ms: u64,
 }
 
-/// Reads `go test -v` output for what ran and how it ended.
-fn read_output(text: &str) -> (Vec<String>, Vec<String>, HashMap<String, u64>) {
+/// Reads `go test -v` output for the top-level tests that started and those
+/// that failed.
+fn read_output(text: &str) -> (u64, Vec<String>) {
+    let mut started = HashSet::new();
     let mut failed = Vec::<String>::new();
-    let mut started = Vec::new();
-    let mut durations = HashMap::new();
-    for line in text.lines() {
-        let line = line.trim_start();
+    text.lines().map(str::trim_start).for_each(|line| {
         if let Some(name) = line.strip_prefix("=== RUN") {
             let name = name.trim();
-            if !name.contains('/') && !started.iter().any(|seen| seen == name) {
-                started.push(name.to_owned());
+            if !name.contains('/') {
+                started.insert(name.to_owned());
             }
         } else if let Some(rest) = line.strip_prefix("--- FAIL:") {
             let name = rest.split_whitespace().next().unwrap_or_default();
-            let top = name.split('/').next().unwrap_or(name);
-            if !top.is_empty() && !failed.iter().any(|seen| seen == top) {
-                failed.push(top.to_owned());
-            }
-        } else if let Some(rest) = line.strip_prefix("--- PASS:") {
-            let mut words = rest.split_whitespace();
-            let name = words.next().unwrap_or_default();
-            if !name.contains('/') {
-                let seconds = words
-                    .next()
-                    .and_then(|time| time.strip_prefix('('))
-                    .and_then(|time| time.strip_suffix("s)"))
-                    .and_then(|time| time.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                durations.insert(name.to_owned(), (seconds * 1000.0).round() as u64);
+            let top = name.split('/').next().unwrap_or_default().to_owned();
+            if !failed.contains(&top) {
+                failed.push(top);
             }
         }
-    }
-    (failed, started, durations)
+    });
+    (started.len() as u64, failed)
 }
 
-/// A `-test.run` or `-test.skip` pattern matching exactly `names`.
+/// A `-test.skip` pattern matching exactly `names`.
 fn anchored(names: &[String]) -> String {
     format!("^(?:{})$", names.join("|"))
 }
@@ -531,7 +517,7 @@ impl Pass<'_> {
             results: self.request.results.to_owned(),
         }
         .timeouts_path();
-        std::fs::read_to_string(path).is_ok_and(|text| {
+        fs::read_to_string(path).is_ok_and(|text| {
             text.lines()
                 .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                 .any(|record| record["mutant"] == mutant)
@@ -548,13 +534,11 @@ impl Pass<'_> {
             "reason": verdict.reason,
         });
         let mut file = self.results.lock().expect("results lock");
-        let _ = writeln!(file, "{line}");
-        let _ = file.flush();
+        let _ = fs::write_all(&mut file, format!("{line}\n").as_bytes());
     }
 
-    /// Runs `binary` in package directory `directory` with `-test.run` over
-    /// `names` (every test where `None`), `mutant` active, for at most
-    /// `limit`.
+    /// Runs `binary` in package directory `directory`, every test but
+    /// `skip`, `mutant` active, for at most `limit`.
     fn run_binary(
         &self,
         binary: &Path,
@@ -572,78 +556,93 @@ impl Pass<'_> {
             .arg("-test.paniconexit0")
             .arg(format!("-test.timeout={}ms", limit.as_millis() + 60_000))
             .args(&self.flags.test)
+            .args(
+                (!skip.is_empty())
+                    .then(|| format!("-test.skip={}", anchored(skip)))
+                    .into_iter()
+                    .chain(mutant.map(|_| "-test.failfast".to_owned())),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env(crate::strong_driver::STRONG_RESULTS, self.request.results)
             .env(crate::strong_driver::MUTANT_HIT_LIMIT, hit_limit())
-            .env_remove(ACTIVE_MUTANT_ENV);
-        if mutant.is_some() {
-            command.arg("-test.failfast");
-        }
-        if !skip.is_empty() {
-            command.arg(format!("-test.skip={}", anchored(skip)));
-        }
-        if let Some(mutant) = mutant {
-            command.env(ACTIVE_MUTANT_ENV, mutant);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let mut child = match command.launch() {
-            Ok(child) => child,
-            Err(error) => {
-                return RunOutcome {
-                    passed: false,
-                    timed_out: false,
-                    hit_limit: false,
-                    failed: Some(format!("<could not start: {error}>")),
-                    failures: Vec::new(),
-                    started: Vec::new(),
-                    durations: HashMap::new(),
-                    elapsed_ms: 0,
-                };
-            }
+            .env(ACTIVE_MUTANT_ENV, mutant.unwrap_or("-"));
+        process_group(&mut command);
+        self.profile.lock().expect("profile").runs += 1;
+        let Ok(mut child) = command.launch() else {
+            // A binary that would not start ran nothing, and passed nothing.
+            return RunOutcome {
+                passed: false,
+                timed_out: false,
+                hit_limit: false,
+                failures: Vec::new(),
+                started: 0,
+                elapsed_ms: 0,
+            };
         };
         let readers = [
-            child.stdout.take().map(read_all),
-            child.stderr.take().map(read_all),
+            read_all(child.stdout.take().expect("piped")),
+            read_all(child.stderr.take().expect("piped")),
         ];
-        let mut timed_out = false;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if started.elapsed() > limit => {
-                    timed_out = true;
-                    kill_tree(&mut child);
-                    break child.wait().ok();
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-                Err(_) => break None,
-            }
-        };
+        let (status, timed_out) = wait_for(&mut child, started, limit);
         let text = readers
-            .into_iter()
-            .flatten()
             .map(|reader| reader.join().unwrap_or_default())
-            .collect::<Vec<_>>()
             .join("\n");
-        let hit_limit = mutant.is_some_and(|mutant| self.timed_out(mutant));
-        let (failures, started_tests, durations) = read_output(&text);
-        self.profile.lock().expect("profile").runs += 1;
+        let (started_tests, failures) = read_output(&text);
         RunOutcome {
             passed: !timed_out && status.is_some_and(|status| status.success()),
             timed_out,
-            hit_limit,
-            failed: failures.first().cloned(),
+            hit_limit: mutant.is_some_and(|mutant| self.timed_out(mutant)),
             failures,
             started: started_tests,
-            durations,
             elapsed_ms: started.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// `child`'s exit, or its process group killed once `limit` has passed
+/// since `started`: the status, and whether the limit ended it.
+fn wait_for(
+    child: &mut std::process::Child,
+    started: Instant,
+    limit: Duration,
+) -> (Option<std::process::ExitStatus>, bool) {
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return (Some(status), false);
+        }
+        if started.elapsed() > limit {
+            kill_tree(child);
+            return (child.wait().ok(), true);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A test binary starts in a process group of its own, so the whole of what
+/// it starts can be stopped with it.
+#[cfg(unix)]
+fn process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    // SAFETY: kill(2) with a negative pid signals a process group; the
+    // group is the child's own, made for it at spawn.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 /// How many test binaries the pass runs at once: `SUPERCOV_STRONG_WORKERS`,
@@ -678,54 +677,32 @@ const ACTIVE_MUTANT_ENV: &str = crate::strong_driver::ACTIVE_MUTANT;
 fn read_all<R: std::io::Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = reader.read_to_end(&mut bytes);
+        let _ = fs::read_to_end_from(&mut reader, &mut bytes);
         String::from_utf8_lossy(&bytes).into_owned()
     })
-}
-
-fn kill_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        // The test binary's process group: it and whatever it started.
-        let group = child.id() as i32;
-        // SAFETY: kill(2) with a negative pid signals a process group; the
-        // group is the child's own, made for it at spawn.
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
 }
 
 /// Copies the project into `destination`, leaving out what is not the
 /// project's (`.git`, `.supercov`).
 fn copy_project(source: &Path, destination: &Path) -> Result<(), String> {
-    crate::fault_fs::create_dir_all(destination).map_err(|e| e.to_string())?;
-    for entry in std::fs::read_dir(source).map_err(|e| format!("{}: {e}", source.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name();
-        if name == ".git" || name == ".supercov" {
-            continue;
-        }
-        let target = destination.join(&name);
-        let kind = entry.file_type().map_err(|e| e.to_string())?;
-        if kind.is_dir() {
-            copy_project(&entry.path(), &target)?;
-        } else if kind.is_symlink() {
-            let link = std::fs::read_link(entry.path()).map_err(|e| e.to_string())?;
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&link, &target).map_err(|e| e.to_string())?;
-            #[cfg(not(unix))]
-            {
-                let _ = link;
-                std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
+    fs::create_dir_all(destination).map_err(failed(destination))?;
+    fs::read_dir(source)
+        .map_err(failed(source))?
+        .flatten()
+        .filter(|entry| !matches!(entry.file_name().to_str(), Some(".git" | ".supercov")))
+        .try_for_each(|entry| {
+            let path = entry.path();
+            let target = destination.join(entry.file_name());
+            let kind = fs::file_type(&entry).map_err(failed(&path))?;
+            if kind.is_dir() {
+                copy_project(&path, &target)
+            } else if kind.is_symlink() {
+                let link = fs::read_link(&path).map_err(failed(&path))?;
+                fs::symlink(&link, &target).map_err(failed(&target))
+            } else {
+                fs::copy(&path, &target).map(drop).map_err(failed(&path))
             }
-        } else {
-            std::fs::copy(entry.path(), &target)
-                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        }
-    }
-    Ok(())
+        })
 }
 
 /// The directory of `file` (`.` for the root), `/`-separated.
@@ -744,33 +721,38 @@ fn pattern(directory: &str) -> String {
 }
 
 /// The modules the copy holds, by directory, with the import path of the
-/// runtime each gets.
+/// runtime each gets: each its own, a `go.work`'s members each theirs.
 fn runtimes(workspace: &Path) -> Result<Vec<(String, String)>, String> {
     let members = crate::go_project::workspace_modules(workspace);
     let directories = if members.is_empty() {
-        vec![".".to_owned()]
+        BTreeSet::from([".".to_owned()])
     } else {
-        members.into_iter().collect()
+        members
     };
-    let mut runtimes = Vec::new();
-    for directory in directories {
-        let at = workspace.join(&directory);
-        let module = crate::go_project::module_path(&at)
-            .ok_or_else(|| format!("{}: no module path in go.mod", at.display()))?;
-        let runtime = at.join(crate::go_run::RUNTIME_DIRECTORY_NAME);
-        crate::fault_fs::create_dir_all(&runtime).map_err(|e| e.to_string())?;
-        for (name, contents) in crate::go_run::runtime_files() {
-            crate::fault_fs::write(runtime.join(name), contents).map_err(|e| e.to_string())?;
-        }
-        runtimes.push((
-            directory,
-            format!("{module}/{}", crate::go_run::RUNTIME_DIRECTORY_NAME),
-        ));
-    }
+    let mut runtimes = directories
+        .into_iter()
+        .map(|directory| {
+            let at = workspace.join(&directory);
+            let module = crate::go_project::module_path(&at)
+                .ok_or_else(|| format!("{}: no module path in go.mod", at.display()))?;
+            let runtime = at.join(crate::go_run::RUNTIME_DIRECTORY_NAME);
+            fs::create_dir_all(&runtime).map_err(failed(&runtime))?;
+            crate::go_run::runtime_files()
+                .into_iter()
+                .try_for_each(|(name, contents)| {
+                    fs::write(runtime.join(name), contents).map_err(failed(&runtime))
+                })?;
+            Ok((
+                directory,
+                format!("{module}/{}", crate::go_run::RUNTIME_DIRECTORY_NAME),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     runtimes.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
     Ok(runtimes)
 }
 
+/// The runtime import of the module `file` is in.
 fn runtime_for<'r>(runtimes: &'r [(String, String)], file: &str) -> &'r str {
     runtimes
         .iter()
@@ -778,8 +760,7 @@ fn runtime_for<'r>(runtimes: &'r [(String, String)], file: &str) -> &'r str {
         .map_or("", |(_, import)| import.as_str())
 }
 
-/// Compile errors in `output`: each `file:line:column: message` line, the
-/// file relative to `directory` as `go` prints it.
+/// Compile errors in `output`: each `file:line:column: message` line.
 fn compile_errors(output: &str) -> Vec<(String, usize, usize, String)> {
     output
         .lines()
@@ -796,12 +777,20 @@ fn compile_errors(output: &str) -> Vec<(String, usize, usize, String)> {
 
 /// The byte offset of 1-based `line` and byte `column` in `text`.
 fn offset_of(text: &str, line: usize, column: usize) -> Option<usize> {
-    let start = if line == 1 {
-        0
-    } else {
-        text.match_indices('\n').nth(line - 2)?.0 + 1
-    };
+    let start = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+        .nth(line.checked_sub(1)?)?;
     Some(start + column.saturating_sub(1))
+}
+
+/// Reads the plan, and opens the results to append to.
+fn open(request: &GoStrongRequest) -> Result<(Plan, std::fs::File), String> {
+    let bytes = fs::read(request.plan).map_err(failed(request.plan))?;
+    let plan = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    let results = fs::open_with(&options, request.results).map_err(failed(request.results))?;
+    Ok((plan, results))
 }
 
 /// Runs the plan's undecided mutants and writes a verdict for each to the
@@ -811,20 +800,8 @@ pub fn run_go_strong(
     diagnostics: &mut dyn Write,
 ) -> Result<Value, String> {
     let started = Instant::now();
-    let plan: Plan = serde_json::from_slice(
-        &std::fs::read(request.plan).map_err(|e| format!("{}: {e}", request.plan.display()))?,
-    )
-    .map_err(|e| format!("{}: {e}", request.plan.display()))?;
-    let work = request
-        .plan
-        .parent()
-        .ok_or("the plan has no directory")?
-        .to_owned();
-    let results = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(request.results)
-        .map_err(|e| format!("{}: {e}", request.results.display()))?;
+    let (plan, results) = open(request)?;
+    let work = request.plan.with_file_name("");
     let pass = Pass {
         request,
         flags: recorded_flags(
@@ -837,67 +814,90 @@ pub fn run_go_strong(
         profile: Mutex::new(Profile::default()),
         results: Mutex::new(results),
     };
-    for directory in [&pass.bins, &pass.scratch] {
-        crate::fault_fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    }
+    [&pass.bins, &pass.scratch]
+        .into_iter()
+        .try_for_each(|directory| fs::create_dir_all(directory).map_err(failed(directory)))?;
     let to_run = plan
         .mutants
         .iter()
         .filter(|mutant| mutant.decided.is_none())
         .collect::<Vec<_>>();
-    if to_run.is_empty() {
-        return Ok(summary(&pass, started));
+    if !to_run.is_empty() {
+        run_mutants(&pass, &plan, &to_run, diagnostics)?;
     }
+    Ok(summary(&pass, started))
+}
 
-    // Each file's list, read again from the project as the plan read it.
-    let mut files = BTreeMap::<String, FileMutants>::new();
-    let mut runnable = Vec::new();
-    for mutant in &to_run {
-        if !files.contains_key(&mutant.file) {
-            let source = std::fs::read_to_string(request.root.join(&mutant.file))
-                .map_err(|e| format!("{}: {e}", mutant.file))?;
+/// Each file of `mutants` as the pass reads it again, and the mutants whose
+/// file still lists them where the plan does: the others are `error`.
+fn read_files<'p>(
+    pass: &Pass,
+    mutants: &[&'p PlanMutant],
+) -> Result<(BTreeMap<String, FileMutants>, Vec<&'p PlanMutant>), String> {
+    let files = mutants
+        .iter()
+        .map(|mutant| mutant.file.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|file| {
+            let path = pass.request.root.join(&file);
+            let source = fs::read_to_string(&path).map_err(failed(&path))?;
             let tokens = crate::go_mutants::listed_tokens(&source).map_err(|e| e.to_string())?;
-            files.insert(mutant.file.clone(), FileMutants { source, tokens });
-        }
-        let listed = &files[&mutant.file];
-        let same = listed
-            .tokens
-            .get(mutant.index)
-            .is_some_and(|(token, mutator, replacement)| {
-                crate::go_mutants::mutant_id(
-                    &mutant.file,
-                    &listed.source,
-                    *token,
-                    mutator,
-                    replacement,
-                ) == mutant.id
-            });
-        if same {
-            runnable.push(*mutant);
-        } else {
-            pass.record(
-                &mutant.id,
-                &Verdict::of("error", "the file changed since the run: measure it again"),
-            );
-        }
-    }
+            Ok((file, FileMutants { source, tokens }))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let (same, changed): (Vec<&PlanMutant>, Vec<&PlanMutant>) =
+        mutants.iter().partition(|mutant| {
+            let listed = &files[&mutant.file];
+            listed
+                .tokens
+                .get(mutant.index)
+                .is_some_and(|(token, mutator, replacement)| {
+                    crate::go_mutants::mutant_id(
+                        &mutant.file,
+                        &listed.source,
+                        *token,
+                        mutator,
+                        replacement,
+                    ) == mutant.id
+                })
+        });
+    changed.iter().for_each(|mutant| {
+        pass.record(
+            &mutant.id,
+            &Verdict::of("error", "the file changed since the run: measure it again"),
+        );
+    });
+    Ok((files, same))
+}
 
-    // Which mutants compile, and what the type checker says of their sites:
-    // every listed mutant of each file, since a constant's switch has to
-    // hold the largest constant around it whether or not that one runs.
-    let helper = helper(request.root, &pass.flags.program)?;
-    let mut asked = Vec::new();
-    for (file, listed) in &files {
-        for (index, (token, _, replacement)) in listed.tokens.iter().enumerate() {
-            asked.push((file.clone(), index, token.0, *replacement));
-        }
-    }
+/// What the type checker says of every listed mutant of `files`, by file
+/// and index: every one, since a constant's switch has to hold the largest
+/// constant around it whether or not that one runs.
+fn check(
+    pass: &Pass,
+    files: &BTreeMap<String, FileMutants>,
+    diagnostics: &mut dyn Write,
+) -> Result<HashMap<(String, usize), Checked>, String> {
+    let helper = helper(pass.request.root, &pass.flags.program)?;
+    let asked = files
+        .iter()
+        .flat_map(|(file, listed)| {
+            listed
+                .tokens
+                .iter()
+                .enumerate()
+                .map(move |(index, (token, _, replacement))| {
+                    (file.clone(), index, token.0, *replacement)
+                })
+        })
+        .collect::<Vec<_>>();
     let patterns = files
         .keys()
         .map(|file| pattern(&directory_of(file)))
         .collect::<BTreeSet<_>>();
-    let check_request = json!({
-        "dir": request.root,
+    let request = json!({
+        "dir": pass.request.root,
         "patterns": patterns,
         "tags": pass.flags.tags,
         "go": pass.flags.program,
@@ -906,65 +906,168 @@ pub fn run_go_strong(
         })).collect::<Vec<_>>(),
     });
     let checked_at = Instant::now();
-    let answer = run_helper(&helper, request.root, &check_request)?;
+    let answer = run_helper(&helper, pass.request.root, &request)?;
     let _ = writeln!(
         diagnostics,
         "[supercov] type-checked {} Go mutant(s) in {} ms",
         asked.len(),
         checked_at.elapsed().as_millis()
     );
-    let mut checked = HashMap::<(String, usize), Checked>::new();
-    for ((file, index, _, _), answer) in asked.into_iter().zip(answer.mutants) {
-        checked.insert((file, index), answer);
-    }
+    Ok(asked
+        .into_iter()
+        .zip(answer.mutants)
+        .map(|((file, index, _, _), answer)| ((file, index), answer))
+        .collect())
+}
 
-    // `go test` runs a subset of `go vet` before it runs a test, and a
-    // mutant vet rejects fails `go test` as a compile error does.
-    let vetted = vet_rejections(&pass, &files, &runnable, &checked);
-    // The copy, with the runtime in each module.
+/// The switched files, rendered, written into the copy and built until the
+/// compiler takes them: each round leaves out the switches it refused.
+fn render(
+    pass: &Pass,
+    files: &BTreeMap<String, FileMutants>,
+    switched: &BTreeMap<String, Vec<StrongMutant>>,
+    checked: &HashMap<(String, usize), Checked>,
+    runtimes: &[(String, String)],
+) -> Result<BTreeMap<String, StrongFile>, String> {
+    let facts_of = |file: &str| -> HashMap<usize, SiteFacts> {
+        files[file]
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(index, (token, _, _))| {
+                let facts = checked
+                    .get(&(file.to_owned(), index))
+                    .map(|answer| answer.facts.clone())
+                    .unwrap_or_default();
+                (token.0, facts)
+            })
+            .collect()
+    };
+    let directories = switched
+        .keys()
+        .map(|file| pattern(&directory_of(file)))
+        .collect::<BTreeSet<_>>();
+    let mut refused = HashMap::<String, HashSet<usize>>::new();
+    // At most a round for each switch: each round refuses one at least.
+    loop {
+        pass.profile.lock().expect("profile").build_rounds += 1;
+        let rendered = switched
+            .iter()
+            .map(|(file, mutants)| {
+                let source = &files[file].source;
+                let strong = crate::go_instrumenter::strong_rewrite(
+                    file,
+                    source,
+                    mutants,
+                    &facts_of(file),
+                    refused.get(file).unwrap_or(&HashSet::new()),
+                    crate::go_project::language_minor(pass.request.root, file, source),
+                )
+                .expect("a file the plan listed parses");
+                let text = strong
+                    .text
+                    .replace(RUNTIME_IMPORT, runtime_for(runtimes, file));
+                let path = pass.workspace.join(file);
+                fs::write(&path, &text).map_err(failed(&path))?;
+                Ok((file.clone(), StrongFile { text, ..strong }))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        let output = Command::new(&pass.flags.program)
+            .arg("build")
+            .arg("-gcflags=-e")
+            .args(&pass.flags.build)
+            .args(&directories)
+            .current_dir(&pass.workspace)
+            .launch_output()
+            .map_err(failed(Path::new(&pass.flags.program)))?;
+        if output.status.success() {
+            return Ok(rendered);
+        }
+        let text = String::from_utf8_lossy(&output.stderr).into_owned();
+        let before = refused.values().map(HashSet::len).sum::<usize>();
+        compile_errors(&text)
+            .into_iter()
+            .filter_map(|(path, line, column, _)| {
+                let relative = path.trim_start_matches("./").to_owned();
+                let strong = rendered.get(&relative)?;
+                let at = offset_of(&strong.text, line, column)?;
+                // Outside every switch: the file's switches all go.
+                let indices = crate::go_instrumenter::strong_site_at(strong, at)
+                    .map(<[usize]>::to_vec)
+                    .unwrap_or_else(|| strong.switched.clone());
+                Some((relative, indices))
+            })
+            .for_each(|(relative, indices)| {
+                let tokens = &files[&relative].tokens;
+                refused
+                    .entry(relative.clone())
+                    .or_default()
+                    .extend(indices.iter().map(|index| tokens[*index].0.0));
+            });
+        if refused.values().map(HashSet::len).sum::<usize>() == before {
+            return Err(format!(
+                "the strong copy does not build, and not at a switch:\n{text}"
+            ));
+        }
+    }
+}
+
+/// Runs `mutants` (none decided), each against its candidates.
+fn run_mutants(
+    pass: &Pass,
+    plan: &Plan,
+    mutants: &[&PlanMutant],
+    diagnostics: &mut dyn Write,
+) -> Result<(), String> {
+    let (files, runnable) = read_files(pass, mutants)?;
+    let checked = check(pass, &files, diagnostics)?;
+    // A mutant that does not compile, or that `go vet` (which `go test`
+    // runs) refuses, is unviable: `go test` fails it before any test runs.
+    let (compiled, unviable): (Vec<_>, Vec<_>) = runnable.into_iter().partition(|mutant| {
+        checked
+            .get(&(mutant.file.clone(), mutant.index))
+            .is_none_or(|answer| answer.status != "unviable")
+    });
+    unviable.iter().for_each(|mutant| {
+        let error = checked[&(mutant.file.clone(), mutant.index)].error.clone();
+        pass.record(
+            &mutant.id,
+            &Verdict::of(
+                "unviable",
+                format!("does not compile: {}", error.unwrap_or_default()),
+            ),
+        );
+    });
+    let vetted = vet_rejections(pass, &files, &compiled);
+    let (live, rejected): (Vec<_>, Vec<_>) = compiled
+        .into_iter()
+        .partition(|mutant| !vetted.contains_key(&(mutant.file.clone(), mutant.index)));
+    rejected.iter().for_each(|mutant| {
+        let finding = &vetted[&(mutant.file.clone(), mutant.index)];
+        pass.record(
+            &mutant.id,
+            &Verdict::of(
+                "unviable",
+                format!("go vet, which go test runs, rejects it: {finding}"),
+            ),
+        );
+    });
+    pass.profile.lock().expect("profile").unviable = unviable.len() + rejected.len();
+
+    // The copy, with the runtime in each module, and the switches.
     let _ = writeln!(
         diagnostics,
         "[supercov] copying the project for the strong pass"
     );
     if pass.workspace.exists() {
-        std::fs::remove_dir_all(&pass.workspace).map_err(|e| e.to_string())?;
+        fs::remove_dir_all(&pass.workspace).map_err(failed(&pass.workspace))?;
     }
-    copy_project(request.root, &pass.workspace)?;
+    copy_project(pass.request.root, &pass.workspace)?;
     let runtimes = runtimes(&pass.workspace)?;
-
-    // Switches: viable mutants, by file.
-    let mut switched_by_file = BTreeMap::<String, Vec<StrongMutant>>::new();
-    let mut ids = HashMap::<(String, usize), String>::new();
-    let mut live = Vec::new();
-    for mutant in &runnable {
-        let answer = checked
-            .get(&(mutant.file.clone(), mutant.index))
-            .cloned()
-            .unwrap_or_default();
-        if let Some(finding) = vetted.get(&(mutant.file.clone(), mutant.index)) {
-            pass.profile.lock().expect("profile").unviable += 1;
-            pass.record(
-                &mutant.id,
-                &Verdict::of(
-                    "unviable",
-                    format!("go vet, which go test runs, rejects it: {finding}"),
-                ),
-            );
-            continue;
-        }
-        if answer.status == "unviable" {
-            pass.profile.lock().expect("profile").unviable += 1;
-            pass.record(
-                &mutant.id,
-                &Verdict::of(
-                    "unviable",
-                    format!("does not compile: {}", answer.error.unwrap_or_default()),
-                ),
-            );
-            continue;
-        }
+    let mut switched = BTreeMap::<String, Vec<StrongMutant>>::new();
+    live.iter().for_each(|mutant| {
         let (token, mutator, replacement) = files[&mutant.file].tokens[mutant.index];
-        switched_by_file
+        switched
             .entry(mutant.file.clone())
             .or_default()
             .push(StrongMutant {
@@ -973,101 +1076,25 @@ pub fn run_go_strong(
                 replacement: replacement.to_owned(),
                 mutator: mutator.to_owned(),
             });
-        ids.insert((mutant.file.clone(), mutant.index), mutant.id.clone());
-        live.push(*mutant);
-    }
-    let facts_of = |file: &str| -> HashMap<usize, SiteFacts> {
-        files[file]
-            .tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (token, _, _))| {
-                checked
-                    .get(&(file.to_owned(), index))
-                    .map(|answer| (token.0, answer.facts.clone()))
-            })
-            .collect()
+    });
+    let rendered = if switched.is_empty() {
+        BTreeMap::new()
+    } else {
+        render(pass, &files, &switched, &checked, &runtimes)?
     };
-
-    // Rendered, built, and rendered again without what the compiler refused.
-    let mut refused = HashMap::<String, HashSet<usize>>::new();
-    let mut rendered = BTreeMap::<String, StrongFile>::new();
-    for round in 0..12 {
-        pass.profile.lock().expect("profile").build_rounds = round + 1;
-        for (file, mutants) in &switched_by_file {
-            let source = &files[file].source;
-            let strong = crate::go_instrumenter::strong_rewrite(
-                file,
-                source,
-                mutants,
-                &facts_of(file),
-                refused.get(file).unwrap_or(&HashSet::new()),
-                crate::go_project::language_minor(request.root, file, source),
-            )
-            .map_err(|e| e.to_string())?;
-            let text = strong
-                .text
-                .replace(RUNTIME_IMPORT, runtime_for(&runtimes, file));
-            crate::fault_fs::write(pass.workspace.join(file), &text).map_err(|e| e.to_string())?;
-            rendered.insert(file.clone(), StrongFile { text, ..strong });
-        }
-        let directories = switched_by_file
-            .keys()
-            .map(|file| pattern(&directory_of(file)))
-            .collect::<BTreeSet<_>>();
-        let output = Command::new(&pass.flags.program)
-            .arg("build")
-            .arg("-gcflags=-e")
-            .args(&pass.flags.build)
-            .args(&directories)
-            .current_dir(&pass.workspace)
-            .launch_output()
-            .map_err(|e| format!("go build: {e}"))?;
-        if output.status.success() {
-            break;
-        }
-        let text = String::from_utf8_lossy(&output.stderr).into_owned();
-        let mut laid = false;
-        for (path, line, column, _) in compile_errors(&text) {
-            let relative = path.trim_start_matches("./").to_owned();
-            let Some(strong) = rendered.get(&relative) else {
-                continue;
-            };
-            let Some(at) = offset_of(&strong.text, line, column) else {
-                continue;
-            };
-            let refuse = refused.entry(relative.clone()).or_default();
-            match crate::go_instrumenter::strong_site_at(strong, at) {
-                Some(indices) => {
-                    for index in indices {
-                        refuse.insert(files[&relative].tokens[*index].0.0);
-                    }
-                    laid = true;
-                }
-                None => {
-                    // Outside every switch: the file's switches all go.
-                    for (_, _, indices) in &strong.sites {
-                        for index in indices {
-                            refuse.insert(files[&relative].tokens[*index].0.0);
-                        }
-                    }
-                    laid |= !strong.sites.is_empty();
-                }
-            }
-        }
-        if !laid {
-            return Err(format!(
-                "the strong copy does not build, and not at a switch:\n{text}"
-            ));
-        }
-    }
-    let mut solo = Vec::new();
-    for (file, strong) in &rendered {
-        pass.profile.lock().expect("profile").switched += strong.switched.len();
-        for (index, reason) in &strong.unplaceable {
-            pass.profile.lock().expect("profile").unplaceable += 1;
-            solo.push((file.clone(), *index, reason.clone()));
-        }
+    let solo = rendered
+        .iter()
+        .flat_map(|(file, strong)| {
+            strong
+                .unplaceable
+                .iter()
+                .map(move |(index, reason)| ((file.clone(), *index), reason.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    {
+        let mut profile = pass.profile.lock().expect("profile");
+        profile.switched = rendered.values().map(|strong| strong.switched.len()).sum();
+        profile.unplaceable = solo.len();
     }
     let _ = writeln!(
         diagnostics,
@@ -1077,94 +1104,64 @@ pub fn run_go_strong(
         solo.len()
     );
 
-    // Each candidate's package, and the binaries.
-    let mut by_package = BTreeMap::<String, BTreeSet<String>>::new();
-    for mutant in &live {
-        for candidate in &mutant.candidates {
-            if let Some((directory, name)) = plan
-                .tests
-                .get(candidate.test)
-                .and_then(|t| split_test(&t.id))
-            {
-                by_package
-                    .entry(directory.to_owned())
-                    .or_default()
-                    .insert(name.to_owned());
-            }
-        }
-    }
-    let mut packages = build_and_baseline(&pass, &by_package, diagnostics)?;
-    for (directory, links) in linked_directories(&pass, by_package.keys()) {
-        if let Some(package) = packages.get_mut(&directory) {
-            package.links = Some(links);
-        }
-    }
-
-    // The mutants, a worker each at a time.
-    let solo_reasons = solo
+    // Each package that holds a candidate: its binary and its baseline.
+    let directories = live
         .iter()
-        .map(|(file, index, reason)| ((file.clone(), *index), reason.clone()))
-        .collect::<HashMap<_, _>>();
-    let queue = Mutex::new(
-        live.iter()
-            .copied()
-            .collect::<std::collections::VecDeque<_>>(),
+        .flat_map(|mutant| mutant.candidates.iter())
+        .filter_map(|candidate| plan.tests.get(candidate.test))
+        .filter_map(|test| split_test(&test.id))
+        .map(|(directory, _)| directory.to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut packages = on_workers(
+        pass.request.workers.min(8),
+        directories.iter().cloned().collect(),
+        |directory| {
+            let package = build_package(pass, &directory, None);
+            (directory, package)
+        },
+    )
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+    linked_directories(pass, &directories)
+        .into_iter()
+        .for_each(|(directory, links)| {
+            if let Some(package) = packages.get_mut(&directory) {
+                package.links = Some(links);
+            }
+        });
+    let _ = writeln!(
+        diagnostics,
+        "[supercov] built {} test binaries ({} cannot run their mutants)",
+        packages.len(),
+        packages
+            .values()
+            .filter(|package| package.broken.is_some())
+            .count()
     );
-    let workers = request.workers.max(1);
-    let retries = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let Some(mutant) = queue.lock().expect("queue").pop_front() else {
-                        break;
-                    };
-                    let key = (mutant.file.clone(), mutant.index);
-                    let verdict = match solo_reasons.get(&key) {
-                        Some(reason) => {
-                            run_solo(&pass, &plan, mutant, &files, &packages, reason, true)
-                        }
-                        None => run_mutant(&pass, &plan, mutant, &packages, None, true),
-                    };
-                    if verdict.status == RETRY {
-                        retries.lock().expect("retries").push(mutant);
-                    } else {
-                        pass.record(&mutant.id, &verdict);
-                    }
-                }
-            });
+
+    // The mutants, a worker each at a time; those past their first limit
+    // again, with the full one, in a round of their own.
+    let run =
+        |mutant: &PlanMutant, first: bool| match solo.get(&(mutant.file.clone(), mutant.index)) {
+            Some(reason) => run_solo(pass, plan, mutant, &files, &packages, reason, first),
+            None => run_mutant(pass, plan, mutant, &packages, None, first),
+        };
+    let retries = on_workers(pass.request.workers, live, |mutant| {
+        let verdict = run(mutant, true);
+        if verdict.status == RETRY {
+            return Some(mutant);
         }
+        pass.record(&mutant.id, &verdict);
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    pass.profile.lock().expect("profile").retries = retries.len();
+    on_workers(pass.request.workers, retries, |mutant| {
+        pass.record(&mutant.id, &run(mutant, false));
     });
-    // The mutants that ran past their first limit, again with the full one,
-    // side by side.
-    let retried = retries.into_inner().expect("retries");
-    pass.profile.lock().expect("profile").retries = retried.len();
-    let queue = Mutex::new(
-        retried
-            .into_iter()
-            .collect::<std::collections::VecDeque<_>>(),
-    );
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let Some(mutant) = queue.lock().expect("queue").pop_front() else {
-                        break;
-                    };
-                    let key = (mutant.file.clone(), mutant.index);
-                    let verdict = match solo_reasons.get(&key) {
-                        Some(reason) => {
-                            run_solo(&pass, &plan, mutant, &files, &packages, reason, false)
-                        }
-                        None => run_mutant(&pass, &plan, mutant, &packages, None, false),
-                    };
-                    pass.record(&mutant.id, &verdict);
-                }
-            });
-        }
-    });
-    let summary = summary(&pass, started);
-    Ok(summary)
+    Ok(())
 }
 
 fn summary(pass: &Pass, started: Instant) -> Value {
@@ -1176,19 +1173,17 @@ fn summary(pass: &Pass, started: Instant) -> Value {
         "switched": profile.switched,
         "unplaceable": profile.unplaceable,
         "unviable": profile.unviable,
+        "vetRejected": profile.vetted,
         "soloBuilds": profile.solo_builds,
         "buildRounds": profile.build_rounds,
         "binaries": profile.binaries,
         "baselines": profile.baselines,
-        "confirmations": profile.confirmations,
-        "overturned": profile.overturned,
-        "retries": profile.retries,
-        "vetRejected": profile.vetted,
         "runs": profile.runs,
+        "retries": profile.retries,
     });
     drop(profile);
     let mut file = pass.results.lock().expect("results lock");
-    let _ = writeln!(file, "{summary}");
+    let _ = fs::write_all(&mut file, format!("{summary}\n").as_bytes());
     summary
 }
 
@@ -1199,11 +1194,11 @@ fn run_helper(helper: &Path, root: &Path, request: &Value) -> Result<CheckAnswer
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .launch()
-        .map_err(|e| format!("{}: {e}", helper.display()))?;
+        .map_err(failed(helper))?;
     let input = serde_json::to_vec(request).expect("plain data serializes");
     let mut stdin = child.stdin.take().expect("piped");
     let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(failed(helper))?;
     let _ = writer.join();
     if !output.status.success() {
         return Err(format!(
@@ -1211,79 +1206,25 @@ fn run_helper(helper: &Path, root: &Path, request: &Value) -> Result<CheckAnswer
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("the Go type-check helper: {e}"))
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("the Go type-check helper: {error}"))
 }
 
-/// Builds each package's test binary and runs its baseline: the package's
-/// candidates, with no mutant.
-fn build_and_baseline(
-    pass: &Pass,
-    by_package: &BTreeMap<String, BTreeSet<String>>,
-    diagnostics: &mut dyn Write,
-) -> Result<BTreeMap<String, Package>, String> {
-    let built = Mutex::new(BTreeMap::<String, Package>::new());
-    let queue = Mutex::new(by_package.iter().collect::<Vec<_>>());
-    let workers = pass.request.workers.clamp(1, 8);
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let Some((directory, names)) = queue.lock().expect("queue").pop() else {
-                        break;
-                    };
-                    let package = build_package(pass, directory, names, None);
-                    built
-                        .lock()
-                        .expect("built")
-                        .insert(directory.clone(), package);
-                }
-            });
-        }
-    });
-    let built = built.into_inner().expect("built");
-    let broken = built
-        .values()
-        .filter(|package| package.broken.is_some())
-        .count();
-    let _ = writeln!(
-        diagnostics,
-        "[supercov] built {} test binar{} ({} did not build), baselines done",
-        built.len(),
-        if built.len() == 1 { "y" } else { "ies" },
-        broken
-    );
-    Ok(built)
-}
-
-/// One package's binary (from the copy, or with `overlay`), and its
-/// baseline over `names`.
-fn build_package(
-    pass: &Pass,
-    directory: &str,
-    names: &BTreeSet<String>,
-    overlay: Option<(&Path, &Path)>,
-) -> Package {
-    let file_name = format!(
-        "{}.test",
-        crate::stable_ids::digest(&[directory, &format!("{overlay:?}")])
-    );
-    let binary = match overlay {
-        Some((_, bins)) => bins.join(&file_name),
-        None => pass.bins.join(&file_name),
-    };
-    let mut command = Command::new(&pass.flags.program);
-    command
+/// One package's binary (from the copy, or with `overlay` and into its
+/// directory), and, from the copy, its baseline: the package whole, with no
+/// mutant.
+fn build_package(pass: &Pass, directory: &str, overlay: Option<&Path>) -> Package {
+    let into = overlay.and_then(Path::parent).unwrap_or(&pass.bins);
+    let binary = into.join(format!("{}.test", crate::stable_ids::digest(&[directory])));
+    let output = Command::new(&pass.flags.program)
         .arg("test")
         .arg("-c")
         // `go vet` would read the switches, not the program.
         .arg("-vet=off")
         .args(&pass.flags.build)
+        .args(overlay.map(|overlay| format!("-overlay={}", overlay.display())))
         .arg("-o")
-        .arg(&binary);
-    if let Some((overlay, _)) = overlay {
-        command.arg(format!("-overlay={}", overlay.display()));
-    }
-    let output = command
+        .arg(&binary)
         .arg(pattern(directory))
         .current_dir(&pass.workspace)
         .launch_output();
@@ -1291,45 +1232,35 @@ fn build_package(
         binary: binary.clone(),
         ..Package::default()
     };
-    match output {
-        Ok(output) if output.status.success() && binary.is_file() => {}
-        Ok(output) if output.status.success() => {
-            package.broken = Some("the package has no test binary".into());
-            return package;
-        }
-        Ok(output) => {
-            package.broken = Some(String::from_utf8_lossy(&output.stderr).into_owned());
-            return package;
-        }
-        Err(error) => {
-            package.broken = Some(error.to_string());
-            return package;
-        }
+    package.broken = match output {
+        Ok(output) if output.status.success() && binary.is_file() => None,
+        Ok(output) if output.status.success() => Some("the package has no test binary".into()),
+        Ok(output) => Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+        Err(error) => Some(error.to_string()),
+    };
+    if package.broken.is_some() {
+        return package;
     }
     pass.profile.lock().expect("profile").binaries += 1;
     if overlay.is_some() {
         return package;
     }
-    let _ = names;
     let limit = Duration::from_secs(600);
     let baseline = pass.run_binary(&binary, directory, &[], None, limit);
     pass.profile.lock().expect("profile").baselines += 1;
     package.baseline_ms = baseline.elapsed_ms;
-    package.passed = baseline.durations.clone();
-    if !baseline.passed && !baseline.failures.is_empty() {
-        // A test that fails as written (one the measured run saw fail, or a
-        // flaky one) is left out of every run of the package, and the
-        // package's baseline is the rest.
-        package.skip = baseline.failures.clone();
-        let rest = pass.run_binary(&binary, directory, &package.skip, None, limit);
-        pass.profile.lock().expect("profile").baselines += 1;
-        package.baseline_ms = rest.elapsed_ms;
-        package.passed = rest.durations;
-        if !rest.passed {
-            package.broken = Some("the package's tests do not pass without a mutant".into());
-        }
-    } else if !baseline.passed {
-        package.broken = Some("the package's test binary fails without a mutant".into());
+    if baseline.passed {
+        return package;
+    }
+    // A test that fails as written (one the measured run saw fail, or a
+    // flaky one) is left out of every run of the package, and the package's
+    // baseline is the rest.
+    package.skip = baseline.failures;
+    let rest = pass.run_binary(&binary, directory, &package.skip, None, limit);
+    pass.profile.lock().expect("profile").baselines += 1;
+    package.baseline_ms = rest.elapsed_ms;
+    if !rest.passed {
+        package.broken = Some("its tests do not pass without a mutant".into());
     }
     package
 }
@@ -1357,105 +1288,129 @@ const RETRY: &str = "retry";
 /// Each test package's binary's linked package directories, from `go list
 /// -deps -test`, relative to the copy's root; a package `go list` cannot
 /// say has none.
-fn linked_directories<'d>(
+fn linked_directories(
     pass: &Pass,
-    directories: impl Iterator<Item = &'d String>,
+    directories: &BTreeSet<String>,
 ) -> BTreeMap<String, HashSet<String>> {
-    let patterns = directories
-        .map(|directory| pattern(directory))
-        .collect::<Vec<_>>();
     let output = Command::new(&pass.flags.program)
         .args(["list", "-e", "-deps", "-test"])
         .args(&pass.flags.build)
         .arg("-f={{.ImportPath}}|{{.Dir}}|{{join .Deps \",\"}}")
-        .args(&patterns)
+        .args(directories.iter().map(|directory| pattern(directory)))
         .current_dir(&pass.workspace)
-        .launch_output();
-    let Ok(output) = output else {
-        return BTreeMap::new();
-    };
-    let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let root = std::fs::canonicalize(&pass.workspace).unwrap_or_else(|_| pass.workspace.clone());
-    let relative = |directory: &str| -> Option<String> {
-        let path = std::fs::canonicalize(directory).ok()?;
-        let inside = path.strip_prefix(&root).ok()?;
-        let text = inside.to_string_lossy().replace('\\', "/");
-        Some(if text.is_empty() {
-            ".".to_owned()
-        } else {
-            text
+        .launch_output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let root = fs::canonicalize(&pass.workspace).unwrap_or_else(|_| pass.workspace.clone());
+    let plain = |path: &str| path.split(" [").next().unwrap_or_default().to_owned();
+    let listed = output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '|');
+            let (import, directory, deps) = (parts.next()?, parts.next()?, parts.next()?);
+            let inside = fs::canonicalize(directory).ok()?;
+            let relative = inside
+                .strip_prefix(&root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let relative = if relative.is_empty() {
+                ".".to_owned()
+            } else {
+                relative
+            };
+            Some((import.to_owned(), relative, deps.to_owned()))
         })
-    };
-    let plain = |path: &str| path.split(" [").next().unwrap_or(path).to_owned();
-    let mut directory_of_import = HashMap::new();
-    let mut binaries = Vec::new();
-    for line in text.lines() {
-        let mut parts = line.splitn(3, '|');
-        let (Some(import), Some(directory), Some(deps)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        if let Some(directory) = relative(directory) {
-            directory_of_import.insert(plain(import), directory.clone());
-            if import.ends_with(".test") {
-                binaries.push((directory, deps.to_owned()));
-            }
-        }
-    }
-    binaries
-        .into_iter()
-        .map(|(directory, deps)| {
-            let mut links = deps
+        .collect::<Vec<_>>();
+    let directory_of_import = listed
+        .iter()
+        .map(|(import, directory, _)| (plain(import), directory.clone()))
+        .collect::<HashMap<_, _>>();
+    listed
+        .iter()
+        .filter(|(import, _, _)| import.ends_with(".test"))
+        .map(|(_, directory, deps)| {
+            let links = deps
                 .split(',')
                 .filter_map(|dep| directory_of_import.get(&plain(dep)).cloned())
+                .chain([directory.clone()])
                 .collect::<HashSet<_>>();
-            links.insert(directory.clone());
-            (directory, links)
+            (directory.clone(), links)
         })
         .collect()
 }
 
-/// A mutant's candidate tests, by package in the order its cheapest
-/// candidate puts each package, that passed their baseline.
+/// The packages that hold a mutant's candidates, in the order its cheapest
+/// candidate puts them: those whose binary can run its code.
 fn candidate_packages(
     plan: &Plan,
     mutant: &PlanMutant,
     packages: &BTreeMap<String, Package>,
-) -> Vec<(String, Vec<String>)> {
-    let mut order = Vec::<(String, Vec<String>)>::new();
-    for candidate in &mutant.candidates {
-        let Some((directory, name)) = plan
-            .tests
-            .get(candidate.test)
-            .and_then(|t| split_test(&t.id))
-        else {
-            continue;
-        };
-        let Some(package) = packages.get(directory) else {
-            continue;
-        };
-        if package.broken.is_none() && !package.passed.contains_key(name) {
-            continue;
-        }
-        // A test the plan took only because its evidence is not its own
-        // (an Example, a parallel test), in a binary that does not link the
-        // mutant's package: it cannot run the mutant's code.
-        let unbounded = matches!(candidate.reason.as_str(), "not-exact" | "unattributed");
-        if unbounded
-            && package
+) -> Vec<String> {
+    let mut order = Vec::<String>::new();
+    mutant
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let (directory, _) = split_test(&plan.tests.get(candidate.test)?.id)?;
+            let package = packages.get(directory)?;
+            // A test the plan took only because its evidence is not its own
+            // (an Example, a parallel test), in a binary that does not link
+            // the mutant's package: it cannot run the mutant's code.
+            let unbounded = matches!(candidate.reason.as_str(), "not-exact" | "unattributed");
+            let unlinked = package
                 .links
                 .as_ref()
-                .is_some_and(|links| !links.contains(&directory_of(&mutant.file)))
-        {
-            continue;
-        }
-        match order.iter_mut().find(|(seen, _)| seen == directory) {
-            Some((_, names)) => names.push(name.to_owned()),
-            None => order.push((directory.to_owned(), vec![name.to_owned()])),
-        }
-    }
+                .is_some_and(|links| !links.contains(&directory_of(&mutant.file)));
+            (!(unbounded && unlinked)).then(|| directory.to_owned())
+        })
+        .for_each(|directory| {
+            if !order.contains(&directory) {
+                order.push(directory);
+            }
+        });
     order
+}
+
+/// The verdict of one run of a mutant's package: none where it passed.
+fn judged(outcome: &RunOutcome, directory: &str, first: bool, limit: Duration) -> Option<Verdict> {
+    let killer = outcome.failures.first();
+    let verdict = |status, killed_by: Option<String>, reason: Option<String>| Verdict {
+        status,
+        killed_by,
+        tests: outcome.started,
+        duration_ms: outcome.elapsed_ms,
+        reason,
+    };
+    if outcome.hit_limit {
+        return Some(verdict(
+            "timeout",
+            None,
+            Some("the mutant passed its hit limit".into()),
+        ));
+    }
+    match (outcome.timed_out, killer) {
+        // A test that failed before the limit settles it.
+        (_, Some(name)) => Some(verdict(
+            "killed",
+            Some(format!("{directory}::{name}")),
+            outcome
+                .timed_out
+                .then(|| "a test failed before the time limit".into()),
+        )),
+        (true, None) if first => Some(Verdict::of(RETRY, "past its first limit")),
+        (true, None) => Some(verdict(
+            "timeout",
+            None,
+            Some(format!("the tests ran past {} ms", limit.as_millis())),
+        )),
+        (false, None) if outcome.passed => None,
+        (false, None) => Some(verdict(
+            "killed",
+            Some(directory.to_owned()),
+            Some("the test binary failed outside any test".into()),
+        )),
+    }
 }
 
 fn run_mutant(
@@ -1468,111 +1423,50 @@ fn run_mutant(
 ) -> Verdict {
     let started = Instant::now();
     let order = candidate_packages(plan, mutant, packages);
-    if order.is_empty() {
-        return Verdict::of(
-            "survived",
-            "no candidate test passed its baseline without the mutant",
-        );
-    }
     let active = format!("{}#{}", mutant.file, mutant.index);
     let mut tests = 0;
-    for (directory, _) in &order {
-        let package = &packages[directory];
+    let decided = order.iter().find_map(|directory| {
+        let package = solo.map_or(&packages[directory], |solo| &solo[directory]);
+        let skip = &packages[directory].skip;
         if let Some(broken) = &package.broken {
-            return Verdict {
-                duration_ms: started.elapsed().as_millis() as u64,
-                ..Verdict::of(
-                    "error",
-                    format!(
-                        "the test package {directory} did not build: {}",
-                        first_line(broken)
-                    ),
-                )
-            };
-        }
-        let binary = solo
-            .and_then(|solo| solo.get(directory))
-            .map_or(&package.binary, |built| &built.binary);
-        if let Some(Some(broken)) = solo.and_then(|solo| solo.get(directory)).map(|p| &p.broken) {
-            return Verdict {
-                duration_ms: started.elapsed().as_millis() as u64,
-                ..Verdict::of(
-                    "error",
-                    format!(
-                        "the test package {directory} did not build with the mutant: {}",
-                        first_line(broken)
-                    ),
-                )
-            };
+            return Some(Verdict::of(
+                "error",
+                format!(
+                    "the test package {directory} cannot run it: {}",
+                    first_line(broken)
+                ),
+            ));
         }
         let limit = if first {
-            first_limit_for(package)
+            first_limit_for(&packages[directory])
         } else {
-            limit_for(package)
+            limit_for(&packages[directory])
         };
         // The package whole, as `go test` runs it: its tests share the
         // process, so a test after a candidate can fail on what the mutant
         // left behind, and one before it set up what the candidate reads.
         let outcome = pass.run_binary(
-            binary,
+            &package.binary,
             directory,
-            &package.skip,
+            skip,
             solo.is_none().then_some(active.as_str()),
             limit,
         );
-        tests += outcome.started.len() as u64;
-        if outcome.timed_out && !outcome.hit_limit {
-            // A test that failed before the limit settles it.
-            if let Some(failed) = &outcome.failed {
-                return Verdict {
-                    status: "killed",
-                    killed_by: Some(format!("{directory}::{failed}")),
-                    tests,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    reason: Some("a test failed before the time limit".into()),
-                };
-            }
-            if first {
-                return Verdict::of(RETRY, "past its first limit");
-            }
-        }
-        if outcome.hit_limit || outcome.timed_out {
-            return Verdict {
-                status: "timeout",
-                killed_by: outcome.started.last().cloned(),
-                tests,
-                duration_ms: started.elapsed().as_millis() as u64,
-                reason: Some(if outcome.hit_limit {
-                    "the mutant passed its hit limit".into()
-                } else {
-                    format!("the tests ran past {} ms", limit.as_millis())
-                }),
-            };
-        }
-        if outcome.passed {
-            continue;
-        }
-        let killer = outcome.failed.clone();
-        return Verdict {
-            status: "killed",
-            killed_by: Some(match &killer {
-                Some(name) => format!("{directory}::{name}"),
-                None => directory.clone(),
-            }),
-            tests,
-            duration_ms: started.elapsed().as_millis() as u64,
-            reason: killer
-                .is_none()
-                .then(|| "the test binary failed outside any test".to_owned()),
-        };
-    }
-    Verdict {
+        tests += outcome.started;
+        judged(&outcome, directory, first, limit)
+    });
+    let mut verdict = decided.unwrap_or(Verdict {
         status: "survived",
         killed_by: None,
-        tests,
-        duration_ms: started.elapsed().as_millis() as u64,
-        reason: None,
-    }
+        tests: 0,
+        duration_ms: 0,
+        reason: order
+            .is_empty()
+            .then(|| "no package of its candidates can run its code".to_owned()),
+    });
+    verdict.tests = tests;
+    verdict.duration_ms = started.elapsed().as_millis() as u64;
+    verdict
 }
 
 /// A mutant with no switch: its own build of each package it needs, from
@@ -1586,53 +1480,32 @@ fn run_solo(
     reason: &str,
     first: bool,
 ) -> Verdict {
-    let listed = &files[&mutant.file];
-    let (token, _, replacement) = listed.tokens[mutant.index];
-    let mutated = format!(
-        "{}{replacement}{}",
-        &listed.source[..token.0],
-        &listed.source[token.1..]
-    );
     let directory = pass
         .scratch
         .join(format!("solo-{}", crate::stable_ids::digest(&[&mutant.id])));
-    let _ = std::fs::create_dir_all(&directory);
-    let replaced = directory.join("mutated.go");
-    let overlay = directory.join("overlay.json");
-    let written = std::fs::write(&replaced, mutated).and_then(|()| {
-        std::fs::write(
-            &overlay,
-            serde_json::to_vec(&json!({
-                "Replace": { pass.workspace.join(&mutant.file).to_string_lossy(): replaced }
-            }))
-            .expect("plain data serializes"),
-        )
-    });
-    if let Err(error) = written {
-        return Verdict::of("error", format!("could not write its build: {error}"));
-    }
-    let mut built = BTreeMap::new();
-    for (package_directory, _) in candidate_packages(plan, mutant, packages) {
-        let package = build_package(
-            pass,
-            &package_directory,
-            &BTreeSet::new(),
-            Some((&overlay, &directory)),
-        );
-        pass.profile.lock().expect("profile").solo_builds += 1;
-        built.insert(package_directory, package);
-    }
+    let overlay = match write_overlay(
+        &directory,
+        &pass.workspace.join(&mutant.file),
+        &mutated_source(files, mutant),
+    ) {
+        Ok(overlay) => overlay,
+        Err(error) => return Verdict::of("error", format!("could not write its build: {error}")),
+    };
+    let built = candidate_packages(plan, mutant, packages)
+        .into_iter()
+        .map(|package| {
+            pass.profile.lock().expect("profile").solo_builds += 1;
+            let built = build_package(pass, &package, Some(&overlay));
+            (package, built)
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut verdict = run_mutant(pass, plan, mutant, packages, Some(&built), first);
-    if verdict.status == RETRY {
-        let _ = std::fs::remove_dir_all(&directory);
-        return verdict;
-    }
     let note = format!("built alone ({reason})");
-    verdict.reason = Some(match verdict.reason {
-        Some(said) => format!("{said}; {note}"),
-        None => note,
-    });
-    let _ = std::fs::remove_dir_all(&directory);
+    verdict.reason = Some(
+        verdict
+            .reason
+            .map_or(note.clone(), |said| format!("{said}; {note}")),
+    );
     verdict
 }
 
@@ -1688,11 +1561,9 @@ mod tests {
     #[test]
     fn verbose_output_says_what_ran_and_what_failed() {
         let text = "=== RUN   TestA\n--- PASS: TestA (0.25s)\n=== RUN   TestB\n=== RUN   TestB/sub\n    --- FAIL: TestB/sub (0.00s)\n--- FAIL: TestB (0.01s)\nFAIL\n";
-        let (failed, started, durations) = read_output(text);
+        let (started, failed) = read_output(text);
         assert_eq!(failed, ["TestB"]);
-        assert_eq!(started, ["TestA", "TestB"]);
-        assert_eq!(durations.get("TestA"), Some(&250));
-        assert!(!durations.contains_key("TestB"));
+        assert_eq!(started, 2);
     }
 
     #[test]

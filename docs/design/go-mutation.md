@@ -236,8 +236,8 @@ Every mutant's verdict is compared with Gremlins run with every test per
 mutant (`--integration --coverpkg ./...`), `GOFLAGS=-count=1` and
 `--timeout-coefficient 10`. Without `-count=1` Gremlins' coverage run is a
 cached result of a few milliseconds, its time limit three times that, and
-every mutant timed out. `scripts/go-mutation-corpus.sh` clones each module
-at its tag and runs either tool; `scripts/gremlins-compare.mjs` joins the
+every mutant timed out. `benchmarks/mutation-go/corpus.sh` clones each module
+at its tag and runs either tool; `benchmarks/mutation-go/gremlins-compare.mjs` joins the
 verdicts by file, line, column and Gremlins mutator.
 
 Five modules, at their tags, on SoroCI (16 CPUs each tool, Go stable):
@@ -261,7 +261,7 @@ strong pass is 12.4 s, of which six timeouts take ten seconds each, side by
 side.
 
 Every disagreement, with the mutant applied by hand and the suite run whole
-ten times (`scripts/go-mutant-by-hand.mjs`):
+ten times (`benchmarks/mutation-go/by-hand.mjs`):
 
 - **Unviable** (54): Supercov's type check refuses the mutant (`-` of
   strings, a negative array length, a duplicate map key after a constant

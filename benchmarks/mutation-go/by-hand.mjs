@@ -3,7 +3,7 @@
 // whole, several times: what the module's own tests say of the mutant,
 // whatever either tool's selection or timing did.
 //
-//   node scripts/go-mutant-by-hand.mjs <module dir> <compare.json> [runs] [kinds]
+//   node benchmarks/mutation-go/by-hand.mjs <module dir> <compare.json> [runs] [kinds]
 //
 // <compare.json> is `gremlins-compare.mjs --json`'s output. Each mutant of
 // the listed kinds (default `soundness,other`) is applied to a copy of the

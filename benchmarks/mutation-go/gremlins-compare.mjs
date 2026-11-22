@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Compares a Go strong pass's verdicts with Gremlins' on the same module.
 //
-//   node scripts/gremlins-compare.mjs <module dir> <gremlins report.json> [--json]
+//   node benchmarks/mutation-go/gremlins-compare.mjs <module dir> <gremlins report.json> [--json]
 //
 // Gremlins is run with every test per mutant and the mutators Supercov
 // lists:
