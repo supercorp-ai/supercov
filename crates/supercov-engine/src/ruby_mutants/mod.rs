@@ -733,3 +733,132 @@ pub(crate) fn list_mutants(
         changed,
     }
 }
+
+/// Whether `bytes` are the mutant gem's session results
+/// (`.mutant/results/<session>.json.gz`, or that JSON unpacked).
+pub fn is_mutant_session(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x1f, 0x8b])
+        || serde_json::from_slice::<serde_json::Value>(bytes)
+            .is_ok_and(|value| value.get("subject_results").is_some())
+}
+
+/// The mutant gem's verdicts from its session results, each matched to
+/// Supercov's mutant by the method it makes: mutant records each mutation
+/// as the method's code (`mutation_source`), which is parsed and compared
+/// with each of Supercov's mutants of that method. `path_of` gives a source
+/// path from the project root; `read` reads a file under it. A mutation no
+/// mutant of Supercov's makes keeps mutant's identification as its id.
+pub fn parse_mutant_session(
+    bytes: &[u8],
+    path_of: impl Fn(&str) -> String,
+    read: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<crate::mutants_query::StrykerReportMutant>, String> {
+    use std::io::Read;
+    let text = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut text = Vec::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut text)
+            .map_err(|error| error.to_string())?;
+        text
+    } else {
+        bytes.to_vec()
+    };
+    let session: serde_json::Value =
+        serde_json::from_slice(&text).map_err(|error| error.to_string())?;
+    let subjects = session["subject_results"]
+        .as_array()
+        .ok_or("it has no `subject_results`; is it mutant's session results?")?;
+    let mut cache: std::collections::HashMap<String, Option<(Vec<u8>, Vec<Described>)>> =
+        Default::default();
+    let mut out = Vec::new();
+    for subject in subjects {
+        let Some(source_path) = subject["source_path"].as_str() else {
+            continue;
+        };
+        let file = path_of(source_path);
+        // `Name#method:/path/file.rb:LINE`: the method's first line.
+        let line = subject["identification"]
+            .as_str()
+            .and_then(|identification| identification.rsplit(':').next())
+            .and_then(|line| line.parse::<u32>().ok());
+        let entry = cache.entry(file.clone()).or_insert_with(|| {
+            let source = read(&file)?;
+            let described = described(&source, enumerate(&source));
+            Some((source, described))
+        });
+        for result in subject["coverage_results"].as_array().into_iter().flatten() {
+            let mutation = &result["mutation_result"];
+            if mutation["mutation_type"].as_str() != Some("evil") {
+                continue;
+            }
+            let criteria = &result["criteria_result"];
+            let status = if criteria["timeout"] == true {
+                "Timeout"
+            } else if criteria["test_result"] == true || criteria["process_abort"] == true {
+                "Killed"
+            } else {
+                "Survived"
+            };
+            let identification = mutation["mutation_identification"]
+                .as_str()
+                .unwrap_or_default();
+            let matched = entry.as_ref().and_then(|(source, described)| {
+                let code = mutation["mutation_source"].as_str()?;
+                let tree = method_of(code.as_bytes())?;
+                described.iter().find(|(mutant, start, _, _)| {
+                    let _ = start;
+                    let method_line =
+                        position(source, mutant.method.span.map_or(0, |span| span.0)).0;
+                    line.is_none_or(|line| method_line == line)
+                        && same_method(&mutant.mutated, &tree)
+                })
+            });
+            match matched {
+                Some((mutant, start, end, descriptor)) => {
+                    out.push(crate::mutants_query::StrykerReportMutant {
+                        file: file.clone(),
+                        start: *start,
+                        end: *end,
+                        mutator: mutant.mutator.to_owned(),
+                        replacement: Some(descriptor.clone()),
+                        original: None,
+                        status: status.to_owned(),
+                        id: Some(format!(
+                            "{file}:{}:{}-{}:{}:{}:{descriptor}",
+                            start.0, start.1, end.0, end.1, mutant.mutator
+                        )),
+                    })
+                }
+                None => out.push(crate::mutants_query::StrykerReportMutant {
+                    file: file.clone(),
+                    start: (line.unwrap_or(0), 0),
+                    end: (line.unwrap_or(0), 0),
+                    mutator: "Unmatched".into(),
+                    replacement: None,
+                    original: None,
+                    status: status.to_owned(),
+                    id: Some(format!("{file}:mutant:{identification}")),
+                }),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The first method defined in `code`, as mutant prints a mutation: the
+/// method alone, or inside `class << self` or beside `memoize`.
+fn method_of(code: &[u8]) -> Option<Rc<N>> {
+    let result = ruby_prism::parse(code);
+    if result.errors().next().is_some() {
+        return None;
+    }
+    let mut finder = Methods::default();
+    finder.visit(&result.node());
+    let def = finder.defs.first()?.as_def_node()?;
+    Converter::new(code).method(&def).ok()
+}
+
+/// Whether two methods are the same tree, whatever the spans.
+fn same_method(left: &N, right: &N) -> bool {
+    left == right
+}

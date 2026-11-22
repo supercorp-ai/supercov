@@ -135,6 +135,10 @@ pub struct StrykerReportMutant {
     /// The mutated code, from the source the report holds.
     pub original: Option<String>,
     pub status: String,
+    /// Supercov's id for it, where the report was matched to Supercov's
+    /// mutants by what each mutant makes of the program (the mutant gem's
+    /// session results) rather than by span and replacement.
+    pub id: Option<String>,
 }
 
 /// Read a StrykerJS `mutation.json`: every mutant of every file, its path
@@ -177,6 +181,7 @@ pub fn parse_stryker_report(
                 original: source.and_then(|source| utf16_slice(source, start, end)),
                 status: field("status")
                     .ok_or_else(|| format!("a mutant of {path} has no status"))?,
+                id: None,
             });
         }
     }
@@ -554,6 +559,16 @@ fn stryker_by_id(
                 .copied()
         });
         let replacement = mutant.replacement.as_deref().unwrap_or_default();
+        if let Some(id) = &mutant.id {
+            let kept = merged
+                .get(id)
+                .and_then(|(_, status)| stryker_rank(status))
+                .is_some_and(|kept| kept >= rank);
+            if !kept {
+                merged.insert(id.clone(), (mutant.mutator.clone(), mutant.status.clone()));
+            }
+            continue;
+        }
         let descriptor = original
             .and_then(|original| {
                 crate::js_mutants::descriptor_from_stryker(&mutant.mutator, original, replacement)
@@ -931,6 +946,7 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: Some("a < b".into()),
             status: status.into(),
+            id: None,
         };
         let merged = stryker_by_id(
             &[
@@ -1277,6 +1293,7 @@ mod tests {
                 replacement: Some("a <= b".into()),
                 original: None,
                 status: "Killed".into(),
+                id: None,
             }]
         );
     }
@@ -1306,6 +1323,7 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: None,
             status: "Survived".into(),
+            id: None,
         };
         let originals =
             HashMap::from([(("src/a.js", (1, 5), (1, 10), "EqualityOperator"), "a < b")]);
@@ -1328,6 +1346,7 @@ mod tests {
             replacement: Some("a <= b".into()),
             original: Some("a < b".into()),
             status: status.into(),
+            id: None,
         }
     }
 

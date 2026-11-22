@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# One project of the Ruby mutation benchmark: the mutant gem's verdicts on
+# every test per mutant, Supercov's strong pass on the same project, their
+# times, and the join of the two.
+#
+#   benchmarks/mutation-ruby/run-job.sh <project> <out-dir>
+#
+# Needs Ruby 3.4 with Bundler, git, and SUPERCOV_BIN (the supercov binary).
+# Jobs: SUPERCOV_STRONG_JOBS and mutant's --jobs are both JOBS (default:
+# the machine's CPUs), so the two run as wide.
+set -euo pipefail
+
+project="$1"
+out="$(mkdir -p "$2" && cd "$2" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd)"
+jobs="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
+work="$(mktemp -d)"
+
+# name repo tag integration subjects require test-command...
+case "$project" in
+  dry-inflector)
+    repo=dry-rb/dry-inflector tag=v1.3.1 integration=rspec subjects='Dry::Inflector*' requires=(dry/inflector)
+    command=(bundle exec rspec) ;;
+  dotenv)
+    repo=bkeepers/dotenv tag=v3.2.0 integration=rspec subjects='Dotenv*' requires=(dotenv)
+    command=(bundle exec rspec) ;;
+  erubi)
+    repo=jeremyevans/erubi tag=1.13.1 integration=minitest subjects='Erubi*' requires=(erubi ./test/test.rb)
+    command=(bundle exec ruby -Ilib test/test.rb) ;;
+  *) echo "unknown project $project" >&2; exit 2 ;;
+esac
+
+git clone -q --depth 1 --branch "$tag" "https://github.com/$repo.git" "$work/$project"
+cd "$work/$project"
+git -c advice.detachedHead=false checkout -q "$tag"
+
+# mutant and its integration in the project's bundle, and every test made a
+# candidate for every subject: mutant otherwise picks tests by their names.
+if [ ! -f Gemfile ]; then
+  printf 'source "https://rubygems.org"\ngemspec\n' > Gemfile
+fi
+printf '\ngem "mutant", "0.17.1"\ngem "mutant-%s", "0.17.1"\n' "$integration" >> Gemfile
+if [ "$integration" = rspec ]; then
+  printf '\nRSpec.configure { |config| config.define_derived_metadata { |metadata| metadata[:mutant_expression] = "*" } }\n' >> spec/spec_helper.rb
+  printf 'gem "rspec"\n' >> Gemfile
+else
+  printf 'gem "minitest"\n' >> Gemfile
+  mkdir -p "$work/shim"
+  printf 'require "mutant/minitest/coverage"\nMinitest::Test.cover("*")\n' > "$work/shim/every_test.rb"
+  requires=("$work/shim/every_test.rb" "${requires[@]}")
+fi
+bundle config set --local path "$work/bundle" >/dev/null
+bundle install --jobs 8 --quiet
+
+require_flags=()
+for name in "${requires[@]}"; do require_flags+=(--require "$name"); done
+
+seconds() { date +%s.%N; }
+
+# The mutant gem, every test per mutant.
+start=$(seconds)
+bundle exec mutant run --usage opensource --integration "$integration" --include lib \
+  "${require_flags[@]}" --jobs "$jobs" --mutation-timeout 60 "$subjects" > "$out/mutant.log" 2>&1 || true
+mutant_seconds=$(echo "$(seconds) - $start" | bc)
+cp .mutant/results/*.json.gz "$out/" 2>/dev/null || true
+
+# Supercov: the measured run, then the strong pass.
+start=$(seconds)
+"$SUPERCOV_BIN" -- "${command[@]}" > "$out/supercov-run.log" 2>&1
+measured_seconds=$(echo "$(seconds) - $start" | bc)
+start=$(seconds)
+SUPERCOV_STRONG_JOBS="$jobs" "$SUPERCOV_BIN" runs latest mutants test --json > "$out/supercov-strong.json" 2> "$out/supercov-strong.log" || true
+strong_seconds=$(echo "$(seconds) - $start" | bc)
+
+"$SUPERCOV_BIN" runs latest mutants --stryker .mutant/results --json --limit 1000000 > "$out/join.json" 2> "$out/join.log" || true
+ruby "$here/summarize.rb" "$out/join.json" "$project" "$mutant_seconds" "$measured_seconds" "$strong_seconds" "$jobs" > "$out/summary.json"
+cat "$out/summary.json"
