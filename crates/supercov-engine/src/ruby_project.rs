@@ -664,6 +664,22 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A listing is its files' mutants once its thread ends: none for a
+    /// file without methods, and two listings of the same files are equal.
+    #[test]
+    fn a_mutant_listing_is_its_files_mutants() {
+        let source = b"A = 1\n".to_vec();
+        let mut next = 0;
+        let obligations =
+            crate::ruby_instrumenter::build_ruby_obligations_with("a.rb", &source, &mut next, true)
+                .unwrap();
+        let listing =
+            || MutantListing::start(vec![("a.rb".into(), source.clone(), obligations.clone())]);
+        let (first, second) = (listing(), listing());
+        assert!(first == second);
+        assert!(first.get().files.is_empty());
+    }
+
     #[test]
     fn tests_helpers_and_gemspecs_are_known_by_their_names() {
         let root = fixture("names");

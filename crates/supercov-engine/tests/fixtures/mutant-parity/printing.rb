@@ -101,4 +101,12 @@ class Printing
       restore(diff)
     end
   end
+
+  def bare_yield_receiver
+    yield.to_s
+  end
+
+  def bare_super_receiver
+    super.inspect
+  end
 end

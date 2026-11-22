@@ -1282,3 +1282,20 @@ fn a_switch_goes_around_a_self_receiver_and_past_a_copy_that_does_not_print() {
         Err("no-placeable-ancestor".to_owned())
     );
 }
+
+/// A body with an ensure clause made a value prints as `begin ... end`, and
+/// does not print where a part of it does not.
+#[test]
+fn an_ensure_body_prints_as_a_begin_only_where_its_parts_print() {
+    let method = &defs(b"def m\nend\n")[0];
+    let call = N::new("send", vec![Child::Nil, Child::Sym("a".into())]);
+    let ensure = |body: Rc<N>| N::new("ensure", vec![Child::Node(body), Child::Node(call.clone())]);
+    assert_eq!(
+        print::one_line(b"", method, &ensure(call.clone())).as_deref(),
+        Some("begin; a; ensure; a; end")
+    );
+    assert_eq!(
+        print::one_line(b"", method, &ensure(N::new("unknown", Vec::new()))),
+        None
+    );
+}

@@ -2108,6 +2108,8 @@ pub(crate) mod tests {
         let mut records = head.to_vec();
         records.push(json!({"t":"cmps","ctx":1,"n":[0,1],"o":[1,6]}));
         records.push(json!({"t":"assert","ctx":1}));
+        // After the first assertion, and empty: nothing more.
+        records.push(json!({"t":"cmps","ctx":1,"n":[],"o":[]}));
         records.push(json!({"t":"exit","at":9}));
         let evidence = read(&records).unwrap();
         let mut seen = BTreeMap::new();
@@ -2138,6 +2140,10 @@ pub(crate) mod tests {
                 "differ in length",
             ),
             (json!({"t":"cmps","ctx":1,"n":[9],"o":[1]}), "has no name"),
+            (
+                json!({"t":"cmps","ctx":5,"n":[0],"o":[1]}),
+                "UnknownContext",
+            ),
         ] {
             let mut records = head.to_vec();
             records.push(bad);
@@ -3041,6 +3047,9 @@ pub(crate) mod tests {
                 serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call"}),
                 serde_json::json!({"t":"phase","ctx":2,"at":6,"worker":REQUEST_WORKER,"test":"1","retry":0,"phase":"call"}),
                 serde_json::json!({"t":"hit","ctx":2,"id":statement}),
+                // A value the request's code compared goes with its hits.
+                serde_json::json!({"t":"ids","first":0,"names":["a.rb:1:1-1:2#nil"]}),
+                serde_json::json!({"t":"cmps","ctx":2,"n":[0],"o":[1]}),
                 serde_json::json!({"t":"outcome","worker":"main","test":"spec/m_spec.rb[1:1]","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"rspec"}),
                 serde_json::json!({"t":"exit","at":9}),
             ]),

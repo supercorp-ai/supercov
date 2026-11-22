@@ -5580,6 +5580,174 @@
           "replacement": "(nil)"
         }
       ]
+    },
+    {
+      "subject": "bare_yield_receiver:105",
+      "sexp": "(def :bare_yield_receiver (args) (send (yield) :to_s))",
+      "mutants": [
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(yield)"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(send (yield) :to_str)"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            15
+          ],
+          "node": "send",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            106,
+            5
+          ],
+          "end": [
+            106,
+            10
+          ],
+          "node": "yield",
+          "replacement": "(self)"
+        }
+      ]
+    },
+    {
+      "subject": "bare_super_receiver:109",
+      "sexp": "(def :bare_super_receiver (args) (send (zsuper) :inspect))",
+      "mutants": [
+        {
+          "start": [
+            110,
+            5
+          ],
+          "end": [
+            110,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            110,
+            5
+          ],
+          "end": [
+            110,
+            18
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            110,
+            5
+          ],
+          "end": [
+            110,
+            18
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            110,
+            5
+          ],
+          "end": [
+            110,
+            18
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            110,
+            5
+          ],
+          "end": [
+            110,
+            10
+          ],
+          "node": "zsuper",
+          "replacement": "(self)"
+        }
+      ]
     }
   ]
 }
