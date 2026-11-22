@@ -292,70 +292,68 @@ the README copied.
 
 ### Speed
 
-Wall time on 16 CPUs, mutmut with one child per CPU, Supercov's forks one
-per CPU:
+Wall time with mutmut at one child per CPU and Supercov's forks one per CPU,
+each tool on a machine of its own, parse's pytest-cov off for both (its own
+configuration turns it on, and a strong pass turns it off). On 4-CPU Linux
+machines (m8a.xlarge):
 
 | Project | mutmut run | per mutant | Supercov measured run | strong pass | per mutant |
 | --- | --- | --- | --- | --- | --- |
-| python-slugify | 10.4 s | 9.2 ms | 1.3 s | 9.7 s | 8.6 ms |
-| cachetools (pytest) | 27.0 s | 16.3 ms | 1.5 s | 18.4 s | 11.1 ms |
-| cachetools (unittest) | | | 1.0 s | 13.3 s | 8.1 ms |
-| parse | 269.2 s | 206 ms | 1.4 s | 14.1 s | 11.0 ms |
-| humanize | 65.8 s | 48.8 ms | 5.2 s | 14.6 s | 10.9 ms |
+| python-slugify | 23.6 s | 21.0 ms | 1.2 s | 17.9 s | 15.9 ms |
+| cachetools | 44.8 s | 27.0 ms | 1.6 s | 43.6 s | 26.4 ms |
+| parse | 56.5 s | 43.3 ms | 1.4 s | 12.6 s | 9.9 ms |
+| humanize | 152.3 s | 113.0 ms | 4.6 s | 19.8 s | 14.8 ms |
 
-On GitHub's 4-CPU runners, each tool on a runner of its own, with parse's
-pytest-cov off for mutmut too (as a strong pass has it):
+On 16-CPU Linux machines (c8a/m8a.4xlarge), with values:
 
 | Project | mutmut run | per mutant | Supercov measured run | strong pass | per mutant |
 | --- | --- | --- | --- | --- | --- |
-| python-slugify | 36.7 s | 32.6 ms | 1.3 s | 40.5 s | 36.1 ms |
-| cachetools (pytest) | 65.9 s | 39.7 ms | 1.9 s | 45.1 s | 27.1 ms |
-| cachetools (unittest) | | | 1.5 s | 39.9 s | 24.1 ms |
-| parse | 70.5 s | 54.0 ms | 2.3 s | 75.8 s | 59.6 ms |
-| humanize | 211.9 s | 157.2 ms | 6.3 s | 54.1 s | 40.4 ms |
-
-GitHub's runners vary from one to the next: an earlier run of the same
-workflow took mutmut 63.6 s on python-slugify (Supercov 40.8 s) and 293.1 s on
-humanize, and parse's strong pass with values took 47.2 s against 75.8 s
-without. On these runners Supercov is faster on cachetools and humanize, and
-about mutmut's speed on python-slugify and parse (whose 16-CPU mutmut time
-above has pytest-cov on).
+| python-slugify | 10.4 s | 9.2 ms | 1.3 s | 8.1 s | 7.2 ms |
+| cachetools (pytest) | 27.0 s | 16.3 ms | 1.7 s | 15.9 s | 9.6 ms |
+| cachetools (unittest) | | | 1.1 s | 13.3 s | 8.0 ms |
+| parse (mutmut with pytest-cov) | 269.2 s | 206 ms | 1.7 s | 11.8 s | 9.3 ms |
+| humanize | 65.8 s | 48.8 ms | 5.3 s | 13.8 s | 10.4 ms |
 
 Per mutant is the run's time over the mutants it ran (Supercov's strong pass
-alone; with its measured run, python-slugify is 9.7 ms a mutant, about
-mutmut's). parse's suite turns pytest-cov on in its own configuration: every
-mutmut worker builds a coverage report over the mutated tree, which a strong
-pass does not. On python-slugify, whose CLI tests start `python -m slugify`
-in subprocesses, keeping each switched file's compiled code beside the
-schemata took the pass from 147 s to 9.7 s: every subprocess parsed every
-mutant's copy before.
+alone). A fork runs its tests with pytest's report of a failure switched off
+(only that the test failed counts): building that report, every frame's
+source parsed and its paths resolved, had been most of a fork's time on
+parse, whose pass took 75.8 s on 4 CPUs before and 12.6 s after. On
+python-slugify, whose CLI tests start `python -m slugify` in subprocesses,
+keeping each switched file's compiled code beside the schemata took the
+pass from 147 s to 9.7 s: every subprocess parsed every mutant's copy
+before. GitHub's 4-CPU runners, measured earlier, vary by up to half from
+one runner to the next.
 
 ### The measured run's cost
 
 The suite alone, under `supercov --`, and under `supercov --` with
 `SUPERCOV_MUTANTS=1`, each the best of three (`overhead.sh`; humanize's
 pytest-benchmark tests run once, since they size their rounds to the speed
-they measure), on 16-CPU Linux machines (c8a/m8a.4xlarge):
+they measure), on 16-CPU Linux machines (c8a/m8a.4xlarge), in two runs:
 
-| Project | Tests alone | Measured | Measured with values | Values over measured |
-| --- | --- | --- | --- | --- |
-| python-slugify | 0.65 s | 0.86 s (1.34×) | 0.95 s (1.47×) | 1.10× |
-| cachetools | 0.53 s | 0.99 s (1.88×) | 1.17 s (2.23×) | 1.19× |
-| parse | 0.58 s | 0.71 s (1.22×) | 0.88 s (1.52×) | 1.24× |
-| humanize | 0.97 s | 1.21 s (1.25×) | 1.34 s (1.38×) | 1.11× |
+| Project | Tests alone | Measured | Values over measured |
+| --- | --- | --- | --- |
+| python-slugify | 0.64 s | 1.34× | 0.98–1.06× |
+| cachetools | 0.53 s | 1.85–1.88× | 1.01–1.09× |
+| parse | 0.58 s | 1.21–1.23× | 1.14–1.15× |
+| humanize | 0.97 s | 1.20–1.25× | 1.02× |
 
-These include the interpreter's start and pytest's collection, which the
-probes do not slow. A value probe stops working where its mutant can no
-longer change a verdict: once a site's mutant gave another value in a test,
-the site's probe in that test only runs the program's own operation, and a
-`None` or arithmetic site the instrumented code guards with
-`value if site in decided else probe(...)` skips the call altogether until
-the next test begins. A guarded site another thread decided records nothing
-in its own context, which reads as unknown (the test stays a candidate),
-never as not infected. That took cachetools' values from 1.95× its measured
-run to 1.19×. What is left there is comparisons whose operands are never
-equal, which every evaluation must still check, and on parse one record per
-test and site.
+These include the interpreter's start and pytest's collection. A value
+probe stops at a site once any test's mutant there gave another value: that
+mutant is infected, so no verdict waits on the site, and from then on the
+probe only runs the program's own operation. A `None` or arithmetic site is
+written `value if g[i] else probe(..., g, i)`, `g` a list of the module's
+guards the runtime sets, so a decided site costs no call. A later test that
+runs a decided site records nothing there, which reads as unknown and keeps
+the test a candidate, never as not infected or not reached; outcomes that do
+not infect are written once each test ends, and those that do at once, so a
+process killed during a test loses only what can lose no verdict.
+
+parse is still 1.14× its measured run, and its probes are not where the time
+goes: about 41,000 probe calls (a few milliseconds) and 1,700 records.
+Leaving `None` sites unguarded takes parse to 1.00–1.10× but cachetools,
+whose hot loops assign in every iteration, to 1.34×.
 
 ## Not yet
 
