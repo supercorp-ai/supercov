@@ -22698,6 +22698,69 @@ fn a_strong_pass_forks_its_workers_through_a_spawner_with_the_same_verdicts() {
     assert_eq!(through, direct);
 }
 
+/// The spawner keeps workers started ahead of Vitest's requests, and a copy
+/// that gets one sees the process a fresh worker is: Vitest's worker entry
+/// as its script, nothing of Supercov's in its environment (a test file that
+/// sees otherwise fails to load, and kills what survives). Started ahead or
+/// not (`SUPERCOV_STRONG_WORKERS_AHEAD=0`), each mutant gets the same verdict.
+#[cfg(unix)]
+#[test]
+fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
+    let project = vitest_mutants_project("strong-ahead");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nif (!/[\\\\/]workers[\\\\/]forks\\.js$/.test(process.argv[1] ?? \"\")) throw new Error(`not Vitest's worker: ${process.argv[1]}`);\nif (\"SUPERCOV_STRONG_WORKER\" in process.env) throw new Error(\"Supercov's worker variable is set\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("worker checks");
+    let verdicts = |ahead: &str| {
+        // One worker: its copies run one after another, so most get a
+        // worker started while the one before ran.
+        project
+            .supercov(&["--", "npx", "vitest", "run", "--maxWorkers=1"])
+            .succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_WORKERS_AHEAD", ahead)],
+            )
+            .json();
+        assert_eq!(reply["summary"]["error"], 0, "{reply}");
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let statuses = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"]["status"].to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (
+            reply["passes"][0]["profile"]["usedAhead"].as_u64(),
+            statuses,
+        )
+    };
+    let (used, ahead) = verdicts("4");
+    assert!(used.unwrap_or(0) > 0, "{used:?}");
+    let (none, fresh) = verdicts("0");
+    assert_eq!(none.unwrap_or(0), 0);
+    assert!(ahead.values().any(|status| status == "\"killed\""));
+    assert!(ahead.values().any(|status| status == "\"survived\""));
+    assert_eq!(ahead, fresh);
+}
+
 /// A test file that does not finish without a mutant (here it throws while
 /// it loads, in the strong pass only) cannot test the mutants it alone
 /// covers: they are errors, not survivors.
