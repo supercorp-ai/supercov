@@ -198,11 +198,18 @@ PY
     {
       echo "== $HANDCHECK"
       echo "== alone: $HANDCHECK_TEST"
-      # shellcheck disable=SC2086
-      mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test && echo "PASSED alone" || echo "FAILED alone"
+      if [ "$build" = maven ]; then
+        # shellcheck disable=SC2086
+        mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test && echo "PASSED alone" || echo "FAILED alone"
+      else
+        task="test"
+        [ -n "$module" ] && task=":$module:test"
+        # shellcheck disable=SC2086
+        ./gradlew --no-daemon -q $flags "$task" --tests "$HANDCHECK_TEST" && echo "PASSED alone" || echo "FAILED alone"
+      fi
       echo "== whole suite"
       # shellcheck disable=SC2086
-      mvn -B -q $flags test && echo "PASSED whole" || echo "FAILED whole"
+      $(tests_command) && echo "PASSED whole" || echo "FAILED whole"
     } > "$results/handcheck-$(echo "$HANDCHECK" | tr '/:' '__').log" 2>&1
     ;;
   *)

@@ -331,6 +331,9 @@ pub struct PitMutant {
     pub description: String,
     pub status: String,
     pub killing_tests: Vec<String>,
+    /// The mutated instruction's index in its method: the order of a
+    /// line's mutants, where kotlinc gives a whole condition one line.
+    pub index: u32,
 }
 
 impl PitMutant {
@@ -451,6 +454,7 @@ pub fn parse_pit_report(text: &str) -> Vec<PitMutant> {
             description,
             status,
             killing_tests,
+            index: get("index").parse().unwrap_or(0),
         });
     }
     mutants
@@ -487,6 +491,18 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             .or_default()
             .push(at);
     }
+    // A group's mutants in code order, ours in source order, so that where
+    // several share the line PIT reports (kotlinc puts a condition's jumps
+    // on one line) each takes its own counterpart, not the first.
+    for group in by_group.values_mut() {
+        group.sort_by_key(|at| {
+            (
+                pit[*at].class.clone(),
+                pit[*at].method.clone(),
+                pit[*at].index,
+            )
+        });
+    }
     let mut unmatched = Vec::new();
     for (file, mutants) in ours {
         for mutant in mutants {
@@ -496,6 +512,40 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                 mutant.key.clone()
             };
             unmatched.push((file.clone(), mutant, key));
+        }
+    }
+    unmatched.sort_by_key(|(file, mutant, _)| (file.clone(), mutant.start));
+    // A line where PIT has more of a group than Supercov is a line kotlinc
+    // gave other lines' code (a condition's jumps all on its last line):
+    // its mutants are paired in code order by the statement pass, not line
+    // by line.
+    let mut ours_on_line = BTreeMap::<(String, &str, String, u32), usize>::new();
+    for (file, mutant, key) in &unmatched {
+        *ours_on_line
+            .entry((
+                file.clone(),
+                mutant.mutator.name(),
+                key.clone(),
+                mutant.start.0,
+            ))
+            .or_default() += 1;
+    }
+    let mut crowded = vec![false; pit.len()];
+    for ((file, mutator, key), group) in &by_group {
+        let mut theirs_on_line = BTreeMap::<u32, Vec<usize>>::new();
+        for at in group {
+            theirs_on_line.entry(pit[*at].line).or_default().push(*at);
+        }
+        for (line, theirs) in theirs_on_line {
+            let ours = ours_on_line
+                .get(&(file.clone(), mutator.as_str(), key.clone(), line))
+                .copied()
+                .unwrap_or(0);
+            if ours > 0 && theirs.len() > ours {
+                for at in theirs {
+                    crowded[at] = true;
+                }
+            }
         }
     }
     // Three passes, each taking what the one before left: the exact line,
@@ -510,13 +560,16 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
                 group.iter().copied().find(|at| {
                     !taken[*at]
                         && match pass {
-                            0 => pit[*at].line == mutant.start.0,
+                            0 => pit[*at].line == mutant.start.0 && !crowded[*at],
                             // javac gives an operator on a continuation line
                             // the line of the operand before it, or of the
                             // statement.
-                            1 => (mutant.lines.0.saturating_sub(3)
-                                ..=mutant.lines.1.max(mutant.end.0))
-                                .contains(&pit[*at].line),
+                            1 => {
+                                !crowded[*at]
+                                    && (mutant.lines.0.saturating_sub(3)
+                                        ..=mutant.lines.1.max(mutant.end.0))
+                                        .contains(&pit[*at].line)
+                            }
                             // kotlinc puts a condition's jumps on its last
                             // line: the statement's every line.
                             2 => (mutant.lines.0..=mutant.statement_end).contains(&pit[*at].line),
@@ -614,6 +667,7 @@ mod tests {
                 description: row["description"].as_str().unwrap_or("").into(),
                 status: "SURVIVED".into(),
                 killing_tests: Vec::new(),
+                index: 0,
             })
             .collect::<Vec<_>>();
         let sources = files
@@ -681,6 +735,13 @@ mod tests {
             ours.values().map(Vec::len).sum::<usize>(),
             join.pairs.len()
         );
+        if let Ok(file) = std::env::var("PAIRS") {
+            for (id, at) in &join.pairs {
+                if id.contains(&file) {
+                    println!("PAIR {id} = {} {}", pit[*at].line, pit[*at].status);
+                }
+            }
+        }
         for at in &join.only_pit {
             let m = &pit[*at];
             println!("PIT  {}:{} {} {}", m.file, m.line, m.mutator, m.description);

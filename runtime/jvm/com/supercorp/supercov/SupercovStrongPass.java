@@ -272,6 +272,11 @@ public final class SupercovStrongPass {
     } catch (Throwable e) {
       // No management API: the minions run with defaults.
     }
+    // Surefire enables assertions through its class loader, not `-ea`: a
+    // minion asks for them on its command line instead.
+    if (assertionsOn()) {
+      command.add("-ea");
+    }
     command.add("-D" + MINION + "=true");
     command.add("-cp");
     command.add(System.getProperty("java.class.path"));
@@ -578,9 +583,19 @@ public final class SupercovStrongPass {
     return new Fresh(roots(), SupercovStrongPass.class.getClassLoader());
   }
 
+  /**
+   * Whether the project's classes run with assertions: Gradle passes `-ea`,
+   * Surefire sets them on its class loader, which a new loader does not
+   * inherit, and Java `assert` statements are how many tests check.
+   */
+  static boolean assertionsOn() {
+    return SupercovStrongPass.class.desiredAssertionStatus();
+  }
+
   private static final class Fresh extends java.net.URLClassLoader {
     Fresh(java.net.URL[] roots, ClassLoader parent) {
       super(roots, parent);
+      setDefaultAssertionStatus(assertionsOn());
     }
 
     @Override

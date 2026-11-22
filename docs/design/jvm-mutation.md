@@ -111,6 +111,11 @@ The build compiles the strong copy once and starts its test JVM as it always
 does; the pass runs inside it, as PIT's minion does, switching mutants
 between test executions (`SupercovStrongPass.java`).
 
+- **Ant.** In an Ant build the patched tasks name Supercov's formatter and
+  listeners by class; a strong copy compiles drivers under those names:
+  `<junit>`'s formatter starts the pass with the JUnit 4 driver in each JVM
+  the task forks (the claims share the work), `<junitlauncher>`'s listener
+  and `<testng>`'s listener the other two.
 - **Getting in.** On the JUnit Platform (Jupiter, JUnit 4 through Vintage,
   Kotest, Spock) `SupercovStrong` is a discovery filter that leaves the
   build's own discovery empty, and a listener that, told the empty plan
@@ -120,9 +125,22 @@ between test executions (`SupercovStrongPass.java`).
   registered through the frameworks' service files in the copy.
 - **One test at a time, by its name.** A test is found by the name the
   measured run recorded: the platform driver discovers its class and takes
-  the identifier with that name (or, for a parameterized invocation whose
-  arguments print differently in another JVM, with that invocation index);
-  the TestNG driver runs the class and method. Each runs alone.
+  the identifier with that name. A parameterized or dynamic test's
+  invocations are not in a discovered plan (they appear as it runs), so an
+  invocation is selected by its template's id and its index
+  (`…/[test-template-invocation:#3]`), as PIT selects it. The TestNG driver
+  runs the class and method (a data provider's invocations together); the
+  JUnit 4 driver of Ant's `<junit>` runs `JUnitCore` on the method. A
+  candidate the driver cannot find leaves its mutant `error`, never
+  `survived`.
+- **Fresh classes for each mutant.** Each mutant runs in a class loader of
+  its own that loads the project's classes afresh (every directory on the
+  test class path, a surefire booter jar's manifest read for them) and the
+  libraries as the JVM already has them. A cache a baseline filled, or a
+  static a previous mutant changed, does not carry over: on typetools a
+  type cache filled without the mutant hid seven mutants PIT kills. The
+  runtime's switches are set in that loader's copy and in the JVM's own, for
+  code a packaged jar holds.
 - **Baselines and confirmations.** A test runs once without a mutant before
   any mutant runs against it; one that fails then is no candidate. A kill is
   confirmed by running the killing test again with no mutant: a mutant that
@@ -166,6 +184,24 @@ both operands are known primitives of the same type. Elsewhere a mutant
 has no probe and is decided by reach alone. A probe that recorded nothing
 says its code never ran, which is what decides reach in a Kotlin
 expression body, where no statement point is.
+
+A probe's opening ranks inside the coverage wrappers at its start and its
+closing between their parentheses (5, 20, 21) and the braces and `else`
+arms statements close there (60 and up). The instrumenter braces a Kotlin
+`if`, `when` or `try` expression's branches and its braces nest by the
+order they were added, which no rank can reproduce from outside, so a
+Kotlin probe is not placed around an expression that ends in one.
+
+## Reach that is not where the code is
+
+A lambda's body runs when the lambda is called. An expression lambda (and a
+Kotlin lambda a function that is not `inline` keeps) has no statement point
+of its own, so the statement around it records only that the lambda was
+made: `map.put(Character.class, s -> …)` runs once, as the class loads, and
+the tests that convert a character later run the body. A mutant in such a
+body is linked to no point: every test is its candidate, unless its value
+probe recorded where it ran. commons-cli's `TypeHandler` had a violation of
+this kind before.
 
 ## Validation
 

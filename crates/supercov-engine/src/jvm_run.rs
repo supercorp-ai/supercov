@@ -878,17 +878,15 @@ fn gradle_with_launcher(
         // on every OS: the same spelling `junit4` uses.
         let relative =
             "rootDir.toPath().relativize(projectDir.toPath()).toString().replace('\\\\', '/')";
-        let (list, test_tasks, still_junit4) = if kotlin {
+        let (list, test_tasks) = if kotlin {
             (
                 format!("listOf({projects})"),
                 "tasks.withType<Test>().configureEach",
-                "options is JUnitOptions",
             )
         } else {
             (
                 format!("[{projects}]"),
                 "tasks.withType(Test).configureEach",
-                "options instanceof JUnitOptions",
             )
         };
         body.push_str(&format!("        if ({relative} in {list}) {{\n"));
@@ -904,8 +902,11 @@ fn gradle_with_launcher(
             ),
         ));
         body.push_str("            }\n");
+        // Unconditionally: these projects are on neither TestNG nor the
+        // platform, and Gradle 8 finalizes a task's framework when its
+        // options are read, so a check of `options` would refuse the switch.
         body.push_str(&format!(
-            "            {test_tasks} {{\n                if ({still_junit4}) useJUnitPlatform()\n            }}\n"
+            "            {test_tasks} {{\n                useJUnitPlatform()\n            }}\n"
         ));
         body.push_str("        }\n");
     }
@@ -3712,8 +3713,8 @@ mod tests {
         );
         assert!(updated.contains("in listOf(\"\", \"moshi\")"), "{updated}");
         assert!(
-            updated.contains("if (options is JUnitOptions) useJUnitPlatform()"),
-            "only a task still on Gradle's JUnit 4 framework is switched:\n{updated}"
+            updated.contains("configureEach {\n                useJUnitPlatform()\n"),
+            "the tasks are switched without reading their options (Gradle 8 finalizes them):\n{updated}"
         );
 
         // Already compiling against the launcher, Vintage is still added.

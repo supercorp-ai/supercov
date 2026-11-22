@@ -31,6 +31,9 @@ for path in root.rglob("*.json"):
         times[project]["measure"] += data["measureMs"]
         times[project]["strong"] += data["strongMs"]
     elif name == "supercov-pit.json":
+        if "pit" not in data:
+            rows[project]["join failed"] += 1
+            continue
         row = rows[project]
         row["pit"] += data["pit"]
         row["supercov"] += data["supercov"]
@@ -51,7 +54,7 @@ for path in root.rglob("*.json"):
 
 columns = ["pit", "supercov", "matched", "agree", "violations", "only PIT", "only Supercov",
            "not compared", "strong ran", "strong killed", "strong survived", "strong timeout",
-           "strong error"]
+           "strong error", "join failed"]
 print("| project | " + " | ".join(columns) + " | PIT (s) | PIT matrix (s) | measured run (s) | strong pass (s) |")
 print("|" + " --- |" * (len(columns) + 5))
 for project in sorted(set(rows) | set(times)):
