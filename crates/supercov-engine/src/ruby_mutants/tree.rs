@@ -88,6 +88,22 @@ impl Child {
     pub(crate) fn is_nil(&self) -> bool {
         matches!(self, Self::Nil)
     }
+
+    /// The value as `scripts/mutant-parity.rb` prints it: an integer's
+    /// decimal digits.
+    pub(crate) fn text(&self) -> String {
+        let mut out = String::new();
+        write_child(self, &mut out);
+        out
+    }
+}
+
+/// An integer of decimal `text`: `Int` where it fits.
+pub(crate) fn integer_child(text: String) -> Child {
+    match text.parse::<i128>() {
+        Ok(number) => Child::Int(number),
+        Err(_) => Child::BigInt(text),
+    }
 }
 
 /// How a node was written, where printing it again needs to know.
@@ -128,6 +144,9 @@ pub(crate) mod syntax {
     pub const HEREDOC: u32 = 1 << 15;
     /// A part of a regexp written `%r{...}`: a `/` in it is not escaped.
     pub const PERCENT_REGEXP: u32 = 1 << 16;
+    /// An operator assignment's target (`a[i]` of `a[i] += 1`): written
+    /// as a target, without a value.
+    pub const TARGET: u32 = 1 << 17;
 }
 
 /// A parser AST node.
@@ -321,11 +340,7 @@ fn integer_text(value: ruby_prism::Integer<'_>) -> String {
 
 /// The integer value of a Prism integer: past `i128`, its decimal text.
 fn integer(value: ruby_prism::Integer<'_>) -> Child {
-    let text = integer_text(value);
-    match text.parse::<i128>() {
-        Ok(number) => Child::Int(number),
-        Err(_) => Child::BigInt(text),
-    }
+    integer_child(integer_text(value))
 }
 
 impl<'s> Converter<'s> {
@@ -1008,10 +1023,9 @@ impl<'s> Converter<'s> {
         if self.text(&string.content_loc()).contains(&b'\n') {
             let parts = self.lines(string)?;
             if parts.len() == 1 {
+                // One line, ending in its line break: a plain string.
                 let only = parts.into_iter().next().expect("one");
-                let mut copy = (**only.node().expect("node")).clone();
-                copy.span = Some(at);
-                return Ok(Rc::new(copy));
+                return Ok(made("str", only.node().expect("node").children.clone(), at));
             }
             return Ok(made("dstr", parts, at));
         }
@@ -1053,13 +1067,12 @@ impl<'s> Converter<'s> {
         at: (usize, usize),
     ) -> Built {
         let value = self.convert(value)?;
-        let target = if target.ty == "index" {
-            let mut copy = (*target).clone();
-            copy.ty = "indexasgn";
-            Rc::new(copy)
-        } else {
-            target
-        };
+        let mut target = (*target).clone();
+        if target.ty == "index" {
+            target.ty = "indexasgn";
+        }
+        target.syntax |= syntax::TARGET;
+        let target = Rc::new(target);
         let operator =
             String::from_utf8_lossy(operator.strip_suffix(b"=").unwrap_or(operator)).into_owned();
         Ok(match operator.as_str() {
@@ -2017,6 +2030,12 @@ impl<'s> Converter<'s> {
             }
             Node::AliasMethodNode { .. } => {
                 let alias = value.as_alias_method_node().expect("alias");
+                let new_name = self.convert(&alias.new_name())?;
+                let old_name = self.convert(&alias.old_name())?;
+                leaf("alias", vec![node(new_name), node(old_name)])
+            }
+            Node::AliasGlobalVariableNode { .. } => {
+                let alias = value.as_alias_global_variable_node().expect("alias");
                 let new_name = self.convert(&alias.new_name())?;
                 let old_name = self.convert(&alias.old_name())?;
                 leaf("alias", vec![node(new_name), node(old_name)])

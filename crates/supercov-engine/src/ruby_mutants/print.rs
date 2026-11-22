@@ -323,6 +323,9 @@ impl Printer<'_> {
                 quoted(name.as_bytes())
             });
         }
+        if located.has(syntax::TARGET) {
+            return self.target(replacement);
+        }
         if matches!(replacement.ty, "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn")
             && replacement.children.len() == 1
         {
@@ -825,8 +828,9 @@ impl Printer<'_> {
             head.push_str(&self.operand(receiver)?);
             head.push_str(dot);
         }
+        // `a.b = c`; `a.[]=(i)` is called by name.
         if selector.ends_with('=')
-            && !OPERATORS.contains(&selector)
+            && method_name(selector)
             && receiver.is_some()
             && arguments.len() == 1
         {
@@ -1029,9 +1033,9 @@ impl Printer<'_> {
             }
             "indexasgn" => {
                 let receiver = self.operand(node.node(0)?)?;
-                let length = children.len();
-                let indices = self.arguments(&children[1..length - 1])?;
-                let value = self.argument(children[length - 1].node()?)?;
+                let (value, indices) = children[1..].split_last()?;
+                let indices = self.arguments(indices)?;
+                let value = self.argument(value.node()?)?;
                 format!("{receiver}[{}] = {value}", indices.join(", "))
             }
             "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" => {

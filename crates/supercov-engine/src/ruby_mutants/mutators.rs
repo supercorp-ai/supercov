@@ -1398,35 +1398,79 @@ fn array(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
 
 /// mutant's integer overflow zones: the literal also becomes the safe prime
 /// of the next integer width above it.
-const OVERFLOW_ZONES: &[(u128, &str)] = &[
-    (1 << 7, "167"),
-    (1 << 8, "467"),
-    (1 << 15, "55487"),
-    (1 << 16, "108503"),
-    (1 << 31, "2667278543"),
-    (1 << 32, "7980081959"),
-    (1 << 63, "15508464536481899903"),
+const OVERFLOW_ZONES: &[(u128, i128)] = &[
+    (1 << 7, 167),
+    (1 << 8, 467),
+    (1 << 15, 55487),
+    (1 << 16, 108503),
+    (1 << 31, 2667278543),
+    (1 << 32, 7980081959),
+    (1 << 63, 15508464536481899903),
 ];
 
 fn integer(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
     singletons(out, parent);
-    let Child::Int(value) = out.input.child(0).clone() else {
-        return;
-    };
-    for each in [0, 1, value + 1, value - 1] {
-        out.emit_type(vec![Child::Int(each)]);
+    let value = out.input.child(0).clone();
+    for each in [
+        Child::Int(0),
+        Child::Int(1),
+        offset(&value, 1),
+        offset(&value, -1),
+    ] {
+        out.emit_type(vec![each]);
     }
-    let absolute = value.unsigned_abs();
-    if let Some((_, sentinel)) = OVERFLOW_ZONES
-        .iter()
-        .find(|(boundary, _)| absolute < *boundary)
+    if let Child::Int(value) = value
+        && let Some((_, sentinel)) = OVERFLOW_ZONES
+            .iter()
+            .find(|(boundary, _)| value.unsigned_abs() < *boundary)
     {
-        let child = match sentinel.parse::<i128>() {
-            Ok(number) => Child::Int(number),
-            Err(_) => Child::BigInt((*sentinel).to_owned()),
-        };
-        out.emit_type(vec![child]);
+        out.emit_type(vec![Child::Int(*sentinel)]);
     }
+}
+
+/// An integer one more (`delta` 1) or one less (-1) than `value`, past
+/// `i128` as Ruby's integers go.
+fn offset(value: &Child, delta: i8) -> Child {
+    if let Child::Int(number) = value
+        && let Some(sum) = number.checked_add(i128::from(delta))
+    {
+        return Child::Int(sum);
+    }
+    let text = value.text();
+    let (sign, magnitude) = match text.strip_prefix('-') {
+        Some(magnitude) => ("-", magnitude),
+        None => ("", text.as_str()),
+    };
+    // Past `i128` the magnitude is never 0: the sign stays.
+    let away_from_zero = (delta > 0) == sign.is_empty();
+    let mut digits = magnitude.as_bytes().to_vec();
+    let mut index = digits.len();
+    if away_from_zero {
+        loop {
+            index -= 1;
+            if digits[index] != b'9' {
+                digits[index] += 1;
+                break;
+            }
+            digits[index] = b'0';
+            if index == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+        }
+    } else {
+        // Never below 0: a magnitude past `i128` has a digit above 0.
+        loop {
+            index -= 1;
+            if digits[index] != b'0' {
+                digits[index] -= 1;
+                break;
+            }
+            digits[index] = b'9';
+        }
+    }
+    let magnitude = String::from_utf8(digits).expect("decimal digits");
+    super::tree::integer_child(format!("{sign}{}", magnitude.trim_start_matches('0')))
 }
 
 /// A rational's or imaginary's mutations' values, as `inspect` prints them:

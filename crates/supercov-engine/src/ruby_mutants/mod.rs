@@ -493,6 +493,48 @@ fn misplaced(node: &N, parent: Option<&N>) -> bool {
     {
         return true;
     }
+    // `a[] = v` without its value is no statement: only a target (`a[]`
+    // of `a[], b = c`, `a[] += 1`) stands without one.
+    if node.ty == "indexasgn"
+        && node.children.len() < 2
+        && parent
+            .is_some_and(|parent| !matches!(parent.ty, "mlhs" | "op_asgn" | "or_asgn" | "and_asgn"))
+    {
+        return true;
+    }
+    // An operator assignment's target is an assignment: anything else (a
+    // receiver left in place of `a[i]`) prints as another target.
+    if matches!(node.ty, "op_asgn" | "or_asgn" | "and_asgn")
+        && node.node(0).is_some_and(|target| {
+            !matches!(
+                target.ty,
+                "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" | "send" | "csend" | "indexasgn"
+            )
+        })
+    {
+        return true;
+    }
+    // `alias` and `undef` name methods (or globals): no expression stands
+    // for a name.
+    if matches!(node.ty, "alias" | "undef")
+        && node
+            .children
+            .iter()
+            .filter_map(Child::node)
+            .any(|name| !matches!(name.ty, "sym" | "dsym" | "gvar" | "back_ref" | "nth_ref"))
+    {
+        return true;
+    }
+    // Unparser does not print an interpolation of several statements back.
+    if matches!(node.ty, "dstr" | "dsym" | "xstr" | "regexp")
+        && node
+            .children
+            .iter()
+            .filter_map(Child::node)
+            .any(|part| part.ty == "begin" && part.children.len() > 1)
+    {
+        return true;
+    }
     if node.ty == "and"
         && node.node(0).is_some_and(|left| left.ty == "or")
         && parent.is_some_and(|parent| !STATEMENT_PARENTS.contains(&parent.ty))

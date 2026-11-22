@@ -203,6 +203,35 @@ fn normalized(node: &N) -> Rc<N> {
     {
         return only.clone();
     }
+    // A string over several lines, printed on one, is one `str`: adjacent
+    // strings are one string, and a `dstr` of strings alone a `str`.
+    if node.ty == "dstr" {
+        let mut merged: Vec<Child> = Vec::new();
+        for child in children {
+            let text = match &child {
+                Child::Node(part) if part.ty == "str" => part.child(0).clone(),
+                _ => {
+                    merged.push(child);
+                    continue;
+                }
+            };
+            if let Some(Child::Node(last)) = merged.last()
+                && last.ty == "str"
+                && let (Child::Str(before), Child::Str(after)) = (last.child(0), &text)
+            {
+                let joined = [before.as_slice(), after.as_slice()].concat();
+                *merged.last_mut().unwrap() = Child::Node(N::new("str", vec![Child::Str(joined)]));
+                continue;
+            }
+            merged.push(Child::Node(N::new("str", vec![text])));
+        }
+        if let [Child::Node(only)] = merged.as_slice()
+            && only.ty == "str"
+        {
+            return only.clone();
+        }
+        return N::new("dstr", merged);
+    }
     // A body with its clauses, written `begin ... end` where its own syntax
     // held it bare (a block's), is the same program.
     if node.ty == "kwbegin"

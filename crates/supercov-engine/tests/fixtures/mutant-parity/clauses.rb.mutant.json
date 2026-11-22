@@ -1,0 +1,7655 @@
+{
+  "mutantSet": "mutant@0.17.1",
+  "subjects": [
+    {
+      "subject": "rescues:6",
+      "sexp": "(def :rescues (args (arg :a)) (begin (kwbegin (rescue nil (resbody nil nil nil) nil)) (kwbegin (rescue nil (resbody nil (lvasgn :e) nil) nil)) (kwbegin (rescue nil (resbody (array (const nil :ArgumentError) (const nil :TypeError)) nil nil) nil)) (kwbegin (ensure (rescue (send (lvar :a) :call) (resbody (array (const nil :ArgumentError)) (lvasgn :e) (lvar :e)) (resbody (array (const nil :TypeError)) nil (retry)) (lvar :a)) (send (lvar :a) :close))) (kwbegin (ensure (send (lvar :a) :call) nil)) (kwbegin (rescue (send (lvar :a) :call) (resbody nil nil nil) nil)) (lvar :e)))",
+      "mutants": [
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            36,
+            6
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            36,
+            6
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            36,
+            6
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            9,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            7,
+            5
+          ],
+          "end": [
+            9,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            10,
+            5
+          ],
+          "end": [
+            12,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            15,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            15,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            25,
+            14
+          ],
+          "node": "ensure",
+          "replacement": "(rescue (send (lvar :a) :call) (resbody (array (const nil :ArgumentError)) (lvasgn :e) (lvar :e)) (resbody (array (const nil :TypeError)) nil (retry)) (lvar :a))"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            17,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            17,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            17,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "rescue",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            19,
+            7
+          ],
+          "end": [
+            19,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "rescue",
+          "replacement": "(rescue (send (lvar :a) :call) (resbody (array (const nil :TypeError)) nil (retry)) (lvar :a))"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "rescue",
+          "replacement": "(rescue (send (lvar :a) :call) (resbody (array (const nil :ArgumentError)) (lvasgn :e) (lvar :e)) (lvar :a))"
+        },
+        {
+          "start": [
+            23,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            17,
+            7
+          ],
+          "end": [
+            23,
+            8
+          ],
+          "node": "rescue",
+          "replacement": "(begin (send (lvar :a) :call) (lvar :a))"
+        },
+        {
+          "start": [
+            25,
+            7
+          ],
+          "end": [
+            25,
+            14
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            25,
+            7
+          ],
+          "end": [
+            25,
+            14
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            25,
+            7
+          ],
+          "end": [
+            25,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            16,
+            5
+          ],
+          "end": [
+            26,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            28,
+            7
+          ],
+          "end": [
+            29,
+            11
+          ],
+          "node": "ensure",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            28,
+            7
+          ],
+          "end": [
+            28,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            28,
+            7
+          ],
+          "end": [
+            28,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            28,
+            7
+          ],
+          "end": [
+            28,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            30,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            27,
+            5
+          ],
+          "end": [
+            30,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            32,
+            7
+          ],
+          "end": [
+            32,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            32,
+            7
+          ],
+          "end": [
+            32,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            32,
+            7
+          ],
+          "end": [
+            32,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            32,
+            7
+          ],
+          "end": [
+            34,
+            9
+          ],
+          "node": "rescue",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            35,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            35,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            6
+          ],
+          "node": "lvar",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "implicit_rescue:39",
+      "sexp": "(def :implicit_rescue (args (arg :a)) (ensure (rescue (send (lvar :a) :call) (resbody (array (const nil :StandardError)) nil (nil)) (lvar :a)) (send (lvar :a) :close)))",
+      "mutants": [
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "ensure",
+          "replacement": null
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(rescue (send (lvar :a) :call) (resbody (array (const nil :StandardError)) nil (nil)) (lvar :a))"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            40,
+            11
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            40,
+            11
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            40,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            44,
+            6
+          ],
+          "node": "rescue",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            44,
+            6
+          ],
+          "node": "rescue",
+          "replacement": "(begin (send (lvar :a) :call) (nil))"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            40,
+            5
+          ],
+          "end": [
+            44,
+            6
+          ],
+          "node": "rescue",
+          "replacement": "(begin (send (lvar :a) :call) (lvar :a))"
+        },
+        {
+          "start": [
+            46,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            46,
+            5
+          ],
+          "end": [
+            46,
+            12
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            46,
+            5
+          ],
+          "end": [
+            46,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        }
+      ]
+    },
+    {
+      "subject": "ensure_only:49",
+      "sexp": "(def :ensure_only (args (arg :a)) (ensure (send (lvar :a) :call) (send (lvar :a) :close)))",
+      "mutants": [
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "ensure",
+          "replacement": null
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "ensure",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            50,
+            11
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            50,
+            11
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            50,
+            5
+          ],
+          "end": [
+            50,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            52,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            52,
+            5
+          ],
+          "end": [
+            52,
+            12
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            52,
+            5
+          ],
+          "end": [
+            52,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        }
+      ]
+    },
+    {
+      "subject": "block_rescue:55",
+      "sexp": "(def :block_rescue (args (arg :list)) (block (send (lvar :list) :each) (args (procarg0 (arg :a))) (rescue (send (lvar :a) :call) (resbody (array (const nil :StandardError)) nil (nil)) nil)))",
+      "mutants": [
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": null
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send (lvar :list) :each)"
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            60,
+            8
+          ],
+          "node": "block",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            56,
+            5
+          ],
+          "end": [
+            56,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            59,
+            10
+          ],
+          "node": "rescue",
+          "replacement": null
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            59,
+            10
+          ],
+          "node": "rescue",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            57,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            57,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            57,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            59,
+            10
+          ],
+          "node": "rescue",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            57,
+            7
+          ],
+          "end": [
+            59,
+            10
+          ],
+          "node": "rescue",
+          "replacement": "(begin (send (lvar :a) :call) (nil))"
+        }
+      ]
+    },
+    {
+      "subject": "begins:63",
+      "sexp": "(def :begins (args (arg :a)) (begin (kwbegin) (kwbegin (lvar :a)) (kwbegin (lvar :a) (send (lvar :a) :call)) (begin) (begin (lvar :a) (send (lvar :a) :call)) (while (lvar :a) (send (lvar :a) :call)) (while_post (lvar :a) (kwbegin (send (lvar :a) :call))) (until_post (lvar :a) (kwbegin (send (lvar :a) :call)))))",
+      "mutants": [
+        {
+          "start": [
+            64,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            64,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            64,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            64,
+            5
+          ],
+          "end": [
+            65,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            64,
+            5
+          ],
+          "end": [
+            65,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            67,
+            7
+          ],
+          "end": [
+            67,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            68,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            66,
+            5
+          ],
+          "end": [
+            68,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            70,
+            7
+          ],
+          "end": [
+            70,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            71,
+            7
+          ],
+          "end": [
+            71,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            71,
+            7
+          ],
+          "end": [
+            71,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            71,
+            7
+          ],
+          "end": [
+            71,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            69,
+            5
+          ],
+          "end": [
+            72,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            69,
+            5
+          ],
+          "end": [
+            72,
+            8
+          ],
+          "node": "kwbegin",
+          "replacement": null
+        },
+        {
+          "start": [
+            73,
+            5
+          ],
+          "end": [
+            73,
+            7
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            74,
+            6
+          ],
+          "end": [
+            74,
+            7
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            74,
+            5
+          ],
+          "end": [
+            74,
+            16
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            74,
+            9
+          ],
+          "end": [
+            74,
+            15
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            74,
+            9
+          ],
+          "end": [
+            74,
+            15
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            74,
+            9
+          ],
+          "end": [
+            74,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            74,
+            5
+          ],
+          "end": [
+            74,
+            16
+          ],
+          "node": "begin",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            74,
+            5
+          ],
+          "end": [
+            74,
+            16
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            19
+          ],
+          "node": "while",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            75,
+            18
+          ],
+          "end": [
+            75,
+            19
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            19
+          ],
+          "node": "while",
+          "replacement": "(until (lvar :a) (send (lvar :a) :call))"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            11
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            11
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            11
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            11
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            75,
+            5
+          ],
+          "end": [
+            75,
+            19
+          ],
+          "node": "while",
+          "replacement": null
+        },
+        {
+          "start": [
+            76,
+            5
+          ],
+          "end": [
+            78,
+            16
+          ],
+          "node": "while_post",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            78,
+            15
+          ],
+          "end": [
+            78,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            76,
+            5
+          ],
+          "end": [
+            78,
+            16
+          ],
+          "node": "while_post",
+          "replacement": "(until_post (lvar :a) (kwbegin (send (lvar :a) :call)))"
+        },
+        {
+          "start": [
+            77,
+            7
+          ],
+          "end": [
+            77,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            77,
+            7
+          ],
+          "end": [
+            77,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            77,
+            7
+          ],
+          "end": [
+            77,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            77,
+            7
+          ],
+          "end": [
+            77,
+            13
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            76,
+            5
+          ],
+          "end": [
+            78,
+            16
+          ],
+          "node": "while_post",
+          "replacement": null
+        },
+        {
+          "start": [
+            79,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "until_post",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            81,
+            15
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            79,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "until_post",
+          "replacement": "(while_post (lvar :a) (kwbegin (send (lvar :a) :call)))"
+        },
+        {
+          "start": [
+            80,
+            7
+          ],
+          "end": [
+            80,
+            13
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            80,
+            7
+          ],
+          "end": [
+            80,
+            13
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            80,
+            7
+          ],
+          "end": [
+            80,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            80,
+            7
+          ],
+          "end": [
+            80,
+            13
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            79,
+            5
+          ],
+          "end": [
+            81,
+            16
+          ],
+          "node": "until_post",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "loops:84",
+      "sexp": "(def :loops (args (arg :list)) (begin (for (lvasgn :a) (lvar :list) (lvar :a)) (for (mlhs (lvasgn :a) (lvasgn :b)) (lvar :list) (lvar :a)) (while (send (lvar :list) :any?) (send (lvar :list) :pop)) (until (send (lvar :list) :empty?) nil) (block (send nil :loop) (args) (break))))",
+      "mutants": [
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            85,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            85,
+            14
+          ],
+          "end": [
+            85,
+            18
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            86,
+            7
+          ],
+          "end": [
+            86,
+            8
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            17
+          ],
+          "end": [
+            88,
+            21
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            88,
+            25
+          ],
+          "end": [
+            88,
+            26
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            91,
+            8
+          ],
+          "node": "while",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :list) :all?)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :list) :empty?)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :list) :none?)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            20
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            89,
+            11
+          ],
+          "end": [
+            89,
+            15
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            91,
+            8
+          ],
+          "node": "while",
+          "replacement": "(until (send (lvar :list) :any?) (send (lvar :list) :pop))"
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            15
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            15
+          ],
+          "node": "send",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            15
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :list) :shift)"
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            15
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            90,
+            7
+          ],
+          "end": [
+            90,
+            15
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            89,
+            5
+          ],
+          "end": [
+            91,
+            8
+          ],
+          "node": "while",
+          "replacement": null
+        },
+        {
+          "start": [
+            92,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "until",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            22
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            22
+          ],
+          "node": "send",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            22
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :list) :any?)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            22
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            22
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            92,
+            11
+          ],
+          "end": [
+            92,
+            15
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            92,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "until",
+          "replacement": "(while (send (lvar :list) :empty?) nil)"
+        },
+        {
+          "start": [
+            92,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "until",
+          "replacement": "(until (send (lvar :list) :empty?) (send nil :raise))"
+        },
+        {
+          "start": [
+            92,
+            5
+          ],
+          "end": [
+            93,
+            8
+          ],
+          "node": "until",
+          "replacement": null
+        },
+        {
+          "start": [
+            94,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "block",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            94,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "block",
+          "replacement": "(send nil :loop)"
+        },
+        {
+          "start": [
+            95,
+            7
+          ],
+          "end": [
+            95,
+            12
+          ],
+          "node": "break",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            94,
+            5
+          ],
+          "end": [
+            96,
+            8
+          ],
+          "node": "block",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "cases:99",
+      "sexp": "(def :cases (args (arg :a)) (begin (case (lvar :a) (when (int 1) nil) (when (int 2) (int 3) (lvar :a)) nil) (case nil (when (lvar :a) (int 1)) nil) (case (lvar :a) (when (int 1) (int 2)) (int 3))))",
+      "mutants": [
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            111,
+            8
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            111,
+            8
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            111,
+            8
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            103,
+            8
+          ],
+          "node": "case",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            100,
+            10
+          ],
+          "end": [
+            100,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            101,
+            5
+          ],
+          "end": [
+            101,
+            11
+          ],
+          "node": "when",
+          "replacement": "(when (int 1) (send nil :raise))"
+        },
+        {
+          "start": [
+            101,
+            10
+          ],
+          "end": [
+            101,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            101,
+            10
+          ],
+          "end": [
+            101,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            101,
+            10
+          ],
+          "end": [
+            101,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            101,
+            10
+          ],
+          "end": [
+            101,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            103,
+            8
+          ],
+          "node": "case",
+          "replacement": "(case (lvar :a) (when (int 2) (int 3) (lvar :a)) nil)"
+        },
+        {
+          "start": [
+            102,
+            20
+          ],
+          "end": [
+            102,
+            21
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            102,
+            5
+          ],
+          "end": [
+            102,
+            21
+          ],
+          "node": "when",
+          "replacement": "(when (int 3) (lvar :a))"
+        },
+        {
+          "start": [
+            102,
+            10
+          ],
+          "end": [
+            102,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            102,
+            10
+          ],
+          "end": [
+            102,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            102,
+            10
+          ],
+          "end": [
+            102,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            102,
+            10
+          ],
+          "end": [
+            102,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            102,
+            10
+          ],
+          "end": [
+            102,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            102,
+            5
+          ],
+          "end": [
+            102,
+            21
+          ],
+          "node": "when",
+          "replacement": "(when (int 2) (lvar :a))"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 4)"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            102,
+            13
+          ],
+          "end": [
+            102,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            103,
+            8
+          ],
+          "node": "case",
+          "replacement": "(case (lvar :a) (when (int 1) nil) nil)"
+        },
+        {
+          "start": [
+            100,
+            5
+          ],
+          "end": [
+            103,
+            8
+          ],
+          "node": "case",
+          "replacement": null
+        },
+        {
+          "start": [
+            104,
+            5
+          ],
+          "end": [
+            107,
+            8
+          ],
+          "node": "case",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            105,
+            17
+          ],
+          "end": [
+            105,
+            18
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            105,
+            17
+          ],
+          "end": [
+            105,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            105,
+            17
+          ],
+          "end": [
+            105,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            105,
+            17
+          ],
+          "end": [
+            105,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            105,
+            10
+          ],
+          "end": [
+            105,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            104,
+            5
+          ],
+          "end": [
+            107,
+            8
+          ],
+          "node": "case",
+          "replacement": null
+        },
+        {
+          "start": [
+            108,
+            5
+          ],
+          "end": [
+            111,
+            8
+          ],
+          "node": "case",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            108,
+            10
+          ],
+          "end": [
+            108,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            109,
+            17
+          ],
+          "end": [
+            109,
+            18
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            109,
+            17
+          ],
+          "end": [
+            109,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            109,
+            17
+          ],
+          "end": [
+            109,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            109,
+            17
+          ],
+          "end": [
+            109,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            109,
+            17
+          ],
+          "end": [
+            109,
+            18
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            109,
+            10
+          ],
+          "end": [
+            109,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            109,
+            10
+          ],
+          "end": [
+            109,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            109,
+            10
+          ],
+          "end": [
+            109,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            109,
+            10
+          ],
+          "end": [
+            109,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 4)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            110,
+            10
+          ],
+          "end": [
+            110,
+            11
+          ],
+          "node": "int",
+          "replacement": null
+        },
+        {
+          "start": [
+            108,
+            5
+          ],
+          "end": [
+            111,
+            8
+          ],
+          "node": "case",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "patterns:114",
+      "sexp": "(def :patterns (args (arg :value)) (case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0)))",
+      "mutants": [
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": null
+        },
+        {
+          "start": [
+            115,
+            10
+          ],
+          "end": [
+            115,
+            15
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            116,
+            8
+          ],
+          "end": [
+            116,
+            23
+          ],
+          "node": "match_alt",
+          "replacement": "(const nil :Integer)"
+        },
+        {
+          "start": [
+            116,
+            8
+          ],
+          "end": [
+            116,
+            23
+          ],
+          "node": "match_alt",
+          "replacement": "(const nil :Float)"
+        },
+        {
+          "start": [
+            116,
+            8
+          ],
+          "end": [
+            116,
+            15
+          ],
+          "node": "const",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            116,
+            18
+          ],
+          "end": [
+            116,
+            23
+          ],
+          "node": "const",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            117,
+            7
+          ],
+          "end": [
+            117,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            118,
+            9
+          ],
+          "end": [
+            118,
+            10
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            118,
+            9
+          ],
+          "end": [
+            118,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            118,
+            9
+          ],
+          "end": [
+            118,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            118,
+            9
+          ],
+          "end": [
+            118,
+            10
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(lvar :rest)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :rest) :all?)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :rest) :empty?)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :rest) :none?)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            31
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            118,
+            22
+          ],
+          "end": [
+            118,
+            26
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            119,
+            7
+          ],
+          "end": [
+            119,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            120,
+            12
+          ],
+          "end": [
+            120,
+            13
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            120,
+            12
+          ],
+          "end": [
+            120,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            120,
+            12
+          ],
+          "end": [
+            120,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            120,
+            12
+          ],
+          "end": [
+            120,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            120,
+            12
+          ],
+          "end": [
+            120,
+            13
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            34
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            34
+          ],
+          "node": "send",
+          "replacement": "(lvar :value)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            34
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :value) :any?)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            34
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            34
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            120,
+            22
+          ],
+          "end": [
+            120,
+            27
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            121,
+            7
+          ],
+          "end": [
+            121,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            121,
+            7
+          ],
+          "end": [
+            121,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            121,
+            7
+          ],
+          "end": [
+            121,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            121,
+            7
+          ],
+          "end": [
+            121,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            121,
+            7
+          ],
+          "end": [
+            121,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            122,
+            9
+          ],
+          "end": [
+            122,
+            13
+          ],
+          "node": "sym",
+          "replacement": "(sym :name__mutant__)"
+        },
+        {
+          "start": [
+            122,
+            15
+          ],
+          "end": [
+            122,
+            21
+          ],
+          "node": "const",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            123,
+            7
+          ],
+          "end": [
+            123,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            125,
+            7
+          ],
+          "end": [
+            125,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            126,
+            9
+          ],
+          "end": [
+            126,
+            12
+          ],
+          "node": "sym",
+          "replacement": "(sym :age__mutant__)"
+        },
+        {
+          "start": [
+            126,
+            14
+          ],
+          "end": [
+            126,
+            15
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            126,
+            14
+          ],
+          "end": [
+            126,
+            15
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            126,
+            14
+          ],
+          "end": [
+            126,
+            15
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            126,
+            14
+          ],
+          "end": [
+            126,
+            15
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            127,
+            7
+          ],
+          "end": [
+            127,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            127,
+            7
+          ],
+          "end": [
+            127,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            127,
+            7
+          ],
+          "end": [
+            127,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            127,
+            7
+          ],
+          "end": [
+            127,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            129,
+            7
+          ],
+          "end": [
+            129,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            130,
+            10
+          ],
+          "end": [
+            130,
+            11
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            130,
+            10
+          ],
+          "end": [
+            130,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            130,
+            10
+          ],
+          "end": [
+            130,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            130,
+            10
+          ],
+          "end": [
+            130,
+            11
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            130,
+            13
+          ],
+          "end": [
+            130,
+            14
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            130,
+            13
+          ],
+          "end": [
+            130,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            130,
+            13
+          ],
+          "end": [
+            130,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            130,
+            13
+          ],
+          "end": [
+            130,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            130,
+            13
+          ],
+          "end": [
+            130,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 4)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            130,
+            24
+          ],
+          "end": [
+            130,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            131,
+            7
+          ],
+          "end": [
+            131,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (nil) nil nil) (int 0))"
+        },
+        {
+          "start": [
+            115,
+            5
+          ],
+          "end": [
+            135,
+            8
+          ],
+          "node": "case_match",
+          "replacement": "(case_match (lvar :value) (in_pattern (match_as (match_alt (const nil :Integer) (const nil :Float)) (match_var :number)) nil (lvar :number)) (in_pattern (array_pattern (int 1) (match_rest (match_var :rest))) (if_guard (send (lvar :rest) :any?)) (lvar :rest)) (in_pattern (array_pattern (match_rest) (int 2)) (unless_guard (send (lvar :value) :empty?)) (int 2)) (in_pattern (hash_pattern (pair (sym :name) (match_as (const nil :String) (match_var :name))) (match_nil_pattern)) nil (lvar :name)) (in_pattern (hash_pattern (match_var :name) (match_rest (match_var :rest))) nil (lvar :rest)) (in_pattern (hash_pattern (pair (sym :age) (int 1)) (match_rest)) nil (int 1)) (in_pattern (pin (lvar :value)) nil (lvar :value)) (in_pattern (array_pattern (array_pattern (int 1) (int 2)) (match_rest (match_var :rest)) (int 3)) nil (lvar :rest)) (int 0))"
+        },
+        {
+          "start": [
+            134,
+            7
+          ],
+          "end": [
+            134,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            134,
+            7
+          ],
+          "end": [
+            134,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            134,
+            7
+          ],
+          "end": [
+            134,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int -1)"
+        },
+        {
+          "start": [
+            134,
+            7
+          ],
+          "end": [
+            134,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            134,
+            7
+          ],
+          "end": [
+            134,
+            8
+          ],
+          "node": "int",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "predicates:138",
+      "sexp": "(def :predicates (args (arg :value)) (begin (match_pattern_p (lvar :value) (array_pattern (int 1) (match_rest))) (match_pattern (lvar :value) (hash_pattern (match_var :name))) (lvar :name)))",
+      "mutants": [
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            141,
+            9
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            141,
+            9
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            141,
+            9
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            139,
+            20
+          ],
+          "node": "match_pattern_p",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            139,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            139,
+            15
+          ],
+          "end": [
+            139,
+            16
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            139,
+            15
+          ],
+          "end": [
+            139,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            139,
+            15
+          ],
+          "end": [
+            139,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            139,
+            15
+          ],
+          "end": [
+            139,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            139,
+            5
+          ],
+          "end": [
+            139,
+            20
+          ],
+          "node": "match_pattern_p",
+          "replacement": null
+        },
+        {
+          "start": [
+            140,
+            5
+          ],
+          "end": [
+            140,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            141,
+            5
+          ],
+          "end": [
+            141,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            141,
+            5
+          ],
+          "end": [
+            141,
+            9
+          ],
+          "node": "lvar",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "strings:144",
+      "sexp": "(def :strings (args (arg :name)) (array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b))))",
+      "mutants": [
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            145,
+            6
+          ],
+          "end": [
+            145,
+            25
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            19
+          ],
+          "end": [
+            145,
+            23
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            145,
+            27
+          ],
+          "end": [
+            146,
+            10
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            146,
+            12
+          ],
+          "end": [
+            147,
+            2
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            146,
+            12
+          ],
+          "end": [
+            147,
+            2
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            147,
+            4
+          ],
+          "end": [
+            148,
+            7
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            147,
+            11
+          ],
+          "end": [
+            147,
+            15
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            9
+          ],
+          "end": [
+            148,
+            20
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            9
+          ],
+          "end": [
+            148,
+            20
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            22
+          ],
+          "end": [
+            148,
+            29
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            31
+          ],
+          "end": [
+            148,
+            38
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            40
+          ],
+          "end": [
+            148,
+            51
+          ],
+          "node": "dsym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            45
+          ],
+          "end": [
+            148,
+            49
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            53
+          ],
+          "end": [
+            148,
+            60
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            53
+          ],
+          "end": [
+            148,
+            60
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            148,
+            53
+          ],
+          "end": [
+            148,
+            60
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"62\"))"
+        },
+        {
+          "start": [
+            148,
+            56
+          ],
+          "end": [
+            148,
+            57
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            56
+          ],
+          "end": [
+            148,
+            57
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            148,
+            53
+          ],
+          "end": [
+            148,
+            60
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"61\"))"
+        },
+        {
+          "start": [
+            148,
+            58
+          ],
+          "end": [
+            148,
+            59
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            58
+          ],
+          "end": [
+            148,
+            59
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (sym :a) (sym :b)) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            62
+          ],
+          "end": [
+            148,
+            75
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            62
+          ],
+          "end": [
+            148,
+            75
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            148,
+            62
+          ],
+          "end": [
+            148,
+            75
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (begin (lvar :name))))"
+        },
+        {
+          "start": [
+            148,
+            65
+          ],
+          "end": [
+            148,
+            66
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            65
+          ],
+          "end": [
+            148,
+            66
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            148,
+            62
+          ],
+          "end": [
+            148,
+            75
+          ],
+          "node": "array",
+          "replacement": "(array (str s\"61\"))"
+        },
+        {
+          "start": [
+            148,
+            67
+          ],
+          "end": [
+            148,
+            74
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            69
+          ],
+          "end": [
+            148,
+            73
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (dsym (str s\"61\") (begin (lvar :name))) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            77
+          ],
+          "end": [
+            148,
+            84
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            77
+          ],
+          "end": [
+            148,
+            84
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            148,
+            77
+          ],
+          "end": [
+            148,
+            84
+          ],
+          "node": "array",
+          "replacement": "(array (sym :b))"
+        },
+        {
+          "start": [
+            148,
+            80
+          ],
+          "end": [
+            148,
+            81
+          ],
+          "node": "sym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            80
+          ],
+          "end": [
+            148,
+            81
+          ],
+          "node": "sym",
+          "replacement": "(sym :a__mutant__)"
+        },
+        {
+          "start": [
+            148,
+            77
+          ],
+          "end": [
+            148,
+            84
+          ],
+          "node": "array",
+          "replacement": "(array (sym :a))"
+        },
+        {
+          "start": [
+            148,
+            82
+          ],
+          "end": [
+            148,
+            83
+          ],
+          "node": "sym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            82
+          ],
+          "end": [
+            148,
+            83
+          ],
+          "node": "sym",
+          "replacement": "(sym :b__mutant__)"
+        },
+        {
+          "start": [
+            145,
+            5
+          ],
+          "end": [
+            148,
+            101
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (str s\"6109620d1b5c\") (begin (lvar :name))) (dstr (str s\"6c696e65206f6e650a\") (str s\"6c696e652074776f\")) (str s\"656e647320686572650a\") (dstr (str s\"74776f20\") (begin (lvar :name)) (str s\"0a\") (str s\"6c696e6573\")) (str s\"c3a9017f\") (dstr (str s\"6974\") (str s\"73\")) (dstr (str s\"61\") (str s\"62\")) (dsym (str s\"61\") (begin (lvar :name))) (array (str s\"61\") (str s\"62\")) (array (str s\"61\") (dstr (begin (lvar :name)))) (array (sym :a) (sym :b)))"
+        },
+        {
+          "start": [
+            148,
+            86
+          ],
+          "end": [
+            148,
+            100
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            86
+          ],
+          "end": [
+            148,
+            100
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            148,
+            86
+          ],
+          "end": [
+            148,
+            100
+          ],
+          "node": "array",
+          "replacement": "(array (sym :b))"
+        },
+        {
+          "start": [
+            148,
+            89
+          ],
+          "end": [
+            148,
+            97
+          ],
+          "node": "dsym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            92
+          ],
+          "end": [
+            148,
+            96
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            86
+          ],
+          "end": [
+            148,
+            100
+          ],
+          "node": "array",
+          "replacement": "(array (dsym (str s\"61\") (begin (lvar :name))))"
+        },
+        {
+          "start": [
+            148,
+            98
+          ],
+          "end": [
+            148,
+            99
+          ],
+          "node": "sym",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            148,
+            98
+          ],
+          "end": [
+            148,
+            99
+          ],
+          "node": "sym",
+          "replacement": "(sym :b__mutant__)"
+        }
+      ]
+    },
+    {
+      "subject": "interpolations:151",
+      "sexp": "(def :interpolations (args (arg :name)) (array (dstr (begin)) (dstr (begin (lvar :name) (lvar :name))) (dstr (begin (lvar :name))) (dstr (str s\"61\") (ivar :@name)) (xstr (str s\"6c73\")) (xstr (str s\"6c7320\") (begin (lvar :name))) (xstr)))",
+      "mutants": [
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": null
+        },
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            152,
+            5
+          ],
+          "end": [
+            152,
+            75
+          ],
+          "node": "array",
+          "replacement": "(array (dstr (begin)) (dstr (begin (lvar :name))) (dstr (str s\"61\") (ivar :@name)) (xstr (str s\"6c73\")) (xstr (str s\"6c7320\") (begin (lvar :name))) (xstr))"
+        },
+        {
+          "start": [
+            152,
+            13
+          ],
+          "end": [
+            152,
+            28
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        }
+      ]
+    },
+    {
+      "subject": "regexps:155",
+      "sexp": "(def :regexps (args (arg :text)) (begin (send (lvar :text) :match? (regexp (str s\"612f62\") (regopt))) (send (lvar :text) :match? (regexp (str s\"61\") (begin (lvar :text)) (str s\"62\") (regopt))) (send (lvar :text) :match? (regexp (str s\"61\") (begin (lvar :text)) (str s\"62\") (regopt :i))) (send (lvar :text) :match? (regexp (str s\"61\") (regopt :i :m :x)))))",
+      "mutants": [
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"612f62\") (regopt))"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            156,
+            17
+          ],
+          "end": [
+            156,
+            24
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            156,
+            20
+          ],
+          "end": [
+            156,
+            23
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            156,
+            5
+          ],
+          "end": [
+            156,
+            25
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"61\") (begin (lvar :text)) (str s\"62\") (regopt))"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            157,
+            23
+          ],
+          "end": [
+            157,
+            27
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            157,
+            17
+          ],
+          "end": [
+            157,
+            30
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            157,
+            17
+          ],
+          "end": [
+            157,
+            30
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (str s\"6e6f6d617463685c41\") (regopt))"
+        },
+        {
+          "start": [
+            157,
+            5
+          ],
+          "end": [
+            157,
+            31
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"61\") (begin (lvar :text)) (str s\"62\") (regopt :i))"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            158,
+            21
+          ],
+          "end": [
+            158,
+            25
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            158,
+            28
+          ],
+          "end": [
+            158,
+            29
+          ],
+          "node": "regopt",
+          "replacement": "(regopt)"
+        },
+        {
+          "start": [
+            158,
+            17
+          ],
+          "end": [
+            158,
+            29
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt :i))"
+        },
+        {
+          "start": [
+            158,
+            17
+          ],
+          "end": [
+            158,
+            29
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (str s\"6e6f6d617463685c41\") (regopt :i))"
+        },
+        {
+          "start": [
+            158,
+            5
+          ],
+          "end": [
+            158,
+            30
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"61\") (regopt :i :m :x))"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            159,
+            20
+          ],
+          "end": [
+            159,
+            23
+          ],
+          "node": "regopt",
+          "replacement": "(regopt :m :x)"
+        },
+        {
+          "start": [
+            159,
+            20
+          ],
+          "end": [
+            159,
+            23
+          ],
+          "node": "regopt",
+          "replacement": "(regopt :i :x)"
+        },
+        {
+          "start": [
+            159,
+            17
+          ],
+          "end": [
+            159,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt :i :m :x))"
+        },
+        {
+          "start": [
+            159,
+            18
+          ],
+          "end": [
+            159,
+            19
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            159,
+            5
+          ],
+          "end": [
+            159,
+            24
+          ],
+          "node": "send",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "hashes:162",
+      "sexp": "(def :hashes (args (arg :a) (arg :b)) (begin (hash (pair (sym :a) (lvar :a)) (pair (sym :b) (lvar :b))) (hash (pair (sym :a b) (int 1)) (pair (sym :c) (int 2))) (hash (pair (lvar :a) (int 1)) (pair (sym :b) (int 2))) (hash (pair (nil) (int 1)) (pair (self) (int 2))) (hash)))",
+      "mutants": [
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "begin",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            163,
+            13
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            163,
+            13
+          ],
+          "node": "hash",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            163,
+            6
+          ],
+          "end": [
+            163,
+            7
+          ],
+          "node": "sym",
+          "replacement": "(sym :a__mutant__)"
+        },
+        {
+          "start": [
+            163,
+            6
+          ],
+          "end": [
+            163,
+            7
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            163,
+            13
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :b) (lvar :b)))"
+        },
+        {
+          "start": [
+            163,
+            10
+          ],
+          "end": [
+            163,
+            11
+          ],
+          "node": "sym",
+          "replacement": "(sym :b__mutant__)"
+        },
+        {
+          "start": [
+            163,
+            10
+          ],
+          "end": [
+            163,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            163,
+            13
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :a) (lvar :a)))"
+        },
+        {
+          "start": [
+            163,
+            5
+          ],
+          "end": [
+            163,
+            13
+          ],
+          "node": "hash",
+          "replacement": null
+        },
+        {
+          "start": [
+            164,
+            5
+          ],
+          "end": [
+            164,
+            23
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            164,
+            5
+          ],
+          "end": [
+            164,
+            23
+          ],
+          "node": "hash",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            164,
+            6
+          ],
+          "end": [
+            164,
+            11
+          ],
+          "node": "sym",
+          "replacement": "(sym :a b__mutant__)"
+        },
+        {
+          "start": [
+            164,
+            13
+          ],
+          "end": [
+            164,
+            14
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            164,
+            13
+          ],
+          "end": [
+            164,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            164,
+            13
+          ],
+          "end": [
+            164,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            164,
+            13
+          ],
+          "end": [
+            164,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            164,
+            5
+          ],
+          "end": [
+            164,
+            23
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :c) (int 2)))"
+        },
+        {
+          "start": [
+            164,
+            16
+          ],
+          "end": [
+            164,
+            19
+          ],
+          "node": "sym",
+          "replacement": "(sym :c__mutant__)"
+        },
+        {
+          "start": [
+            164,
+            21
+          ],
+          "end": [
+            164,
+            22
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            164,
+            21
+          ],
+          "end": [
+            164,
+            22
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            164,
+            21
+          ],
+          "end": [
+            164,
+            22
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            164,
+            21
+          ],
+          "end": [
+            164,
+            22
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            164,
+            21
+          ],
+          "end": [
+            164,
+            22
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            164,
+            5
+          ],
+          "end": [
+            164,
+            23
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :a b) (int 1)))"
+        },
+        {
+          "start": [
+            164,
+            5
+          ],
+          "end": [
+            164,
+            23
+          ],
+          "node": "hash",
+          "replacement": null
+        },
+        {
+          "start": [
+            165,
+            5
+          ],
+          "end": [
+            165,
+            22
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            165,
+            5
+          ],
+          "end": [
+            165,
+            22
+          ],
+          "node": "hash",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            165,
+            11
+          ],
+          "end": [
+            165,
+            12
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            165,
+            11
+          ],
+          "end": [
+            165,
+            12
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            165,
+            11
+          ],
+          "end": [
+            165,
+            12
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            165,
+            11
+          ],
+          "end": [
+            165,
+            12
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            165,
+            5
+          ],
+          "end": [
+            165,
+            22
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (sym :b) (int 2)))"
+        },
+        {
+          "start": [
+            165,
+            14
+          ],
+          "end": [
+            165,
+            16
+          ],
+          "node": "sym",
+          "replacement": "(sym :b__mutant__)"
+        },
+        {
+          "start": [
+            165,
+            20
+          ],
+          "end": [
+            165,
+            21
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            165,
+            20
+          ],
+          "end": [
+            165,
+            21
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            165,
+            20
+          ],
+          "end": [
+            165,
+            21
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            165,
+            20
+          ],
+          "end": [
+            165,
+            21
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            165,
+            20
+          ],
+          "end": [
+            165,
+            21
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            165,
+            5
+          ],
+          "end": [
+            165,
+            22
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (lvar :a) (int 1)))"
+        },
+        {
+          "start": [
+            165,
+            5
+          ],
+          "end": [
+            165,
+            22
+          ],
+          "node": "hash",
+          "replacement": null
+        },
+        {
+          "start": [
+            166,
+            5
+          ],
+          "end": [
+            166,
+            26
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            166,
+            5
+          ],
+          "end": [
+            166,
+            26
+          ],
+          "node": "hash",
+          "replacement": "(hash)"
+        },
+        {
+          "start": [
+            166,
+            13
+          ],
+          "end": [
+            166,
+            14
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            166,
+            13
+          ],
+          "end": [
+            166,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            166,
+            13
+          ],
+          "end": [
+            166,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            166,
+            13
+          ],
+          "end": [
+            166,
+            14
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            166,
+            5
+          ],
+          "end": [
+            166,
+            26
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (self) (int 2)))"
+        },
+        {
+          "start": [
+            166,
+            24
+          ],
+          "end": [
+            166,
+            25
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            166,
+            24
+          ],
+          "end": [
+            166,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            166,
+            24
+          ],
+          "end": [
+            166,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            166,
+            24
+          ],
+          "end": [
+            166,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            166,
+            24
+          ],
+          "end": [
+            166,
+            25
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            166,
+            5
+          ],
+          "end": [
+            166,
+            26
+          ],
+          "node": "hash",
+          "replacement": "(hash (pair (nil) (int 1)))"
+        },
+        {
+          "start": [
+            166,
+            5
+          ],
+          "end": [
+            166,
+            26
+          ],
+          "node": "hash",
+          "replacement": null
+        },
+        {
+          "start": [
+            167,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "hash",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            167,
+            5
+          ],
+          "end": [
+            167,
+            7
+          ],
+          "node": "hash",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "heredocs:170",
+      "sexp": "(def :heredocs (args (arg :name)) (begin (lvasgn :a (str s\"706c61696e0a\")) (lvasgn :b (dstr (str s\"6f6e6520\") (begin (lvar :name)) (str s\"0a\") (str s\"74776f0a\"))) (array (lvar :a) (lvar :b))))",
+      "mutants": [
+        {
+          "start": [
+            171,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            171,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            171,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "begin",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            171,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            171,
+            9
+          ],
+          "end": [
+            171,
+            16
+          ],
+          "node": "str",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            171,
+            9
+          ],
+          "end": [
+            171,
+            16
+          ],
+          "node": "str",
+          "replacement": "(str s\"\")"
+        },
+        {
+          "start": [
+            174,
+            9
+          ],
+          "end": [
+            174,
+            16
+          ],
+          "node": "dstr",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            175,
+            13
+          ],
+          "end": [
+            175,
+            17
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            178,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "array",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            178,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "array",
+          "replacement": "(array)"
+        },
+        {
+          "start": [
+            178,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "array",
+          "replacement": "(array (lvar :b))"
+        },
+        {
+          "start": [
+            178,
+            6
+          ],
+          "end": [
+            178,
+            7
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            178,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "array",
+          "replacement": "(array (lvar :a))"
+        },
+        {
+          "start": [
+            178,
+            9
+          ],
+          "end": [
+            178,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            178,
+            5
+          ],
+          "end": [
+            178,
+            11
+          ],
+          "node": "array",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "conditionals:181",
+      "sexp": "(def :conditionals (args (arg :a) (arg :b)) (begin (if (lvar :a) (lvar :b) (nil)) (if (lvar :a) (nil) (lvar :b)) (if (lvar :a) nil (if (lvar :b) (int 1) (if (send (lvar :a) :call) nil (int 2)))) (if (lvar :a) (int 1) nil) (if (lvar :a) (int 2) (int 1)) (if (lvar :b) nil (send (lvar :a) :call)) (if (lvar :b) (send (lvar :a) :call) nil) (or (and (lvar :a) (lvar :b)) (send (lvar :a) :call)) (or (and (lvar :a) (lvar :b)) (send (lvar :a) :call))))",
+      "mutants": [
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            16
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            16
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :a) (nil) nil)"
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            16
+          ],
+          "node": "if",
+          "replacement": "(lvar :b)"
+        },
+        {
+          "start": [
+            182,
+            9
+          ],
+          "end": [
+            182,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            182,
+            13
+          ],
+          "end": [
+            182,
+            16
+          ],
+          "node": "nil",
+          "replacement": null
+        },
+        {
+          "start": [
+            182,
+            9
+          ],
+          "end": [
+            182,
+            10
+          ],
+          "node": "lvar",
+          "replacement": null
+        },
+        {
+          "start": [
+            182,
+            5
+          ],
+          "end": [
+            182,
+            16
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :a) (lvar :b) nil)"
+        },
+        {
+          "start": [
+            183,
+            15
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "lvar",
+          "replacement": null
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "if",
+          "replacement": "(lvar :b)"
+        },
+        {
+          "start": [
+            183,
+            15
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            183,
+            9
+          ],
+          "end": [
+            183,
+            12
+          ],
+          "node": "nil",
+          "replacement": null
+        },
+        {
+          "start": [
+            183,
+            5
+          ],
+          "end": [
+            183,
+            16
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            184,
+            5
+          ],
+          "end": [
+            190,
+            8
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            184,
+            8
+          ],
+          "end": [
+            184,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            184,
+            8
+          ],
+          "end": [
+            184,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            184,
+            8
+          ],
+          "end": [
+            184,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            184,
+            5
+          ],
+          "end": [
+            190,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :a) (if (lvar :b) (int 1) (if (send (lvar :a) :call) nil (int 2))) nil)"
+        },
+        {
+          "start": [
+            184,
+            5
+          ],
+          "end": [
+            190,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :b) (int 1) (if (send (lvar :a) :call) nil (int 2)))"
+        },
+        {
+          "start": [
+            185,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            185,
+            11
+          ],
+          "end": [
+            185,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            185,
+            11
+          ],
+          "end": [
+            185,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            185,
+            11
+          ],
+          "end": [
+            185,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            185,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :b) (if (send (lvar :a) :call) nil (int 2)) nil)"
+        },
+        {
+          "start": [
+            185,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            186,
+            7
+          ],
+          "end": [
+            186,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            186,
+            7
+          ],
+          "end": [
+            186,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            186,
+            7
+          ],
+          "end": [
+            186,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            186,
+            7
+          ],
+          "end": [
+            186,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            187,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            185,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (send (lvar :a) :call) nil (int 2))"
+        },
+        {
+          "start": [
+            187,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            187,
+            11
+          ],
+          "end": [
+            187,
+            17
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            187,
+            11
+          ],
+          "end": [
+            187,
+            17
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            187,
+            11
+          ],
+          "end": [
+            187,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            187,
+            11
+          ],
+          "end": [
+            187,
+            17
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            187,
+            11
+          ],
+          "end": [
+            187,
+            17
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            187,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (send (lvar :a) :call) (int 2) nil)"
+        },
+        {
+          "start": [
+            187,
+            5
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "if",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            189,
+            7
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            189,
+            7
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            189,
+            7
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            189,
+            7
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            189,
+            7
+          ],
+          "end": [
+            189,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            186,
+            7
+          ],
+          "end": [
+            186,
+            8
+          ],
+          "node": "int",
+          "replacement": null
+        },
+        {
+          "start": [
+            184,
+            5
+          ],
+          "end": [
+            190,
+            8
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            191,
+            5
+          ],
+          "end": [
+            191,
+            20
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            191,
+            8
+          ],
+          "end": [
+            191,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            191,
+            8
+          ],
+          "end": [
+            191,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            191,
+            8
+          ],
+          "end": [
+            191,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            191,
+            5
+          ],
+          "end": [
+            191,
+            20
+          ],
+          "node": "if",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            191,
+            15
+          ],
+          "end": [
+            191,
+            16
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            191,
+            15
+          ],
+          "end": [
+            191,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            191,
+            15
+          ],
+          "end": [
+            191,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            191,
+            15
+          ],
+          "end": [
+            191,
+            16
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            191,
+            5
+          ],
+          "end": [
+            191,
+            20
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            192,
+            5
+          ],
+          "end": [
+            196,
+            8
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            192,
+            12
+          ],
+          "end": [
+            192,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            192,
+            12
+          ],
+          "end": [
+            192,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            192,
+            12
+          ],
+          "end": [
+            192,
+            13
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            192,
+            5
+          ],
+          "end": [
+            196,
+            8
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :a) (int 1) nil)"
+        },
+        {
+          "start": [
+            192,
+            5
+          ],
+          "end": [
+            196,
+            8
+          ],
+          "node": "if",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 3)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            193,
+            7
+          ],
+          "end": [
+            193,
+            8
+          ],
+          "node": "int",
+          "replacement": null
+        },
+        {
+          "start": [
+            192,
+            5
+          ],
+          "end": [
+            196,
+            8
+          ],
+          "node": "if",
+          "replacement": "(int 1)"
+        },
+        {
+          "start": [
+            193,
+            7
+          ],
+          "end": [
+            193,
+            8
+          ],
+          "node": "int",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            193,
+            7
+          ],
+          "end": [
+            193,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 0)"
+        },
+        {
+          "start": [
+            193,
+            7
+          ],
+          "end": [
+            193,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 2)"
+        },
+        {
+          "start": [
+            193,
+            7
+          ],
+          "end": [
+            193,
+            8
+          ],
+          "node": "int",
+          "replacement": "(int 167)"
+        },
+        {
+          "start": [
+            195,
+            7
+          ],
+          "end": [
+            195,
+            8
+          ],
+          "node": "int",
+          "replacement": null
+        },
+        {
+          "start": [
+            192,
+            5
+          ],
+          "end": [
+            196,
+            8
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            197,
+            19
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            197,
+            19
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            197,
+            19
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "if",
+          "replacement": "(if (lvar :b) (send (lvar :a) :call) nil)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "if",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            11
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            11
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            197,
+            5
+          ],
+          "end": [
+            197,
+            20
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "if",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            198,
+            15
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            198,
+            15
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            198,
+            15
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "if",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            11
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            11
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            198,
+            5
+          ],
+          "end": [
+            198,
+            16
+          ],
+          "node": "if",
+          "replacement": null
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "or",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "or",
+          "replacement": "(and (lvar :a) (lvar :b))"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "or",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "or",
+          "replacement": "(and (and (lvar :a) (lvar :b)) (send (lvar :a) :call))"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            11
+          ],
+          "node": "and",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            11
+          ],
+          "node": "and",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            11
+          ],
+          "node": "and",
+          "replacement": "(lvar :b)"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            11
+          ],
+          "node": "and",
+          "replacement": "(or (lvar :a) (lvar :b))"
+        },
+        {
+          "start": [
+            199,
+            5
+          ],
+          "end": [
+            199,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            199,
+            10
+          ],
+          "end": [
+            199,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            199,
+            15
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            199,
+            15
+          ],
+          "end": [
+            199,
+            21
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            199,
+            15
+          ],
+          "end": [
+            199,
+            16
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "or",
+          "replacement": null
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "or",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "or",
+          "replacement": "(and (lvar :a) (lvar :b))"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "or",
+          "replacement": "(send (lvar :a) :call)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "or",
+          "replacement": "(and (and (lvar :a) (lvar :b)) (send (lvar :a) :call))"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            12
+          ],
+          "node": "and",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            12
+          ],
+          "node": "and",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            12
+          ],
+          "node": "and",
+          "replacement": "(lvar :b)"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            12
+          ],
+          "node": "and",
+          "replacement": "(or (lvar :a) (lvar :b))"
+        },
+        {
+          "start": [
+            200,
+            5
+          ],
+          "end": [
+            200,
+            6
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            200,
+            11
+          ],
+          "end": [
+            200,
+            12
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            200,
+            16
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            200,
+            16
+          ],
+          "end": [
+            200,
+            22
+          ],
+          "node": "send",
+          "replacement": "(lvar :a)"
+        },
+        {
+          "start": [
+            200,
+            16
+          ],
+          "end": [
+            200,
+            17
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        }
+      ]
+    }
+  ]
+}
