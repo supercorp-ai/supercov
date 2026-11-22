@@ -68,11 +68,6 @@ pub const INVERT_BITWISE: &str = "INVERT_BITWISE";
 pub const INVERT_BWASSIGN: &str = "INVERT_BWASSIGN";
 pub const INVERT_NEGATIVES: &str = "INVERT_NEGATIVES";
 
-/// Whether `mutator` is one a Go mutant can carry.
-pub fn is_go_mutator(mutator: &str) -> bool {
-    MUTATORS.contains(&mutator)
-}
-
 /// The Gremlins mutator a Go mutant is: from its mutator, the token as
 /// written (`operator`) and what it becomes.
 pub fn gremlins_name(mutator: &str, operator: &str, replacement: &str) -> &'static str {
@@ -172,17 +167,16 @@ pub struct GoSite {
 /// Every token of `source` Gremlins mutates, in its order.
 pub fn sites(tree: &tree_sitter::Tree, source: &str) -> Vec<GoSite> {
     let mut found = Vec::new();
-    let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        if let Some(site) = site(node, source) {
-            found.push(site);
-        }
-        found.extend(union_sites(node));
-        let mut cursor = node.walk();
-        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
-        stack.extend(children.into_iter().rev());
-    }
+    collect_sites(tree.root_node(), source, &mut found);
     found
+}
+
+/// `node`'s sites, then its children's, in order (`ast.Inspect`'s).
+fn collect_sites(node: Node, source: &str, found: &mut Vec<GoSite>) {
+    found.extend(site(node, source));
+    found.extend(union_sites(node));
+    node.named_children(&mut node.walk())
+        .for_each(|child| collect_sites(child, source, found));
 }
 
 /// The site `node` is the operator's node of, if any.
@@ -213,18 +207,24 @@ pub(crate) fn reads_alike(node: Node, source: &str) -> bool {
 }
 
 fn site(node: Node, source: &str) -> Option<GoSite> {
-    let (kind, token) = match node.kind() {
-        "binary_expression" => (SiteKind::Binary, node.child_by_field_name("operator")?),
-        "unary_expression" => (SiteKind::Unary, node.child_by_field_name("operator")?),
-        "assignment_statement" => (SiteKind::Assignment, node.child_by_field_name("operator")?),
-        "inc_statement" | "dec_statement" => (
-            SiteKind::IncDec,
-            // The operand, then the token: the token is the last child.
-            node.child(node.child_count().checked_sub(1)?)?,
-        ),
-        "break_statement" | "continue_statement" => (SiteKind::Branch, node.child(0)?),
+    // A tree with no error gives each of these its operator or keyword.
+    let kind = match node.kind() {
+        "binary_expression" => SiteKind::Binary,
+        "unary_expression" => SiteKind::Unary,
+        "assignment_statement" => SiteKind::Assignment,
+        "inc_statement" | "dec_statement" => SiteKind::IncDec,
+        "break_statement" | "continue_statement" => SiteKind::Branch,
         _ => return None,
     };
+    let token = match kind {
+        SiteKind::Binary | SiteKind::Unary | SiteKind::Assignment => {
+            node.child_by_field_name("operator")
+        }
+        // The operand, then the token: the token is the last child.
+        SiteKind::IncDec => node.child(node.child_count() - 1),
+        SiteKind::Branch => node.child(0),
+    }
+    .expect("a parsed node has its operator");
     let operator = source[token.byte_range()].to_owned();
     let mutants = match (kind, operator.as_str()) {
         // A unary expression's own table: `-x` and `+x` only (`!`, `^`,
@@ -324,25 +324,24 @@ pub fn position(source: &str, offset: usize) -> (u32, u32) {
 /// takes its type from the comparison (an untyped shift, `1 << n`), nor
 /// where both operands are literals, which the call would type alone.
 pub fn comparison_probe(node: Node, source: &str) -> bool {
-    if node.kind() != "binary_expression" {
+    let relational = node.kind() == "binary_expression"
+        && operator_of(node, source).is_some_and(|op| matches!(op, "<" | "<=" | ">" | ">="));
+    if !relational {
         return false;
     }
-    let Some(operator) = node.child_by_field_name("operator") else {
-        return false;
-    };
-    if !matches!(&source[operator.byte_range()], "<" | "<=" | ">" | ">=") {
-        return false;
-    }
-    let mut in_function = false;
-    let mut at = node.parent();
-    while let Some(ancestor) = at {
-        match ancestor.kind() {
-            "const_declaration" | "array_type" | "type_declaration" => return false,
-            "function_declaration" | "method_declaration" | "func_literal" => in_function = true,
-            _ => {}
-        }
-        at = ancestor.parent();
-    }
+    let ancestors = std::iter::successors(node.parent(), Node::parent).collect::<Vec<_>>();
+    let constant = ancestors.iter().any(|ancestor| {
+        matches!(
+            ancestor.kind(),
+            "const_declaration" | "array_type" | "type_declaration"
+        )
+    });
+    let in_function = ancestors.iter().any(|ancestor| {
+        matches!(
+            ancestor.kind(),
+            "function_declaration" | "method_declaration" | "func_literal"
+        )
+    });
     let literal = |side: &str| {
         node.child_by_field_name(side).is_some_and(|operand| {
             matches!(
@@ -356,24 +355,23 @@ pub fn comparison_probe(node: Node, source: &str) -> bool {
             )
         })
     };
-    let shifted = {
-        let mut stack = vec![node];
-        let mut found = false;
-        while let Some(next) = stack.pop() {
-            if next.kind() == "binary_expression"
-                && next
-                    .child_by_field_name("operator")
-                    .is_some_and(|op| matches!(&source[op.byte_range()], "<<" | ">>"))
-            {
-                found = true;
-                break;
-            }
-            let mut cursor = next.walk();
-            stack.extend(next.named_children(&mut cursor));
-        }
-        found
-    };
-    in_function && !shifted && !(literal("left") && literal("right"))
+    let typed_alone = literal("left") && literal("right");
+    in_function && !(constant || typed_alone || shifts(node, source))
+}
+
+/// A binary node's operator.
+fn operator_of<'s>(node: Node, source: &'s str) -> Option<&'s str> {
+    node.child_by_field_name("operator")
+        .map(|operator| &source[operator.byte_range()])
+}
+
+/// Whether `node` is or holds a shift.
+fn shifts(node: Node, source: &str) -> bool {
+    (node.kind() == "binary_expression"
+        && operator_of(node, source).is_some_and(|op| matches!(op, "<<" | ">>")))
+        || node
+            .named_children(&mut node.walk())
+            .any(|child| shifts(child, source))
 }
 
 /// Whether a mutant of the token at `token` can change what `go vet`
@@ -383,34 +381,32 @@ pub fn comparison_probe(node: Node, source: &str) -> bool {
 /// `bools`, of the operands of a chain of `&&` or `||` (`x != a || x != b`),
 /// and `atomic`, of an assignment of an `atomic.Add` call to its own
 /// operand (`x += atomic.AddInt64(&x, 1)` to `x = ...`). The rest read
-/// types, formats and names a mutation leaves as they were.
+/// types, formats and names a mutation leaves as they were. `source`
+/// parses: it is the file a mutant was listed from.
 pub fn vet_candidate(source: &str, token: (usize, usize)) -> bool {
-    let Ok(tree) = parse(source) else {
-        return false;
-    };
-    let Some(node) = tree.root_node().descendant_for_byte_range(token.0, token.1) else {
-        return false;
-    };
-    let mut at = node.parent();
-    while let Some(ancestor) = at {
-        match ancestor.kind() {
-            "binary_expression" => {
-                let logical = ancestor
-                    .child_by_field_name("operator")
-                    .is_some_and(|op| matches!(&source[op.byte_range()], "&&" | "||"));
-                if logical {
-                    return true;
+    let tree = parse(source).expect("a listed file parses");
+    let node = tree
+        .root_node()
+        .descendant_for_byte_range(token.0, token.1)
+        .expect("a listed token is in its file");
+    // Up through the expressions around the token: the first that is not
+    // a parenthesis or a negation says.
+    std::iter::successors(node.parent(), Node::parent)
+        .find(|ancestor| {
+            let through = match ancestor.kind() {
+                "parenthesized_expression" | "unary_expression" => true,
+                "binary_expression" => {
+                    !operator_of(*ancestor, source).is_some_and(|op| matches!(op, "&&" | "||"))
                 }
-            }
-            "parenthesized_expression" | "unary_expression" => {}
-            "assignment_statement" => {
-                return source[ancestor.byte_range()].contains("atomic.");
-            }
-            _ => return false,
-        }
-        at = ancestor.parent();
-    }
-    false
+                _ => false,
+            };
+            !through
+        })
+        .is_some_and(|ancestor| match ancestor.kind() {
+            "binary_expression" => true,
+            "assignment_statement" => source[ancestor.byte_range()].contains("atomic."),
+            _ => false,
+        })
 }
 
 /// The site a comparison probe at `operator` records under.
@@ -435,31 +431,21 @@ fn function_point(node: Node) -> bool {
 
 /// The statement and function points around `node`, by id.
 fn points(file: &str, node: Node) -> (Option<String>, Option<String>) {
-    let mut statement = None;
-    let mut function = None;
-    let mut at = Some(node);
-    while let Some(ancestor) = at {
-        if statement.is_none() && function.is_none() && statement_point(ancestor) {
-            statement = Some(stable_obligation_id(
-                "go",
-                file,
-                "statement",
-                ancestor.start_byte(),
-                ancestor.end_byte(),
-            ));
-        }
-        if function.is_none() && function_point(ancestor) {
-            function = Some(stable_obligation_id(
-                "go",
-                file,
-                "function",
-                ancestor.start_byte(),
-                ancestor.end_byte(),
-            ));
-        }
-        at = ancestor.parent();
-    }
-    (statement, function)
+    let ancestors = std::iter::successors(Some(node), Node::parent).collect::<Vec<_>>();
+    let function = ancestors
+        .iter()
+        .position(|ancestor| function_point(*ancestor));
+    // The statement inside the innermost function, not one around it.
+    let statement = ancestors[..function.unwrap_or(ancestors.len())]
+        .iter()
+        .find(|ancestor| statement_point(**ancestor));
+    let id = |kind: &str, at: &Node| {
+        stable_obligation_id("go", file, kind, at.start_byte(), at.end_byte())
+    };
+    (
+        statement.map(|at| id("statement", at)),
+        function.map(|at| id("function", &ancestors[at])),
+    )
 }
 
 /// `file`'s mutants, linked to the statement and function points coverage
@@ -520,7 +506,7 @@ pub(crate) fn candidates_of(
         let original = source[site.node.0..site.node.1].to_owned();
         let start = position(source, site.token.0);
         let end = position(source, site.token.1);
-        for (mutator, replacement) in &site.mutants {
+        site.mutants.iter().for_each(|(mutator, replacement)| {
             listed.push(CandidateMutant {
                 id: String::new(),
                 mutator: (*mutator).to_owned(),
@@ -557,7 +543,7 @@ pub(crate) fn candidates_of(
                 is_static: false,
                 unplaceable: None,
             });
-        }
+        });
     }
     listed
 }
@@ -775,5 +761,154 @@ mod tests {
                 "{module}"
             );
         }
+    }
+
+    /// The binary node of `source` whose operator is the first `operator`
+    /// after `after`.
+    fn binary<'t>(
+        tree: &'t tree_sitter::Tree,
+        source: &str,
+        after: &str,
+        operator: &str,
+    ) -> Node<'t> {
+        let start = source.find(after).unwrap();
+        let at = start + source[start..].find(operator).unwrap();
+        let mut node = tree
+            .root_node()
+            .descendant_for_byte_range(at, at + operator.len())
+            .unwrap();
+        while node.kind() != "binary_expression" {
+            node = node.parent().unwrap();
+        }
+        node
+    }
+
+    #[test]
+    fn a_comparison_is_probed_only_where_a_generic_call_can_stand() {
+        let source = "package p\n\nconst c = 1 < 2\n\nvar v = 1 < 2\n\ntype T [2]int\n\nfunc f(a, b int) bool {\n\t_ = func() bool { return a < b }\n\t_ = 1 < 2\n\t_ = a<<1 > b\n\t_ = a == b\n\treturn a >= 1\n}\n\nfunc (T) m(a int) bool { return a <= 2 }\n";
+        let tree = parse(source).unwrap();
+        let probed = |after: &str, operator: &str| {
+            comparison_probe(binary(&tree, source, after, operator), source)
+        };
+        assert!(!probed("const c", "<"));
+        assert!(!probed("var v", "<"));
+        assert!(probed("return a < b", "<"));
+        assert!(!probed("_ = 1 < 2", "<"));
+        assert!(!probed("a<<1 >", ">"));
+        assert!(!probed("a == b", "=="));
+        assert!(probed("a >= 1", ">="));
+        assert!(probed("a <= 2", "<="));
+        assert!(!comparison_probe(tree.root_node(), source));
+        // An array length is no place for one either.
+        let source = "package p\n\nfunc f() { var a [len(\"ab\") + 1]int; _ = a }\n";
+        let tree = parse(source).unwrap();
+        let node = binary(&tree, source, "len", "+");
+        assert!(!comparison_probe(node, source));
+    }
+
+    #[test]
+    fn only_a_logical_chain_or_an_atomic_assignment_is_vetted() {
+        let source = "package p\n\nimport \"sync/atomic\"\n\nfunc f(x int, n *int64) bool {\n\ty := x + 1\n\ty += int(atomic.AddInt64(n, 1))\n\ty -= 1\n\treturn !(x != 1) && (x != y+1)\n}\n";
+        let token = |after: &str, operator: &str| {
+            let start = source.find(after).unwrap();
+            let at = start + source[start..].find(operator).unwrap();
+            (at, at + operator.len())
+        };
+        assert!(vet_candidate(source, token("!(x != 1)", "!=")));
+        assert!(vet_candidate(source, token("(x != y+1)", "+")));
+        assert!(vet_candidate(source, token(") && (", "&&")));
+        assert!(vet_candidate(source, token("y += int", "+=")));
+        assert!(!vet_candidate(source, token("y -= 1", "-=")));
+        assert!(!vet_candidate(source, token("x + 1", "+")));
+    }
+
+    #[test]
+    fn what_reads_alike_twice() {
+        let source = "package p\n\nfunc f() { a.b[c][1], (d), _, e[g()], h().i, *j = 0, 0, 0, 0, 0, 0, 0 }\n";
+        let tree = parse(source).unwrap();
+        let left = tree
+            .root_node()
+            .descendant_for_byte_range(source.find("a.b").unwrap(), source.find("a.b").unwrap() + 1)
+            .unwrap();
+        let list = std::iter::successors(Some(left), Node::parent)
+            .find(|node| node.kind() == "expression_list")
+            .unwrap();
+        let alike = list
+            .named_children(&mut list.walk())
+            .map(|operand| reads_alike(operand, source))
+            .collect::<Vec<_>>();
+        assert_eq!(alike, [true, true, false, false, false, false]);
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_lists_nothing() {
+        assert!(candidate_mutants("a.go", "package p\n\nfunc (").is_err());
+        assert!(
+            candidate_mutants_probed("a.go", "package p\n\nfunc (", &Default::default()).is_err()
+        );
+        assert!(listed_tokens("package p\n\nfunc (").is_err());
+    }
+
+    #[test]
+    fn a_method_s_and_a_closure_s_points_are_their_own() {
+        let source = "package p\n\ntype T int\n\nfunc (T) m(a int) int {\n\tf := func() int {\n\t\treturn a + 1\n\t}\n\treturn f() - 1\n}\n";
+        let mutants = candidate_mutants("a.go", source).unwrap();
+        let inner = &mutants[0];
+        let at = source.find("return a + 1").unwrap();
+        assert_eq!(
+            inner.statement.as_deref(),
+            Some(stable_obligation_id("go", "a.go", "statement", at, at + 12).as_str())
+        );
+        let literal = source.find("func() int").unwrap();
+        assert!(
+            inner.function.as_deref().unwrap()
+                == stable_obligation_id(
+                    "go",
+                    "a.go",
+                    "function",
+                    literal,
+                    source.find("\t}\n\treturn f()").unwrap() + 2
+                )
+        );
+        let method = source.find("func (T)").unwrap();
+        assert_eq!(
+            mutants.last().unwrap().function.as_deref(),
+            Some(stable_obligation_id("go", "a.go", "function", method, source.len() - 1).as_str())
+        );
+    }
+
+    #[test]
+    fn a_run_s_mutants_are_listed_from_its_sources_where_they_did_not_change() {
+        let root = std::env::temp_dir().join(format!("supercov-go-list-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let sources = [
+            ("a.go", "package p\n\nfunc f(a int) int { return a + 1 }\n"),
+            ("b.go", "package p\n\nfunc g() {}\n"),
+            ("c.go", "package p\n\nfunc h(a int) int { return a - 1 }\n"),
+        ];
+        let mut recorded = std::collections::BTreeMap::new();
+        for (file, source) in sources {
+            std::fs::write(root.join(file), source).unwrap();
+            let points = crate::go_instrumenter::build_go_obligations(file, source, &mut 0, &mut 0)
+                .unwrap()
+                .manifest
+                .points
+                .into_iter()
+                .map(|point| point.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            recorded.insert(file.to_owned(), points);
+        }
+        // Changed since: another statement.
+        std::fs::write(
+            root.join("c.go"),
+            "package p\n\nfunc h(a int) int { a++; return a - 1 }\n",
+        )
+        .unwrap();
+        recorded.insert("gone.go".to_owned(), Default::default());
+        let listed = list_mutants(&root, &recorded);
+        assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.go"]);
+        assert_eq!(listed.changed, ["c.go", "gone.go"]);
+        assert_eq!(listed.mutants.mutant_set.as_deref(), Some(MUTANT_SET));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
