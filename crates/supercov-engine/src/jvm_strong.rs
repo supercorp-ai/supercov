@@ -514,7 +514,13 @@ pub fn join_pit(ours: &BTreeMap<String, Vec<JvmMutant>>, pit: &[PitMutant]) -> P
             unmatched.push((file.clone(), mutant, key));
         }
     }
-    unmatched.sort_by_key(|(file, mutant, _)| (file.clone(), mutant.start));
+    // In the order the compiler emits them: by where the code ends, inner
+    // code first, so an operand's jump comes before the jump of the
+    // condition around it (`require(a || b)`: `a`, `b`, then the
+    // require's own).
+    unmatched.sort_by_key(|(file, mutant, _)| {
+        (file.clone(), mutant.end, std::cmp::Reverse(mutant.start))
+    });
     // A line where PIT has more of a group than Supercov is a line kotlinc
     // gave other lines' code (a condition's jumps all on its last line):
     // its mutants are paired in code order by the statement pass, not line
@@ -833,6 +839,47 @@ mod tests {
     /// `require(a && b)` inlines to a jump on the whole condition besides
     /// its operands': PIT negates it, and so does Supercov. A single
     /// comparison's is the comparison's own mutant, listed once.
+    /// PIT's jumps of `require(a || b)` come in the order kotlinc emits
+    /// them, the operands' then the require's own: each pairs with the
+    /// mutant of the same code, not the one that starts at the same place.
+    #[test]
+    fn a_require_s_jumps_pair_in_the_order_the_compiler_emits_them() {
+        let file = "fixture/Pair.kt";
+        let source = "fun f(a: String?) {\n    require(a == null || a.length > 1) { \"m\" }\n}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let ours = file_mutants(file, source, &index)
+            .unwrap()
+            .mutants
+            .into_iter()
+            .filter(|mutant| mutant.mutator.name() == "NegateConditionals")
+            .collect::<Vec<_>>();
+        assert_eq!(ours.len(), 3);
+        let pit = (0..3)
+            .map(|index| PitMutant {
+                file: file.into(),
+                line: 2,
+                mutator: "NegateConditionals".into(),
+                key: String::new(),
+                class: "fixture.PairKt".into(),
+                method: "f".into(),
+                description: String::new(),
+                status: ["KILLED", "SURVIVED", "TIMED_OUT"][index as usize].into(),
+                killing_tests: Vec::new(),
+                index,
+            })
+            .collect::<Vec<_>>();
+        let join = join_pit(&BTreeMap::from([(file.to_owned(), ours)]), &pit);
+        let status = |id: &str| {
+            join.pairs
+                .iter()
+                .find(|(ours, _)| ours.contains(id))
+                .map(|(_, at)| pit[*at].status.clone())
+        };
+        assert_eq!(status(":2:13-2:22:").as_deref(), Some("KILLED"));
+        assert_eq!(status(":2:26-2:38:").as_deref(), Some("SURVIVED"));
+        assert_eq!(status(":2:13-2:38:").as_deref(), Some("TIMED_OUT"));
+    }
+
     #[test]
     fn a_kotlin_require_of_a_compound_condition_negates_the_whole() {
         let file = "fixture/Check.kt";
