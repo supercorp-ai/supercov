@@ -219,6 +219,12 @@ many at once as `SUPERCOV_STRONG_JOBS` (default: the machine's CPUs).
   `exit!`, so the suite's `at_exit` hooks (an autorun) do not run in it, and
   its outcome is read while it runs, so a large one cannot fill the pipe and
   hold it.
+- A suite in random order (RSpec's `--order random`, Minitest) runs in the
+  pass with seed 0, unless its command names a seed: every pass orders the
+  same tests the same way, so an edit that changes no test does not move a
+  verdict (pastel's order-dependent specs gave 83.6 % and 83.4 % across a
+  comment edit). The measured run keeps the suite's own seed; it only
+  chooses candidates, which the pass runs in its own fixed order.
 - A Ruby process a test starts (`assert_separately`, a CLI it runs)
   inherits `RUBYOPT`: the pass sets `SUPERCOV_ACTIVE_MUTANT` as it switches
   a mutant on, so that process runs the same mutant, as it would load the

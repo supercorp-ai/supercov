@@ -29,6 +29,10 @@ module Supercov
     SWITCHES_ONLY_ENV = "SUPERCOV_STRONG_SWITCHES_ONLY"
     TIMEOUT_CODE = "SUPERCOV_MUTANT_TIMEOUT"
     MAIN = Ractor.current
+    # The seed a suite in random order runs with in the pass, unless its
+    # command names one: the same order every pass, so an edit that changes
+    # no test does not move a verdict.
+    SEED = 0
     MUTANT = -1
 
     # Raised past the hit limit: an Exception, so code under test that
@@ -801,6 +805,8 @@ module Supercov
         return super if Strong.ran || Strong.plan.nil? || ENV[SWITCHES_ONLY_ENV]
 
         Strong.start
+        # A seed given on the command line is forced: this changes nothing.
+        ::RSpec.configuration.seed = SEED
         Pass.new(RSpecRunner.new(self)).run
         0
       end
@@ -813,7 +819,9 @@ module Supercov
         Strong.start
         # What `Minitest.run` sets before it runs anything.
         options = respond_to?(:process_args) ? process_args(args) : {}
-        self.seed ||= options[:seed] || (Random.new_seed % 0xFFFF)
+        given = ENV["SEED"] || args.any? { |arg| arg.start_with?("--seed", "-s") }
+        options[:seed] = SEED unless given
+        self.seed ||= options[:seed]
         srand(seed)
         init_plugins(options) if respond_to?(:init_plugins)
         Pass.new(MinitestRunner.new).run
