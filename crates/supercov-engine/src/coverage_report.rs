@@ -3869,6 +3869,27 @@ pub(crate) fn archive_tests_and_mutants(
             .or_default()
             .insert(point.id.clone());
     }
+    // A Rust mutant is also linked to the arm it deletes and the guard it
+    // forces, where the run measured them.
+    for decision in &normalized.manifest.decisions {
+        if decision.file.ends_with(".rs") {
+            points
+                .entry(decision.file.clone())
+                .or_default()
+                .insert(decision.id.clone());
+        }
+    }
+    for branch in &normalized.manifest.branches {
+        if branch.file.ends_with(".rs") {
+            let ids = points.entry(branch.file.clone()).or_default();
+            ids.extend(
+                branch
+                    .alternatives
+                    .iter()
+                    .map(|alternative| alternative.id.clone()),
+            );
+        }
+    }
     Ok((normalized.raw_results, listed, points))
 }
 

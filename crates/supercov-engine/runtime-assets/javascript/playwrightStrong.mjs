@@ -88,8 +88,8 @@ function serialFilesOf(plan, tests, fullyParallel) {
             byFile.set(file, []);
     }
     for (const test of plan.tests) {
-        if (tests[test.id] && Array.isArray(test.span))
-            byFile.get(tests[test.id].file).push(test.span);
+        if (tests[playwrightId(test)] && Array.isArray(test.span))
+            byFile.get(tests[playwrightId(test)].file).push(test.span);
     }
     const serialFiles = [];
     for (const [file, spans] of byFile) {
@@ -136,12 +136,18 @@ function mutantRows(tests, entry) {
  * (a test that infected it, cheapest first): its other candidates run in a
  * later pass only if that one survives.
  */
+// A plan test's id as Playwright knows it: a Rust wasm run names a test by
+// its file too (`<file>::<id>`).
+function playwrightId(test) {
+    return test.file && test.id.startsWith(`${test.file}::`) ? test.id.slice(test.file.length + 2) : test.id;
+}
+
 function buildRows(pass, root, config) {
     const plan = readJson(pass.planPath);
     const tests = {};
     plan.tests.forEach((test) => {
         if (test.runner === "playwright" && test.file)
-            tests[test.id] = { file: test.file, durationMs: test.durationMs ?? null };
+            tests[playwrightId(test)] = { file: test.file, durationMs: test.durationMs ?? null };
     });
     // `workers` set only where the pass runs one test at a time.
     const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests, fullyParallelOf(config)) };
@@ -191,7 +197,9 @@ function buildRows(pass, root, config) {
     for (const mutant of plan.mutants) {
         if (mutant.decided)
             continue;
-        const found = indexes.get(mutant.id);
+        // A Rust mutant (Rust compiled to wasm) is switched by its index in
+        // its file's list, as the pass's build placed it.
+        const found = mutant.language === "rust" ? { index: mutant.index, entry: {} } : indexes.get(mutant.id);
         if (!found || found.entry.unplaceable) {
             immediate.push({
                 id: mutant.id,
@@ -208,8 +216,8 @@ function buildRows(pass, root, config) {
         const others = new Set();
         for (const candidate of mutant.candidates) {
             const test = plan.tests[candidate.test];
-            if (test && tests[test.id])
-                own.push({ id: test.id, infected: candidate.reason === "infected" });
+            if (test && tests[playwrightId(test)])
+                own.push({ id: playwrightId(test), infected: candidate.reason === "infected" });
             else if (test)
                 others.add(test.runner);
         }

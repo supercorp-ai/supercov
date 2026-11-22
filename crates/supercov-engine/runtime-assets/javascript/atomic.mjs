@@ -125,7 +125,11 @@ export function atomicRenameSync(source, destination) {
 const journals = new Map();
 export function appendEvidenceRecord(directory, prefix, payload) {
     const line = `${JSON.stringify(payload)}\n`;
-    let journal = journals.get(prefix);
+    // One journal per directory and writer: a process may write into more
+    // than one evidence directory over its life (a strong pass's resident
+    // Jest, one per job).
+    const journalKey = `${directory}\0${prefix}`;
+    let journal = journals.get(journalKey);
     if (journal) {
         let size = -1;
         try {
@@ -141,7 +145,7 @@ export function appendEvidenceRecord(directory, prefix, payload) {
         const writer = (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
             .replace(/[^A-Za-z0-9_-]/g, "_");
         journal = { path: resolve(directory, `${prefix}-${writer}-${randomUUID()}.mcdc.jsonl`), size: 0 };
-        journals.set(prefix, journal);
+        journals.set(journalKey, journal);
     }
     const append = process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1"
         ? appendJsonLineDurableSync

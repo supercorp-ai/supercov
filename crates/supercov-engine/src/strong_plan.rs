@@ -688,8 +688,8 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         if planned.server_wide.is_none() {
                             planned.server_wide = server_wide(raw, mutant);
                         }
-                        match role_of(raw) {
-                            "test" => {
+                        match (role_of(raw), &raw.test_file) {
+                            ("test", _) => {
                                 let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
                                 take(test_index[&id], why);
                                 // Module-level code a test ran (a module it
@@ -706,12 +706,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                 }
                             }
                             // A file's module setup: every test of the file.
-                            "setup" if raw.test_file.is_some() => {
-                                if let Some(file) = &raw.test_file {
-                                    whole_files.insert(file.clone());
-                                    for &test in by_file.get(file).into_iter().flatten() {
-                                        take(test, CandidateReason::ModuleLoad);
-                                    }
+                            ("setup", Some(file)) => {
+                                whole_files.insert(file.clone());
+                                for &test in by_file.get(file).into_iter().flatten() {
+                                    take(test, CandidateReason::ModuleLoad);
                                 }
                             }
                             // Work no test was credited with, a module setup
@@ -886,6 +884,13 @@ mod tests {
         failed.status = Some("failed".into());
         let mut flaky = record("c", "test", Some("t/c.test.js"), &[]);
         flaky.flaky = true;
+        // A record of evidence alone says nothing of the outcome, but for a
+        // flaky attempt's.
+        let mut evidence = record("d", "test", None, &[]);
+        evidence.status = Some("unknown".into());
+        let mut flaky_evidence = record("e", "test", None, &[]);
+        flaky_evidence.status = Some("unknown".into());
+        flaky_evidence.flaky = true;
         let raw_results = [
             spanned([10, 20]),
             spanned([15, 40]),
@@ -893,6 +898,8 @@ mod tests {
             failed,
             flaky,
             record("d", "test", None, &[]),
+            evidence,
+            flaky_evidence,
         ];
         let plan = plan(&raw_results, listed(Vec::new(), &[])).unwrap();
         let tests = plan
@@ -915,6 +922,7 @@ mod tests {
                 ("b", Some("t/b.test.js"), false, None, None),
                 ("c", Some("t/c.test.js"), false, None, None),
                 ("d", None, true, None, None),
+                ("e", None, false, None, None),
             ]
         );
         assert!(plan.mutants.is_empty());

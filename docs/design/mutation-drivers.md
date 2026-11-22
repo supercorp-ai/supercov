@@ -256,3 +256,64 @@ values only take tests away.
 | runtime switch | `runtime/javascript/runtime.mjs` (`strongSlot`, `setActiveMutant`) |
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
+
+Rust implements the contract with cargo-mutants 27.1.0 as its reference:
+`docs/design/rust-mutation.md`.
+
+## Rust compiled to wasm under a JavaScript host
+
+A Rust crate's mutants can only be told apart by the tests that load its
+wasm: a Vitest or Playwright suite over `wasm-pack build` output, or
+`wasm-bindgen-test-runner` in Node or Chrome. A wasm module reads no
+environment, so a crate switched for a strong pass (`rust_schemata`) exports,
+per crate (`<key>` is the crate's):
+
+| Export | Meaning |
+| --- | --- |
+| `__supercov_strong_buffer_<key>() -> u32` | where in the module's memory to write the active mutant's file (UTF-8, at most 4096 bytes) |
+| `__supercov_strong_activate_<key>(length: u32, index: u64)` | switches mutant `index` of the file just written on; the hit limit is off |
+
+A host that knows the active mutant (`<file>#<index>`) calls, for every
+instance it sees created, each `_activate_` export after writing the file
+into the matching `_buffer_` (`rust-wasm-node.mjs` and the Chrome proxy's
+page script do so for Rust's own runners). It must do so before any test
+code of the instance runs: right after `WebAssembly.Instance` or
+`instantiate` returns.
+
+For Rust wasm loaded by JavaScript tests, the JavaScript strong pass owns
+the run: the mutants are listed by the Rust run beside it, and its candidate
+tests are JavaScript tests.
+
+1. Dispatch: a Rust mutant all of whose candidates ran under a JavaScript
+   runner goes to the JavaScript driver (`strong_driver::driver_of`); one
+   with a Rust test among its candidates stays Rust's.
+2. Build: in a strong pass, each Cargo workspace of the copy that holds a
+   wasm crate gets the plan's Rust mutants behind switches
+   (`rust_strong::switch_wasm_workspace`, through
+   `rust_project::prepare_rust_strong_project`) instead of probes, before
+   the command's own build runs. Which mutants compile is found first in a
+   scratch copy with `cargo build --lib --target wasm32-unknown-unknown`, as
+   the Rust driver finds it: one whose own code does not type-check is
+   `unviable`; one a switch cannot hold, or whose switch breaks the build,
+   is `error` (the command builds the wasm once). Those are taken out of the
+   plan the JavaScript driver runs.
+3. Activation: the test processes get `SUPERCOV_WASM_STRONG`, a JSON list of
+   the workspaces' directories in the project (`""` at its root). The
+   runtime remembers every wasm instance (`globalThis.__supercovWasm`) and
+   hands each the active mutant, its file relative to its workspace, as it
+   is created and whenever `setActiveMutant` switches another on; a mutant
+   of no workspace (a JavaScript one) switches every crate's off. The Rust
+   runtime's active file can change in one instance, as a Vitest worker
+   keeps its modules from one mutant to the next.
+
+In a Playwright page the context's init script gives the page the same list
+(`globalThis.__SUPERCOV_WASM_STRONG__`), and the attempt's own init script
+switches its mutant on before the page's scripts run, so each wasm instance
+the page makes runs the attempt's mutant. A Rust wasm run names its tests by
+their file too (`<file>::<id>`); the Vitest and Playwright drivers read the
+id after it.
+
+A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
+time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
+measures yet, so none of its mutants are planned; and a mutant a switch
+cannot hold is not built on its own.

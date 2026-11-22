@@ -1,7 +1,7 @@
 {
 "mutantSet": "stryker-js@10.1.1",
 "file": "operators.ts",
-"skipped": {"Regex":0,"ignored":0},
+"skipped": {"ignored":0},
 "mutants": [
   {"file":"operators.ts","mutator":"BlockStatement","start":[3,73],"end":[15,2],"replacement":"{}","text":"{}"},
   {"file":"operators.ts","mutator":"ArithmeticOperator","start":[4,15],"end":[4,24],"replacement":"+","text":"a + b + 1"},
