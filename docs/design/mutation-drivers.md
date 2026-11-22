@@ -310,3 +310,15 @@ A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
 job's time limit. Not yet: wasm loaded in a browser page (Playwright, Vitest
 Browser Mode) gets no mutant, and a mutant a switch cannot hold is not built
 on its own.
+
+## Python
+
+| Contract | Python |
+| --- | --- |
+| enumerator | `python_mutants.rs` (mutmut 3.8.1's operators), parity goldens in `tests/fixtures/mutmut-parity` |
+| schemata | `python_strong.rs` writes each switched function's mutants' edits; `runtime/python/supercov_strong.py` switches the function to mutmut's copy of it |
+| runtime switch | `supercov_strong.py` (`strong_slot`, `activate`), `SUPERCOV_ACTIVE_MUTANT` from a process's start |
+| driver | `supercov_strong.py`: pytest's `pytest_runtestloop`, unittest's `TestProgram.runTests`; a fork per mutant after collection |
+| value probes | `supercov_instrument.py` (`_MutantProbes`) and `supercov_runtime.py`, from the plan's `mutantProbes` |
+
+See `python-mutants.md`.

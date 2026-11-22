@@ -92,7 +92,7 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
-Test the tests with mutants (JavaScript and TypeScript):
+Test the tests with mutants (JavaScript, TypeScript and Python):
   supercov mutants                     which mutants the tests kill, run by run
   supercov mutants --diff main         only the mutants on changed lines
 
@@ -118,6 +118,7 @@ Settings, in the environment of the measured command (supercov docs cli says wha
   SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
   SUPERCOV_MUTANTS=1                   list mutants as the run measures, with their probes
+  SUPERCOV_STRONG_WORKERS=<n>          forks a Python strong pass runs at once
 
 Guides:
   supercov docs                        list bundled guides
@@ -4225,7 +4226,7 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2481).
+// Below the lines tests name by number (main.rs:2482).
 mod mutants_export;
 mod mutants_test_command;
 

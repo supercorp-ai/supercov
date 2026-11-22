@@ -109,6 +109,9 @@ pub const STRONG_RUNNERS: &[&str] = &[
     "rust-libtest",
     "nextest",
     "rustdoc",
+    // Python's (`python_strong`): pytest and unittest, a fork per mutant.
+    "pytest",
+    "unittest",
 ];
 
 /// The JavaScript runners whose strong pass is `strongJobs.mjs`: each job
@@ -162,7 +165,7 @@ pub fn driver_of<'a>(
 pub fn has_driver(language: &str) -> bool {
     matches!(
         language,
-        crate::mutant_list::JAVASCRIPT | crate::mutant_list::RUST
+        crate::mutant_list::JAVASCRIPT | crate::mutant_list::RUST | crate::python_mutants::PYTHON
     )
 }
 
@@ -195,6 +198,7 @@ pub fn run_strong_pass(
             },
             diagnostics,
         ),
+        crate::python_mutants::PYTHON => crate::python_strong::run_strong_python(pass, diagnostics),
         other => Err(format!("no strong mutation driver for {other} yet")),
     }
 }
@@ -303,6 +307,7 @@ mod tests {
     #[test]
     fn only_a_language_with_a_driver_runs() {
         assert!(has_driver("javascript"));
+        assert!(has_driver("python"));
         assert!(!has_driver("cobol"));
         let pass = StrongPass {
             root: PathBuf::from("."),

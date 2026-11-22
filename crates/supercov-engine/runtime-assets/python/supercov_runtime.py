@@ -34,6 +34,8 @@ import os
 import sys
 import time
 import zlib
+import operator as _operator
+import math as _math
 
 PLAN_VERSION = 1
 EVIDENCE_VERSION = 1
@@ -304,6 +306,31 @@ def _transport_write(output, offset, data):
         output[offset:offset + len(data)] = data
 
 
+# Values a mutant's value probe works the mutant's value out for: built-in
+# types whose operators and methods run none of the program's code.
+_ORDERED_NUMBERS = frozenset((int, float, bool))
+_NUMBERS = frozenset((int, float, bool, complex))
+_PLAIN = frozenset((int, float, bool, complex, str, bytes, tuple, list, type(None), frozenset, set))
+_TRUTHY = frozenset((bool, int, float, complex, str, bytes, tuple, list, dict, set, frozenset, type(None)))
+
+
+def _same(a, b) -> bool:
+    """Whether two results cannot be told apart: the same type and value,
+    a float's sign of zero included. NaN is never the same."""
+    kind = type(a)
+    if kind is not type(b):
+        return False
+    if kind is float:
+        return a == b and _math.copysign(1.0, a) == _math.copysign(1.0, b)
+    if kind is complex:
+        return _same(a.real, b.real) and _same(a.imag, b.imag)
+    if kind in (int, bool, str, bytes, type(None)):
+        return a == b
+    if kind is tuple:
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return False
+
+
 class _Hits(mmap.mmap):
     """A slot: one small file mapped for the probes, handed to one context
     at a time.
@@ -399,6 +426,8 @@ class Runtime:
         # (context, file, line) of every site probe already handled.
         self.probed_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
+        # (context, site, outcome) a mutant's value probe recorded.
+        self.seen_values: set = set()
         self.seen_vectors: set = set()
         self._id_json: dict = {}
         self.pytest_active = False
@@ -812,6 +841,128 @@ class Runtime:
                 return
             self._ensure_process_output()
             self._write_hit(context, obligation)
+
+    def _value(self, site: str, outcome: str) -> None:
+        """One outcome of a mutant's value probe in the current context,
+        written once per site and outcome, as a first hit is."""
+        context = self.context.get()
+        key = (context, site, outcome)
+        if key in self.seen_values:
+            return
+        with self.lock:
+            if key in self.seen_values:
+                return
+            self.seen_values.add(key)
+            if self.closed:
+                return
+            self._ensure_process_output()
+            self._write_payload(
+                b'{"ctx":%d,"id":%s,"o":"%s","t":"cmp"}' % (context, self._json_id(site), outcome.encode("ascii"))
+            )
+
+    def _mutant_compare(self, site: str, op: str, a, b):
+        """A relational comparison a boundary mutant changes: the operands'
+        relation, where they are numbers, strings or bytes."""
+        try:
+            result = getattr(_operator, op)(a, b)
+        except BaseException:
+            self._value(site, "other")
+            raise
+        ta, tb = type(a), type(b)
+        if (ta in _ORDERED_NUMBERS and tb in _ORDERED_NUMBERS) or (ta is tb and ta in (str, bytes)):
+            if a < b:
+                relation = "lt"
+            elif a == b:
+                relation = "eq"
+            elif a > b:
+                relation = "gt"
+            else:
+                relation = "unordered"
+            self._value(site, relation)
+        else:
+            self._value(site, "other")
+        return result
+
+    def _mutant_arith(self, site: str, op: str, mutated: str, a, b):
+        """A binary operation whose operator a mutant swaps: whether the
+        swapped operator gives the same value, where both operands are
+        built-in values the swapped one cannot run code of."""
+        try:
+            result = getattr(_operator, op)(a, b)
+        except BaseException:
+            # The mutant may not raise: a difference, at worst.
+            self._value(site, "differs")
+            raise
+        if type(a) not in _PLAIN or type(b) not in _PLAIN:
+            self._value(site, "other")
+            return result
+        if mutated in ("__lshift__", "__rshift__") and type(b) is int and type(a) in (int, bool) and b > 4096:
+            # A shift by this much: both are 0 where `a` is, and differ
+            # otherwise; the mutant's value is not worked out.
+            self._value(site, "same" if a == 0 else "differs")
+            return result
+        try:
+            changed = getattr(_operator, mutated)(a, b)
+        except Exception:
+            self._value(site, "differs")
+            return result
+        self._value(site, "same" if _same(result, changed) else "differs")
+        return result
+
+    def _mutant_none(self, site: str, value):
+        """A value a mutant replaces with `None`: the same only where it is."""
+        self._value(site, "same" if value is None else "differs")
+        return value
+
+    def _mutant_sign(self, site: str, op: str, mutated: str, operand):
+        result = getattr(_operator, op)(operand)
+        if type(operand) not in _NUMBERS:
+            self._value(site, "other")
+            return result
+        self._value(site, "same" if _same(result, getattr(_operator, mutated)(operand)) else "differs")
+        return result
+
+    def _mutant_method(self, site: str, receiver, name: str, mutated: str):
+        """A string method a mutant swaps: the method the program calls,
+        comparing its result with the swapped method's where the receiver is
+        a built-in string, whose methods run no code of the program's."""
+        method = getattr(receiver, name)
+        if type(receiver) not in (str, bytes):
+            self._value(site, "other")
+            return method
+        swapped = getattr(receiver, mutated)
+        record = self._value
+
+        def call(*arguments, **keywords):
+            try:
+                result = method(*arguments, **keywords)
+            except BaseException:
+                record(site, "other")
+                raise
+            try:
+                changed = swapped(*arguments, **keywords)
+            except Exception:
+                record(site, "differs")
+                return result
+            record(site, "same" if _same(result, changed) else "differs")
+            return result
+
+        return call
+
+    def _mutant_test(self, false_site, true_site, value):
+        """A conditional's test, which the mutants force false (`and False`)
+        or true (`or True`): each is the same where the test already was."""
+        if type(value) not in _TRUTHY:
+            for site in (false_site, true_site):
+                if site is not None:
+                    self._value(site, "other")
+            return value
+        truth = bool(value)
+        if false_site is not None:
+            self._value(false_site, "differs" if truth else "same")
+        if true_site is not None:
+            self._value(true_site, "same" if truth else "differs")
+        return value
 
     def _wide_vector(self, context: int, d: int, mask: int, outcome: bool) -> None:
         """A vector of a decision too wide for a region: recorded at once."""
@@ -1300,6 +1451,12 @@ class Runtime:
                 "iter_probe": self._iter_probe,
                 "aiter_probe": self._aiter_probe,
                 "site_probe": self._site_probe,
+                "mutant_compare": self._mutant_compare,
+                "mutant_arith": self._mutant_arith,
+                "mutant_none": self._mutant_none,
+                "mutant_sign": self._mutant_sign,
+                "mutant_method": self._mutant_method,
+                "mutant_test": self._mutant_test,
                 "limitation": self.limitation,
             },
             self.probe_sites,
