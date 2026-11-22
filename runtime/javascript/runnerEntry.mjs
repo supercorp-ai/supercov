@@ -98,6 +98,12 @@ export async function adaptRunnerEntry(entrypoint) {
         if (strongJob()?.runsFile(entrypoint) === false)
             process.exit(0);
     }
+    // node:test counts a test file with no test() in it as a test of its
+    // own, passing or failing by what its top level asserts. What runs there
+    // is that test's. A file that names node:test keeps its top level
+    // counting for the run, as it always did.
+    if (process.env.NODE_TEST_CONTEXT && process.env.SUPERCOV_EVIDENCE_DIR && entrypoint && !namesNodeTest(entrypoint))
+        await recordNodeTestTopLevel(entrypoint);
     useGeneratedVitestConfig(entrypoint);
     // The Mocha CLI, the child it forks for Node options, and each --parallel
     // worker run tests through Mocha's Runner, which the adapter patches before
@@ -125,4 +131,40 @@ export async function adaptRunnerEntry(entrypoint) {
         const { adaptTap } = await import(new URL("./tap.mjs", import.meta.url).href);
         await adaptTap(entrypoint);
     }
+}
+
+// Whether a test file's source names node:test: a file that does not can
+// register no test of its own.
+function namesNodeTest(file) {
+    try {
+        return /\bnode:test\b|["']test["']/.test(readFileSync(file.startsWith("file:") ? new URL(file) : file, "utf8"));
+    }
+    catch {
+        return true;
+    }
+}
+
+async function recordNodeTestTopLevel(file) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { runnerExecutionScope, writeRunnerEvidence } = await import(new URL("./runnerEvidence.mjs", import.meta.url).href);
+    const identity = { runner: "node:test", file, name: "(top level)" };
+    const scope = runnerExecutionScope(identity);
+    // From the file's first assertion outside any test on, what runs is the
+    // file's test. What ran before it (loading its modules) counts for the
+    // run, as in any file; a file that asserts nothing is no test.
+    let asserted = false;
+    globalThis.__SUPERCOV_UNSCOPED_ASSERTION__ = () => {
+        if (asserted || (globalThis[Symbol.for("supercov.nodeTestRegistrations")] ?? 0) > 0)
+            return;
+        asserted = true;
+        runtime.beginBufferedServerEvidence(scope);
+        runtime.activateCoverageScope(scope);
+    };
+    process.once("exit", (code) => {
+        if (!asserted)
+            return;
+        writeRunnerEvidence(identity, code === 0 ? "passed" : "failed", scope, process.env.SUPERCOV_EVIDENCE_DIR, runtime.takeNodeAssertionPhases(scope), runtime.flushBufferedServerEvidence(scope));
+    });
 }
