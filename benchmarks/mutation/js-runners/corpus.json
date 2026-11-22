@@ -198,8 +198,7 @@
       ],
       "test": [
         "npx",
-        "ava",
-        "--no-worker-threads"
+        "ava"
       ],
       "sources": "index.js",
       "mutate": [
@@ -208,11 +207,12 @@
       "stryker": {
         "testRunner": "command",
         "commandRunner": {
-          "command": "npx ava --no-worker-threads"
+          "command": "npx ava"
         },
         "coverageAnalysis": "off"
       },
-      "note": "AVA's worker threads ran out of memory under Supercov's measured run; its child processes do not"
+      "note": "Measured without the mutants' value probes, whose run ran out of memory in AVA's worker: the plan reads reach alone",
+      "values": false
     },
     {
       "name": "p-map",
@@ -316,12 +316,10 @@
         "decorators.ts"
       ],
       "stryker": {
-        "testRunner": "command",
-        "commandRunner": {
-          "command": "npx vitest run"
-        },
-        "coverageAnalysis": "off"
-      }
+        "testRunner": "vitest",
+        "coverageAnalysis": "perTest"
+      },
+      "note": "StrykerJS's command runner switches a mutant on through the environment, which the browser never reads: every mutant survives under it. Its Vitest runner switches it on in the page."
     }
   ]
 }

@@ -10,9 +10,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { joinMutants, originalCode, readSupercovMutants } from "../supercov-join.mjs";
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, word, at, all) =>
@@ -42,7 +40,7 @@ if (!existsSync(join(tools, "node_modules/.bin/stryker"))) {
     mkdirSync(tools, { recursive: true });
     writeFileSync(join(tools, "package.json"), '{"private":true}');
     // StrykerJS reads a project's tsconfig.json with TypeScript.
-    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", "typescript@5", ...["core", "mocha-runner", "jest-runner", "tap-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
+    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", "typescript@5", ...["core", "mocha-runner", "jest-runner", "tap-runner", "vitest-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
 }
 
 const directory = join(work, project.name);
@@ -64,7 +62,6 @@ const plain = run("plain-tests", project.test, { cwd: directory });
 // StrykerJS: every killer of every mutant.
 const include = project.mutate.filter((glob) => !glob.startsWith("!"));
 const exclude = project.mutate.filter((glob) => glob.startsWith("!")).map((glob) => glob.slice(1));
-const runnerPlugin = { mocha: "mocha-runner", jest: "jest-runner", tap: "tap-runner" }[project.stryker.testRunner];
 writeFileSync(join(directory, "stryker.supercov-bench.json"), JSON.stringify({
     disableBail: true,
     incremental: false,
@@ -72,8 +69,7 @@ writeFileSync(join(directory, "stryker.supercov-bench.json"), JSON.stringify({
     mutate: project.mutate,
     ignorePatterns: [".supercov"],
     tempDirName: ".stryker-tmp",
-    // StrykerJS imports a plugin by what it is given: the module's own file.
-    plugins: runnerPlugin ? [pathToFileURL(createRequire(join(tools, "package.json")).resolve(`@stryker-mutator/${runnerPlugin}`)).href] : [],
+    // StrykerJS finds its runners beside itself, in the tools' packages.
     ...project.stryker,
 }, null, 2));
 const stryker = args["skip-stryker"] ? null : run("stryker", [join(tools, "node_modules/.bin/stryker"), "run", "stryker.supercov-bench.json"], { cwd: directory });
@@ -83,7 +79,9 @@ if (existsSync(reportPath))
 
 // Supercov: measure with the mutants' values, then the strong pass.
 const environment = { SUPERCOV_SOURCE_ROOTS: project.sources };
-const measure = run("supercov-measure", [supercov, "--", ...project.test], { cwd: directory, env: { ...environment, SUPERCOV_MUTANTS: "1" } });
+// A project marked `values: false` is measured as a plain run: its mutants are
+// listed after it, and planned from reach alone.
+const measure = run("supercov-measure", [supercov, "--", ...project.test], { cwd: directory, env: { ...environment, ...(project.values === false ? {} : { SUPERCOV_MUTANTS: "1" }) } });
 const strong = run("supercov-strong", [supercov, "runs", "latest", "mutants", "test", "--json"], { cwd: directory, env: environment });
 run("supercov-export", [supercov, "runs", "latest", "mutants", "--format", "jsonl", "--output", join(out, "supercov-mutants.jsonl")], { cwd: directory, env: environment });
 let pass = {};
