@@ -191,7 +191,8 @@ Five modules, at their tags, on SoroCI (16 CPUs each tool, Go stable):
 | google/uuid v1.6.0 | 146 | 88 / 101 | 0 | 13.5 | 15.9 |
 | spf13/cast v1.7.1 | 184 | 123 / 122 | 1 | 8.9 | 6.3 |
 
-Counts are of one run (the fourth of five); Supercov kills more where Gremlins
+Counts are of the fourth of five runs, times of the fifth (golang-lru's of the
+fourth: in the fifth Gremlins stopped). Supercov kills more where Gremlins
 leaves constants uncovered. Supercov's time is the whole of `supercov mutants -- go test ./...`: the
 measured run, the type check, the copy, the builds and the strong pass.
 Gremlins' killed counts include the mutants that do not compile, which it
