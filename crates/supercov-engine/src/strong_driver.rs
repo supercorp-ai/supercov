@@ -384,6 +384,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A finished pass keeps its logs alone; a later pass removes every
+    /// pass's directory whose process has ended, or that names none, and
+    /// keeps its own and a running process's.
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_s_directory_keeps_its_logs_and_goes_when_its_process_has() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-strong-work-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work = work_directory(&root, "run_1", 7);
+        claim_work_directory(&work).unwrap();
+        std::fs::write(work.join("restart-0.log"), "said").unwrap();
+        std::fs::write(work.join("plan.json"), "{}").unwrap();
+        std::fs::create_dir_all(work.join("results.jsonl.jobs/1/evidence")).unwrap();
+        finish_work_directory(&work);
+        let mut left = std::fs::read_dir(&work)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["restart-0.log"]);
+        // Gone already: nothing to finish.
+        finish_work_directory(&root.join("gone"));
+        // Another process's: one that runs (this test's parent, say), one
+        // that ended, one that named none, one that named nonsense.
+        let strong = root.join(".supercov/strong");
+        let owned = |name: &str, owner: Option<String>| {
+            std::fs::create_dir_all(strong.join(name)).unwrap();
+            if let Some(owner) = owner {
+                std::fs::write(strong.join(name).join(OWNER_FILE), owner).unwrap();
+            }
+        };
+        let mut ended = std::process::Command::new("true").spawn().unwrap();
+        let ended_pid = ended.id();
+        ended.wait().unwrap();
+        owned(
+            "running",
+            Some(std::os::unix::process::parent_id().to_string()),
+        );
+        owned("ended", Some(ended_pid.to_string()));
+        owned("unowned", None);
+        // A pass of this process still at work.
+        claim_work_directory(&work_directory(&root, "run_1", 8)).unwrap();
+        owned("nonsense", Some("x".into()));
+        std::fs::write(strong.join("a-file"), "").unwrap();
+        prune_work_directories(&root);
+        let mut kept = std::fs::read_dir(&strong)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        kept.sort();
+        // The finished pass's own directory, its owner gone with the rest,
+        // is removed by the pass after it.
+        assert_eq!(kept, ["a-file", "run_1-8", "running"]);
+        // A project with no passes yet.
+        prune_work_directories(&root.join("none"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn only_a_language_with_a_driver_runs() {
         assert!(has_driver("javascript"));

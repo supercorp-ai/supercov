@@ -31,6 +31,9 @@ import { fileURLToPath } from "node:url";
 // included, runs all its baseline's tests beside a mutant's own candidates
 // rather than confirm a kill apart (`tryFile`).
 const UNION_MS = 1_500;
+// What a job costs beyond its tests' own time, in the order a mutant's
+// files run: a start of the runner, or a resident runner's file setup.
+const JOB_START_MS = 300;
 // Vitest's node tests run here where the run also had browser tests, which
 // Vitest's own driver cannot run beside them.
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser", "vitest"]);
@@ -650,12 +653,30 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         }
     }
 
+    // Each test file's kills over the mutants it ran so far in the pass: a
+    // mutant's next file is the one likeliest to kill it for its cost, as the
+    // Vitest driver orders its copies. Most killed mutants die in their first
+    // file, and the cheapest file is often not the one that kills.
+    const killsOf = new Map();
+    const promise = (group) => {
+        const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
+        return (seen.kills + 1) / (seen.ran + 2) / (group.cost + JOB_START_MS);
+    };
     async function runMutant(mutant, groups, elsewhere) {
         const begun = Date.now();
         let ran = 0;
-        for (const group of groups) {
+        const left = [...groups];
+        while (left.length > 0) {
+            // Ties go to the cheapest, as the groups are sorted by cost.
+            const at = left.reduce((best, group, index) => (promise(group) > promise(left[best]) ? index : best), 0);
+            const [group] = left.splice(at, 1);
             const verdict = await tryFile(mutant, group);
             ran += verdict.tests;
+            const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
+            seen.ran += 1;
+            if (verdict.status === "killed" || verdict.status === "timeout")
+                seen.kills += 1;
+            killsOf.set(group.file, seen);
             if (verdict.status !== "alive") {
                 write({ id: mutant.id, status: verdict.status, ...(verdict.killedBy ? { killedBy: verdict.killedBy } : {}), tests: ran, durationMs: Date.now() - begun, ...(verdict.reason ? { reason: verdict.reason } : {}) });
                 return;
@@ -722,8 +743,14 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         pending.push([mutant, groups, elsewhere]);
     }
     // Every file's baseline runs the tests of all its mutants: none starts
-    // before all are known.
-    await Promise.all(pending.map((task) => runMutant(...task)));
+    // before all are known. Twice as many mutants as workers are under way at
+    // once, each a job at a time, which keeps every worker busy; a mutant
+    // that starts later picks its first file from what the pass learned.
+    const queue = pending.values();
+    await Promise.all(Array.from({ length: Math.min(pending.length, 2 * workers) }, async () => {
+        for (const task of queue)
+            await runMutant(...task);
+    }));
     jestHosts.close();
     mochaHosts.close();
     esmHosts.close();

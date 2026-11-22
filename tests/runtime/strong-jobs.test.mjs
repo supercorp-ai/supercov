@@ -12,7 +12,7 @@ const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
 // A strong pass's driver over a runner whose tests do what `rules` says
 // (fixtures/strong-jobs-runner.mjs), each mutant's verdict by id.
-async function pass({ tests, mutants, listed, rules, files }) {
+async function pass({ tests, mutants, listed, rules, files, workers = 4 }) {
     const root = mkdtempSync(join(tmpdir(), "supercov-strong-jobs-"));
     try {
         mkdirSync(join(root, ".supercov/frontend-evidence"), { recursive: true });
@@ -24,7 +24,7 @@ async function pass({ tests, mutants, listed, rules, files }) {
             plan: { tests, mutants },
             resultsPath,
             root,
-            workers: 4,
+            workers,
             environment: { ...process.env, FAKE_SUITE: join(root, "suite.json") },
             graceMs: 1_500,
             baselineGraceMs: 1_500,
@@ -130,6 +130,21 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.equal(summary.overturned, 1);
     assert.ok(summary.confirmations >= 2, JSON.stringify(summary));
     assert.ok(summary.stopped >= 2, JSON.stringify(summary));
+});
+
+// A mutant's next file is the one that killed most for its cost so far: once
+// the costlier file kills the first mutants, the later ones run it first and
+// never need the cheap one that kills nothing.
+test("a mutant runs the file likeliest to kill it first, as the pass learns", async () => {
+    const tests = [test_("a1", "t/a.test.js", 1), test_("b1", "t/b.test.js", 50)];
+    const mutants = ["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => ({ id, file: "src/a.js", candidates: [{ test: 0, reason: "infected" }, { test: 1, reason: "infected" }] }));
+    const listed = mutants.map(({ id }) => ({ id }));
+    const rules = Object.fromEntries(listed.map((_, index) => [`src/a.js#${index}`, { b1: "fail" }]));
+    const { verdicts, summary } = await pass({ tests, mutants, listed, rules, files: { "t/a.test.js": ["a1"], "t/b.test.js": ["b1"] }, workers: 1 });
+    assert.ok(Object.values(verdicts).every((verdict) => verdict.status === "killed"), JSON.stringify(verdicts));
+    // Two baselines; the first two mutants (under way at once) run both
+    // files, the four after them the killing one alone.
+    assert.equal(summary.jobs, 2 + 2 * 2 + 4, JSON.stringify(summary));
 });
 
 // Ctrl-C reaches the driver, not its jobs, which run in process groups of

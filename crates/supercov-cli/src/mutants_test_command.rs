@@ -382,7 +382,12 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // A run with no test has nothing to run a mutant against: said, not
     // reported as a score of nothing killed.
     if plan.tests.is_empty() {
-        return Err(Stop::Refused(no_test_message(run, &plan)));
+        return Err(Stop::Refused(no_test_message(
+            &run.id,
+            &run.metadata.command,
+            run.metadata.test_exit_code,
+            &plan,
+        )));
     }
     let total = plan.mutants.len();
     narrow(&mut plan, &root, run, options)?;
@@ -421,7 +426,13 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     if options.plan {
         return Ok(plan_json(run, &plan));
     }
-    let to_run = plan.mutants.iter().filter(|m| m.decided.is_none()).count();
+    let running = plan
+        .mutants
+        .iter()
+        .filter(|m| m.decided.is_none())
+        .map(|m| m.id.clone())
+        .collect::<Vec<_>>();
+    let to_run = running.len();
     let started = std::time::Instant::now();
     let executed = execute(&root, run, plan.clone(), &mut saved, options)?;
     let verdicts = read_saved(run);
@@ -441,18 +452,18 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // What keeps this pass from gating, as `runs patch` says of a failed
     // suite: the answer stands, and the command exits 2.
     let mut reasons = Vec::new();
-    if let Some(failed) = failed_command(run, &narrowed) {
+    if let Some(failed) = failed_command(&run.id, run.metadata.test_exit_code, &narrowed) {
         reasons.push(failed);
     }
-    let ran_any = asked.iter().any(|(id, _)| {
+    // A pass that had mutants to run and ran none of them.
+    let ran_any = running.iter().any(|id| {
         verdicts
             .get(id)
             .is_some_and(|verdict| verdict.status != "error")
     });
-    if !asked.is_empty() && !ran_any {
+    if to_run > 0 && !ran_any {
         reasons.push(format!(
-            "no mutant of the {} asked about could be run: each is an error, said above",
-            asked.len()
+            "no mutant of the {to_run} this pass had to run could be run: each is an error, said above"
         ));
     }
     if !reasons.is_empty() {
@@ -463,62 +474,60 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
 }
 
 /// Why a run that recorded no test is refused.
-fn no_test_message(run: &StoredRun, plan: &StrongPlan) -> String {
+fn no_test_message(
+    run: &str,
+    command: &[String],
+    exit_code: Option<i32>,
+    plan: &StrongPlan,
+) -> String {
     let reached = plan
         .mutants
         .iter()
         .filter(|mutant| mutant.weak != "not-reached" && mutant.weak != "equivalent")
         .count();
-    let command = supercov_engine::javascript_run::shell_words(&run.metadata.command);
-    let exited = match run.metadata.test_exit_code {
+    let runner = runner_of_command(command);
+    let command = supercov_engine::javascript_run::shell_words(command);
+    let exited = match exit_code {
         Some(0) | None => String::new(),
         Some(code) => format!(", and exited {code}"),
     };
     if reached == 0 {
         return format!(
-            "run {} recorded no test: its command ({command}) ran none{exited}, so there is nothing to run its {} mutant(s) against",
-            run.id,
+            "run {run} recorded no test: its command ({command}) ran none{exited}, so there is nothing to run its {} mutant(s) against",
             plan.mutants.len()
         );
     }
     format!(
-        "run {} recorded no test: its command ({command}) ran the code of {reached} mutant(s){exited}, but no runner Supercov drives reported a test there, so none can be run against one\n  {reached} mutant(s) not run: no strong driver for {}",
-        run.id,
-        runner_of_command(&run.metadata.command)
+        "run {run} recorded no test: its command ({command}) ran the code of {reached} mutant(s){exited}, but no runner Supercov drives reported a test there, so none can be run against one\n  {reached} mutant(s) not run: no strong driver for {runner}"
     )
 }
 
 /// The runner a command starts, by name, for a run no known runner
 /// reported: `npx tape 'test/**/*.js'` is tape's.
 fn runner_of_command(command: &[String]) -> String {
-    let mut words = command.iter().map(String::as_str).peekable();
+    let mut words = command.iter().map(String::as_str);
     while let Some(word) = words.next() {
         let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
         let name = name.strip_suffix(".cmd").unwrap_or(name);
         match name {
-            _ if word.contains('=') && !word.starts_with('-') => {}
-            _ if word.starts_with('-') => {}
+            // An option, or a variable set for the command.
+            _ if word.starts_with('-') || word.contains('=') => {}
             "npx" | "bunx" | "pnpx" | "exec" | "env" | "node" | "bun" | "deno" | "dlx" => {}
-            "npm" | "pnpm" | "yarn" => {
-                // `npm exec x`, `pnpm x`, `yarn x`: the tool is next; a
-                // script (`npm test`) is the command's name.
-                if words
-                    .peek()
-                    .is_some_and(|next| matches!(*next, "test" | "t" | "run" | "run-script"))
-                {
-                    return command.join(" ");
-                }
-            }
+            // A package script: the command is its name.
+            "test" | "t" | "run" | "run-script" => return command.join(" "),
+            "npm" | "pnpm" | "yarn" => {}
             "sh" | "bash" | "zsh" => {
-                if words.peek() == Some(&"-c")
-                    && let Some(script) = command.iter().skip_while(|w| *w != "-c").nth(1)
-                {
-                    let inner = script
-                        .split_whitespace()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    return runner_of_command(&inner);
+                let script = words
+                    .find(|word| !word.starts_with('-'))
+                    .unwrap_or_default();
+                let inner = script
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if inner.is_empty() {
+                    break;
                 }
+                return runner_of_command(&inner);
             }
             _ => return name.to_owned(),
         }
@@ -529,8 +538,7 @@ fn runner_of_command(command: &[String]) -> String {
 /// Where the run's command failed: what it cost, in one sentence. A test that
 /// failed is no candidate, so its mutants ran against the others, and a
 /// pass over a failing suite cannot gate.
-fn failed_command(run: &StoredRun, plan: &StrongPlan) -> Option<String> {
-    let code = run.metadata.test_exit_code;
+fn failed_command(run: &str, code: Option<i32>, plan: &StrongPlan) -> Option<String> {
     if code == Some(0) {
         return None;
     }
@@ -559,8 +567,7 @@ fn failed_command(run: &StoredRun, plan: &StrongPlan) -> Option<String> {
         ),
     };
     Some(format!(
-        "run {}'s command {exited}: {tests}. A test that does not pass kills nothing, so these verdicts are the passing tests' alone, and cannot gate; fix the suite and measure it again",
-        run.id
+        "run {run}'s command {exited}: {tests}. A test that does not pass kills nothing, so these verdicts are the passing tests' alone, and cannot gate; fix the suite and measure it again"
     ))
 }
 
@@ -1684,6 +1691,143 @@ mod tests {
         );
     }
 
+    /// The runner a command starts, named where no runner Supercov knows
+    /// reported a test: past launchers, options, variables and shells; a
+    /// package script by the command itself.
+    #[test]
+    fn a_command_names_its_runner() {
+        let named = |words: &[&str]| {
+            runner_of_command(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(named(&["npx", "-y", "tape", "test/**/*.js"]), "tape");
+        assert_eq!(named(&["FOO=1", "node_modules/.bin/tape.cmd", "x"]), "tape");
+        assert_eq!(named(&["--require=x", "env", "pnpm", "dlx", "uvu"]), "uvu");
+        assert_eq!(named(&["npm", "test"]), "npm test");
+        assert_eq!(named(&["sh", "-c", "BABEL_ENV=x npx tape t/"]), "tape");
+        assert_eq!(named(&["bash", "-c", " "]), "bash -c  ");
+        assert_eq!(named(&["node"]), "node");
+    }
+
+    fn plan_of(tests: &[(&str, bool)], weak: &[&'static str]) -> StrongPlan {
+        use supercov_engine::strong_plan::{PlannedMutant, PlannedTest};
+        StrongPlan {
+            mutant_set: "set".into(),
+            tests: tests
+                .iter()
+                .map(|(name, runnable)| PlannedTest {
+                    id: (*name).into(),
+                    file: None,
+                    name: (*name).into(),
+                    title: None,
+                    runner: "jest".into(),
+                    duration_ms: None,
+                    span: None,
+                    runnable: *runnable,
+                })
+                .collect(),
+            mutants: weak
+                .iter()
+                .map(|weak| PlannedMutant {
+                    id: (*weak).into(),
+                    file: "a.js".into(),
+                    language: "javascript".into(),
+                    index: 0,
+                    mutator: "M".into(),
+                    weak,
+                    decided: None,
+                    reason: None,
+                    candidates: Vec::new(),
+                    whole_files: Vec::new(),
+                    server_wide: None,
+                    covering: 0,
+                    statement: None,
+                    function: None,
+                    function_hit_by: Default::default(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A run with no test is refused: by how many mutants' code its command
+    /// ran and the runner that ran it, or as having run none.
+    #[test]
+    fn a_run_with_no_test_says_what_its_command_ran() {
+        let tape = ["npx".to_owned(), "tape".to_owned(), "t/**/*.js".to_owned()];
+        let plan = plan_of(&[], &["infected", "not-reached", "equivalent", "unknown"]);
+        let said = no_test_message("r1", &tape, Some(0), &plan);
+        assert_eq!(
+            said,
+            "run r1 recorded no test: its command (npx tape 't/**/*.js') ran the code of 2 mutant(s), but no runner Supercov drives reported a test there, so none can be run against one\n  2 mutant(s) not run: no strong driver for tape"
+        );
+        let plan = plan_of(&[], &["not-reached"]);
+        assert_eq!(
+            no_test_message("r1", &tape, Some(1), &plan),
+            "run r1 recorded no test: its command (npx tape 't/**/*.js') ran none, and exited 1, so there is nothing to run its 1 mutant(s) against"
+        );
+        assert!(no_test_message("r1", &tape, None, &plan).contains("ran none, so"));
+    }
+
+    /// A failed command is said with the tests that did not pass, the first
+    /// three of them; a passing one is not.
+    #[test]
+    fn a_failed_command_names_the_tests_that_did_not_pass() {
+        let plan = plan_of(&[("a", false), ("b", true)], &[]);
+        assert_eq!(failed_command("r1", Some(0), &plan), None);
+        assert_eq!(
+            failed_command("r1", Some(1), &plan).unwrap(),
+            "run r1's command exited 1: 1 of its 2 test(s) did not pass (a). A test that does not pass kills nothing, so these verdicts are the passing tests' alone, and cannot gate; fix the suite and measure it again"
+        );
+        let four = plan_of(
+            &[("a", false), ("b", false), ("c", false), ("d", false)],
+            &[],
+        );
+        assert!(
+            failed_command("r1", None, &four)
+                .unwrap()
+                .starts_with("run r1's command ended without an exit status: 4 of its 4 test(s) did not pass (a, b, c, ...)")
+        );
+        let none = plan_of(&[("a", true)], &[]);
+        assert!(
+            failed_command("r1", Some(3), &none)
+                .unwrap()
+                .contains("exited 3: no test it reported failed.")
+        );
+    }
+
+    /// The summary's first line names the mutants asked about where they
+    /// are not all the run's, and the verdicts kept from an earlier run.
+    #[test]
+    fn the_summary_names_what_was_asked_and_what_was_kept() {
+        let summary = json!({"killed": 1, "timeout": 0, "survived": 0, "noCoverage": 0,
+            "equivalent": 0, "error": 0, "unviable": 2, "ran": 1, "durationMs": 5,
+            "mutationScore": null});
+        let text = plan_text(&json!({
+            "run": "r1", "summary": summary,
+            "scope": {"diff": "main", "files": ["a.js", "b.js"], "mutants": 3, "of": 9},
+            "carried": {"from": "r0", "mutants": 4},
+        }));
+        assert!(
+            text.starts_with(
+                "Strong mutation for r1 (3 of its 9 mutants, on lines changed since main and in a.js, b.js): mutation score -\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("  unviable      2\n"), "{text}");
+        assert!(
+            text.contains("  4 verdict(s) kept from run r0: nothing they depend on changed\n"),
+            "{text}"
+        );
+        let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
+        assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");
+        assert!(!whole.contains("kept from"), "{whole}");
+    }
+
+    #[test]
+    fn a_signal_s_exit_code_is_an_interruption() {
+        assert!([129, 130, 143].into_iter().all(interrupted));
+        assert!(!interrupted(0) && !interrupted(1) && !interrupted(137));
+    }
+
     #[test]
     fn options_parse() {
         let args = [
@@ -1697,5 +1841,31 @@ mod tests {
         assert_eq!(options.diff.as_deref(), Some("main"));
         assert_eq!(options.command.unwrap(), ["npx", "vitest"]);
         assert!(parse(&["--nope".into()]).is_err());
+        let parsed =
+            |words: &[&str]| parse(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>());
+        let markdown =
+            parsed(&["--format", "markdown", "--output", "m.md", "--file", "a"]).unwrap();
+        assert!(markdown.markdown && markdown.output == Some(PathBuf::from("m.md")));
+        for (words, said) in [
+            (
+                &["--format", "html"][..],
+                "--format takes markdown, not html",
+            ),
+            (&["--format"], "--format takes markdown, not nothing"),
+            (&["--output"], "--output needs a file"),
+            (
+                &["--output", "m.md"],
+                "--output writes the --format markdown table",
+            ),
+            (&["--format", "markdown", "--json"], "two answers"),
+            (&["--format", "markdown", "--plan"], "--plan runs none"),
+            (
+                &["--format", "markdown", "--file", "a", "--file", "b"],
+                "one --file at most",
+            ),
+        ] {
+            let error = parsed(words).unwrap_err();
+            assert!(error.contains(said), "{words:?}: {error}");
+        }
     }
 }

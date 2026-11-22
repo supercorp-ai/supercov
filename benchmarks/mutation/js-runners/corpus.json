@@ -412,7 +412,11 @@
             ]
           }
         },
-        "coverageAnalysis": "perTest"
+        "coverageAnalysis": "perTest",
+        "ignorePatterns": [
+          ".supercov",
+          ".local"
+        ]
       },
       "note": "Jest 28: its configuration is read through jest-config's own build (no readInitialOptions before 29.3)"
     },

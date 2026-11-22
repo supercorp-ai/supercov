@@ -2342,6 +2342,35 @@ mod environment_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The hint for a build the command does not run makes the folders the
+    /// checkout has first, and reads back as the shell would take it.
+    #[test]
+    fn a_build_hint_runs_as_it_reads() {
+        let words = |text: &[&str]| text.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            build_first(
+                &["dist"],
+                &words(&["npm", "run", "build"]),
+                &words(&["npx", "vitest", "run"])
+            ),
+            "supercov -- sh -c \"mkdir -p dist && npm run build && npx vitest run\""
+        );
+        assert_eq!(
+            build_first(
+                &[],
+                &words(&["yarn", "build"]),
+                &words(&["sh", "-c", "echo \"$HOME\" `x` \\ it's"])
+            ),
+            "supercov -- sh -c \"yarn build && sh -c 'echo \\\"\\$HOME\\\" \\`x\\` \\\\ it'\\\\''s'\""
+        );
+        assert_eq!(shell_words(&words(&["a", "", "b c"])), "a '' 'b c'");
+        let root = std::env::temp_dir().join(format!("supercov-build-here-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("build"), "a file").unwrap();
+        assert_eq!(build_output_here(&root), ["dist"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn an_interrupted_run_says_by_what() {
         let interrupted = DirectJavascriptRunError::Interrupted {

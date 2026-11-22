@@ -1230,6 +1230,31 @@ mod tests {
             0,
         );
         assert_eq!((none.weak_score, none.weak_score_reached), (None, None));
+        // A strong pass's verdicts: counted, and scored over the decided.
+        let verdict = |status: &str| serde_json::json!({ "status": status });
+        let strong = BTreeMap::from([
+            ("a".to_owned(), verdict("killed")),
+            ("b".to_owned(), verdict("timeout")),
+            ("c".to_owned(), verdict("survived")),
+            ("d".to_owned(), verdict("error")),
+            ("e".to_owned(), serde_json::json!({})),
+        ]);
+        let scored = none.clone().with_strong(&strong);
+        assert_eq!(scored.mutation_score, Some(0.6667));
+        assert_eq!(
+            scored.strong,
+            Some(BTreeMap::from([
+                ("error".to_owned(), 1),
+                ("killed".to_owned(), 1),
+                ("survived".to_owned(), 1),
+                ("timeout".to_owned(), 1),
+            ]))
+        );
+        let errors = none
+            .clone()
+            .with_strong(&BTreeMap::from([("d".to_owned(), verdict("error"))]));
+        assert_eq!(errors.mutation_score, None);
+        assert_eq!(none.with_strong(&BTreeMap::new()).strong, None);
     }
 
     #[test]

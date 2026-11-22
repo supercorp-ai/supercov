@@ -21917,6 +21917,193 @@ fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
     );
 }
 
+/// A strong pass saves its verdicts as it makes them, so one a signal ends
+/// keeps them and the next runs the rest; it keeps only its logs; after an
+/// edit, only what the edit could move runs again; a run whose command
+/// failed is answered and exits 2, and one that recorded no test is
+/// refused; `supercov mutants` checks its options before it measures, and
+/// writes its answer as markdown when asked.
+#[cfg(unix)]
+#[test]
+fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
+    let project = vitest_mutants_project("strong-keeps");
+    // Options are checked before anything is measured: there is no run yet.
+    let mistaken = project
+        .supercov(&["mutants", "--diff", "HEAD", "--bogus"])
+        .exits(2);
+    assert!(
+        mistaken.contains("Unknown option: --bogus")
+            && mistaken.contains("Usage: supercov mutants"),
+        "{mistaken}"
+    );
+    assert!(project.root.join(".supercov/runs").read_dir().is_err());
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    // Kills each mutant it is given, noting their ids; with FAKE_HALF, half
+    // of them and then ends as Ctrl-C ends a pass.
+    project.write(
+        "fake-strong.mjs",
+        "import { appendFileSync, readFileSync } from \"node:fs\";\nconst plan = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_PLAN, \"utf8\"));\nconst mutants = plan.mutants.filter((mutant) => !mutant.decided);\nconst kill = process.env.FAKE_HALF ? mutants.slice(0, Math.ceil(mutants.length / 2)) : mutants;\nappendFileSync(process.env.FAKE_ASKED, mutants.map((mutant) => mutant.id + \"\\n\").join(\"\"));\nfor (const mutant of kill) appendFileSync(process.env.SUPERCOV_STRONG_RESULTS, JSON.stringify({ id: mutant.id, status: \"killed\", tests: 1 }) + \"\\n\");\nif (process.env.FAKE_HALF) process.exit(130);\n",
+    );
+    project.commit("tax");
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let run = project.latest();
+    let asked = project.root.join("asked.txt");
+    let asked_path = asked.to_str().unwrap();
+    let fake = [
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--json",
+        "--",
+        "node",
+        "fake-strong.mjs",
+    ];
+    let take_asked = || {
+        let ids = std::fs::read_to_string(&asked).unwrap_or_default();
+        let _ = std::fs::remove_file(&asked);
+        ids.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+
+    // Ended by a signal: what it killed is saved, and the next pass runs
+    // the rest.
+    let ended = project.supercov_with(&fake, &[("FAKE_ASKED", asked_path), ("FAKE_HALF", "1")]);
+    assert_eq!(ended.code(), 130, "{}", ended.stderr());
+    assert!(
+        ended
+            .stderr()
+            .contains("interrupted: the verdicts the pass reached are saved"),
+        "{}",
+        ended.stderr()
+    );
+    let first = take_asked();
+    let reply = project
+        .supercov_with(&fake, &[("FAKE_ASKED", asked_path)])
+        .json();
+    let second = take_asked();
+    assert_eq!(second.len(), first.len() / 2, "{first:?}\n{second:?}");
+    assert!(second.iter().all(|id| first.contains(id)), "{second:?}");
+    assert_eq!(reply["summary"]["ran"], second.len(), "{reply}");
+    // The pass keeps no plan, results or jobs, only its logs.
+    for pass in std::fs::read_dir(project.root.join(".supercov/strong")).unwrap() {
+        for entry in std::fs::read_dir(pass.unwrap().path()).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            assert!(name.ends_with(".log"), "{name}");
+        }
+    }
+    // The summary of the run shows the score.
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    assert!(
+        summary.contains("mutation score 100.0%") && summary.contains("mutants --status survived"),
+        "{summary}"
+    );
+
+    // An edit of tax.js's code: tax.js's mutants run again, cart.js's keep
+    // their verdicts, as no cart test ran tax.js.
+    project.edit("src/tax.js", "sum * 0.2", "sum / 5");
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let kept = project
+        .supercov_with(&fake, &[("FAKE_ASKED", asked_path)])
+        .json();
+    let again = take_asked();
+    assert!(
+        !again.is_empty() && again.iter().all(|id| id.starts_with("src/tax.js:")),
+        "{again:?}"
+    );
+    assert_eq!(kept["carried"]["from"], run, "{kept}");
+    assert!(kept["carried"]["mutants"].as_u64() > Some(0), "{kept}");
+    let text = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .succeeds();
+    assert!(
+        text.contains(&format!("verdict(s) kept from run {run}")),
+        "{text}"
+    );
+    // As a pull request's comment.
+    let markdown = project
+        .supercov(&["mutants", "--format", "markdown"])
+        .succeeds();
+    assert!(markdown.starts_with("### Mutants"), "{markdown}");
+
+    // A failing test: the pass answers, and cannot gate.
+    project.write(
+        "test/fails.test.js",
+        "import { expect, it } from \"vitest\";\nit(\"fails\", () => expect(1).toBe(2));\n",
+    );
+    project.supercov_with(
+        &["--", "npx", "vitest", "run"],
+        &[("SUPERCOV_MUTANTS", "1")],
+    );
+    let failing = project.supercov_with(&fake, &[("FAKE_ASKED", asked_path)]);
+    assert_eq!(failing.code(), 2, "{}", failing.stderr());
+    assert_eq!(failing.json()["result"], "error");
+    assert!(
+        failing.stderr().contains("1 of its") && failing.stderr().contains("did not pass (fails)"),
+        "{}",
+        failing.stderr()
+    );
+    // A command that decides nothing: no mutant could be run.
+    std::fs::remove_file(project.root.join("test/fails.test.js")).unwrap();
+    project.edit("src/cart.js", "return 0;", "return 0 * 1;");
+    project
+        .supercov_with(
+            &["--", "npx", "vitest", "run"],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let nothing = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/cart.js",
+        "--",
+        "node",
+        "-e",
+        "0",
+    ]);
+    assert_eq!(nothing.code(), 2, "{}", nothing.stdout());
+    assert!(
+        nothing.stderr().contains("no mutant of the"),
+        "{}",
+        nothing.stderr()
+    );
+
+    // A run that recorded no test, its command running the code: refused,
+    // naming what ran it.
+    project.write(
+        "run-cart.mjs",
+        "import { shipping } from \"./src/cart.js\";\nshipping(80);\n",
+    );
+    project.supercov(&["--", "node", "run-cart.mjs"]).succeeds();
+    let refused = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .exits(2);
+    assert!(
+        refused.contains("recorded no test")
+            && refused.contains("no strong driver for run-cart.mjs"),
+        "{refused}"
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -23915,12 +24102,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1375",
+            "fs.write#mutants_test_command.rs:1382",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1375"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1382"),
         "{}",
         unwritten.stderr()
     );
