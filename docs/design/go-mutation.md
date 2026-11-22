@@ -363,6 +363,13 @@ and btree's Example-only kills).
   the file cannot write: the generic call infers `int`). Each switch's
   bytes now move with the import.
 
+- Ctrl-C during a strong pass left its test binaries running: each runs in
+  a process group of its own (so a timeout stops what its tests started),
+  which a terminal's Ctrl-C, sent to Supercov's group, does not reach. The
+  pass now registers each binary's group, and every `go` it runs, with the
+  signal guard (`child_signal_guard`): SIGHUP, SIGINT or SIGTERM to Supercov
+  sends SIGTERM to each before Supercov exits.
+
 ## Not yet
 
 - Value probes for floating-point operations.

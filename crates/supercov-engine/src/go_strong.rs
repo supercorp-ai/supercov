@@ -84,6 +84,25 @@ fn split_test(id: &str) -> Option<(&str, &str)> {
     id.rsplit_once("::")
 }
 
+/// `launch_output`, with the child registered while it runs: a signal that
+/// stops Supercov stops it too.
+trait LaunchRegistered {
+    fn launch_registered(&mut self) -> std::io::Result<std::process::Output>;
+}
+
+impl LaunchRegistered for Command {
+    #[track_caller]
+    fn launch_registered(&mut self) -> std::io::Result<std::process::Output> {
+        let child = self
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .launch()?;
+        let _registered = crate::child_signal_guard::register(&child);
+        child.wait_with_output()
+    }
+}
+
 /// One verdict, as `results.jsonl` holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Verdict {
@@ -305,7 +324,7 @@ fn vet_one(
         .arg(format!("-overlay={}", overlay.display()))
         .arg(pattern(&directory_of(&mutant.file)))
         .current_dir(pass.request.root)
-        .launch_output()
+        .launch_registered()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stderr).into_owned();
     // The overlay's file is reported by its own path: the mutant's.
@@ -458,7 +477,7 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
         .env("GOWORK", "off")
         .env("GOFLAGS", "-mod=mod")
         .env("CGO_ENABLED", "0")
-        .launch_output()
+        .launch_registered()
         .map_err(failed(Path::new(go)))?;
     if !output.status.success() {
         return Err(format!(
@@ -647,6 +666,10 @@ impl Pass<'_> {
                 elapsed_ms: 0,
             };
         };
+        // Its own process group, so a timeout stops what its tests started;
+        // so a signal to Supercov stops the group too, which a terminal's
+        // Ctrl-C, sent to Supercov's group, does not reach.
+        let _registered = crate::child_signal_guard::register_group(&child);
         let readers = [
             read_all(child.stdout.take().expect("piped")),
             read_all(child.stderr.take().expect("piped")),
@@ -888,6 +911,8 @@ pub fn run_go_strong(
     diagnostics: &mut dyn Write,
 ) -> Result<Value, String> {
     let started = Instant::now();
+    // A signal that stops Supercov stops every process the pass started.
+    let _guard = crate::child_signal_guard::ChildSignalGuard::install();
     let (plan, results) = open(request)?;
     let work = request.plan.with_file_name("");
     let pass = Pass {
@@ -1093,7 +1118,7 @@ fn render(
             .args(&pass.flags.build)
             .args(&directories)
             .current_dir(&pass.workspace)
-            .launch_output()
+            .launch_registered()
             .map_err(failed(Path::new(&pass.flags.program)))?;
         if output.status.success() {
             return Ok(rendered);
@@ -1310,6 +1335,7 @@ fn run_helper(helper: &Path, root: &Path, request: &Value) -> Result<CheckAnswer
         .stderr(Stdio::piped())
         .launch()
         .map_err(failed(helper))?;
+    let _registered = crate::child_signal_guard::register(&child);
     let input = serde_json::to_vec(request).expect("plain data serializes");
     let mut stdin = child.stdin.take().expect("piped");
     let writer = std::thread::spawn(move || stdin.write_all(&input));
@@ -1344,7 +1370,7 @@ fn build_package(pass: &Pass, directory: &str, overlay: Option<&Path>) -> Packag
         .arg(&binary)
         .arg(pattern(directory))
         .current_dir(&pass.workspace)
-        .launch_output();
+        .launch_registered();
     let mut package = Package {
         binary: binary.clone(),
         ..Package::default()
@@ -1415,7 +1441,7 @@ fn linked_directories(
         .arg("-f={{.ImportPath}}|{{.Dir}}|{{join .Deps \",\"}}")
         .args(directories.iter().map(|directory| pattern(directory)))
         .current_dir(&pass.workspace)
-        .launch_output()
+        .launch_registered()
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default();
     let root = fs::canonicalize(&pass.workspace).unwrap_or_else(|_| pass.workspace.clone());

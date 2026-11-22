@@ -430,7 +430,7 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
         (
             at(
                 "spawn",
-                after(".env(\"CGO_ENABLED\", \"0\")", ".launch_output()"),
+                after(".env(\"CGO_ENABLED\", \"0\")", ".launch_registered()"),
             ),
             true,
         ),
@@ -500,7 +500,10 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
             true,
         ),
         (
-            at("spawn", after(".arg(\"-gcflags=-e\")", ".launch_output()")),
+            at(
+                "spawn",
+                after(".arg(\"-gcflags=-e\")", ".launch_registered()"),
+            ),
             true,
         ),
         // Vet that cannot run finds nothing; a test binary that cannot be
@@ -510,13 +513,13 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
                 "spawn",
                 after(
                     ".args([\"vet\", \"-atomic\", \"-bools\"])",
-                    ".launch_output()",
+                    ".launch_registered()",
                 ),
             ),
             false,
         ),
         (
-            at("spawn", after("fn build_package(", ".launch_output()")),
+            at("spawn", after("fn build_package(", ".launch_registered()")),
             false,
         ),
         (

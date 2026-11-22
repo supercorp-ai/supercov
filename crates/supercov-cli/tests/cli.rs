@@ -16156,8 +16156,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#rust_test_runner.rs:1569 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1569@2 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
-            "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
+            "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
+            "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -16194,7 +16194,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
+                "spawn#child_signal_guard.rs:328 => child_signal_guard.rs:328",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:604",
@@ -24777,6 +24777,73 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         .unwrap_or_else(|| panic!("{listed}"))
         .clone();
     assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
+
+/// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
+/// terminal sends it, stops every test binary the pass started and what
+/// they started, though each runs in a process group of its own.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_go_pass_leaves_no_process_running() {
+    use std::os::unix::process::CommandExt;
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-interrupted");
+    project.write("go.mod", "module example.com/slow\n\ngo 1.22\n");
+    project.write(
+        "slow.go",
+        "package slow\n\nfunc Big(n int) bool { return n > 9 }\n",
+    );
+    // In the strong pass (its binaries are given an active mutant), the
+    // test starts a process and waits: its pid and its own go to the marker.
+    project.write(
+        "slow_test.go",
+        "package slow\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestBig(t *testing.T) {\n\tif !Big(10) {\n\t\tt.Fatal(\"big\")\n\t}\n\tif os.Getenv(\"SUPERCOV_ACTIVE_MUTANT\") == \"\" {\n\t\treturn\n\t}\n\tsleeper := exec.Command(\"sleep\", \"120\")\n\tif err := sleeper.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tmarker := os.Getenv(\"SUPERCOV_TEST_MARKER\")\n\tos.WriteFile(marker+\".tmp\", []byte(fmt.Sprintf(\"%d %d\", os.Getpid(), sleeper.Process.Pid)), 0o644)\n\tos.Rename(marker+\".tmp\", marker)\n\ttime.Sleep(120 * time.Second)\n}\n",
+    );
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["mutants", "--", go, "test", "./..."])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    supercov.wait().unwrap();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
 }
 
 /// A mutant `go vet` rejects fails `go test` before any test runs, as one
