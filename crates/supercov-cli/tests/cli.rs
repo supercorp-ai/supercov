@@ -19298,7 +19298,7 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
     );
     project.write(
         "src/test/java/w/WTest.java",
-        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n}\n",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport org.junit.jupiter.api.Test;\n\nclass WTest {\n    @Test\n    void twice() {\n        assertEquals(4, W.twice(2));\n    }\n\n    @Test\n    void small() {\n        assertTrue(W.small(3));\n    }\n\n    @Test\n    void named() {\n        assertEquals(\"nullnull\", W.named(\"\"));\n    }\n}\n",
     );
     project.git(&["init", "-q"]);
     project.commit("fixture");
@@ -19352,10 +19352,10 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
         Some("unviable"),
         "{tested}"
     );
-    // No test calls named(): its return is not covered.
+    // named() returns "nullnull" without the properties: "" is caught.
     assert_eq!(
         status(&format!("{file}:13:16-13:60:EmptyObjectReturnVals:\"\"")).as_deref(),
-        Some("no-coverage"),
+        Some("killed"),
         "{tested}"
     );
 }
