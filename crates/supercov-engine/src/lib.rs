@@ -78,6 +78,7 @@ pub mod python_instrumenter;
 pub mod python_mutants;
 pub mod python_project;
 pub mod python_run;
+pub mod python_strong;
 pub mod query_index;
 pub mod ruby_evidence;
 pub mod ruby_instrumenter;

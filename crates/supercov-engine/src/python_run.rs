@@ -59,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 8] {
     [
         (
             "sitecustomize.py",
@@ -85,11 +85,19 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
             "supercov_instrument.py",
             include_bytes!("../runtime-assets/python/supercov_instrument.py"),
         ),
+        (
+            "supercov_strong.py",
+            include_bytes!("../runtime-assets/python/supercov_strong.py"),
+        ),
+        (
+            "supercov_strong_pytest.py",
+            include_bytes!("../runtime-assets/python/supercov_strong_pytest.py"),
+        ),
     ]
 }
 
 #[track_caller]
-fn write_runtime(directory: &Path) -> Result<(), String> {
+pub(crate) fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     // The runtime has its files.
     embedded_runtime_files()
