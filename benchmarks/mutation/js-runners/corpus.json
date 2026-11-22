@@ -7,122 +7,321 @@
       "runner": "mocha",
       "repo": "https://github.com/visionmedia/bytes.js",
       "commit": "9ddc13b6c66e0cb293616fba246e05db4b6cef4d",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["npx", "mocha", "--check-leaks", "--reporter", "spec"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "mocha",
+        "--check-leaks",
+        "--reporter",
+        "spec"
+      ],
       "sources": "index.js",
-      "mutate": ["index.js"],
-      "stryker": { "testRunner": "mocha", "mochaOptions": { "spec": ["test/**/*.js"] }, "coverageAnalysis": "perTest" }
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "mocha",
+        "mochaOptions": {
+          "spec": [
+            "test/**/*.js"
+          ]
+        },
+        "coverageAnalysis": "perTest"
+      }
     },
     {
       "name": "negotiator",
       "runner": "mocha",
       "repo": "https://github.com/jshttp/negotiator",
       "commit": "14b0a7b88e7e7bb1cae38681195951bff29ca2fd",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["npx", "mocha", "--reporter", "spec", "--check-leaks", "test/"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "mocha",
+        "--reporter",
+        "spec",
+        "--check-leaks",
+        "test/"
+      ],
       "sources": "lib,index.js",
-      "mutate": ["lib/**/*.js", "index.js"],
-      "stryker": { "testRunner": "mocha", "mochaOptions": { "spec": ["test/**/*.js"] }, "coverageAnalysis": "perTest" }
+      "mutate": [
+        "lib/**/*.js",
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "mocha",
+        "mochaOptions": {
+          "spec": [
+            "test/**/*.js"
+          ]
+        },
+        "coverageAnalysis": "perTest"
+      }
     },
     {
       "name": "ms",
       "runner": "jest",
       "repo": "https://github.com/vercel/ms",
       "commit": "4ff48cec099f0514c3e9bbca18706c9c21122bfb",
-      "install": ["npx", "-y", "pnpm@10.33.0", "install", "--frozen-lockfile"],
-      "test": ["npx", "jest", "--env", "node"],
+      "install": [
+        "npx",
+        "-y",
+        "pnpm@10.33.0",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "test": [
+        "npx",
+        "jest",
+        "--env",
+        "node"
+      ],
       "sources": "src/index.ts",
-      "mutate": ["src/index.ts"],
-      "stryker": { "testRunner": "jest", "jest": { "config": { "testEnvironment": "node" } }, "coverageAnalysis": "perTest" }
+      "mutate": [
+        "src/index.ts"
+      ],
+      "stryker": {
+        "testRunner": "jest",
+        "jest": {
+          "config": {
+            "testEnvironment": "node"
+          }
+        },
+        "coverageAnalysis": "perTest"
+      }
     },
     {
-      "name": "prop-types",
+      "name": "cron-parser",
       "runner": "jest",
-      "repo": "https://github.com/facebook/prop-types",
-      "commit": "1c9c6311c1fb8778bffc7a1ca70c273ee8a8654d",
-      "install": ["npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps"],
-      "test": ["npx", "jest"],
-      "sources": "checkPropTypes.js,factoryWithTypeCheckers.js,factoryWithThrowingShims.js,lib",
-      "mutate": ["checkPropTypes.js", "factoryWithTypeCheckers.js", "factoryWithThrowingShims.js", "lib/**/*.js"],
-      "stryker": { "testRunner": "jest", "coverageAnalysis": "perTest" }
+      "repo": "https://github.com/harrisiirak/cron-parser",
+      "commit": "286b871d68040e4afa37d426a4e72dc42ec62256",
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund",
+        "--ignore-scripts"
+      ],
+      "env": {
+        "TZ": "UTC"
+      },
+      "test": [
+        "npx",
+        "jest"
+      ],
+      "sources": "src/CronExpressionParser.ts",
+      "mutate": [
+        "src/CronExpressionParser.ts"
+      ],
+      "stryker": {
+        "testRunner": "jest",
+        "coverageAnalysis": "perTest"
+      }
     },
     {
       "name": "classnames",
       "runner": "node:test",
       "repo": "https://github.com/JedWatson/classnames",
       "commit": "abd6314010de053a09df5acc53e474ff65cea470",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["node", "--test", "tests/*.js"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "node",
+        "--test",
+        "tests/*.js"
+      ],
       "sources": "index.js,bind.js,dedupe.js",
-      "mutate": ["index.js", "bind.js", "dedupe.js"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "node --test tests/*.js" }, "coverageAnalysis": "off" }
+      "mutate": [
+        "index.js",
+        "bind.js",
+        "dedupe.js"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "node --test tests/*.js"
+        },
+        "coverageAnalysis": "off"
+      }
     },
     {
       "name": "camelcase",
       "runner": "node:test",
       "repo": "https://github.com/sindresorhus/camelcase",
       "commit": "328428291b2f5c0e41dd4a2d0e5a942eb9de3b70",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["node", "--test"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "node",
+        "--test"
+      ],
       "sources": "index.js",
-      "mutate": ["index.js"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "node --test" }, "coverageAnalysis": "off" }
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "node --test"
+        },
+        "coverageAnalysis": "off"
+      }
     },
     {
       "name": "dot-prop",
       "runner": "ava",
       "repo": "https://github.com/sindresorhus/dot-prop",
       "commit": "d5d11c71a70bfb643a45d22821ed6d284240fce5",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["npx", "ava"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "ava",
+        "--no-worker-threads"
+      ],
       "sources": "index.js",
-      "mutate": ["index.js"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "npx ava" }, "coverageAnalysis": "off" }
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "npx ava --no-worker-threads"
+        },
+        "coverageAnalysis": "off"
+      },
+      "note": "AVA's worker threads ran out of memory under Supercov's measured run; its child processes do not"
     },
     {
       "name": "p-map",
       "runner": "ava",
       "repo": "https://github.com/sindresorhus/p-map",
       "commit": "d61b6a33cc1d5533ad5711b435959f3f78c3d2fe",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["npx", "ava"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "ava"
+      ],
       "sources": "index.js",
-      "mutate": ["index.js"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "npx ava" }, "coverageAnalysis": "off", "timeoutMS": 10000 }
+      "mutate": [
+        "index.js"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "npx ava"
+        },
+        "coverageAnalysis": "off",
+        "timeoutMS": 10000
+      }
     },
     {
       "name": "ini",
       "runner": "tap",
       "repo": "https://github.com/npm/ini",
       "commit": "3c96c74fd42584bd655e17a4e63e2ef0a3b406ee",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
-      "test": ["npx", "tap"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "test": [
+        "npx",
+        "tap"
+      ],
       "sources": "lib",
-      "mutate": ["lib/**/*.js"],
-      "stryker": { "testRunner": "tap", "coverageAnalysis": "perTest" }
+      "mutate": [
+        "lib/**/*.js"
+      ],
+      "stryker": {
+        "testRunner": "tap",
+        "coverageAnalysis": "perTest"
+      }
     },
     {
       "name": "remix-auth",
       "runner": "bun:test",
       "repo": "https://github.com/sergiodxa/remix-auth",
       "commit": "572811928b5501eea1754b53260b21a8435c185f",
-      "install": ["bun", "install", "--frozen-lockfile"],
-      "test": ["bun", "test"],
+      "install": [
+        "bun",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "test": [
+        "bun",
+        "test"
+      ],
       "sources": "src",
-      "mutate": ["src/**/*.ts", "!src/**/*.test.ts"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "bun test" }, "coverageAnalysis": "off" }
+      "mutate": [
+        "src/**/*.ts",
+        "!src/**/*.test.ts"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "bun test"
+        },
+        "coverageAnalysis": "off"
+      }
     },
     {
       "name": "mini-throttle",
       "runner": "vitest-browser",
       "repo": "https://github.com/github/mini-throttle",
       "commit": "b37bfbf676c7ffa90c1714d1184c958d77d0e653",
-      "install": ["npm", "install", "--no-audit", "--no-fund"],
+      "install": [
+        "npm",
+        "install",
+        "--no-audit",
+        "--no-fund"
+      ],
       "browsers": true,
-      "test": ["npx", "vitest", "run"],
+      "test": [
+        "npx",
+        "vitest",
+        "run"
+      ],
       "sources": "index.ts,decorators.ts",
-      "mutate": ["index.ts", "decorators.ts"],
-      "stryker": { "testRunner": "command", "commandRunner": { "command": "npx vitest run" }, "coverageAnalysis": "off" }
+      "mutate": [
+        "index.ts",
+        "decorators.ts"
+      ],
+      "stryker": {
+        "testRunner": "command",
+        "commandRunner": {
+          "command": "npx vitest run"
+        },
+        "coverageAnalysis": "off"
+      }
     }
   ]
 }

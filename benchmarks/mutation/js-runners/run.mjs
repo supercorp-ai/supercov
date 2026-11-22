@@ -10,7 +10,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { joinMutants, originalCode, readSupercovMutants } from "../supercov-join.mjs";
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, word, at, all) =>
@@ -27,7 +29,7 @@ mkdirSync(work, { recursive: true });
 
 function run(name, command, options = {}) {
     const started = Date.now();
-    const result = spawnSync(command[0], command.slice(1), { encoding: "utf8", maxBuffer: 1 << 30, ...options, env: { ...process.env, ...options.env } });
+    const result = spawnSync(command[0], command.slice(1), { encoding: "utf8", maxBuffer: 1 << 30, ...options, env: { ...process.env, ...project.env, ...options.env } });
     const seconds = (Date.now() - started) / 1000;
     writeFileSync(join(out, `${name}.log`), `$ ${command.join(" ")}\n${result.stdout ?? ""}\n${result.stderr ?? ""}\nexit ${result.status}\n`);
     console.log(`[${project.name}] ${name}: exit ${result.status} in ${seconds.toFixed(1)} s`);
@@ -53,7 +55,7 @@ const install = run("install", project.install, { cwd: directory });
 if (install.status !== 0)
     process.exit(1);
 if (project.browsers)
-    run("browsers", ["npx", "playwright", "install", "--with-deps", "chromium", "chromium-headless-shell"], { cwd: directory });
+    run("browsers", ["npx", "playwright", "install", "chromium", "chromium-headless-shell"], { cwd: directory });
 const plain = run("plain-tests", project.test, { cwd: directory });
 
 // StrykerJS: every killer of every mutant.
@@ -67,7 +69,8 @@ writeFileSync(join(directory, "stryker.supercov-bench.json"), JSON.stringify({
     mutate: project.mutate,
     ignorePatterns: [".supercov"],
     tempDirName: ".stryker-tmp",
-    plugins: runnerPlugin ? [join(tools, "node_modules/@stryker-mutator", runnerPlugin)] : [],
+    // StrykerJS imports a plugin by what it is given: the module's own file.
+    plugins: runnerPlugin ? [pathToFileURL(createRequire(join(tools, "package.json")).resolve(`@stryker-mutator/${runnerPlugin}`)).href] : [],
     ...project.stryker,
 }, null, 2));
 const stryker = args["skip-stryker"] ? null : run("stryker", [join(tools, "node_modules/.bin/stryker"), "run", "stryker.supercov-bench.json"], { cwd: directory });

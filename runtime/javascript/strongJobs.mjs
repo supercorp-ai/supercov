@@ -27,9 +27,10 @@ import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Tests that took at most this long together run beside a mutant's own
-// candidates rather than be confirmed apart (strongJobs's `tryFile`).
-const UNION_MS = 1_000;
+// A file whose baseline job took at most this long, the start of the command
+// included, runs all its baseline's tests beside a mutant's own candidates
+// rather than confirm a kill apart (`tryFile`).
+const UNION_MS = 1_500;
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
 
 function parallelism() {
@@ -379,7 +380,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             // Where the baseline's tests take little time beside a start of
             // the command, the job runs them all: a kill is then judged by a
             // baseline that ran the same tests, and needs no confirmation.
-            const cheap = !whole && baseline.chosen && cost(group.file, baseline.chosen) <= UNION_MS;
+            const cheap = !whole && baseline.chosen && baseline.durationMs <= UNION_MS;
             const chosen = whole ? null : new Set(cheap ? [...baseline.chosen, ...group.tests] : group.tests);
             const excluded = whole ? (testId) => !baseline.passing.has(testId) : () => false;
             const limitMs = 3 * baseline.durationMs + graceMs;

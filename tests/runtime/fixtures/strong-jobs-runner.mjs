@@ -6,7 +6,8 @@
 // mutant, then the test id:
 //   "fail", "hang" (never ends), "loop" (passes its hit limit and says so),
 //   "crash" (the process ends, nothing written), "subset-fail" (fails when
-//   run without the tests before it in its file).
+//   run without the tests before it in its file), "slow" (passes in 0.8 s).
+// A test id may also carry a second rule after a comma: "slow,subset-fail".
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -26,7 +27,9 @@ for (const [file, chosen] of Object.entries(job.files)) {
             write(testId, "skipped");
             continue;
         }
-        const rule = rules[testId];
+        const [rule, also] = String(rules[testId] ?? "").split(",").reverse();
+        if (also === "slow" || rule === "slow")
+            await new Promise((done) => setTimeout(done, 800));
         if (rule === "hang")
             await new Promise(() => setInterval(() => { }, 1000));
         if (rule === "crash")
