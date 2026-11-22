@@ -12,7 +12,7 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
+import { activateCoverageScope, beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
 import { runnerExecutionScope, writeRunnerEvidence } from "./runnerEvidence.mjs";
 import { strongJob } from "./strongJob.mjs";
 
@@ -123,6 +123,13 @@ function nameFromTheCopy(StackUtils) {
         };
 }
 
+// tap counts a test file as a test of its own: assertions at its top level,
+// outside any subtest, pass or fail it. What runs there is that test's, the
+// file's top level, which tap's own report names after the file, and it is
+// written as a test where the file asserts there (or has no subtest), as the
+// file's module setup otherwise.
+const topLevel = { root: undefined, subtests: 0 };
+
 export async function adaptTap(testFile) {
     const evidenceDirectory = process.env.SUPERCOV_EVIDENCE_DIR;
     if (!evidenceDirectory)
@@ -131,6 +138,16 @@ export async function adaptTap(testFile) {
         if (typeof Class?.prototype?.sub === "function" && !Class.prototype.sub.supercovTap)
             patch(Class, testFile, evidenceDirectory);
     }
+    const identity = { runner: "tap", file: testFile, name: "(top level)" };
+    const scope = runnerExecutionScope(identity);
+    beginBufferedServerEvidence(scope);
+    activateCoverageScope(scope);
+    process.once("exit", (code) => {
+        const points = topLevel.root?.count ?? topLevel.root?.counts?.total ?? 0;
+        const asserts = topLevel.subtests === 0 || points > topLevel.subtests;
+        const written = asserts ? identity : { ...identity, role: "setup" };
+        writeRunnerEvidence(written, !asserts || code === 0 ? "passed" : "failed", scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
+    });
 }
 
 function patch(TestBase, testFile, evidenceDirectory) {
@@ -157,8 +174,12 @@ function patch(TestBase, testFile, evidenceDirectory) {
         // failure. A subtest runs with its parent, as it does without
         // Supercov.
         const job = strongJob();
-        const topLevel = !this.parent;
-        if (job && (job.stopped || (topLevel && !job.selects(testFile, scope.testId))))
+        const atTop = !this.parent;
+        if (atTop) {
+            topLevel.root = this;
+            topLevel.subtests += 1;
+        }
+        if (job && (job.stopped || (atTop && !job.selects(testFile, scope.testId))))
             extra = { ...extra, skip: true };
         beginBufferedServerEvidence(scope);
         let written = false;

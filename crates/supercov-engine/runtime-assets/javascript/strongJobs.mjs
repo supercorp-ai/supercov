@@ -124,8 +124,13 @@ export function outcomes(directory) {
 // The command for one job: Bun's runner takes the file as an argument, as it
 // loads every test file into one process; the other runners' adapters keep
 // their runner from loading another file.
-export function commandFor(command, file, root = process.cwd()) {
+export function commandFor(command, file, root = process.cwd(), runner = undefined) {
     const [program, first] = command;
+    // A tap test file is a program of its own, as tap's runner runs it (and
+    // StrykerJS's tap runner): run by itself, beside other jobs, it shares
+    // none of the working files tap's command keeps in the project.
+    if (runner === "tap" && /\.[cm]?js$/.test(file))
+        return [process.execPath, file];
     if (program && /^bun(?:\.exe)?$/.test(basename(program)) && first === "test")
         return [...command, `./${file}`];
     return withoutNpx(command, root);
@@ -193,6 +198,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // none of their tests but the job's.
     const known = [...new Set(tests.filter(handled).map((test) => test.file).filter(Boolean))].sort();
     const testsOf = new Map();
+    const runnerOf = new Map(tests.filter(handled).map((test) => [test.file, test.runner]));
     for (const test of tests) {
         if (!handled(test) || !test.file)
             continue;
@@ -233,12 +239,14 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail }));
             const results = join(directory, "results.jsonl");
             const log = join(directory, "output.log");
-            const [program, ...args] = commandFor(command, file, root);
+            const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
             const begun = Date.now();
             let output;
             try {
                 output = [];
                 const overrides = {
+                    // What tap's runner gives each test file it starts.
+                    ...(runnerOf.get(file) === "tap" ? { TAP_CHILD_ID: String(number) } : {}),
                     SUPERCOV_EVIDENCE_DIR: evidence,
                     SUPERCOV_STRONG_JOB: spec,
                     SUPERCOV_ACTIVE_MUTANT: mutant ? `${mutant.file}#${mutant.index}` : "-",

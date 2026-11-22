@@ -41,7 +41,8 @@ const tools = join(work, "stryker-tools");
 if (!existsSync(join(tools, "node_modules/.bin/stryker"))) {
     mkdirSync(tools, { recursive: true });
     writeFileSync(join(tools, "package.json"), '{"private":true}');
-    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", ...["core", "mocha-runner", "jest-runner", "tap-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
+    // StrykerJS reads a project's tsconfig.json with TypeScript.
+    run("tools-install", ["npm", "install", "--no-audit", "--no-fund", "typescript@5", ...["core", "mocha-runner", "jest-runner", "tap-runner"].map((name) => `@stryker-mutator/${name}@${corpus.stryker}`)], { cwd: tools });
 }
 
 const directory = join(work, project.name);
@@ -55,7 +56,9 @@ const install = run("install", project.install, { cwd: directory });
 if (install.status !== 0)
     process.exit(1);
 if (project.browsers)
-    run("browsers", ["npx", "playwright", "install", "chromium", "chromium-headless-shell"], { cwd: directory });
+    // A Playwright older than the runner's system knows no browser build for
+    // it; the latest Ubuntu's it knows runs there.
+    run("browsers", ["npx", "playwright", "install", "chromium", "chromium-headless-shell"], { cwd: directory, env: { PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: "ubuntu24.04-x64" } });
 const plain = run("plain-tests", project.test, { cwd: directory });
 
 // StrykerJS: every killer of every mutant.
