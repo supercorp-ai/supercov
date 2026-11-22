@@ -16,6 +16,7 @@ class Rules
     target.reduce(0, &:+)
     target.reduce(:+)
     target.reduce(:*)
+    target.defined?
     target.other("a" => 1, name => 2)
   end
 
@@ -27,6 +28,7 @@ class Rules
     a = list.first and a.call
     b = list.last or b.call
     (list.first..list.last) && list.call
+    (list.first..) && list.call
   end
 
   def single_calls(list)

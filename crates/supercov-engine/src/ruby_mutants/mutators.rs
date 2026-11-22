@@ -554,11 +554,6 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
             }
         }
         "op_asgn" => op_asgn(&mut out, parent),
-        "procarg0" => {
-            for index in 0..input.children.len() {
-                mutate_child(&mut out, index, parent, |_| true);
-            }
-        }
         "resbody" => {
             if input.node(2).is_some() {
                 mutate_child(&mut out, 2, parent, |_| true);
@@ -759,10 +754,13 @@ fn normal_dispatch(out: &mut Out<'_>, parent: Option<&Parent<'_>>, attribute: bo
         _ => {}
     }
     // emit_static_send
+    let symbol_first = arguments
+        .first()
+        .and_then(Child::node)
+        .filter(|first| first.ty == "sym")
+        .and_then(|first| first.child(0).sym());
     if matches!(selector.as_str(), "__send__" | "send" | "public_send")
-        && let Some(first) = arguments.first().and_then(Child::node)
-        && first.ty == "sym"
-        && let Some(name) = first.child(0).sym()
+        && let Some(name) = symbol_first
     {
         let mut children = vec![receiver.clone(), sym(name)];
         children.extend(arguments.iter().skip(1).cloned());
@@ -770,9 +768,7 @@ fn normal_dispatch(out: &mut Out<'_>, parent: Option<&Parent<'_>>, attribute: bo
     }
     // emit_const_get_mutation
     if selector == "const_get"
-        && let Some(first) = arguments.first().and_then(Child::node)
-        && first.ty == "sym"
-        && let Some(name) = first.child(0).sym()
+        && let Some(name) = symbol_first
     {
         out.emit(s("const", vec![receiver.clone(), sym(name)]));
     }
@@ -796,7 +792,11 @@ fn normal_dispatch(out: &mut Out<'_>, parent: Option<&Parent<'_>>, attribute: bo
         && inner.ty == "send"
         && inner.child(1).sym() == Some("!")
     {
-        out.emit_child_or_nil(inner.child(0).clone());
+        // `!x`'s operand (`not()`'s is empty parentheses).
+        inner
+            .node(0)
+            .into_iter()
+            .for_each(|operand| out.emit(operand.clone()));
     }
     // emit_lambda_mutation
     let naked_proc = receiver.is_nil() && selector == "proc";
@@ -866,15 +866,6 @@ fn normal_dispatch(out: &mut Out<'_>, parent: Option<&Parent<'_>>, attribute: bo
     }
 }
 
-impl Out<'_> {
-    /// `emit(node)` of a child that may be nil (a receiverless `!!x`).
-    fn emit_child_or_nil(&mut self, child: Child) {
-        if let Child::Node(node) = child {
-            self.emit(node);
-        }
-    }
-}
-
 /// `Send::Binary`, run without a parent.
 fn send_binary(out: &mut Out<'_>) {
     let input = out.input;
@@ -939,10 +930,7 @@ fn arguments(out: &mut Out<'_>) {
             && mlhs.ty == "mlhs"
         {
             let mut children = input.children.clone();
-            children.remove(index);
-            for (offset, inner) in mlhs.children.iter().enumerate() {
-                children.insert(index + offset, inner.clone());
-            }
+            children.splice(index..=index, mlhs.children.iter().cloned());
             out.emit_type(children);
         }
     }
@@ -1234,13 +1222,11 @@ fn if_node(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
         }
         out.emit_type(vec![condition, then_branch, else_branch]);
     };
-    // Every emit goes through If's own `emit_type`, child updates too: under
-    // `return`, `next` or `break`, nothing with a branch missing.
-    let blocked = ternary && (then_branch.is_nil() || else_branch.is_nil());
+    // Every emit goes through If's own `emit_type`: under `return`, `next`
+    // or `break`, nothing with a branch missing. Such an `if` is a ternary,
+    // with both branches, so its children's mutations keep them.
     singletons(out, parent);
-    if !blocked {
-        mutate_child(out, 0, parent, |_| true);
-    }
+    mutate_child(out, 0, parent, |_| true);
     emit_if(
         out,
         node(s("true", Vec::new())),
@@ -1258,16 +1244,12 @@ fn if_node(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
     }
     if let Some(then_node) = then_branch.node() {
         out.emit(then_node.clone());
-        if !blocked {
-            mutate_child(out, 1, parent, |_| true);
-        }
+        mutate_child(out, 1, parent, |_| true);
         emit_if(out, condition.clone(), then_branch.clone(), Child::Nil);
     }
     if let Some(else_node) = else_branch.node() {
         out.emit(else_node.clone());
-        if !blocked {
-            mutate_child(out, 2, parent, |_| true);
-        }
+        mutate_child(out, 2, parent, |_| true);
         emit_if(out, condition, Child::Nil, else_branch.clone());
     }
 }

@@ -3,7 +3,7 @@
   "subjects": [
     {
       "subject": "by_name:7",
-      "sexp": "(def :by_name (args (arg :target) (arg :name)) (begin (send (lvar :target) :send (lvar :name)) (send (lvar :target) :public_send (sym :size) (int 1)) (send (lvar :target) :const_get (lvar :name)) (send (lvar :target) :const_get (sym :Inner)) (send (send (lvar :target) :ready?) :!) (block (send (const nil :Thing) :new) (args) (int 1)) (send (lvar :target) :new) (send (lvar :target) :reduce (block_pass (sym :+))) (send (lvar :target) :reduce (int 0) (block_pass (sym :+))) (send (lvar :target) :reduce (sym :+)) (send (lvar :target) :reduce (sym :*)) (send (lvar :target) :other (kwargs (pair (str s\"61\") (int 1)) (pair (lvar :name) (int 2))))))",
+      "sexp": "(def :by_name (args (arg :target) (arg :name)) (begin (send (lvar :target) :send (lvar :name)) (send (lvar :target) :public_send (sym :size) (int 1)) (send (lvar :target) :const_get (lvar :name)) (send (lvar :target) :const_get (sym :Inner)) (send (send (lvar :target) :ready?) :!) (block (send (const nil :Thing) :new) (args) (int 1)) (send (lvar :target) :new) (send (lvar :target) :reduce (block_pass (sym :+))) (send (lvar :target) :reduce (int 0) (block_pass (sym :+))) (send (lvar :target) :reduce (sym :+)) (send (lvar :target) :reduce (sym :*)) (send (lvar :target) :defined?) (send (lvar :target) :other (kwargs (pair (str s\"61\") (int 1)) (pair (lvar :name) (int 2))))))",
       "mutants": [
         {
           "start": [
@@ -11,7 +11,7 @@
             5
           ],
           "end": [
-            19,
+            20,
             38
           ],
           "node": "begin",
@@ -23,7 +23,7 @@
             5
           ],
           "end": [
-            19,
+            20,
             38
           ],
           "node": "begin",
@@ -35,7 +35,7 @@
             5
           ],
           "end": [
-            19,
+            20,
             38
           ],
           "node": "begin",
@@ -1284,7 +1284,7 @@
           ],
           "end": [
             19,
-            38
+            20
           ],
           "node": "send",
           "replacement": "(nil)"
@@ -1296,7 +1296,7 @@
           ],
           "end": [
             19,
-            38
+            20
           ],
           "node": "send",
           "replacement": "(lvar :target)"
@@ -1320,6 +1320,54 @@
           ],
           "end": [
             19,
+            20
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            38
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            38
+          ],
+          "node": "send",
+          "replacement": "(lvar :target)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            11
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
             38
           ],
           "node": "send",
@@ -1327,11 +1375,11 @@
         },
         {
           "start": [
-            19,
+            20,
             18
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "kwargs",
@@ -1339,11 +1387,11 @@
         },
         {
           "start": [
-            19,
+            20,
             18
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "kwargs",
@@ -1351,11 +1399,11 @@
         },
         {
           "start": [
-            19,
+            20,
             18
           ],
           "end": [
-            19,
+            20,
             21
           ],
           "node": "str",
@@ -1363,11 +1411,11 @@
         },
         {
           "start": [
-            19,
+            20,
             25
           ],
           "end": [
-            19,
+            20,
             26
           ],
           "node": "int",
@@ -1375,11 +1423,11 @@
         },
         {
           "start": [
-            19,
+            20,
             25
           ],
           "end": [
-            19,
+            20,
             26
           ],
           "node": "int",
@@ -1387,11 +1435,11 @@
         },
         {
           "start": [
-            19,
+            20,
             25
           ],
           "end": [
-            19,
+            20,
             26
           ],
           "node": "int",
@@ -1399,11 +1447,11 @@
         },
         {
           "start": [
-            19,
+            20,
             25
           ],
           "end": [
-            19,
+            20,
             26
           ],
           "node": "int",
@@ -1411,11 +1459,11 @@
         },
         {
           "start": [
-            19,
+            20,
             36
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "int",
@@ -1423,11 +1471,11 @@
         },
         {
           "start": [
-            19,
+            20,
             36
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "int",
@@ -1435,11 +1483,11 @@
         },
         {
           "start": [
-            19,
+            20,
             36
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "int",
@@ -1447,11 +1495,11 @@
         },
         {
           "start": [
-            19,
+            20,
             36
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "int",
@@ -1459,11 +1507,11 @@
         },
         {
           "start": [
-            19,
+            20,
             36
           ],
           "end": [
-            19,
+            20,
             37
           ],
           "node": "int",
@@ -1471,11 +1519,11 @@
         },
         {
           "start": [
-            19,
+            20,
             5
           ],
           "end": [
-            19,
+            20,
             38
           ],
           "node": "send",
@@ -1484,16 +1532,16 @@
       ]
     },
     {
-      "subject": "identities:22",
+      "subject": "identities:23",
       "sexp": "(def :identities (args (arg :a)) (array (send (lvar :a) :* (int 1)) (send (lvar :a) :/ (int 1)) (send (lvar :a) :* (int -1)) (send (lvar :a) :/ (int -1)) (send (lvar :a) :* (float f3ff0000000000000)) (send (lvar :a) :/ (float fbff0000000000000)) (send (lvar :a) :* (int 2))))",
       "mutants": [
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1501,11 +1549,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1513,11 +1561,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1525,11 +1573,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1537,11 +1585,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1549,11 +1597,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1561,11 +1609,11 @@
         },
         {
           "start": [
-            23,
+            24,
             6
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "send",
@@ -1573,11 +1621,11 @@
         },
         {
           "start": [
-            23,
+            24,
             6
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "send",
@@ -1585,11 +1633,11 @@
         },
         {
           "start": [
-            23,
+            24,
             6
           ],
           "end": [
-            23,
+            24,
             7
           ],
           "node": "lvar",
@@ -1597,11 +1645,11 @@
         },
         {
           "start": [
-            23,
+            24,
             6
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "send",
@@ -1609,11 +1657,11 @@
         },
         {
           "start": [
-            23,
+            24,
             10
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "int",
@@ -1621,11 +1669,11 @@
         },
         {
           "start": [
-            23,
+            24,
             10
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "int",
@@ -1633,11 +1681,11 @@
         },
         {
           "start": [
-            23,
+            24,
             10
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "int",
@@ -1645,11 +1693,11 @@
         },
         {
           "start": [
-            23,
+            24,
             10
           ],
           "end": [
-            23,
+            24,
             11
           ],
           "node": "int",
@@ -1657,11 +1705,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1669,11 +1717,11 @@
         },
         {
           "start": [
-            23,
+            24,
             13
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "send",
@@ -1681,11 +1729,11 @@
         },
         {
           "start": [
-            23,
+            24,
             13
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "send",
@@ -1693,11 +1741,11 @@
         },
         {
           "start": [
-            23,
+            24,
             13
           ],
           "end": [
-            23,
+            24,
             14
           ],
           "node": "lvar",
@@ -1705,11 +1753,11 @@
         },
         {
           "start": [
-            23,
+            24,
             13
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "send",
@@ -1717,11 +1765,11 @@
         },
         {
           "start": [
-            23,
+            24,
             17
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "int",
@@ -1729,11 +1777,11 @@
         },
         {
           "start": [
-            23,
+            24,
             17
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "int",
@@ -1741,11 +1789,11 @@
         },
         {
           "start": [
-            23,
+            24,
             17
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "int",
@@ -1753,11 +1801,11 @@
         },
         {
           "start": [
-            23,
+            24,
             17
           ],
           "end": [
-            23,
+            24,
             18
           ],
           "node": "int",
@@ -1765,11 +1813,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1777,11 +1825,11 @@
         },
         {
           "start": [
-            23,
+            24,
             20
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "send",
@@ -1789,11 +1837,11 @@
         },
         {
           "start": [
-            23,
+            24,
             20
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "send",
@@ -1801,11 +1849,11 @@
         },
         {
           "start": [
-            23,
+            24,
             20
           ],
           "end": [
-            23,
+            24,
             21
           ],
           "node": "lvar",
@@ -1813,11 +1861,11 @@
         },
         {
           "start": [
-            23,
+            24,
             20
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "send",
@@ -1825,11 +1873,11 @@
         },
         {
           "start": [
-            23,
+            24,
             24
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "int",
@@ -1837,11 +1885,11 @@
         },
         {
           "start": [
-            23,
+            24,
             24
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "int",
@@ -1849,11 +1897,11 @@
         },
         {
           "start": [
-            23,
+            24,
             24
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "int",
@@ -1861,11 +1909,11 @@
         },
         {
           "start": [
-            23,
+            24,
             24
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "int",
@@ -1873,11 +1921,11 @@
         },
         {
           "start": [
-            23,
+            24,
             24
           ],
           "end": [
-            23,
+            24,
             26
           ],
           "node": "int",
@@ -1885,11 +1933,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -1897,11 +1945,11 @@
         },
         {
           "start": [
-            23,
+            24,
             28
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "send",
@@ -1909,11 +1957,11 @@
         },
         {
           "start": [
-            23,
+            24,
             28
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "send",
@@ -1921,11 +1969,11 @@
         },
         {
           "start": [
-            23,
+            24,
             28
           ],
           "end": [
-            23,
+            24,
             29
           ],
           "node": "lvar",
@@ -1933,11 +1981,11 @@
         },
         {
           "start": [
-            23,
+            24,
             28
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "send",
@@ -1945,11 +1993,11 @@
         },
         {
           "start": [
-            23,
+            24,
             32
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "int",
@@ -1957,11 +2005,11 @@
         },
         {
           "start": [
-            23,
+            24,
             32
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "int",
@@ -1969,11 +2017,11 @@
         },
         {
           "start": [
-            23,
+            24,
             32
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "int",
@@ -1981,11 +2029,11 @@
         },
         {
           "start": [
-            23,
+            24,
             32
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "int",
@@ -1993,11 +2041,11 @@
         },
         {
           "start": [
-            23,
+            24,
             32
           ],
           "end": [
-            23,
+            24,
             34
           ],
           "node": "int",
@@ -2005,11 +2053,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -2017,11 +2065,11 @@
         },
         {
           "start": [
-            23,
+            24,
             36
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "send",
@@ -2029,11 +2077,11 @@
         },
         {
           "start": [
-            23,
+            24,
             36
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "send",
@@ -2041,11 +2089,11 @@
         },
         {
           "start": [
-            23,
+            24,
             36
           ],
           "end": [
-            23,
+            24,
             37
           ],
           "node": "lvar",
@@ -2053,11 +2101,11 @@
         },
         {
           "start": [
-            23,
+            24,
             36
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "send",
@@ -2065,11 +2113,11 @@
         },
         {
           "start": [
-            23,
+            24,
             40
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "float",
@@ -2077,11 +2125,11 @@
         },
         {
           "start": [
-            23,
+            24,
             40
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "float",
@@ -2089,11 +2137,11 @@
         },
         {
           "start": [
-            23,
+            24,
             40
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "float",
@@ -2101,11 +2149,11 @@
         },
         {
           "start": [
-            23,
+            24,
             40
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "float",
@@ -2113,11 +2161,11 @@
         },
         {
           "start": [
-            23,
+            24,
             40
           ],
           "end": [
-            23,
+            24,
             43
           ],
           "node": "float",
@@ -2125,11 +2173,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -2137,11 +2185,11 @@
         },
         {
           "start": [
-            23,
+            24,
             45
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "send",
@@ -2149,11 +2197,11 @@
         },
         {
           "start": [
-            23,
+            24,
             45
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "send",
@@ -2161,11 +2209,11 @@
         },
         {
           "start": [
-            23,
+            24,
             45
           ],
           "end": [
-            23,
+            24,
             46
           ],
           "node": "lvar",
@@ -2173,11 +2221,11 @@
         },
         {
           "start": [
-            23,
+            24,
             45
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "send",
@@ -2185,11 +2233,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2197,11 +2245,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2209,11 +2257,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2221,11 +2269,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2233,11 +2281,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2245,11 +2293,11 @@
         },
         {
           "start": [
-            23,
+            24,
             49
           ],
           "end": [
-            23,
+            24,
             53
           ],
           "node": "float",
@@ -2257,11 +2305,11 @@
         },
         {
           "start": [
-            23,
+            24,
             5
           ],
           "end": [
-            23,
+            24,
             61
           ],
           "node": "array",
@@ -2269,11 +2317,11 @@
         },
         {
           "start": [
-            23,
+            24,
             55
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "send",
@@ -2281,11 +2329,11 @@
         },
         {
           "start": [
-            23,
+            24,
             55
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "send",
@@ -2293,11 +2341,11 @@
         },
         {
           "start": [
-            23,
+            24,
             55
           ],
           "end": [
-            23,
+            24,
             56
           ],
           "node": "lvar",
@@ -2305,11 +2353,11 @@
         },
         {
           "start": [
-            23,
+            24,
             55
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "send",
@@ -2317,11 +2365,11 @@
         },
         {
           "start": [
-            23,
+            24,
             55
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "send",
@@ -2329,11 +2377,11 @@
         },
         {
           "start": [
-            23,
+            24,
             59
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "int",
@@ -2341,11 +2389,11 @@
         },
         {
           "start": [
-            23,
+            24,
             59
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "int",
@@ -2353,11 +2401,11 @@
         },
         {
           "start": [
-            23,
+            24,
             59
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "int",
@@ -2365,11 +2413,11 @@
         },
         {
           "start": [
-            23,
+            24,
             59
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "int",
@@ -2377,11 +2425,11 @@
         },
         {
           "start": [
-            23,
+            24,
             59
           ],
           "end": [
-            23,
+            24,
             60
           ],
           "node": "int",
@@ -2390,52 +2438,52 @@
       ]
     },
     {
-      "subject": "left_assignments:26",
-      "sexp": "(def :left_assignments (args (arg :list)) (begin (and (lvasgn :a (send (lvar :list) :first)) (send (lvar :a) :call)) (or (lvasgn :b (send (lvar :list) :last)) (send (lvar :b) :call)) (and (begin (irange (send (lvar :list) :first) (send (lvar :list) :last))) (send (lvar :list) :call))))",
+      "subject": "left_assignments:27",
+      "sexp": "(def :left_assignments (args (arg :list)) (begin (and (lvasgn :a (send (lvar :list) :first)) (send (lvar :a) :call)) (or (lvasgn :b (send (lvar :list) :last)) (send (lvar :b) :call)) (and (begin (irange (send (lvar :list) :first) (send (lvar :list) :last))) (send (lvar :list) :call)) (and (begin (irange (send (lvar :list) :first) nil)) (send (lvar :list) :call))))",
       "mutants": [
         {
           "start": [
-            27,
+            28,
             5
           ],
           "end": [
-            29,
-            41
+            31,
+            32
           ],
           "node": "begin",
           "replacement": "(send nil :raise)"
         },
         {
           "start": [
-            27,
+            28,
             5
           ],
           "end": [
-            29,
-            41
+            31,
+            32
           ],
           "node": "begin",
           "replacement": "(zsuper)"
         },
         {
           "start": [
-            27,
+            28,
             5
           ],
           "end": [
-            29,
-            41
+            31,
+            32
           ],
           "node": "begin",
           "replacement": null
         },
         {
           "start": [
-            27,
+            28,
             5
           ],
           "end": [
-            27,
+            28,
             30
           ],
           "node": "and",
@@ -2443,11 +2491,11 @@
         },
         {
           "start": [
-            27,
+            28,
             5
           ],
           "end": [
-            27,
+            28,
             30
           ],
           "node": "and",
@@ -2455,11 +2503,11 @@
         },
         {
           "start": [
-            27,
+            28,
             9
           ],
           "end": [
-            27,
+            28,
             19
           ],
           "node": "send",
@@ -2467,11 +2515,11 @@
         },
         {
           "start": [
-            27,
+            28,
             9
           ],
           "end": [
-            27,
+            28,
             19
           ],
           "node": "send",
@@ -2479,11 +2527,11 @@
         },
         {
           "start": [
-            27,
+            28,
             9
           ],
           "end": [
-            27,
+            28,
             13
           ],
           "node": "lvar",
@@ -2491,11 +2539,11 @@
         },
         {
           "start": [
-            27,
+            28,
             24
           ],
           "end": [
-            27,
+            28,
             30
           ],
           "node": "send",
@@ -2503,11 +2551,11 @@
         },
         {
           "start": [
-            27,
+            28,
             24
           ],
           "end": [
-            27,
+            28,
             30
           ],
           "node": "send",
@@ -2515,11 +2563,11 @@
         },
         {
           "start": [
-            27,
+            28,
             24
           ],
           "end": [
-            27,
+            28,
             25
           ],
           "node": "lvar",
@@ -2527,11 +2575,11 @@
         },
         {
           "start": [
-            28,
+            29,
             5
           ],
           "end": [
-            28,
+            29,
             28
           ],
           "node": "or",
@@ -2539,11 +2587,11 @@
         },
         {
           "start": [
-            28,
+            29,
             5
           ],
           "end": [
-            28,
+            29,
             28
           ],
           "node": "or",
@@ -2551,11 +2599,11 @@
         },
         {
           "start": [
-            28,
+            29,
             9
           ],
           "end": [
-            28,
+            29,
             18
           ],
           "node": "send",
@@ -2563,11 +2611,11 @@
         },
         {
           "start": [
-            28,
+            29,
             9
           ],
           "end": [
-            28,
+            29,
             18
           ],
           "node": "send",
@@ -2575,11 +2623,11 @@
         },
         {
           "start": [
-            28,
+            29,
             9
           ],
           "end": [
-            28,
+            29,
             13
           ],
           "node": "lvar",
@@ -2587,11 +2635,11 @@
         },
         {
           "start": [
-            28,
+            29,
             22
           ],
           "end": [
-            28,
+            29,
             28
           ],
           "node": "send",
@@ -2599,11 +2647,11 @@
         },
         {
           "start": [
-            28,
+            29,
             22
           ],
           "end": [
-            28,
+            29,
             28
           ],
           "node": "send",
@@ -2611,11 +2659,11 @@
         },
         {
           "start": [
-            28,
+            29,
             22
           ],
           "end": [
-            28,
+            29,
             23
           ],
           "node": "lvar",
@@ -2623,11 +2671,11 @@
         },
         {
           "start": [
-            29,
+            30,
             5
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "and",
@@ -2635,11 +2683,11 @@
         },
         {
           "start": [
-            29,
+            30,
             5
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "and",
@@ -2647,11 +2695,11 @@
         },
         {
           "start": [
-            29,
+            30,
             5
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "and",
@@ -2659,11 +2707,11 @@
         },
         {
           "start": [
-            29,
+            30,
             5
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "and",
@@ -2671,11 +2719,11 @@
         },
         {
           "start": [
-            29,
+            30,
             6
           ],
           "end": [
-            29,
+            30,
             27
           ],
           "node": "irange",
@@ -2683,11 +2731,11 @@
         },
         {
           "start": [
-            29,
+            30,
             6
           ],
           "end": [
-            29,
+            30,
             16
           ],
           "node": "send",
@@ -2695,11 +2743,11 @@
         },
         {
           "start": [
-            29,
+            30,
             6
           ],
           "end": [
-            29,
+            30,
             16
           ],
           "node": "send",
@@ -2707,11 +2755,11 @@
         },
         {
           "start": [
-            29,
+            30,
             6
           ],
           "end": [
-            29,
+            30,
             10
           ],
           "node": "lvar",
@@ -2719,11 +2767,11 @@
         },
         {
           "start": [
-            29,
+            30,
             6
           ],
           "end": [
-            29,
+            30,
             27
           ],
           "node": "irange",
@@ -2731,11 +2779,11 @@
         },
         {
           "start": [
-            29,
+            30,
             18
           ],
           "end": [
-            29,
+            30,
             27
           ],
           "node": "send",
@@ -2743,11 +2791,11 @@
         },
         {
           "start": [
-            29,
+            30,
             18
           ],
           "end": [
-            29,
+            30,
             27
           ],
           "node": "send",
@@ -2755,11 +2803,11 @@
         },
         {
           "start": [
-            29,
+            30,
             18
           ],
           "end": [
-            29,
+            30,
             22
           ],
           "node": "lvar",
@@ -2767,11 +2815,11 @@
         },
         {
           "start": [
-            29,
+            30,
             32
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "send",
@@ -2779,11 +2827,11 @@
         },
         {
           "start": [
-            29,
+            30,
             32
           ],
           "end": [
-            29,
+            30,
             41
           ],
           "node": "send",
@@ -2791,11 +2839,11 @@
         },
         {
           "start": [
-            29,
+            30,
             32
           ],
           "end": [
-            29,
+            30,
             36
           ],
           "node": "lvar",
@@ -2803,12 +2851,156 @@
         },
         {
           "start": [
-            29,
+            30,
             5
           ],
           "end": [
-            29,
+            30,
             41
+          ],
+          "node": "and",
+          "replacement": null
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "and",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "and",
+          "replacement": "(begin (irange (send (lvar :list) :first) nil))"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "and",
+          "replacement": "(send (lvar :list) :call)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "and",
+          "replacement": "(or (begin (irange (send (lvar :list) :first) nil)) (send (lvar :list) :call))"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            18
+          ],
+          "node": "irange",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            16
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            16
+          ],
+          "node": "send",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            31,
+            6
+          ],
+          "end": [
+            31,
+            10
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            31,
+            23
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            31,
+            23
+          ],
+          "end": [
+            31,
+            32
+          ],
+          "node": "send",
+          "replacement": "(lvar :list)"
+        },
+        {
+          "start": [
+            31,
+            23
+          ],
+          "end": [
+            31,
+            27
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            31,
+            5
+          ],
+          "end": [
+            31,
+            32
           ],
           "node": "and",
           "replacement": null
@@ -2816,16 +3008,16 @@
       ]
     },
     {
-      "subject": "single_calls:32",
+      "subject": "single_calls:34",
       "sexp": "(def :single_calls (args (arg :list)) (begin (block (send (lvar :list) :each) (args) (send (lvar :list) :clear)) (block (send (lvar :list) :each) (args) (next)) (block (send (lvar :list) :each) (args) (if (send (lvar :list) :empty?) (break) nil)) (block (lambda) (args) (send (lvar :list) :clear))))",
       "mutants": [
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "begin",
@@ -2833,11 +3025,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "begin",
@@ -2845,11 +3037,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "begin",
@@ -2857,11 +3049,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -2869,11 +3061,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -2881,11 +3073,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -2893,11 +3085,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             9
           ],
           "node": "lvar",
@@ -2905,11 +3097,11 @@
         },
         {
           "start": [
-            33,
+            35,
             17
           ],
           "end": [
-            33,
+            35,
             27
           ],
           "node": "send",
@@ -2917,11 +3109,11 @@
         },
         {
           "start": [
-            33,
+            35,
             17
           ],
           "end": [
-            33,
+            35,
             27
           ],
           "node": "send",
@@ -2929,11 +3121,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -2941,11 +3133,11 @@
         },
         {
           "start": [
-            33,
+            35,
             17
           ],
           "end": [
-            33,
+            35,
             27
           ],
           "node": "send",
@@ -2953,11 +3145,11 @@
         },
         {
           "start": [
-            33,
+            35,
             17
           ],
           "end": [
-            33,
+            35,
             27
           ],
           "node": "send",
@@ -2965,11 +3157,11 @@
         },
         {
           "start": [
-            33,
+            35,
             17
           ],
           "end": [
-            33,
+            35,
             21
           ],
           "node": "lvar",
@@ -2977,11 +3169,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -2989,11 +3181,11 @@
         },
         {
           "start": [
-            33,
+            35,
             5
           ],
           "end": [
-            33,
+            35,
             29
           ],
           "node": "block",
@@ -3001,11 +3193,11 @@
         },
         {
           "start": [
-            34,
+            36,
             5
           ],
           "end": [
-            34,
+            36,
             23
           ],
           "node": "block",
@@ -3013,11 +3205,11 @@
         },
         {
           "start": [
-            34,
+            36,
             5
           ],
           "end": [
-            34,
+            36,
             23
           ],
           "node": "block",
@@ -3025,11 +3217,11 @@
         },
         {
           "start": [
-            34,
+            36,
             5
           ],
           "end": [
-            34,
+            36,
             23
           ],
           "node": "block",
@@ -3037,11 +3229,11 @@
         },
         {
           "start": [
-            34,
+            36,
             5
           ],
           "end": [
-            34,
+            36,
             9
           ],
           "node": "lvar",
@@ -3049,11 +3241,11 @@
         },
         {
           "start": [
-            34,
+            36,
             17
           ],
           "end": [
-            34,
+            36,
             21
           ],
           "node": "next",
@@ -3061,11 +3253,11 @@
         },
         {
           "start": [
-            34,
+            36,
             17
           ],
           "end": [
-            34,
+            36,
             21
           ],
           "node": "next",
@@ -3073,11 +3265,11 @@
         },
         {
           "start": [
-            34,
+            36,
             17
           ],
           "end": [
-            34,
+            36,
             21
           ],
           "node": "next",
@@ -3085,11 +3277,11 @@
         },
         {
           "start": [
-            34,
+            36,
             17
           ],
           "end": [
-            34,
+            36,
             21
           ],
           "node": "next",
@@ -3097,11 +3289,11 @@
         },
         {
           "start": [
-            34,
+            36,
             5
           ],
           "end": [
-            34,
+            36,
             23
           ],
           "node": "block",
@@ -3109,11 +3301,11 @@
         },
         {
           "start": [
-            35,
+            37,
             5
           ],
           "end": [
-            35,
+            37,
             39
           ],
           "node": "block",
@@ -3121,11 +3313,11 @@
         },
         {
           "start": [
-            35,
+            37,
             5
           ],
           "end": [
-            35,
+            37,
             39
           ],
           "node": "block",
@@ -3133,11 +3325,11 @@
         },
         {
           "start": [
-            35,
+            37,
             5
           ],
           "end": [
-            35,
+            37,
             39
           ],
           "node": "block",
@@ -3145,11 +3337,11 @@
         },
         {
           "start": [
-            35,
+            37,
             5
           ],
           "end": [
-            35,
+            37,
             9
           ],
           "node": "lvar",
@@ -3157,11 +3349,11 @@
         },
         {
           "start": [
-            35,
+            37,
             17
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "if",
@@ -3169,11 +3361,11 @@
         },
         {
           "start": [
-            35,
+            37,
             17
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "if",
@@ -3181,11 +3373,11 @@
         },
         {
           "start": [
-            35,
+            37,
             17
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "if",
@@ -3193,11 +3385,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "send",
@@ -3205,11 +3397,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "send",
@@ -3217,11 +3409,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "send",
@@ -3229,11 +3421,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "send",
@@ -3241,11 +3433,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "send",
@@ -3253,11 +3445,11 @@
         },
         {
           "start": [
-            35,
+            37,
             26
           ],
           "end": [
-            35,
+            37,
             30
           ],
           "node": "lvar",
@@ -3265,11 +3457,11 @@
         },
         {
           "start": [
-            35,
+            37,
             17
           ],
           "end": [
-            35,
+            37,
             37
           ],
           "node": "if",
@@ -3277,11 +3469,11 @@
         },
         {
           "start": [
-            35,
+            37,
             17
           ],
           "end": [
-            35,
+            37,
             22
           ],
           "node": "break",
@@ -3289,11 +3481,11 @@
         },
         {
           "start": [
-            35,
+            37,
             5
           ],
           "end": [
-            35,
+            37,
             39
           ],
           "node": "block",
@@ -3301,11 +3493,11 @@
         },
         {
           "start": [
-            36,
+            38,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "block",
@@ -3313,11 +3505,11 @@
         },
         {
           "start": [
-            36,
+            38,
             10
           ],
           "end": [
-            36,
+            38,
             20
           ],
           "node": "send",
@@ -3325,11 +3517,11 @@
         },
         {
           "start": [
-            36,
+            38,
             10
           ],
           "end": [
-            36,
+            38,
             20
           ],
           "node": "send",
@@ -3337,11 +3529,11 @@
         },
         {
           "start": [
-            36,
+            38,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "block",
@@ -3349,11 +3541,11 @@
         },
         {
           "start": [
-            36,
+            38,
             10
           ],
           "end": [
-            36,
+            38,
             20
           ],
           "node": "send",
@@ -3361,11 +3553,11 @@
         },
         {
           "start": [
-            36,
+            38,
             10
           ],
           "end": [
-            36,
+            38,
             20
           ],
           "node": "send",
@@ -3373,11 +3565,11 @@
         },
         {
           "start": [
-            36,
+            38,
             10
           ],
           "end": [
-            36,
+            38,
             14
           ],
           "node": "lvar",
@@ -3385,11 +3577,11 @@
         },
         {
           "start": [
-            36,
+            38,
             5
           ],
           "end": [
-            36,
+            38,
             22
           ],
           "node": "block",
@@ -3398,16 +3590,16 @@
       ]
     },
     {
-      "subject": "ternaries:39",
+      "subject": "ternaries:41",
       "sexp": "(def :ternaries (args (arg :a)) (begin (if (send (lvar :a) :nil?) (return (if (lvar :a) (int 1) (int 2))) nil) (if (send (lvar :a) :zero?) (return (begin (if (lvar :a) (int 1) nil))) nil) (block (send (lvar :a) :each) (args (procarg0 (arg :b))) (next (if (lvar :b) (int 1) (int 2)))) (block (send (lvar :a) :each) (args (procarg0 (arg :b))) (break (begin (if (lvar :b) nil (int 1)))))))",
       "mutants": [
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "begin",
@@ -3415,11 +3607,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "begin",
@@ -3427,11 +3619,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "begin",
@@ -3439,11 +3631,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "if",
@@ -3451,11 +3643,11 @@
         },
         {
           "start": [
-            40,
+            42,
             25
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "send",
@@ -3463,11 +3655,11 @@
         },
         {
           "start": [
-            40,
+            42,
             25
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "send",
@@ -3475,11 +3667,11 @@
         },
         {
           "start": [
-            40,
+            42,
             25
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "send",
@@ -3487,11 +3679,11 @@
         },
         {
           "start": [
-            40,
+            42,
             25
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "send",
@@ -3499,11 +3691,11 @@
         },
         {
           "start": [
-            40,
+            42,
             25
           ],
           "end": [
-            40,
+            42,
             26
           ],
           "node": "lvar",
@@ -3511,11 +3703,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "if",
@@ -3523,11 +3715,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "return",
@@ -3535,11 +3727,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "return",
@@ -3547,11 +3739,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "if",
@@ -3559,11 +3751,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             13
           ],
           "node": "lvar",
@@ -3571,11 +3763,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             13
           ],
           "node": "lvar",
@@ -3583,11 +3775,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             13
           ],
           "node": "lvar",
@@ -3595,11 +3787,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "if",
@@ -3607,11 +3799,11 @@
         },
         {
           "start": [
-            40,
+            42,
             16
           ],
           "end": [
-            40,
+            42,
             17
           ],
           "node": "int",
@@ -3619,11 +3811,11 @@
         },
         {
           "start": [
-            40,
+            42,
             16
           ],
           "end": [
-            40,
+            42,
             17
           ],
           "node": "int",
@@ -3631,11 +3823,11 @@
         },
         {
           "start": [
-            40,
+            42,
             16
           ],
           "end": [
-            40,
+            42,
             17
           ],
           "node": "int",
@@ -3643,11 +3835,11 @@
         },
         {
           "start": [
-            40,
+            42,
             16
           ],
           "end": [
-            40,
+            42,
             17
           ],
           "node": "int",
@@ -3655,11 +3847,11 @@
         },
         {
           "start": [
-            40,
+            42,
             12
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "if",
@@ -3667,11 +3859,11 @@
         },
         {
           "start": [
-            40,
+            42,
             20
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "int",
@@ -3679,11 +3871,11 @@
         },
         {
           "start": [
-            40,
+            42,
             20
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "int",
@@ -3691,11 +3883,11 @@
         },
         {
           "start": [
-            40,
+            42,
             20
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "int",
@@ -3703,11 +3895,11 @@
         },
         {
           "start": [
-            40,
+            42,
             20
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "int",
@@ -3715,11 +3907,11 @@
         },
         {
           "start": [
-            40,
+            42,
             20
           ],
           "end": [
-            40,
+            42,
             21
           ],
           "node": "int",
@@ -3727,11 +3919,11 @@
         },
         {
           "start": [
-            40,
+            42,
             5
           ],
           "end": [
-            40,
+            42,
             31
           ],
           "node": "if",
@@ -3739,11 +3931,11 @@
         },
         {
           "start": [
-            41,
+            43,
             5
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "if",
@@ -3751,11 +3943,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "send",
@@ -3763,11 +3955,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "send",
@@ -3775,11 +3967,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "send",
@@ -3787,11 +3979,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "send",
@@ -3799,11 +3991,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "send",
@@ -3811,11 +4003,11 @@
         },
         {
           "start": [
-            41,
+            43,
             24
           ],
           "end": [
-            41,
+            43,
             25
           ],
           "node": "lvar",
@@ -3823,11 +4015,11 @@
         },
         {
           "start": [
-            41,
+            43,
             5
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "if",
@@ -3835,11 +4027,11 @@
         },
         {
           "start": [
-            41,
+            43,
             5
           ],
           "end": [
-            41,
+            43,
             20
           ],
           "node": "return",
@@ -3847,11 +4039,11 @@
         },
         {
           "start": [
-            41,
+            43,
             5
           ],
           "end": [
-            41,
+            43,
             20
           ],
           "node": "return",
@@ -3859,11 +4051,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             19
           ],
           "node": "if",
@@ -3871,11 +4063,11 @@
         },
         {
           "start": [
-            41,
+            43,
             18
           ],
           "end": [
-            41,
+            43,
             19
           ],
           "node": "lvar",
@@ -3883,11 +4075,11 @@
         },
         {
           "start": [
-            41,
+            43,
             18
           ],
           "end": [
-            41,
+            43,
             19
           ],
           "node": "lvar",
@@ -3895,11 +4087,11 @@
         },
         {
           "start": [
-            41,
+            43,
             18
           ],
           "end": [
-            41,
+            43,
             19
           ],
           "node": "lvar",
@@ -3907,11 +4099,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             19
           ],
           "node": "if",
@@ -3919,11 +4111,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             14
           ],
           "node": "int",
@@ -3931,11 +4123,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             14
           ],
           "node": "int",
@@ -3943,11 +4135,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             14
           ],
           "node": "int",
@@ -3955,11 +4147,11 @@
         },
         {
           "start": [
-            41,
+            43,
             13
           ],
           "end": [
-            41,
+            43,
             14
           ],
           "node": "int",
@@ -3967,11 +4159,11 @@
         },
         {
           "start": [
-            41,
+            43,
             5
           ],
           "end": [
-            41,
+            43,
             31
           ],
           "node": "if",
@@ -3979,11 +4171,11 @@
         },
         {
           "start": [
-            42,
+            44,
             5
           ],
           "end": [
-            42,
+            44,
             34
           ],
           "node": "block",
@@ -3991,11 +4183,11 @@
         },
         {
           "start": [
-            42,
+            44,
             5
           ],
           "end": [
-            42,
+            44,
             34
           ],
           "node": "block",
@@ -4003,11 +4195,11 @@
         },
         {
           "start": [
-            42,
+            44,
             5
           ],
           "end": [
-            42,
+            44,
             34
           ],
           "node": "block",
@@ -4015,11 +4207,11 @@
         },
         {
           "start": [
-            42,
+            44,
             5
           ],
           "end": [
-            42,
+            44,
             6
           ],
           "node": "lvar",
@@ -4027,11 +4219,11 @@
         },
         {
           "start": [
-            42,
+            44,
             18
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "next",
@@ -4039,11 +4231,11 @@
         },
         {
           "start": [
-            42,
+            44,
             18
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "next",
@@ -4051,11 +4243,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "if",
@@ -4063,11 +4255,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             24
           ],
           "node": "lvar",
@@ -4075,11 +4267,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             24
           ],
           "node": "lvar",
@@ -4087,11 +4279,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             24
           ],
           "node": "lvar",
@@ -4099,11 +4291,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "if",
@@ -4111,11 +4303,11 @@
         },
         {
           "start": [
-            42,
+            44,
             27
           ],
           "end": [
-            42,
+            44,
             28
           ],
           "node": "int",
@@ -4123,11 +4315,11 @@
         },
         {
           "start": [
-            42,
+            44,
             27
           ],
           "end": [
-            42,
+            44,
             28
           ],
           "node": "int",
@@ -4135,11 +4327,11 @@
         },
         {
           "start": [
-            42,
+            44,
             27
           ],
           "end": [
-            42,
+            44,
             28
           ],
           "node": "int",
@@ -4147,11 +4339,11 @@
         },
         {
           "start": [
-            42,
+            44,
             27
           ],
           "end": [
-            42,
+            44,
             28
           ],
           "node": "int",
@@ -4159,11 +4351,11 @@
         },
         {
           "start": [
-            42,
+            44,
             23
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "if",
@@ -4171,11 +4363,11 @@
         },
         {
           "start": [
-            42,
+            44,
             31
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "int",
@@ -4183,11 +4375,11 @@
         },
         {
           "start": [
-            42,
+            44,
             31
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "int",
@@ -4195,11 +4387,11 @@
         },
         {
           "start": [
-            42,
+            44,
             31
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "int",
@@ -4207,11 +4399,11 @@
         },
         {
           "start": [
-            42,
+            44,
             31
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "int",
@@ -4219,11 +4411,11 @@
         },
         {
           "start": [
-            42,
+            44,
             31
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "int",
@@ -4231,11 +4423,11 @@
         },
         {
           "start": [
-            42,
+            44,
             18
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "next",
@@ -4243,11 +4435,11 @@
         },
         {
           "start": [
-            42,
+            44,
             18
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "next",
@@ -4255,11 +4447,11 @@
         },
         {
           "start": [
-            42,
+            44,
             18
           ],
           "end": [
-            42,
+            44,
             32
           ],
           "node": "next",
@@ -4267,11 +4459,11 @@
         },
         {
           "start": [
-            43,
+            45,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "block",
@@ -4279,11 +4471,11 @@
         },
         {
           "start": [
-            43,
+            45,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "block",
@@ -4291,11 +4483,11 @@
         },
         {
           "start": [
-            43,
+            45,
             5
           ],
           "end": [
-            43,
+            45,
             38
           ],
           "node": "block",
@@ -4303,11 +4495,11 @@
         },
         {
           "start": [
-            43,
+            45,
             5
           ],
           "end": [
-            43,
+            45,
             6
           ],
           "node": "lvar",
@@ -4315,11 +4507,11 @@
         },
         {
           "start": [
-            43,
+            45,
             18
           ],
           "end": [
-            43,
+            45,
             36
           ],
           "node": "break",
@@ -4327,11 +4519,11 @@
         },
         {
           "start": [
-            43,
+            45,
             18
           ],
           "end": [
-            43,
+            45,
             36
           ],
           "node": "break",
@@ -4339,11 +4531,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "if",
@@ -4351,11 +4543,11 @@
         },
         {
           "start": [
-            43,
+            45,
             34
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "lvar",
@@ -4363,11 +4555,11 @@
         },
         {
           "start": [
-            43,
+            45,
             34
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "lvar",
@@ -4375,11 +4567,11 @@
         },
         {
           "start": [
-            43,
+            45,
             34
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "lvar",
@@ -4387,11 +4579,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "if",
@@ -4399,11 +4591,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             35
           ],
           "node": "if",
@@ -4411,11 +4603,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             26
           ],
           "node": "int",
@@ -4423,11 +4615,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             26
           ],
           "node": "int",
@@ -4435,11 +4627,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             26
           ],
           "node": "int",
@@ -4447,11 +4639,11 @@
         },
         {
           "start": [
-            43,
+            45,
             25
           ],
           "end": [
-            43,
+            45,
             26
           ],
           "node": "int",
@@ -4459,11 +4651,11 @@
         },
         {
           "start": [
-            43,
+            45,
             18
           ],
           "end": [
-            43,
+            45,
             36
           ],
           "node": "break",
@@ -4471,11 +4663,11 @@
         },
         {
           "start": [
-            43,
+            45,
             18
           ],
           "end": [
-            43,
+            45,
             36
           ],
           "node": "break",
@@ -4484,16 +4676,16 @@
       ]
     },
     {
-      "subject": "defaulted:46",
+      "subject": "defaulted:48",
       "sexp": "(def :defaulted (args (optarg :a (int 1)) (optarg :_b (int 2))) nil)",
       "mutants": [
         {
           "start": [
-            46,
+            48,
             17
           ],
           "end": [
-            46,
+            48,
             22
           ],
           "node": "optarg",
@@ -4501,11 +4693,11 @@
         },
         {
           "start": [
-            46,
+            48,
             21
           ],
           "end": [
-            46,
+            48,
             22
           ],
           "node": "int",
@@ -4513,11 +4705,11 @@
         },
         {
           "start": [
-            46,
+            48,
             21
           ],
           "end": [
-            46,
+            48,
             22
           ],
           "node": "int",
@@ -4525,11 +4717,11 @@
         },
         {
           "start": [
-            46,
+            48,
             21
           ],
           "end": [
-            46,
+            48,
             22
           ],
           "node": "int",
@@ -4537,11 +4729,11 @@
         },
         {
           "start": [
-            46,
+            48,
             21
           ],
           "end": [
-            46,
+            48,
             22
           ],
           "node": "int",
@@ -4549,11 +4741,11 @@
         },
         {
           "start": [
-            46,
+            48,
             29
           ],
           "end": [
-            46,
+            48,
             30
           ],
           "node": "int",
@@ -4561,11 +4753,11 @@
         },
         {
           "start": [
-            46,
+            48,
             29
           ],
           "end": [
-            46,
+            48,
             30
           ],
           "node": "int",
@@ -4573,11 +4765,11 @@
         },
         {
           "start": [
-            46,
+            48,
             29
           ],
           "end": [
-            46,
+            48,
             30
           ],
           "node": "int",
@@ -4585,11 +4777,11 @@
         },
         {
           "start": [
-            46,
+            48,
             29
           ],
           "end": [
-            46,
+            48,
             30
           ],
           "node": "int",
@@ -4597,11 +4789,11 @@
         },
         {
           "start": [
-            46,
+            48,
             29
           ],
           "end": [
-            46,
+            48,
             30
           ],
           "node": "int",
@@ -4609,11 +4801,11 @@
         },
         {
           "start": [
-            46,
+            48,
             3
           ],
           "end": [
-            47,
+            49,
             6
           ],
           "node": "def",
@@ -4621,11 +4813,11 @@
         },
         {
           "start": [
-            46,
+            48,
             3
           ],
           "end": [
-            47,
+            49,
             6
           ],
           "node": "def",
@@ -4633,11 +4825,11 @@
         },
         {
           "start": [
-            46,
+            48,
             3
           ],
           "end": [
-            47,
+            49,
             6
           ],
           "node": "def",
@@ -4646,16 +4838,16 @@
       ]
     },
     {
-      "subject": "integer_body:49",
+      "subject": "integer_body:51",
       "sexp": "(def :integer_body (args) (int 1))",
       "mutants": [
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4663,11 +4855,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4675,11 +4867,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4687,11 +4879,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4699,11 +4891,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4711,11 +4903,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4723,11 +4915,11 @@
         },
         {
           "start": [
-            50,
+            52,
             5
           ],
           "end": [
-            50,
+            52,
             6
           ],
           "node": "int",
@@ -4736,16 +4928,16 @@
       ]
     },
     {
-      "subject": "float_body:53",
+      "subject": "float_body:55",
       "sexp": "(def :float_body (args) (float f3ff8000000000000))",
       "mutants": [
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4753,11 +4945,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4765,11 +4957,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4777,11 +4969,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4789,11 +4981,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4801,11 +4993,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4813,11 +5005,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4825,11 +5017,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4837,11 +5029,11 @@
         },
         {
           "start": [
-            54,
+            56,
             5
           ],
           "end": [
-            54,
+            56,
             8
           ],
           "node": "float",
@@ -4850,16 +5042,16 @@
       ]
     },
     {
-      "subject": "single_pattern:57",
+      "subject": "single_pattern:59",
       "sexp": "(def :single_pattern (args (arg :a)) (case_match (lvar :a) (in_pattern (int 1) nil (int 2)) nil))",
       "mutants": [
         {
           "start": [
-            58,
+            60,
             5
           ],
           "end": [
-            60,
+            62,
             8
           ],
           "node": "case_match",
@@ -4867,11 +5059,11 @@
         },
         {
           "start": [
-            58,
+            60,
             5
           ],
           "end": [
-            60,
+            62,
             8
           ],
           "node": "case_match",
@@ -4879,11 +5071,11 @@
         },
         {
           "start": [
-            58,
+            60,
             5
           ],
           "end": [
-            60,
+            62,
             8
           ],
           "node": "case_match",
@@ -4891,11 +5083,11 @@
         },
         {
           "start": [
-            58,
+            60,
             10
           ],
           "end": [
-            58,
+            60,
             11
           ],
           "node": "lvar",
@@ -4903,11 +5095,11 @@
         },
         {
           "start": [
-            59,
+            61,
             8
           ],
           "end": [
-            59,
+            61,
             9
           ],
           "node": "int",
@@ -4915,11 +5107,11 @@
         },
         {
           "start": [
-            59,
+            61,
             8
           ],
           "end": [
-            59,
+            61,
             9
           ],
           "node": "int",
@@ -4927,11 +5119,11 @@
         },
         {
           "start": [
-            59,
+            61,
             8
           ],
           "end": [
-            59,
+            61,
             9
           ],
           "node": "int",
@@ -4939,11 +5131,11 @@
         },
         {
           "start": [
-            59,
+            61,
             8
           ],
           "end": [
-            59,
+            61,
             9
           ],
           "node": "int",
@@ -4951,11 +5143,11 @@
         },
         {
           "start": [
-            59,
+            61,
             15
           ],
           "end": [
-            59,
+            61,
             16
           ],
           "node": "int",
@@ -4963,11 +5155,11 @@
         },
         {
           "start": [
-            59,
+            61,
             15
           ],
           "end": [
-            59,
+            61,
             16
           ],
           "node": "int",
@@ -4975,11 +5167,11 @@
         },
         {
           "start": [
-            59,
+            61,
             15
           ],
           "end": [
-            59,
+            61,
             16
           ],
           "node": "int",
@@ -4987,11 +5179,11 @@
         },
         {
           "start": [
-            59,
+            61,
             15
           ],
           "end": [
-            59,
+            61,
             16
           ],
           "node": "int",
@@ -4999,11 +5191,11 @@
         },
         {
           "start": [
-            59,
+            61,
             15
           ],
           "end": [
-            59,
+            61,
             16
           ],
           "node": "int",
@@ -5012,16 +5204,16 @@
       ]
     },
     {
-      "subject": "indices:63",
+      "subject": "indices:65",
       "sexp": "(def :indices (args (arg :list)) (array (index (lvar :list) (irange (int 1) (int -1))) (index (lvar :list) (irange (int 1) nil)) (index (lvar :list) (lvasgn :a (int 1))) (array (lvar :list)) (array (splat (lvar :list)))))",
       "mutants": [
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5029,11 +5221,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5041,11 +5233,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5053,11 +5245,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5065,11 +5257,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5077,11 +5269,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5089,11 +5281,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5101,11 +5293,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             10
           ],
           "node": "lvar",
@@ -5113,11 +5305,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5125,11 +5317,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5137,11 +5329,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5149,11 +5341,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5161,11 +5353,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5173,11 +5365,11 @@
         },
         {
           "start": [
-            64,
+            66,
             6
           ],
           "end": [
-            64,
+            66,
             17
           ],
           "node": "index",
@@ -5185,11 +5377,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "irange",
@@ -5197,11 +5389,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             12
           ],
           "node": "int",
@@ -5209,11 +5401,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             12
           ],
           "node": "int",
@@ -5221,11 +5413,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             12
           ],
           "node": "int",
@@ -5233,11 +5425,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             12
           ],
           "node": "int",
@@ -5245,11 +5437,11 @@
         },
         {
           "start": [
-            64,
+            66,
             11
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "irange",
@@ -5257,11 +5449,11 @@
         },
         {
           "start": [
-            64,
+            66,
             14
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "int",
@@ -5269,11 +5461,11 @@
         },
         {
           "start": [
-            64,
+            66,
             14
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "int",
@@ -5281,11 +5473,11 @@
         },
         {
           "start": [
-            64,
+            66,
             14
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "int",
@@ -5293,11 +5485,11 @@
         },
         {
           "start": [
-            64,
+            66,
             14
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "int",
@@ -5305,11 +5497,11 @@
         },
         {
           "start": [
-            64,
+            66,
             14
           ],
           "end": [
-            64,
+            66,
             16
           ],
           "node": "int",
@@ -5317,11 +5509,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5329,11 +5521,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5341,11 +5533,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             23
           ],
           "node": "lvar",
@@ -5353,11 +5545,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5365,11 +5557,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5377,11 +5569,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5389,11 +5581,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5401,11 +5593,11 @@
         },
         {
           "start": [
-            64,
+            66,
             19
           ],
           "end": [
-            64,
+            66,
             28
           ],
           "node": "index",
@@ -5413,11 +5605,11 @@
         },
         {
           "start": [
-            64,
+            66,
             24
           ],
           "end": [
-            64,
+            66,
             27
           ],
           "node": "irange",
@@ -5425,11 +5617,11 @@
         },
         {
           "start": [
-            64,
+            66,
             24
           ],
           "end": [
-            64,
+            66,
             25
           ],
           "node": "int",
@@ -5437,11 +5629,11 @@
         },
         {
           "start": [
-            64,
+            66,
             24
           ],
           "end": [
-            64,
+            66,
             25
           ],
           "node": "int",
@@ -5449,11 +5641,11 @@
         },
         {
           "start": [
-            64,
+            66,
             24
           ],
           "end": [
-            64,
+            66,
             25
           ],
           "node": "int",
@@ -5461,11 +5653,11 @@
         },
         {
           "start": [
-            64,
+            66,
             24
           ],
           "end": [
-            64,
+            66,
             25
           ],
           "node": "int",
@@ -5473,11 +5665,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5485,11 +5677,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5497,11 +5689,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             34
           ],
           "node": "lvar",
@@ -5509,11 +5701,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5521,11 +5713,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5533,11 +5725,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5545,11 +5737,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5557,11 +5749,11 @@
         },
         {
           "start": [
-            64,
+            66,
             30
           ],
           "end": [
-            64,
+            66,
             41
           ],
           "node": "index",
@@ -5569,11 +5761,11 @@
         },
         {
           "start": [
-            64,
+            66,
             39
           ],
           "end": [
-            64,
+            66,
             40
           ],
           "node": "int",
@@ -5581,11 +5773,11 @@
         },
         {
           "start": [
-            64,
+            66,
             39
           ],
           "end": [
-            64,
+            66,
             40
           ],
           "node": "int",
@@ -5593,11 +5785,11 @@
         },
         {
           "start": [
-            64,
+            66,
             39
           ],
           "end": [
-            64,
+            66,
             40
           ],
           "node": "int",
@@ -5605,11 +5797,11 @@
         },
         {
           "start": [
-            64,
+            66,
             39
           ],
           "end": [
-            64,
+            66,
             40
           ],
           "node": "int",
@@ -5617,11 +5809,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5629,11 +5821,11 @@
         },
         {
           "start": [
-            64,
+            66,
             43
           ],
           "end": [
-            64,
+            66,
             49
           ],
           "node": "array",
@@ -5641,11 +5833,11 @@
         },
         {
           "start": [
-            64,
+            66,
             43
           ],
           "end": [
-            64,
+            66,
             49
           ],
           "node": "array",
@@ -5653,11 +5845,11 @@
         },
         {
           "start": [
-            64,
+            66,
             44
           ],
           "end": [
-            64,
+            66,
             48
           ],
           "node": "lvar",
@@ -5665,11 +5857,11 @@
         },
         {
           "start": [
-            64,
+            66,
             43
           ],
           "end": [
-            64,
+            66,
             49
           ],
           "node": "array",
@@ -5677,11 +5869,11 @@
         },
         {
           "start": [
-            64,
+            66,
             5
           ],
           "end": [
-            64,
+            66,
             59
           ],
           "node": "array",
@@ -5689,11 +5881,11 @@
         },
         {
           "start": [
-            64,
+            66,
             51
           ],
           "end": [
-            64,
+            66,
             58
           ],
           "node": "array",
@@ -5701,11 +5893,11 @@
         },
         {
           "start": [
-            64,
+            66,
             51
           ],
           "end": [
-            64,
+            66,
             58
           ],
           "node": "array",
@@ -5713,11 +5905,11 @@
         },
         {
           "start": [
-            64,
+            66,
             52
           ],
           "end": [
-            64,
+            66,
             57
           ],
           "node": "splat",
@@ -5725,11 +5917,11 @@
         },
         {
           "start": [
-            64,
+            66,
             53
           ],
           "end": [
-            64,
+            66,
             57
           ],
           "node": "lvar",
@@ -5737,11 +5929,11 @@
         },
         {
           "start": [
-            64,
+            66,
             52
           ],
           "end": [
-            64,
+            66,
             57
           ],
           "node": "splat",
@@ -5750,16 +5942,16 @@
       ]
     },
     {
-      "subject": "singleton_super:67",
+      "subject": "singleton_super:69",
       "sexp": "(defs (self) :singleton_super (args (arg :a)) (zsuper))",
       "mutants": [
         {
           "start": [
-            68,
+            70,
             5
           ],
           "end": [
-            68,
+            70,
             10
           ],
           "node": "zsuper",
@@ -5767,11 +5959,11 @@
         },
         {
           "start": [
-            68,
+            70,
             5
           ],
           "end": [
-            68,
+            70,
             10
           ],
           "node": "zsuper",
@@ -5779,11 +5971,11 @@
         },
         {
           "start": [
-            68,
+            70,
             5
           ],
           "end": [
-            68,
+            70,
             10
           ],
           "node": "zsuper",
@@ -5791,11 +5983,11 @@
         },
         {
           "start": [
-            68,
+            70,
             5
           ],
           "end": [
-            68,
+            70,
             10
           ],
           "node": "zsuper",
@@ -5804,16 +5996,16 @@
       ]
     },
     {
-      "subject": "imaginary:71",
+      "subject": "imaginary:73",
       "sexp": "(def :imaginary (args) (array (complex (0+0i)) (complex (0+1i)) (complex (0-2i))))",
       "mutants": [
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5821,11 +6013,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5833,11 +6025,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5845,11 +6037,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5857,11 +6049,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5869,11 +6061,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5881,11 +6073,11 @@
         },
         {
           "start": [
-            72,
+            74,
             6
           ],
           "end": [
-            72,
+            74,
             8
           ],
           "node": "complex",
@@ -5893,11 +6085,11 @@
         },
         {
           "start": [
-            72,
+            74,
             6
           ],
           "end": [
-            72,
+            74,
             8
           ],
           "node": "complex",
@@ -5905,11 +6097,11 @@
         },
         {
           "start": [
-            72,
+            74,
             6
           ],
           "end": [
-            72,
+            74,
             8
           ],
           "node": "complex",
@@ -5917,11 +6109,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5929,11 +6121,11 @@
         },
         {
           "start": [
-            72,
+            74,
             10
           ],
           "end": [
-            72,
+            74,
             12
           ],
           "node": "complex",
@@ -5941,11 +6133,11 @@
         },
         {
           "start": [
-            72,
+            74,
             10
           ],
           "end": [
-            72,
+            74,
             12
           ],
           "node": "complex",
@@ -5953,11 +6145,11 @@
         },
         {
           "start": [
-            72,
+            74,
             10
           ],
           "end": [
-            72,
+            74,
             12
           ],
           "node": "complex",
@@ -5965,11 +6157,11 @@
         },
         {
           "start": [
-            72,
+            74,
             5
           ],
           "end": [
-            72,
+            74,
             18
           ],
           "node": "array",
@@ -5977,11 +6169,11 @@
         },
         {
           "start": [
-            72,
+            74,
             14
           ],
           "end": [
-            72,
+            74,
             17
           ],
           "node": "complex",
@@ -5989,11 +6181,11 @@
         },
         {
           "start": [
-            72,
+            74,
             14
           ],
           "end": [
-            72,
+            74,
             17
           ],
           "node": "complex",
@@ -6001,11 +6193,11 @@
         },
         {
           "start": [
-            72,
+            74,
             14
           ],
           "end": [
-            72,
+            74,
             17
           ],
           "node": "complex",
@@ -6013,11 +6205,11 @@
         },
         {
           "start": [
-            72,
+            74,
             14
           ],
           "end": [
-            72,
+            74,
             17
           ],
           "node": "complex",
@@ -6025,11 +6217,11 @@
         },
         {
           "start": [
-            72,
+            74,
             14
           ],
           "end": [
-            72,
+            74,
             17
           ],
           "node": "complex",

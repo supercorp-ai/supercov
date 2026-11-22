@@ -256,7 +256,8 @@ fn float(bits: u64) -> String {
 
 impl Printer<'_> {
     fn slice(&self, node: &N) -> Option<String> {
-        if node.has(syntax::SYNTHETIC | syntax::WORD | syntax::HEREDOC) {
+        // An `elsif`'s text is no `if` of its own.
+        if node.has(syntax::SYNTHETIC | syntax::WORD | syntax::HEREDOC | syntax::ELSIF) {
             return None;
         }
         let (start, end) = node.span?;

@@ -793,6 +793,59 @@ fn ruby_methods_with_unconverted_syntax_are_skipped_by_name() {
             "syntax this port does not convert",
         ),
         ("def m\n  1.5i\nend\n", "an imaginary literal"),
+        // The same refusals where they sit inside other syntax.
+        (
+            "def m(a)\n  /a\n  b/ =~ a\nend\n",
+            "a regexp over several lines",
+        ),
+        (
+            "def m(a)\n  /(?<x>a\n  b)/ =~ a\nend\n",
+            "a regexp over several lines",
+        ),
+        (
+            "def m(b)\n  \"a\\\n  #{b}\"\nend\n",
+            "a string with escaped line breaks",
+        ),
+        (
+            "def m(a)\n  (a.b(1.5i).c, d), e = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  b, *a.c(1.5i).d = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  *b, a.c(1.5i).d = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  (*a.c(1.5i).d), b = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  (b, *c), a.c(1.5i).d = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  ((b, a.c(1.5i).d)), e = a\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m(a)\n  for a.c(1.5i).d in a\n  end\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m\n  alias :\"a#{1.5i}\" b\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m\n  alias b :\"a#{1.5i}\"\nend\n",
+            "an imaginary literal",
+        ),
+        (
+            "def m\n  undef :\"a#{1.5i}\"\nend\n",
+            "an imaginary literal",
+        ),
     ];
     for (source, reason) in cases {
         let file = format!("{source}\ndef fine(a)\n  a + 1\nend\n");

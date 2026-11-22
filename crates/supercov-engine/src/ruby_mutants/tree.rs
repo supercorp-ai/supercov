@@ -319,11 +319,11 @@ fn integer_text(value: ruby_prism::Integer<'_>) -> String {
     let mut decimal = Vec::new();
     loop {
         let mut remainder: u64 = 0;
-        for digit in digits.iter_mut().rev() {
+        digits.iter_mut().rev().for_each(|digit| {
             let current = (remainder << 32) | u64::from(*digit);
             *digit = (current / 10) as u32;
             remainder = current % 10;
-        }
+        });
         decimal.push(b'0' + remainder as u8);
         if digits.iter().all(|digit| *digit == 0) {
             break;
@@ -396,8 +396,8 @@ impl<'s> Converter<'s> {
             .iter()
             .map(|statement| Ok(marked(self.convert(&statement)?, syntax::STATEMENT)))
             .collect::<Result<Vec<_>, Unsupported>>()?;
+        // Prism's statement lists hold one statement at least.
         Ok(match converted.len() {
-            0 => Child::Nil,
             1 => node(converted.pop().expect("one")),
             _ => node(made_with(
                 "begin",
@@ -760,11 +760,9 @@ impl<'s> Converter<'s> {
         let call_at = (at.0, call_end);
         if call_operator.is_none() {
             match selector.as_str() {
+                // `!x`, `not x`, `not()` (whose operand is empty parentheses).
                 "!" => {
-                    let receiver = match receiver {
-                        Some(receiver) => node(self.convert(&receiver)?),
-                        None => node(made("begin", Vec::new(), at)),
-                    };
+                    let receiver = node(self.convert(&receiver.expect("an operand"))?);
                     let not = made("send", vec![receiver, sym("!")], call_at);
                     return self.with_block(not, block, at);
                 }
@@ -1201,7 +1199,7 @@ impl<'s> Converter<'s> {
                     .is_some_and(|opening| self.text(&opening).starts_with(b"<<"))
                 {
                     let mut parts = Vec::new();
-                    for part in &string.parts() {
+                    string.parts().iter().try_for_each(|part| {
                         match part.as_string_node() {
                             Some(text) => parts.extend(
                                 text.unescaped()
@@ -1210,19 +1208,13 @@ impl<'s> Converter<'s> {
                             ),
                             None => parts.push(HeredocPart::Node(self.convert(&part)?)),
                         }
-                    }
+                        Ok::<(), Unsupported>(())
+                    })?;
                     return Ok(heredoc(parts, at));
                 }
+                // A string with interpolation, or strings written one after
+                // another (`"a" "b"`): two parts, or one interpolation.
                 let parts = self.string_parts(string.parts())?;
-                if parts.len() == 1
-                    && parts[0]
-                        .node()
-                        .is_some_and(|part| matches!(part.ty, "str" | "dstr"))
-                {
-                    let mut copy = (**parts[0].node().expect("node")).clone();
-                    copy.span = Some(at);
-                    return Ok(Rc::new(copy));
-                }
                 leaf("dstr", parts)
             }
             Node::XStringNode { .. } => {
@@ -1348,7 +1340,11 @@ impl<'s> Converter<'s> {
                 let shorthand = assoc.value().as_implicit_node().is_some();
                 let value_node = match assoc.value().as_implicit_node() {
                     Some(implicit) => {
-                        let mut converted = (*self.convert(&implicit.value())?).clone();
+                        // A local, a method or a constant: always converted.
+                        let mut converted = (*self
+                            .convert(&implicit.value())
+                            .expect("a shorthand's value"))
+                        .clone();
                         converted.span = key
                             .as_symbol_node()
                             .and_then(|symbol| symbol.value_loc())
@@ -1429,42 +1425,24 @@ impl<'s> Converter<'s> {
             }
             Node::ParenthesesNode { .. } => {
                 let parens = value.as_parentheses_node().expect("parens");
-                match parens.body() {
-                    None => leaf("begin", Vec::new()),
-                    Some(body) => {
-                        let inner = match body.as_statements_node() {
-                            Some(statements) => self.statements(Some(statements))?,
-                            None => node(self.convert(&body)?),
-                        };
-                        match inner {
-                            Child::Node(inner)
-                                if (inner.ty == "begin" && inner.has(syntax::SYNTHETIC))
-                                    || inner.ty == "mlhs" =>
-                            {
-                                leaf(inner.ty, inner.children.clone())
-                            }
-                            Child::Nil => leaf("begin", Vec::new()),
-                            inner => leaf("begin", vec![inner]),
-                        }
-                    }
-                }
-            }
-            Node::StatementsNode { .. } => {
-                let statements = value.as_statements_node().expect("statements");
+                let Some(body) = parens.body() else {
+                    return leaf("begin", Vec::new());
+                };
+                // A method's receiver in parentheses is read apart; any other
+                // parentheses hold statements.
+                let statements = body.as_statements_node().expect("statements");
                 match self.statements(Some(statements))? {
-                    Child::Node(inner) => Ok(inner),
-                    _ => leaf("begin", Vec::new()),
+                    Child::Node(inner) if inner.ty == "begin" && inner.has(syntax::SYNTHETIC) => {
+                        leaf("begin", inner.children.clone())
+                    }
+                    inner => leaf("begin", vec![inner]),
                 }
             }
             Node::BeginNode { .. } => {
+                // `begin ... end`: a body with clauses but no keyword is read as
+                // a method's or a block's body.
                 let begin = value.as_begin_node().expect("begin");
                 let body = self.begin_body(&begin)?;
-                if begin.begin_keyword_loc().is_none() {
-                    return match body {
-                        Some(body) => Ok(body),
-                        None => leaf("begin", Vec::new()),
-                    };
-                }
                 match body {
                     None => leaf("kwbegin", Vec::new()),
                     Some(body) if body.ty == "begin" && body.has(syntax::SYNTHETIC) => {
@@ -1574,20 +1552,13 @@ impl<'s> Converter<'s> {
             Node::CaseNode { .. } => {
                 let case = value.as_case_node().expect("case");
                 let mut children = vec![self.optional(case.predicate())?];
-                for condition in &case.conditions() {
-                    let when = condition.as_when_node().expect("when");
-                    let mut parts = self.all(when.conditions().iter())?;
-                    parts.push(self.statements(when.statements())?);
-                    let end = when
-                        .statements()
-                        .map(|statements| statements.location().end_offset())
-                        .unwrap_or(condition.location().end_offset());
-                    children.push(node(made(
-                        "when",
-                        parts,
-                        (condition.location().start_offset(), end),
-                    )));
-                }
+                // A `case` has one `when` at least.
+                let clauses = case
+                    .conditions()
+                    .iter()
+                    .map(|condition| self.when_clause(&condition).map(node))
+                    .collect::<Result<Vec<_>, Unsupported>>()?;
+                children.extend(clauses);
                 children.push(match case.else_clause() {
                     Some(else_node) => self.statements(else_node.statements())?,
                     None => Child::Nil,
@@ -1597,49 +1568,12 @@ impl<'s> Converter<'s> {
             Node::CaseMatchNode { .. } => {
                 let case = value.as_case_match_node().expect("case_match");
                 let mut children = vec![self.optional(case.predicate())?];
-                for condition in &case.conditions() {
-                    let in_node = condition.as_in_node().expect("in");
-                    let (pattern, guard) = match (
-                        in_node.pattern().as_if_node(),
-                        in_node.pattern().as_unless_node(),
-                    ) {
-                        (Some(guarded), _) => {
-                            let pattern = self.pattern_statements(guarded.statements())?;
-                            let predicate = self.convert(&guarded.predicate())?;
-                            (
-                                pattern,
-                                node(made(
-                                    "if_guard",
-                                    vec![node(predicate)],
-                                    span(&guarded.predicate().location()),
-                                )),
-                            )
-                        }
-                        (_, Some(guarded)) => {
-                            let pattern = self.pattern_statements(guarded.statements())?;
-                            let predicate = self.convert(&guarded.predicate())?;
-                            (
-                                pattern,
-                                node(made(
-                                    "unless_guard",
-                                    vec![node(predicate)],
-                                    span(&guarded.predicate().location()),
-                                )),
-                            )
-                        }
-                        _ => (self.pattern(&in_node.pattern())?, Child::Nil),
-                    };
-                    let body = self.statements(in_node.statements())?;
-                    let end = in_node
-                        .statements()
-                        .map(|statements| statements.location().end_offset())
-                        .unwrap_or(condition.location().end_offset());
-                    children.push(node(made(
-                        "in_pattern",
-                        vec![node(pattern), guard, body],
-                        (condition.location().start_offset(), end),
-                    )));
-                }
+                let clauses = case
+                    .conditions()
+                    .iter()
+                    .map(|condition| self.in_clause(&condition).map(node))
+                    .collect::<Result<Vec<_>, Unsupported>>()?;
+                children.extend(clauses);
                 children.push(match case.else_clause() {
                     Some(else_node) => self.statements(else_node.statements())?,
                     None => Child::Nil,
@@ -2051,9 +1985,10 @@ impl<'s> Converter<'s> {
                 leaf("alias", vec![node(new_name), node(old_name)])
             }
             Node::AliasGlobalVariableNode { .. } => {
+                // Globals (`$a`, `$&`, `$1`): always converted.
                 let alias = value.as_alias_global_variable_node().expect("alias");
-                let new_name = self.convert(&alias.new_name())?;
-                let old_name = self.convert(&alias.old_name())?;
+                let new_name = self.convert(&alias.new_name()).expect("a global");
+                let old_name = self.convert(&alias.old_name()).expect("a global");
                 leaf("alias", vec![node(new_name), node(old_name)])
             }
             Node::UndefNode { .. } => {
@@ -2068,6 +2003,67 @@ impl<'s> Converter<'s> {
             Node::FlipFlopNode { .. } => self.unsupported("a flip-flop", &location),
             _ => self.unsupported("syntax this port does not convert", &location),
         }
+    }
+
+    /// A `when` and its body.
+    fn when_clause(&mut self, condition: &Node<'s>) -> Built {
+        let when = condition.as_when_node().expect("when");
+        let mut parts = self.all(when.conditions().iter())?;
+        parts.push(self.statements(when.statements())?);
+        let end = when
+            .statements()
+            .map(|statements| statements.location().end_offset())
+            .unwrap_or(condition.location().end_offset());
+        Ok(made(
+            "when",
+            parts,
+            (condition.location().start_offset(), end),
+        ))
+    }
+
+    /// An `in` with its pattern, guard and body.
+    fn in_clause(&mut self, condition: &Node<'s>) -> Built {
+        let in_node = condition.as_in_node().expect("in");
+        let (pattern, guard) = match (
+            in_node.pattern().as_if_node(),
+            in_node.pattern().as_unless_node(),
+        ) {
+            (Some(guarded), _) => {
+                let pattern = self.pattern_statements(guarded.statements())?;
+                let predicate = self.convert(&guarded.predicate())?;
+                (
+                    pattern,
+                    node(made(
+                        "if_guard",
+                        vec![node(predicate)],
+                        span(&guarded.predicate().location()),
+                    )),
+                )
+            }
+            (_, Some(guarded)) => {
+                let pattern = self.pattern_statements(guarded.statements())?;
+                let predicate = self.convert(&guarded.predicate())?;
+                (
+                    pattern,
+                    node(made(
+                        "unless_guard",
+                        vec![node(predicate)],
+                        span(&guarded.predicate().location()),
+                    )),
+                )
+            }
+            _ => (self.pattern(&in_node.pattern())?, Child::Nil),
+        };
+        let body = self.statements(in_node.statements())?;
+        let end = in_node
+            .statements()
+            .map(|statements| statements.location().end_offset())
+            .unwrap_or(condition.location().end_offset());
+        Ok(made(
+            "in_pattern",
+            vec![node(pattern), guard, body],
+            (condition.location().start_offset(), end),
+        ))
     }
 
     fn array_elements(
@@ -2119,7 +2115,10 @@ impl<'s> Converter<'s> {
         }
         if let Some(capture) = pattern.as_capture_pattern_node() {
             let value = self.pattern(&capture.value())?;
-            let target = self.pattern(&capture.target().as_node())?;
+            // `=> name`: a local.
+            let target = self
+                .pattern(&capture.target().as_node())
+                .expect("a capture's local");
             return Ok(made("match_as", vec![node(value), node(target)], at));
         }
         if let Some(alternation) = pattern.as_alternation_pattern_node() {
@@ -2128,7 +2127,8 @@ impl<'s> Converter<'s> {
             return Ok(made("match_alt", vec![node(left), node(right)], at));
         }
         if let Some(pinned) = pattern.as_pinned_variable_node() {
-            let variable = self.convert(&pinned.variable())?;
+            // `^a`, `^@a`, `^$a`: a variable.
+            let variable = self.convert(&pinned.variable()).expect("a variable");
             return Ok(made("pin", vec![node(variable)], at));
         }
         if let Some(array) = pattern.as_array_pattern_node() {
@@ -2143,7 +2143,8 @@ impl<'s> Converter<'s> {
                 if rest.as_implicit_rest_node().is_some() {
                     return self.unsupported("an implicit rest pattern", &location);
                 }
-                elements.push(node(self.pattern(&rest)?));
+                // `*name` or `*`: a local at most.
+                elements.push(node(self.pattern(&rest).expect("a rest pattern")));
             }
             for post in &array.posts() {
                 elements.push(node(self.pattern(&post)?));
@@ -2151,10 +2152,11 @@ impl<'s> Converter<'s> {
             return Ok(made("array_pattern", elements, at));
         }
         if let Some(splat) = pattern.as_splat_node() {
-            let children = match splat.expression() {
-                Some(expression) => vec![node(self.pattern(&expression)?)],
-                None => Vec::new(),
-            };
+            // `*name`: a local.
+            let children = splat
+                .expression()
+                .map(|expression| vec![node(self.pattern(&expression).expect("a local"))])
+                .unwrap_or_default();
             return Ok(made("match_rest", children, at));
         }
         if let Some(hash) = pattern.as_hash_pattern_node() {
@@ -2178,9 +2180,7 @@ impl<'s> Converter<'s> {
                     continue;
                 }
                 let value = self.pattern(&assoc.value())?;
-                let key_at = symbol
-                    .value_loc()
-                    .map_or_else(|| span(&key.location()), |value_loc| span(&value_loc));
+                let key_at = span(&symbol.value_loc().expect("a key's name"));
                 let key_node = made_with("sym", vec![sym(key_name)], key_at, syntax::LABEL);
                 elements.push(node(made_with(
                     "pair",
@@ -2192,7 +2192,7 @@ impl<'s> Converter<'s> {
             if let Some(rest) = hash.rest() {
                 if let Some(splat) = rest.as_assoc_splat_node() {
                     let children = match splat.value() {
-                        Some(value) => vec![node(self.pattern(&value)?)],
+                        Some(value) => vec![node(self.pattern(&value).expect("a local"))],
                         None => Vec::new(),
                     };
                     elements.push(node(made("match_rest", children, span(&rest.location()))));
@@ -2226,7 +2226,7 @@ fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
     let mut children: Vec<Child> = Vec::new();
     for part in parts {
         match part {
-            HeredocPart::Text(text) if text.is_empty() => {}
+            // Each a line's text: never empty.
             HeredocPart::Text(text) => {
                 // A line without its line break yet (a `str`, the only node
                 // whose first child is text): the text joins it.
@@ -2255,10 +2255,10 @@ fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
             HeredocPart::Node(value) => children.push(node(value)),
         }
     }
-    if children.len() == 1
-        && let Some(only) = children[0].node()
-        && only.ty == "str"
-    {
+    // One part left is one line of text: an interpolation is followed by
+    // its line's break.
+    if let [only] = children.as_slice() {
+        let only = only.node().expect("a line");
         return made_with("str", only.children.clone(), at, syntax::HEREDOC);
     }
     made_with("dstr", children, at, syntax::HEREDOC)

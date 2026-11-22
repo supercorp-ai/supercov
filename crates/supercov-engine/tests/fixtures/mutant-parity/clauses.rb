@@ -72,6 +72,9 @@ class Clauses
     end
     ()
     (a; a.call)
+    begin
+      (a; a.call)
+    end
     a.call while a
     begin
       a.call
@@ -125,6 +128,8 @@ class Clauses
       rest
     in {age: 1, **}
       1
+    in {**nil}
+      nil
     in ^value
       value
     in [[1, 2], *rest, 3]
@@ -149,7 +154,7 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
   end
 
   def interpolations(name)
-    ["#{}", "#{name; name}", "#{name}", "a#@name", `ls`, `ls #{name}`, ``]
+    ["#{}", "#{name; name}", "#{(name; name)}", "#{name}", "a#@name", `ls`, `ls #{name}`, ``]
   end
 
   def regexps(text)
@@ -176,7 +181,11 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
       one #{name}
       two
     TEXT
-    [a, b]
+    c = <<~TEXT
+      joined \
+      line
+    TEXT
+    [a, b, c]
   end
 
   def conditionals(a, b)
@@ -190,6 +199,11 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
       2
     end
     if a then 1 end
+    if a
+      1
+    elsif b
+    end
+    if a then 1 elsif b then end
     unless a
       1
     else

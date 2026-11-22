@@ -60,6 +60,10 @@ class Forms
     list.each { |(a, b), c| a + b + c }
     list.each { |*a, b| b }
     list.each { |a, b = 1| a + b }
+    list.each { |a, *b, c| c }
+    list.each { |a, b:| b }
+    list.each { |a, **b| b }
+    list.each { |a, &b| b }
     list.map { _1 + _2 }
     list.map { it + 1 }
     list.each do |a|
@@ -130,6 +134,7 @@ class Forms
     (*o, p), q = list
     (r, *s, t), u = list
     (v, ), w = list
+    ((x, y)) = list
     @m, @@n, $o = list
     list.first, list[1] = list
     [a, b, c, d, e, f, g, h, i, j, k, l]
@@ -155,6 +160,7 @@ class Forms
     super(a) { a }
     super { a }
     super(&block)
+    super a do a end
   end
 
   def yields(a)
