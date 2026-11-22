@@ -25,6 +25,10 @@ class Forms
     a
   end
 
+  def (Forms.itself).on_call(a)
+    a
+  end
+
   def posts(a, *rest, b, c)
     [a, rest, b, c]
   end
@@ -55,6 +59,7 @@ class Forms
     list.each { || 1 }
     list.each { |(a, b), c| a + b + c }
     list.each { |*a, b| b }
+    list.each { |a, b = 1| a + b }
     list.map { _1 + _2 }
     list.map { it + 1 }
     list.each do |a|
@@ -79,6 +84,7 @@ class Forms
     -> do 2 end
     -> { _1 }
     -> { it }
+    ->(; c) { c }
   end
 
   def safe(user, value)
@@ -120,6 +126,10 @@ class Forms
     h, * = list
     (i, j), k = list
     l, = list
+    (m, *n), = list
+    (*o, p), q = list
+    (r, *s, t), u = list
+    (v, ), w = list
     @m, @@n, $o = list
     list.first, list[1] = list
     [a, b, c, d, e, f, g, h, i, j, k, l]

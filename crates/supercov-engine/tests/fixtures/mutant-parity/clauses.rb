@@ -17,7 +17,7 @@ class Clauses
       a.call
     rescue ArgumentError => e
       e
-    rescue TypeError
+    rescue TypeError => a&.error
       retry
     else
       a
@@ -164,6 +164,7 @@ lines", "é\x01\x7f", 'it''s', "a" "b", :"a#{name}", %w[a b], %W[a #{name}], %i[
     {"a b": 1, "c": 2}
     {a => 1, :b => 2}
     {nil => 1, self => 2}
+    {"a#{b}": 1}
     {}
   end
 

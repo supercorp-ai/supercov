@@ -729,7 +729,9 @@ impl Printer<'_> {
                     .iter()
                     .map(|child| self.target(child.node()?))
                     .collect::<Option<Vec<_>>>()?;
-                Some(format!("({})", inner.join(", ")))
+                // `(a,)`: one target is still a nested assignment.
+                let comma = if inner.len() == 1 { "," } else { "" };
+                Some(format!("({}{comma})", inner.join(", ")))
             }
             "splat" => match node.node(0) {
                 Some(inner) => Some(format!("*{}", self.target(inner)?)),
@@ -794,6 +796,16 @@ impl Printer<'_> {
             }
             _ => self.expression(node),
         }
+    }
+
+    /// A method's code; a singleton method's children start at `offset`.
+    fn def(&self, node: &N, receiver: String, offset: usize) -> Option<String> {
+        let parameters = self.arguments_list(node.node(offset + 1)?, false)?;
+        Some(format!(
+            "def {receiver}{}{parameters}; {}; end",
+            node.child(offset).sym()?,
+            self.statements(node.child(offset + 2))?
+        ))
     }
 
     /// A call's code: receiver, selector and arguments.
@@ -1254,23 +1266,17 @@ impl Printer<'_> {
                 self.expression(node.node(0)?)?,
                 self.operand(node.node(1)?)?
             ),
-            "def" | "defs" => {
-                let (name, arguments, body) = if node.ty == "def" {
-                    (0, 1, 2)
-                } else {
-                    (1, 2, 3)
+            "def" => self.def(node, String::new(), 0)?,
+            "defs" => {
+                // `def self.m`, `def Const.m`; any other receiver in
+                // parentheses.
+                let receiver = node.node(0)?;
+                let text = self.expression(receiver)?;
+                let receiver = match receiver.ty {
+                    "self" | "lvar" | "ivar" | "gvar" | "cvar" | "const" => text,
+                    _ => format!("({text})"),
                 };
-                let receiver = if node.ty == "defs" {
-                    format!("{}.", self.operand(node.node(0)?)?)
-                } else {
-                    String::new()
-                };
-                let parameters = self.arguments_list(node.node(arguments)?, false)?;
-                format!(
-                    "def {receiver}{}{parameters}; {}; end",
-                    node.child(name).sym()?,
-                    self.statements(node.child(body))?
-                )
+                self.def(node, format!("{receiver}."), 1)?
             }
             "alias" => format!(
                 "alias {} {}",

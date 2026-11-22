@@ -414,10 +414,12 @@ impl<'s> Converter<'s> {
         };
         let tree = match def.receiver() {
             Some(receiver) => {
+                // `def (expression).name`: the expression.
                 let receiver = match receiver.as_parentheses_node() {
-                    Some(parens) => self.optional(parens.body())?,
-                    None => node(self.convert(&receiver)?),
+                    Some(parens) => parens.body(),
+                    None => Some(receiver),
                 };
+                let receiver = self.optional(receiver)?;
                 made_with(
                     "defs",
                     vec![receiver, sym(name(&def.name())), node(args), body],
@@ -441,10 +443,10 @@ impl<'s> Converter<'s> {
         if let Some(statements) = body.as_statements_node() {
             return self.statements(Some(statements));
         }
-        if let Some(begin) = body.as_begin_node() {
-            return Ok(opt(self.begin_body(&begin)?));
-        }
-        Ok(node(marked(self.convert(body)?, syntax::STATEMENT)))
+        let begin = body
+            .as_begin_node()
+            .expect("a body is statements, or a begin with its clauses");
+        Ok(opt(self.begin_body(&begin)?))
     }
 
     fn def_args(&mut self, def: &ruby_prism::DefNode<'s>) -> Built {
@@ -467,117 +469,141 @@ impl<'s> Converter<'s> {
         &mut self,
         parameters: &ruby_prism::ParametersNode<'s>,
     ) -> Result<Vec<Child>, Unsupported> {
-        let mut out = Vec::new();
-        for required in &parameters.requireds() {
-            out.push(node(self.parameter(&required)?));
-        }
-        for optional in &parameters.optionals() {
-            out.push(node(self.parameter(&optional)?));
-        }
+        let mut out: Vec<Child> = parameters
+            .requireds()
+            .iter()
+            .map(|required| node(plain_parameter(&required)))
+            .collect();
+        // Only a default value holds code that may not convert.
+        out.extend(self.defaulted(parameters.optionals())?);
         if let Some(rest) = parameters.rest()
             && rest.as_implicit_rest_node().is_none()
         {
-            out.push(node(self.parameter(&rest)?));
+            out.push(node(plain_parameter(&rest)));
         }
-        for post in &parameters.posts() {
-            out.push(node(self.parameter(&post)?));
-        }
-        for keyword in &parameters.keywords() {
-            out.push(node(self.parameter(&keyword)?));
-        }
+        out.extend(
+            parameters
+                .posts()
+                .iter()
+                .map(|post| node(plain_parameter(&post))),
+        );
+        out.extend(self.defaulted(parameters.keywords())?);
         if let Some(rest) = parameters.keyword_rest() {
-            out.push(node(self.parameter(&rest)?));
+            out.push(node(plain_parameter(&rest)));
         }
         if let Some(block) = parameters.block() {
-            out.push(node(self.parameter(&block.as_node())?));
+            out.push(node(plain_parameter(&block.as_node())));
         }
         Ok(out)
     }
 
-    fn parameter(&mut self, parameter: &Node<'s>) -> Built {
-        let at = span(&parameter.location());
-        if let Some(required) = parameter.as_required_parameter_node() {
-            return Ok(made("arg", vec![sym(name(&required.name()))], at));
-        }
-        if let Some(optional) = parameter.as_optional_parameter_node() {
-            let value = self.convert(&optional.value())?;
-            return Ok(made(
-                "optarg",
-                vec![sym(name(&optional.name())), node(value)],
-                at,
-            ));
-        }
-        if let Some(rest) = parameter.as_rest_parameter_node() {
-            let children = rest
-                .name()
-                .map(|id| vec![sym(name(&id))])
-                .unwrap_or_default();
-            return Ok(made("restarg", children, at));
-        }
-        if let Some(keyword) = parameter.as_required_keyword_parameter_node() {
-            return Ok(made("kwarg", vec![sym(name(&keyword.name()))], at));
-        }
-        if let Some(keyword) = parameter.as_optional_keyword_parameter_node() {
-            let value = self.convert(&keyword.value())?;
-            return Ok(made(
-                "kwoptarg",
-                vec![sym(name(&keyword.name())), node(value)],
-                at,
-            ));
-        }
-        if let Some(rest) = parameter.as_keyword_rest_parameter_node() {
-            let children = rest
-                .name()
-                .map(|id| vec![sym(name(&id))])
-                .unwrap_or_default();
-            return Ok(made("kwrestarg", children, at));
-        }
-        if parameter.as_forwarding_parameter_node().is_some() {
-            return Ok(made("forward_arg", Vec::new(), at));
-        }
-        if parameter.as_no_keywords_parameter_node().is_some() {
-            return Ok(made("kwnilarg", Vec::new(), at));
-        }
-        if let Some(block) = parameter.as_block_parameter_node() {
-            let name = block.name().map_or(Child::Nil, |id| sym(name(&id)));
-            return Ok(made("blockarg", vec![name], at));
-        }
-        if let Some(target) = parameter.as_multi_target_node() {
-            let mut elements = Vec::new();
-            for left in &target.lefts() {
-                elements.push(node(self.parameter(&left)?));
-            }
-            if let Some(rest) = target.rest()
-                && rest.as_implicit_rest_node().is_none()
-            {
-                elements.push(node(self.parameter(&rest)?));
-            }
-            for right in &target.rights() {
-                elements.push(node(self.parameter(&right)?));
-            }
-            return Ok(made("mlhs", elements, at));
-        }
-        if let Some(splat) = parameter.as_splat_node() {
-            // A destructuring rest, `|(a, *b)|`: Ruby names it or leaves it
-            // anonymous.
-            let children = splat
-                .expression()
-                .map(|expression| {
-                    let required = expression
-                        .as_required_parameter_node()
-                        .expect("a destructuring rest names a parameter");
-                    vec![sym(name(&required.name()))]
-                })
-                .unwrap_or_default();
-            return Ok(made("restarg", children, at));
-        }
-        // The last kind a block's parameters hold.
-        let block_local = parameter
-            .as_block_local_variable_node()
-            .expect("a parameter of a kind Prism builds");
-        Ok(made("shadowarg", vec![sym(name(&block_local.name()))], at))
+    /// Optional or keyword parameters: those with a default, its value
+    /// converted.
+    fn defaulted(
+        &mut self,
+        parameters: ruby_prism::NodeList<'s>,
+    ) -> Result<Vec<Child>, Unsupported> {
+        parameters
+            .iter()
+            .map(|each| {
+                let at = span(&each.location());
+                if let Some(optional) = each.as_optional_parameter_node() {
+                    let value = self.convert(&optional.value())?;
+                    return Ok(node(made(
+                        "optarg",
+                        vec![sym(name(&optional.name())), node(value)],
+                        at,
+                    )));
+                }
+                if let Some(keyword) = each.as_optional_keyword_parameter_node() {
+                    let value = self.convert(&keyword.value())?;
+                    return Ok(node(made(
+                        "kwoptarg",
+                        vec![sym(name(&keyword.name())), node(value)],
+                        at,
+                    )));
+                }
+                Ok(node(plain_parameter(&each)))
+            })
+            .collect()
     }
+}
 
+/// A parameter without a default value: `(arg :a)`, `(restarg)`,
+/// `(mlhs ...)`, `(shadowarg :b)`, ...
+fn plain_parameter(parameter: &Node<'_>) -> Rc<N> {
+    let at = span(&parameter.location());
+    if let Some(required) = parameter.as_required_parameter_node() {
+        return made("arg", vec![sym(name(&required.name()))], at);
+    }
+    if let Some(rest) = parameter.as_rest_parameter_node() {
+        let children = rest
+            .name()
+            .map(|id| vec![sym(name(&id))])
+            .unwrap_or_default();
+        return made("restarg", children, at);
+    }
+    if let Some(keyword) = parameter.as_required_keyword_parameter_node() {
+        return made("kwarg", vec![sym(name(&keyword.name()))], at);
+    }
+    if let Some(rest) = parameter.as_keyword_rest_parameter_node() {
+        let children = rest
+            .name()
+            .map(|id| vec![sym(name(&id))])
+            .unwrap_or_default();
+        return made("kwrestarg", children, at);
+    }
+    if parameter.as_forwarding_parameter_node().is_some() {
+        return made("forward_arg", Vec::new(), at);
+    }
+    if parameter.as_no_keywords_parameter_node().is_some() {
+        return made("kwnilarg", Vec::new(), at);
+    }
+    if let Some(block) = parameter.as_block_parameter_node() {
+        let name = block.name().map_or(Child::Nil, |id| sym(name(&id)));
+        return made("blockarg", vec![name], at);
+    }
+    if let Some(target) = parameter.as_multi_target_node() {
+        let mut elements: Vec<Child> = target
+            .lefts()
+            .iter()
+            .map(|left| node(plain_parameter(&left)))
+            .collect();
+        if let Some(rest) = target.rest()
+            && rest.as_implicit_rest_node().is_none()
+        {
+            elements.push(node(plain_parameter(&rest)));
+        }
+        elements.extend(
+            target
+                .rights()
+                .iter()
+                .map(|right| node(plain_parameter(&right))),
+        );
+        return made("mlhs", elements, at);
+    }
+    if let Some(splat) = parameter.as_splat_node() {
+        // A destructuring rest, `|(a, *b)|`: Ruby names it or leaves it
+        // anonymous.
+        let children = splat
+            .expression()
+            .map(|expression| {
+                let required = expression
+                    .as_required_parameter_node()
+                    .expect("a destructuring rest names a parameter");
+                vec![sym(name(&required.name()))]
+            })
+            .unwrap_or_default();
+        return made("restarg", children, at);
+    }
+    // The last kind a block's parameters hold.
+    let block_local = parameter
+        .as_block_local_variable_node()
+        .expect("a parameter of a kind Prism builds");
+    made("shadowarg", vec![sym(name(&block_local.name()))], at)
+}
+
+impl<'s> Converter<'s> {
     fn block_args(
         &mut self,
         parameters: Option<Node<'s>>,
@@ -605,7 +631,7 @@ impl<'s> Converter<'s> {
         if let Some(inner) = block.parameters() {
             if procarg0(&inner) {
                 let first = inner.requireds().first().expect("one required");
-                let visited = self.parameter(&first)?;
+                let visited = plain_parameter(&first);
                 let procarg = if visited.ty == "arg" {
                     made(
                         "procarg0",
@@ -622,9 +648,12 @@ impl<'s> Converter<'s> {
                 children.extend(self.parameters(&inner)?);
             }
         }
-        for local in &block.locals() {
-            children.push(node(self.parameter(&local)?));
-        }
+        children.extend(
+            block
+                .locals()
+                .iter()
+                .map(|local| node(plain_parameter(&local))),
+        );
         Ok(node(made_with(
             "args",
             children,
@@ -734,8 +763,7 @@ impl<'s> Converter<'s> {
                 // that may assign its named captures.
                 "=~" if receiver
                     .as_ref()
-                    .is_some_and(|receiver| receiver.as_regular_expression_node().is_some())
-                    && arguments.len() == 1 =>
+                    .is_some_and(|receiver| receiver.as_regular_expression_node().is_some()) =>
                 {
                     let regexp = self.convert(&receiver.expect("receiver"))?;
                     let mut children = vec![node(regexp)];
@@ -805,9 +833,9 @@ impl<'s> Converter<'s> {
             .unwrap_or(begin.location().start_offset());
         if let Some(first) = begin.rescue_clause() {
             let mut children = vec![body];
-            let mut clause = Some(first);
-            let mut end = start;
-            while let Some(current) = clause {
+            let mut current = first;
+            let mut end;
+            loop {
                 let exceptions = self.all(current.exceptions().iter())?;
                 let exceptions = if exceptions.is_empty() {
                     Child::Nil
@@ -845,7 +873,10 @@ impl<'s> Converter<'s> {
                     vec![exceptions, reference, statements],
                     (current.keyword_loc().start_offset(), clause_end),
                 )));
-                clause = current.subsequent();
+                let Some(next) = current.subsequent() else {
+                    break;
+                };
+                current = next;
             }
             match begin.else_clause() {
                 Some(else_clause) => {
@@ -1324,7 +1355,7 @@ impl<'s> Converter<'s> {
                 let label = assoc.operator_loc().is_none();
                 let key_node = self.convert(&key)?;
                 let key_node = match (label, key.as_symbol_node()) {
-                    (true, Some(symbol)) if symbol.value_loc().is_some() => {
+                    (true, Some(symbol)) => {
                         let mut copy = (*key_node).clone();
                         // `name:` is the name; `"a b":` its quotes too, as
                         // parser spans it.
@@ -1375,9 +1406,6 @@ impl<'s> Converter<'s> {
                     // `*` alone parses only where the method forwards it.
                     None => leaf("forwarded_restarg", Vec::new()),
                 }
-            }
-            Node::BlockArgumentNode { .. } => {
-                self.block_argument(&value.as_block_argument_node().expect("pass"))
             }
             Node::ForwardingArgumentsNode { .. } => leaf("forwarded_args", Vec::new()),
             Node::RangeNode { .. } => {
@@ -1967,9 +1995,12 @@ impl<'s> Converter<'s> {
                                 Some(inner) => self.parameters(&inner)?,
                                 None => Vec::new(),
                             };
-                            for local in &block.locals() {
-                                children.push(node(self.parameter(&local)?));
-                            }
+                            children.extend(
+                                block
+                                    .locals()
+                                    .iter()
+                                    .map(|local| node(plain_parameter(&local))),
+                            );
                             node(made_with(
                                 "args",
                                 children,
@@ -2006,10 +2037,6 @@ impl<'s> Converter<'s> {
                     (rescue.keyword_loc().start_offset(), at.1),
                 );
                 leaf("rescue", vec![node(expression), node(resbody), Child::Nil])
-            }
-            Node::ShareableConstantNode { .. } => {
-                let shareable = value.as_shareable_constant_node().expect("shareable");
-                self.convert(&shareable.write())
             }
             Node::AliasMethodNode { .. } => {
                 let alias = value.as_alias_method_node().expect("alias");
@@ -2070,14 +2097,11 @@ impl<'s> Converter<'s> {
     }
 
     fn pattern_statements(&mut self, statements: Option<ruby_prism::StatementsNode<'s>>) -> Built {
-        let Some(statements) = statements else {
-            return Err(Unsupported("an empty guarded pattern".into()));
-        };
-        let body = statements.body();
-        if body.iter().count() != 1 {
-            return self.unsupported("a guarded pattern", &statements.location());
-        }
-        self.pattern(&body.first().expect("one"))
+        // The guard's one statement is the pattern.
+        let pattern = statements
+            .and_then(|statements| statements.body().first())
+            .expect("a guarded pattern");
+        self.pattern(&pattern)
     }
 
     /// A pattern of `case ... in`, `in` and `=>`.
@@ -2133,13 +2157,11 @@ impl<'s> Converter<'s> {
             }
             let mut elements = Vec::new();
             for element in &hash.elements() {
-                let Some(assoc) = element.as_assoc_node() else {
-                    return self.unsupported("a hash pattern element", &location);
-                };
+                // `key: pattern` or `key:`, the key a plain symbol (Ruby
+                // refuses an interpolated one).
+                let assoc = element.as_assoc_node().expect("a hash pattern's pair");
                 let key = assoc.key();
-                let Some(symbol) = key.as_symbol_node() else {
-                    return self.unsupported("a hash pattern key", &location);
-                };
+                let symbol = key.as_symbol_node().expect("a hash pattern's key");
                 let key_name = String::from_utf8_lossy(symbol.unescaped()).into_owned();
                 if assoc.value().as_implicit_node().is_some() {
                     elements.push(node(made(
@@ -2168,14 +2190,13 @@ impl<'s> Converter<'s> {
                         None => Vec::new(),
                     };
                     elements.push(node(made("match_rest", children, span(&rest.location()))));
-                } else if rest.as_no_keywords_parameter_node().is_some() {
+                } else {
+                    // `**nil`, the other rest.
                     elements.push(node(made(
                         "match_nil_pattern",
                         Vec::new(),
                         span(&rest.location()),
                     )));
-                } else {
-                    return self.unsupported("a hash pattern rest", &location);
                 }
             }
             return Ok(made("hash_pattern", elements, at));
@@ -2201,32 +2222,29 @@ fn heredoc(parts: Vec<HeredocPart>, at: (usize, usize)) -> Rc<N> {
         match part {
             HeredocPart::Text(text) if text.is_empty() => {}
             HeredocPart::Text(text) => {
-                let joins = children.last().and_then(Child::node).is_some_and(|last| {
-                    last.ty == "str"
-                        && matches!(last.child(0), Child::Str(bytes) if !bytes.ends_with(b"\n"))
-                });
-                if joins {
-                    let Some(Child::Node(last)) = children.pop() else {
-                        unreachable!()
-                    };
-                    let Child::Str(mut bytes) = last.child(0).clone() else {
-                        unreachable!()
-                    };
-                    bytes.extend_from_slice(&text);
-                    children.push(node(made_with(
-                        "str",
-                        vec![Child::Str(bytes)],
-                        at,
-                        syntax::HEREDOC,
-                    )));
-                } else {
-                    children.push(node(made_with(
-                        "str",
-                        vec![Child::Str(text)],
-                        at,
-                        syntax::HEREDOC,
-                    )));
-                }
+                // A line without its line break yet (a `str`, the only node
+                // whose first child is text): the text joins it.
+                let unfinished = children
+                    .last()
+                    .and_then(Child::node)
+                    .and_then(|last| match last.child(0) {
+                        Child::Str(bytes) if !bytes.ends_with(b"\n") => Some(bytes.clone()),
+                        _ => None,
+                    });
+                let bytes = match unfinished {
+                    Some(mut bytes) => {
+                        children.pop();
+                        bytes.extend_from_slice(&text);
+                        bytes
+                    }
+                    None => text,
+                };
+                children.push(node(made_with(
+                    "str",
+                    vec![Child::Str(bytes)],
+                    at,
+                    syntax::HEREDOC,
+                )));
             }
             HeredocPart::Node(value) => children.push(node(value)),
         }

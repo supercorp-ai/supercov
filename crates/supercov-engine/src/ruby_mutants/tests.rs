@@ -752,3 +752,57 @@ fn printing_and_mutating_never_panic_on_a_malformed_tree() {
     }
     assert!(refused > 1000, "{refused}");
 }
+
+/// Each kind of syntax the port does not convert yet skips its method with
+/// the reason, and the methods around it keep their mutants.
+#[test]
+fn ruby_methods_with_unconverted_syntax_are_skipped_by_name() {
+    let cases = [
+        (
+            "def m\n  \"a\\\n  b\"\nend\n",
+            "a string with escaped line breaks",
+        ),
+        (
+            "def m(a)\n  a =~ /a\n  b/\nend\n",
+            "a regexp over several lines",
+        ),
+        (
+            "def m(a)\n  a.select { (a == 1)..(a == 2) ? 1 : 2 }\nend\n",
+            "a flip-flop",
+        ),
+        (
+            "def m(a)\n  case a\n  in Point[x] then x\n  end\nend\n",
+            "a constant array pattern",
+        ),
+        (
+            "def m(a)\n  case a\n  in Point(x:) then x\n  end\nend\n",
+            "a constant hash pattern",
+        ),
+        (
+            "def m(a)\n  case a\n  in [x, ] then x\n  end\nend\n",
+            "an implicit rest pattern",
+        ),
+        (
+            "def m\n  class << self\n  end\nend\n",
+            "syntax this port does not convert",
+        ),
+        ("def m\n  1.5i\nend\n", "an imaginary literal"),
+    ];
+    for (source, reason) in cases {
+        let file = format!("{source}\ndef fine(a)\n  a + 1\nend\n");
+        let enumeration = enumerate(file.as_bytes());
+        assert_eq!(
+            enumeration.skipped.len(),
+            1,
+            "{source}: {:?}",
+            enumeration.skipped
+        );
+        assert!(
+            enumeration.skipped[0].0.starts_with("m:1")
+                && enumeration.skipped[0].1.contains(reason),
+            "{source}: {:?}",
+            enumeration.skipped
+        );
+        assert!(!enumeration.mutants.is_empty(), "{source}");
+    }
+}
