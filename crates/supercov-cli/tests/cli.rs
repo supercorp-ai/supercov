@@ -21961,12 +21961,12 @@ fn job_runner_project(label: &str, module: &str, tests: &[(&str, &str)]) -> Proj
         "package.json",
         &format!(r#"{{ "name": "cart", "type": "{module}" }}"#),
     );
+    // The repository's packages, where it has them: Bun's tests need none
+    // and run where they were never installed (the Bun bootstrap job).
     let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
-    std::os::unix::fs::symlink(
-        modules.canonicalize().unwrap(),
-        project.root.join("node_modules"),
-    )
-    .unwrap();
+    if let Ok(modules) = modules.canonicalize() {
+        std::os::unix::fs::symlink(modules, project.root.join("node_modules")).unwrap();
+    }
     project.write(".gitignore", "node_modules\n.supercov\n");
     let exports = if module == "module" {
         ("export function", "")
