@@ -689,6 +689,14 @@ npx supercov -- go test -run TestParser ./internal/...
 npx supercov -- go test ./core/... ./app/...
 ```
 
+### Mutation testing in Go
+
+`npx supercov mutants -- go test ./...` lists Gremlins 0.6.0's mutants of
+every Go source the run measures and runs each against the tests that ran
+its code, in test binaries built once (`go test -c`), one process per
+mutant and package, tests picked by exact name. A mutant that does not
+compile is reported `unviable` rather than run.
+
 ### A Go server under browser tests
 
 A Playwright suite that starts a Go server with `go run` measures it: the copy

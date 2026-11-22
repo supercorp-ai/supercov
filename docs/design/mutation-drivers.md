@@ -257,6 +257,16 @@ values only take tests away.
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
 
+## Go
+
+| Contract | Go |
+| --- | --- |
+| enumerator | `go_mutants.rs` (Gremlins 0.6.0's tokens and order; `docs/design/go-mutation.md`) |
+| schemata | `go_instrumenter.rs` (`strong_rewrite`), with `runtime/go/mutants` (go/types) saying which mutants compile |
+| runtime switch | `runtime/go/supercov/strong.go` (`StrongSlot`, `SUPERCOV_ACTIVE_MUTANT`) |
+| driver | `go_strong.rs`: each package's test binary built once, the package run whole per mutant |
+| value probes | `go_instrumenter.rs` (comparison probes), `runtime/go/supercov/mutants.go` |
+
 Rust implements the contract with cargo-mutants 27.1.0 as its reference:
 `docs/design/rust-mutation.md`.
 

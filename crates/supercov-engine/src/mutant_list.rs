@@ -268,6 +268,7 @@ pub(crate) fn list_from_sources(
         let one = match language {
             JAVASCRIPT => crate::js_mutant_links::list_mutants(root, &files),
             RUST => list_rust_mutants(root, &files),
+            crate::go_mutants::GO => crate::go_mutants::list_mutants(root, &files),
             crate::ruby_mutants::RUBY => crate::ruby_mutants::list_mutants(root, &files),
             _ => continue,
         };
@@ -547,6 +548,31 @@ mod tests {
             "start": [1, 1], "end": [1, 5], "original": "true"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_go_file_s_mutants_are_listed_from_its_source_after_the_run() {
+        let root = std::env::temp_dir().join(format!("supercov-list-go-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "package p\n\nfunc f(a int) int { return a + 1 }\n";
+        std::fs::write(root.join("a.go"), source).unwrap();
+        let points = crate::go_instrumenter::build_go_obligations("a.go", source, &mut 0, &mut 0)
+            .unwrap()
+            .manifest
+            .points
+            .into_iter()
+            .map(|point| point.id)
+            .collect();
+        // A language that lists nothing after a run, and a file of none.
+        let recorded = BTreeMap::from([
+            ("a.go".to_owned(), points),
+            ("b.py".to_owned(), Default::default()),
+            ("notes.txt".to_owned(), Default::default()),
+        ]);
+        let listed = list_from_sources(&root, &recorded);
+        assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.go"]);
+        assert!(listed.changed.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn one(language: &str, set: &str, file: &str) -> MutantsFile {
