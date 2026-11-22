@@ -16106,7 +16106,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2624 => main.rs:2624",
+            "fs.canonicalize#main.rs:2674 => main.rs:2674",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
         ],
@@ -25739,8 +25739,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:989",
-        "fs.read_dir entry#public_query.rs:989",
+        "fs.read_dir#public_query.rs:963",
+        "fs.read_dir entry#public_query.rs:963",
     ] {
         let unlisted = project
             .supercov_with(
@@ -25753,7 +25753,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:989"),
+            fired_at(&unlisted, "public_query.rs:963"),
             "{fault}: {unlisted}"
         );
     }

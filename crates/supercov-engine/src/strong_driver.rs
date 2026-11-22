@@ -172,13 +172,32 @@ pub fn driver_of<'a>(
 
 /// Whether the driver of `language` (as `driver_of` names it) runs tests
 /// under `runner`.
+/// The runners in [`STRONG_RUNNERS`] whose tests another language's driver
+/// runs: the JavaScript driver runs every other one.
+const OTHER_LANGUAGES_RUNNERS: &[&str] = &[
+    "rust-libtest",
+    "nextest",
+    "rustdoc",
+    "go-test",
+    "pytest",
+    "unittest",
+    "rspec",
+    "minitest",
+    "test-unit",
+    "cucumber",
+];
+
 pub fn drives(language: &str, runner: &str) -> bool {
     match language {
         crate::mutant_list::JAVASCRIPT => {
-            STRONG_RUNNERS.contains(&runner)
-                && !matches!(runner, "rust-libtest" | "nextest" | "rustdoc")
+            STRONG_RUNNERS.contains(&runner) && !OTHER_LANGUAGES_RUNNERS.contains(&runner)
         }
         crate::mutant_list::RUST => matches!(runner, "rust-libtest" | "nextest" | "rustdoc"),
+        crate::go_mutants::GO => runner == "go-test",
+        crate::python_mutants::PYTHON => matches!(runner, "pytest" | "unittest"),
+        crate::ruby_mutants::RUBY => {
+            matches!(runner, "rspec" | "minitest" | "test-unit" | "cucumber")
+        }
         _ => false,
     }
 }
@@ -384,7 +403,10 @@ mod tests {
         assert!(drives(javascript, "jest") && !drives(javascript, "nextest"));
         assert!(!drives(javascript, "pytest"));
         assert!(drives(rust, "nextest") && !drives(rust, "jest"));
-        assert!(!drives("python", "pytest"));
+        assert!(drives("python", "pytest") && !drives("python", "jest"));
+        assert!(drives("go", "go-test") && !drives("javascript", "go-test"));
+        assert!(drives("ruby", "rspec") && !drives("javascript", "minitest"));
+        assert!(!drives("cobol", "jest"));
     }
 
     #[test]
