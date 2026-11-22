@@ -469,8 +469,16 @@ def instrument(tree: ast.Module, source: bytes, relative: str, plan: dict) -> li
 
 class _Schemata:
     def __init__(self, path: str) -> None:
-        with open(path, encoding="utf-8") as stream:
-            plan = json.load(stream)
+        import zlib
+
+        with open(path, "rb") as stream:
+            raw = stream.read()
+        plan = json.loads(raw)
+        # Compiled code is kept beside the schemata, for every interpreter
+        # of the pass: a test's `python -m package` subprocess loads it
+        # rather than parsing every mutant's copy again.
+        self.cache = os.path.join(os.path.dirname(os.path.abspath(path)), "python-code")
+        self.digest = "%08x" % zlib.crc32(raw)
         if plan.get("version") != SCHEMATA_VERSION:
             raise RuntimeError(f"unsupported Supercov schemata version {plan.get('version')!r}")
         self.root = os.path.realpath(plan["root"])
@@ -518,17 +526,40 @@ class _Schemata:
                 self.failed[relative] = "changed"
 
     def _compile(self, source: bytes, filename: str, relative: str):
+        import marshal
         import zlib
 
         plan = self.files[relative]
         if len(source) != plan["size"] or zlib.crc32(source) != plan["crc32"]:
             self.failed[relative] = "changed"
             return compile(source, filename, "exec", dont_inherit=True)
+        key = "\0".join((self.digest, relative, filename, sys.implementation.cache_tag, str(sys.flags.optimize)))
+        cached = os.path.join(self.cache, "%08x-%d.code" % (zlib.crc32(key.encode("utf-8", "surrogatepass")), len(key)))
+        try:
+            with open(cached, "rb") as stream:
+                stored, failed, code = marshal.loads(stream.read())
+            if stored == key:
+                if failed:
+                    self.failed[relative] = failed
+                return code
+        except (OSError, EOFError, ValueError, TypeError):
+            pass
         tree = ast.parse(source, filename=filename)
         failed = instrument(tree, source, relative, plan)
         if failed:
             self.failed[relative] = failed
-        return compile(tree, filename, "exec", dont_inherit=True)
+        code = compile(tree, filename, "exec", dont_inherit=True)
+        try:
+            import tempfile
+
+            os.makedirs(self.cache, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(dir=self.cache, suffix=".tmp")
+            with os.fdopen(descriptor, "wb") as stream:
+                marshal.dump((key, failed, code), stream)
+            os.replace(temporary, cached)
+        except OSError:
+            pass
+        return code
 
 
 class _Loader:
