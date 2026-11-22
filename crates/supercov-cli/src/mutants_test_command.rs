@@ -409,13 +409,13 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .collect::<Vec<_>>();
     // After an edit, the verdicts no change could have moved.
     let carried = if options.carry && !options.plan {
-        carry_over(&root, run, &plan, &saved)
+        carry_over(&root, &inventory.runs, run, &plan, &saved)
     } else {
         None
     };
+    // Saved with the pass's own verdicts.
     if let Some((_, verdicts)) = &carried {
         saved.extend(verdicts.clone());
-        save(run, &plan.mutant_set, &saved)?;
     }
     // A second pass over the same run runs only what has no verdict.
     plan.mutants
@@ -905,11 +905,16 @@ pub(crate) fn results_path(run: &StoredRun) -> PathBuf {
 
 /// The run's saved verdicts, by mutant id; empty when none were saved.
 pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, Verdict> {
+    saved_document(run)
+        .map(|saved| saved.mutants)
+        .unwrap_or_default()
+}
+
+/// The run's saved verdicts as written, where it has any that read.
+fn saved_document(run: &StoredRun) -> Option<StrongVerdicts> {
     std::fs::read(results_path(run))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())
-        .map(|saved| saved.mutants)
-        .unwrap_or_default()
 }
 
 /// The mutation score StrykerJS reports: killed and timed out over all
@@ -934,53 +939,58 @@ fn survivors(
         })
         .map(|(id, _)| id.as_str())
         .collect::<BTreeSet<_>>();
-    let shown = (|| {
-        let container = crate::open_query_index_for(run, None).ok()?;
-        let index = supercov_engine::coverage_index::CoverageIndex::new(&container).ok()?;
-        let options = supercov_engine::mutants_query::MutantsOptions {
-            strong_statuses: vec!["survived".into()],
-            strong: Some(
-                verdicts
-                    .iter()
-                    .map(|(id, verdict)| {
-                        (
-                            id.clone(),
-                            serde_json::to_value(verdict).expect("plain data"),
-                        )
-                    })
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-        let (data, _) = supercov_engine::mutants_query::coverage_mutants_query(
-            &index,
-            supercov_engine::mutants_query::CoverageMutantsQueryOptions {
-                run: &run.id,
-                file: None,
-                line: None,
-                options: &options,
-                offset: 0,
-                limit: usize::MAX,
-            },
-        )
-        .ok()?;
-        Some(
-            data.mutants
+    let options = supercov_engine::mutants_query::MutantsOptions {
+        strong_statuses: vec!["survived".into()],
+        strong: Some(
+            verdicts
                 .iter()
-                .filter(|mutant| survived.contains(mutant.id.as_str()))
-                .take(SURVIVORS_SHOWN)
-                .map(|mutant| {
-                    json!({
-                        "id": mutant.id,
-                        "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
-                        "mutator": mutant.mutator,
-                        "change": crate::human_query::mutant_change(mutant),
-                    })
+                .map(|(id, verdict)| {
+                    (
+                        id.clone(),
+                        serde_json::to_value(verdict).expect("plain data"),
+                    )
                 })
-                .collect::<Vec<_>>(),
-        )
-    })()
-    .unwrap_or_default();
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    // Shown as the listing shows them, where the run's index reads; else
+    // only counted.
+    let listed = crate::open_query_index_for(run, None)
+        .ok()
+        .and_then(|container| {
+            supercov_engine::coverage_index::CoverageIndex::new(&container)
+                .ok()
+                .and_then(|index| {
+                    supercov_engine::mutants_query::coverage_mutants_query(
+                        &index,
+                        supercov_engine::mutants_query::CoverageMutantsQueryOptions {
+                            run: &run.id,
+                            file: None,
+                            line: None,
+                            options: &options,
+                            offset: 0,
+                            limit: usize::MAX,
+                        },
+                    )
+                    .ok()
+                })
+        })
+        .map(|(data, _)| data.mutants)
+        .unwrap_or_default();
+    let shown = listed
+        .iter()
+        .filter(|mutant| survived.contains(mutant.id.as_str()))
+        .take(SURVIVORS_SHOWN)
+        .map(|mutant| {
+            json!({
+                "id": mutant.id,
+                "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
+                "mutator": mutant.mutator,
+                "change": crate::human_query::mutant_change(mutant),
+            })
+        })
+        .collect::<Vec<_>>();
     json!({"total": survived.len(), "shown": shown})
 }
 
@@ -991,14 +1001,14 @@ fn survivors_text(run: &str, survivors: &Value) -> String {
         return String::new();
     }
     let mut text = String::from("Survived:\n");
-    for mutant in &shown {
-        text.push_str(&format!(
+    text.extend(shown.iter().map(|mutant| {
+        format!(
             "  {}  {}  {}\n",
             mutant["place"].as_str().unwrap_or(""),
             mutant["mutator"].as_str().unwrap_or(""),
             mutant["change"].as_str().unwrap_or("")
-        ));
-    }
+        )
+    }));
     let total = survivors["total"].as_u64().unwrap_or(0) as usize;
     if total > shown.len() {
         text.push_str(&format!(
@@ -1301,7 +1311,6 @@ fn execute(
                 "[supercov] no strong mutation driver for {language} yet: its mutants are errors"
             );
         }
-        save(run, &plan.mutant_set, saved)?;
         // A pass that stops before its end (a test worker that would not
         // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
@@ -1318,34 +1327,37 @@ fn execute(
             };
             let languages = remaining.iter().map(driver_of).collect::<BTreeSet<_>>();
             // A pass with mutants left has a language of them at least.
-            for language in languages {
-                let nonce = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
-                supercov_engine::strong_driver::claim_work_directory(&work)
-                    .map_err(|e| format!("{}: {e}", work.display()))?;
-                let results = work.join("results.jsonl");
-                let ran = run_language(
-                    root, run, &plan, &remaining, &language, &command, &work, saved,
-                );
-                let (verdicts, passes) = read_results(&results);
-                // Success or failure, the pass keeps only its logs.
-                if !supercov_engine::strong_driver::keeps_work_directories(std::env::var_os(
-                    supercov_engine::strong_driver::KEEP,
-                )) {
-                    supercov_engine::strong_driver::finish_work_directory(&work);
-                }
-                saved.extend(verdicts);
-                executed.passes.extend(passes);
-                remaining.retain(|mutant| !saved.contains_key(&mutant.id));
-                save(run, &plan.mutant_set, saved)?;
-                exit = ran?;
-                executed.command_exit = Some(exit);
-                if interrupted(exit) {
-                    return Err(Stop::Interrupted(exit));
-                }
-            }
+            languages
+                .into_iter()
+                .try_for_each(|language| -> Result<(), Stop> {
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
+                    supercov_engine::strong_driver::claim_work_directory(&work)
+                        .map_err(|e| format!("{}: {e}", work.display()))?;
+                    let results = work.join("results.jsonl");
+                    let ran = run_language(
+                        root, run, &plan, &remaining, &language, &command, &work, saved,
+                    );
+                    let (verdicts, passes) = read_results(&results);
+                    // Success or failure, the pass keeps only its logs.
+                    if !supercov_engine::strong_driver::keeps_work_directories(std::env::var_os(
+                        supercov_engine::strong_driver::KEEP,
+                    )) {
+                        supercov_engine::strong_driver::finish_work_directory(&work);
+                    }
+                    saved.extend(verdicts);
+                    executed.passes.extend(passes);
+                    remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+                    save(run, &plan.mutant_set, saved)?;
+                    exit = ran?;
+                    executed.command_exit = Some(exit);
+                    if interrupted(exit) {
+                        return Err(Stop::Interrupted(exit));
+                    }
+                    Ok(())
+                })?;
             if remaining.len() == before {
                 break;
             }
@@ -1476,15 +1488,11 @@ fn summary(
 
 /// Verdicts an earlier run of this checkout's project still gives `run`'s
 /// mutants, by mutant id, and that run's id: where the run is current, the
-/// earlier one ran the same command with the same dependencies and
-/// configuration, and, for each mutant, its file is byte for byte as it was
-/// and every test that could kill it (its candidates, and every test of
-/// their files) is one `tests affected` finds no change could have reached:
-/// a test file edit reaches that file's tests, and a source edit the tests
-/// that ran the changed code. Killed, survived and timed-out verdicts are
-/// kept; an error runs again.
+/// latest earlier run of the same command, dependencies, configuration and
+/// mutant set that holds verdicts gives each mutant `kept_verdicts` keeps.
 fn carry_over(
     root: &Path,
+    runs: &[StoredRun],
     run: &StoredRun,
     plan: &StrongPlan,
     saved: &std::collections::BTreeMap<String, Verdict>,
@@ -1494,49 +1502,65 @@ fn carry_over(
         .iter()
         .filter(|mutant| mutant.decided.is_none() && !saved.contains_key(&mutant.id))
         .collect::<Vec<_>>();
-    if undecided.is_empty() || crate::checkout_comparison(root, run).stale {
+    // The run is current: `supercov mutants` measures one where it is not.
+    if undecided.is_empty() {
         return None;
     }
-    let inventory = discover_runs(root).ok()?;
-    let same = |earlier: &StoredRun| {
-        let (was, now) = (&earlier.metadata.integrity, &run.metadata.integrity);
-        earlier.id != run.id
-            && earlier.metadata.merged != Some(true)
-            && earlier.metadata.started_at < run.metadata.started_at
-            && earlier.metadata.command == run.metadata.command
-            && was.instrumenter_version == now.instrumenter_version
-            && was.fingerprint.dependencies == now.fingerprint.dependencies
-            && was.fingerprint.configuration == now.fingerprint.configuration
-            && results_path(earlier).is_file()
+    // The same command, Supercov and setup: what else a verdict rests on.
+    let key = |of: &StoredRun| {
+        let integrity = &of.metadata.integrity;
+        (
+            of.metadata.command.clone(),
+            integrity.instrumenter_version.clone(),
+            integrity.fingerprint.dependencies.clone(),
+            integrity.fingerprint.configuration.clone(),
+        )
     };
-    let earlier = inventory
-        .runs
+    // Newest first, as runs are listed.
+    let (earlier, document) = runs
         .iter()
-        .filter(|earlier| same(earlier))
-        .max_by(|a, b| a.metadata.started_at.cmp(&b.metadata.started_at))?;
-    let document = std::fs::read(results_path(earlier))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())?;
-    if document.mutant_set != plan.mutant_set {
-        return None;
-    }
+        .filter(|earlier| {
+            earlier.metadata.started_at < run.metadata.started_at && key(earlier) == key(run)
+        })
+        .find_map(|earlier| {
+            saved_document(earlier)
+                .filter(|document| document.mutant_set == plan.mutant_set)
+                .map(|document| (earlier, document))
+        })?;
     let affected = supercov_engine::source_manifest::affected_tests(root, earlier).ok()?;
+    let carried = kept_verdicts(&undecided, &plan.tests, &document.mutants, &affected);
+    (!carried.is_empty()).then(|| (earlier.id.clone(), carried))
+}
+
+/// The verdicts of `earlier` that no change since could move, by mutant id,
+/// given what `tests affected` says of that run (`affected`): a mutant keeps
+/// its verdict (killed, survived or timeout; an error runs again) where its
+/// file is byte for byte as it was, and every candidate test it has now is
+/// one the earlier run had and found unaffected, as is every test of their
+/// files (they share the file's state) and of the files it runs whole. A
+/// test file's edit reaches its tests, a source edit the tests that ran the
+/// changed code; a new test that could kill it is a candidate the earlier
+/// run did not have.
+fn kept_verdicts(
+    undecided: &[&supercov_engine::strong_plan::PlannedMutant],
+    tests: &[supercov_engine::strong_plan::PlannedTest],
+    earlier: &std::collections::BTreeMap<String, Verdict>,
+    affected: &Value,
+) -> std::collections::BTreeMap<String, Verdict> {
     let entries = |key: &str| {
         affected[key]
             .as_array()
-            .cloned()
-            .unwrap_or_default()
             .into_iter()
-            .filter_map(|entry| {
-                Some((
-                    entry["file"].as_str()?.to_owned(),
-                    entry["name"].as_str()?.to_owned(),
-                ))
+            .flatten()
+            .map(|entry| {
+                (
+                    entry["file"].as_str().unwrap_or_default().to_owned(),
+                    entry["name"].as_str().unwrap_or_default().to_owned(),
+                )
             })
             .collect::<Vec<_>>()
     };
-    // A test file holding any test a change may have reached: every test of
-    // it may run differently (its file's state is shared).
+    // A test file holding any test a change may have reached.
     let reached_files = entries("affected")
         .into_iter()
         .chain(entries("undetermined"))
@@ -1547,37 +1571,41 @@ fn carry_over(
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry["file"].as_str())
+        .map(|entry| entry["file"].as_str().unwrap_or_default())
         .collect::<BTreeSet<_>>();
     let unchanged_test = |index: usize| {
-        plan.tests.get(index).is_some_and(|test| {
-            test.file.as_ref().is_some_and(|file| {
-                !reached_files.contains(file)
-                    && unaffected.contains(&(file.clone(), test.name.clone()))
-            })
-        })
+        let test = &tests[index];
+        let file = test.file.clone().unwrap_or_default();
+        !reached_files.contains(&file) && unaffected.contains(&(file, test.name.clone()))
     };
-    let mut carried = std::collections::BTreeMap::new();
+    let mut kept = std::collections::BTreeMap::new();
     for mutant in undecided {
-        let Some(verdict) = document.mutants.get(&mutant.id) else {
+        let Some(verdict) = earlier.get(&mutant.id) else {
             continue;
         };
-        if !matches!(verdict.status.as_str(), "killed" | "survived" | "timeout")
-            || changed.contains(mutant.file.as_str())
-            || mutant
-                .whole_files
-                .iter()
-                .any(|file| reached_files.contains(file))
-            || !mutant
-                .candidates
-                .iter()
-                .all(|candidate| unchanged_test(candidate.test))
+        if !matches!(verdict.status.as_str(), "killed" | "survived" | "timeout") {
+            continue;
+        }
+        if changed.contains(mutant.file.as_str()) {
+            continue;
+        }
+        if mutant
+            .whole_files
+            .iter()
+            .any(|file| reached_files.contains(file))
         {
             continue;
         }
-        carried.insert(mutant.id.clone(), verdict.clone());
+        if !mutant
+            .candidates
+            .iter()
+            .all(|candidate| unchanged_test(candidate.test))
+        {
+            continue;
+        }
+        kept.insert(mutant.id.clone(), verdict.clone());
     }
-    (!carried.is_empty()).then(|| (earlier.id.clone(), carried))
+    kept
 }
 
 #[cfg(test)]
@@ -1719,6 +1747,7 @@ mod tests {
         assert_eq!(named(&["sh", "-c", "BABEL_ENV=x npx tape t/"]), "tape");
         assert_eq!(named(&["bash", "-c", " "]), "bash -c  ");
         assert_eq!(named(&["node"]), "node");
+        assert_eq!(named(&[]), "");
     }
 
     fn plan_of(tests: &[(&str, bool)], weak: &[&'static str]) -> StrongPlan {
@@ -1833,6 +1862,113 @@ mod tests {
         let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
         assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");
         assert!(!whole.contains("kept from"), "{whole}");
+    }
+
+    /// An earlier verdict is kept where its mutant's file and every test
+    /// that could kill it are as they were: not an error's, not a changed
+    /// file's, not where a candidate, its file's other tests, or a file run
+    /// whole was reached, nor where a candidate is new.
+    #[test]
+    fn a_verdict_is_kept_where_nothing_it_rests_on_changed() {
+        use supercov_engine::strong_plan::{Candidate, CandidateReason, PlannedTest};
+        let test = |file: &str, name: &str| PlannedTest {
+            id: name.into(),
+            file: Some(file.into()),
+            name: name.into(),
+            title: None,
+            runner: "jest".into(),
+            duration_ms: None,
+            span: None,
+            runnable: true,
+        };
+        let tests = vec![
+            test("t/a.test.js", "a1"),
+            test("t/b.test.js", "b1"),
+            test("t/c.test.js", "c1"),
+            test("t/a.test.js", "new"),
+            PlannedTest {
+                file: None,
+                ..test("", "fileless")
+            },
+        ];
+        let mut plan = plan_of(&[], &[]);
+        let mutant = |id: &str, file: &str, candidates: &[usize], whole: &[&str]| {
+            let mut planned = plan_of(&[], &["infected"]).mutants.remove(0);
+            planned.id = id.into();
+            planned.file = file.into();
+            planned.candidates = candidates
+                .iter()
+                .map(|test| Candidate {
+                    test: *test,
+                    reason: CandidateReason::Infected,
+                })
+                .collect();
+            planned.whole_files = whole.iter().map(|file| (*file).to_owned()).collect();
+            planned
+        };
+        plan.mutants = vec![
+            mutant("kept", "src/a.js", &[0], &[]),
+            mutant("timeout-kept", "src/a.js", &[0], &["t/a.test.js"]),
+            mutant("never-run", "src/a.js", &[0], &[]),
+            mutant("error", "src/a.js", &[0], &[]),
+            mutant("file-changed", "src/b.js", &[0], &[]),
+            mutant("whole-reached", "src/a.js", &[0], &["t/b.test.js"]),
+            mutant("candidate-reached", "src/a.js", &[1], &[]),
+            mutant("file-mate-reached", "src/a.js", &[2], &[]),
+            mutant("new-candidate", "src/a.js", &[3], &[]),
+            mutant("fileless", "src/a.js", &[4], &[]),
+        ];
+        let verdict = |status: &str| Verdict {
+            status: status.into(),
+            killed_by: None,
+            tests: 1,
+            duration_ms: 1,
+            reason: None,
+        };
+        let earlier = plan
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.id != "never-run")
+            .map(|mutant| {
+                let status = match mutant.id.as_str() {
+                    "error" => "error",
+                    "timeout-kept" => "timeout",
+                    _ => "killed",
+                };
+                (mutant.id.clone(), verdict(status))
+            })
+            .collect();
+        let affected = json!({
+            "affected": [{"file": "t/b.test.js", "name": "b1"}],
+            "undetermined": [{"file": "t/c.test.js", "name": "c2"}],
+            "unaffected": [
+                {"file": "t/a.test.js", "name": "a1"},
+                {"file": "t/c.test.js", "name": "c1"},
+                {"file": "", "name": "fileless"},
+                {"name": "unnamed file"}
+            ],
+            "changedFiles": [{"file": "src/b.js"}, {"change": "no file"}],
+        });
+        let undecided = plan.mutants.iter().collect::<Vec<_>>();
+        let kept = kept_verdicts(&undecided, &tests, &earlier, &affected);
+        assert_eq!(
+            kept.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["fileless", "kept", "timeout-kept"]
+        );
+        assert!(kept_verdicts(&undecided, &tests, &earlier, &json!({})).is_empty());
+        assert!(kept_verdicts(&[], &tests, &earlier, &affected).is_empty());
+    }
+
+    /// The summary names the first survivors and counts the rest.
+    #[test]
+    fn the_survivors_beyond_those_shown_are_counted() {
+        let shown =
+            json!({"total": 12, "shown": [{"place": "a.js:1", "mutator": "M", "change": "x → y"}]});
+        assert_eq!(
+            survivors_text("r1", &shown),
+            "Survived:\n  a.js:1  M  x → y\n  and 11 more: supercov runs r1 mutants --status survived\n"
+        );
+        assert_eq!(survivors_text("r1", &json!({"total": 0, "shown": []})), "");
     }
 
     #[test]

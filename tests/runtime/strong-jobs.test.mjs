@@ -6,7 +6,7 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { delimiter } from "node:path";
-import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { WASM_OUT, commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, slots, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -145,6 +145,18 @@ test("a mutant runs the file likeliest to kill it first, as the pass learns", as
     // Two baselines; the first eight mutants (under way at once) run both
     // files, the twelve after them the killing one alone.
     assert.equal(summary.jobs, 2 + 8 * 2 + 12, JSON.stringify(summary));
+});
+
+// A job of a mutant's later batch waits behind every first file's.
+test("jobs wait their turn by priority, first come first served among equals", async () => {
+    const run = slots(1);
+    const order = [];
+    let release;
+    const first = run(() => new Promise((done) => { release = done; }));
+    const queued = [["b", 2], ["c", 0], ["d", 1], ["e", 0]].map(([name, priority]) => run(async () => order.push(name), priority));
+    release();
+    await Promise.all([first, ...queued]);
+    assert.deepEqual(order, ["c", "e", "d", "b"]);
 });
 
 // Ctrl-C reaches the driver, not its jobs, which run in process groups of

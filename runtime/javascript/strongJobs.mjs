@@ -68,22 +68,28 @@ function parallelism() {
     return Math.max(1, available - 1);
 }
 
-// At most `size` jobs at once, first come first served.
-function slots(size) {
+// At most `size` jobs at once: the lowest `priority` first, and first come
+// first served among equals.
+export function slots(size) {
     let free = size;
     const waiting = [];
-    return async function run(work) {
+    return async function run(work, priority = 0) {
         if (free > 0)
             free -= 1;
-        else
-            await new Promise((resolve) => waiting.push(resolve));
+        else {
+            await new Promise((resolve) => {
+                // After every waiting job of its priority or a lower one.
+                const at = waiting.findIndex((other) => other.priority > priority);
+                waiting.splice(at < 0 ? waiting.length : at, 0, { priority, resolve });
+            });
+        }
         try {
             return await work();
         }
         finally {
             const next = waiting.shift();
             if (next)
-                next();
+                next.resolve();
             else
                 free += 1;
         }
@@ -412,9 +418,9 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     const wasmOutUsed = () => existsSync(join(wasmTools, "used"));
     const parallel = slots(workers);
     const serial = slots(1);
-    const run = !rebuilds ? parallel : async (work) => {
+    const run = !rebuilds ? parallel : async (work, priority) => {
         if (wasmOutUsed())
-            return parallel(work);
+            return parallel(work, priority);
         let handed = false;
         const result = await serial(async () => {
             if (wasmOutUsed()) {
@@ -423,14 +429,17 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             }
             return work();
         });
-        return handed ? parallel(work) : result;
+        return handed ? parallel(work, priority) : result;
     };
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
 
     // One start of the command: `tests` of `file` (null: all of them), with
-    // `mutant` on (null: none), stopped at `limitMs`.
-    function job({ mutant, file, tests: chosen, bail, limitMs }) {
+    // `mutant` on (null: none), stopped at `limitMs`. A job of a mutant's
+    // later batch (`priority` 1, 2, ...) waits behind every first file's,
+    // so that the kills most mutants get at once come first, and a
+    // survivor's many files fill what is left.
+    function job({ mutant, file, tests: chosen, bail, limitMs, priority = 0 }) {
         return run(() => new Promise((resolveJob) => {
             const number = ++jobNumber;
             profile.jobs += 1;
@@ -552,7 +561,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                     durationMs: Date.now() - begun,
                 }));
             });
-        }));
+        }), priority);
     }
 
     // What a file does without a mutant: once with every test a mutant will
@@ -609,7 +618,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     }
 
     // A mutant against one file's tests: killed, timeout, or alive.
-    async function tryFile(mutant, group) {
+    async function tryFile(mutant, group, priority) {
         let baseline = group.whole ? { ...(await wholeBaseline(group.file)), chosen: null } : await baselineFor(group.file);
         if (!baseline.finished)
             return { status: "error", reason: `${group.file} does not finish without a mutant, so it could not test this one`, tests: 0 };
@@ -624,7 +633,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             const limitMs = 3 * baseline.durationMs + graceMs;
             // A test that fails without the mutant must not stop the job.
             const bail = !whole || [...baseline.statuses.values()].every((status) => status === "passed");
-            const result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs });
+            const result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs, priority });
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
             const killer = ran.find(([id, status]) => status === "failed" && !excluded(id))?.[0];
             if (result.mutantTimedOut)
@@ -671,7 +680,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         // rest in batches of 4, 16, ... side by side, the likeliest first: a
         // survivor needs them all, and one after another its files were the
         // pass's longest wait (luxon: a module-level mutant's 58 test files).
-        for (let size = 1; left.length > 0; size *= 4) {
+        for (let size = 1, stage = 0; left.length > 0; size *= 4, stage += 1) {
             const batch = [];
             while (batch.length < size && left.length > 0) {
                 // Ties go to the cheapest, as the groups are sorted by cost.
@@ -679,7 +688,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 batch.push(...left.splice(at, 1));
             }
             const verdicts = await Promise.all(batch.map(async (group) => {
-                const verdict = await tryFile(mutant, group);
+                const verdict = await tryFile(mutant, group, stage);
                 const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
                 seen.ran += 1;
                 if (verdict.status === "killed" || verdict.status === "timeout")

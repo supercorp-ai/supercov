@@ -16207,8 +16207,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             "spawn#rust_test_runner.rs:1569 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1569@2 => rust_test_runner.rs:1569",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
-            "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
+            "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
+            "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -16245,7 +16245,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
+                "spawn#child_signal_guard.rs:328 => child_signal_guard.rs:328",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:604",
@@ -16592,11 +16592,11 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read_dir@9",
             "fs.read_dir@13",
             "fs.create_dir_all@15",
-            "fs.create_dir_all@22",
+            "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
-            "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
+            "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
-            "fs.write#go_run.rs:513 => go_run.rs:513",
+            "fs.write#go_run.rs:525 => go_run.rs:525",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -18075,10 +18075,9 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
         ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
-        ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
-        ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
-        ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
-        ("fs.create_dir_all#go_run.rs:400", "go_run.rs:400"),
+        ("fs.create_dir_all#go_run.rs:323", "go_run.rs:323"),
+        ("fs.create_dir_all#go_run.rs:373", "go_run.rs:373"),
+        ("fs.create_dir_all#go_run.rs:412", "go_run.rs:412"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18106,14 +18105,14 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
         return;
     }
     for (fault, place) in [
-        ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+        ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
-        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
+        ("fs.write#go_run.rs:1216", "go_run.rs:1216"),
+        ("fs.create_dir_all#go_run.rs:1226", "go_run.rs:1226"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19470,8 +19469,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
-                ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+                ("fs.canonicalize#go_run.rs:732", "go_run.rs:732"),
+                ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -22025,6 +22024,24 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         "{summary}"
     );
 
+    // Runs between that one and the next, none of which can lend their
+    // verdicts: one of another command, one with none, one of another
+    // mutant set.
+    let measure = |command: &[&str]| {
+        let mut words = vec!["--"];
+        words.extend(command);
+        project
+            .supercov_with(&words, &[("SUPERCOV_MUTANTS", "1")])
+            .succeeds();
+        project.latest()
+    };
+    measure(&["npx", "vitest", "run", "test/cart.test.js"]);
+    measure(&["npx", "vitest", "run"]);
+    let other = measure(&["npx", "vitest", "run"]);
+    project.write(
+        &format!(".supercov/runs/{other}/strong-mutation.json"),
+        r#"{"schemaVersion": 1, "run": "x", "mutantSet": "other@1", "mutants": {}}"#,
+    );
     // An edit of tax.js's code: `supercov mutants` measures again, and runs
     // tax.js's mutants alone; cart.js's keep their verdicts, as no cart test
     // ran tax.js. (`runs <id> mutants test` tests the run it names whole.)
@@ -22057,11 +22074,42 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         kept.contains(&format!("  ran {to_run} mutant(s)")),
         "{to_run}: {kept}"
     );
-    // As a pull request's comment.
+    // An edit of both sources keeps nothing; where the earlier run's
+    // record of what each test ran is gone, nothing is kept either.
+    project.edit("src/tax.js", "sum / 5", "sum / 5.0");
+    project.edit("src/cart.js", "return 5;", "return 5.0;");
+    let none_kept = project.supercov(&["mutants"]).succeeds();
+    assert!(!none_kept.contains("kept from run"), "{none_kept}");
+    let previous = project.latest();
+    std::fs::remove_file(
+        project
+            .root
+            .join(format!(".supercov/runs/{previous}/test-executions.json")),
+    )
+    .unwrap();
+    project.edit("src/tax.js", "sum / 5.0", "sum / 5");
+    let unrecorded = project.supercov(&["mutants"]).succeeds();
+    assert!(!unrecorded.contains("kept from run"), "{unrecorded}");
+    // `--plan` keeps nothing and runs nothing.
+    project.supercov(&["mutants", "--plan"]).succeeds();
+    // As a pull request's comment, the change's, to a file or one that
+    // cannot be written.
     let markdown = project
         .supercov(&["mutants", "--format", "markdown"])
         .succeeds();
     assert!(markdown.starts_with("### Mutants"), "{markdown}");
+    let change = project
+        .supercov(&["mutants", "--diff", "HEAD", "--format", "markdown"])
+        .succeeds();
+    assert!(change.starts_with("### Mutants on this change"), "{change}");
+    let unwritable = project.supercov(&[
+        "mutants",
+        "--format",
+        "markdown",
+        "--output",
+        "missing/dir/mutants.md",
+    ]);
+    assert_eq!(unwritable.code(), 2, "{}", unwritable.stderr());
 
     // A failing test: the pass answers, and cannot gate.
     project.write(
@@ -22353,6 +22401,18 @@ fn surviving_mutants_are_named_in_every_view() {
         .succeeds();
     assert!(only.contains("sum >= 50 → sum > 50"), "{only}");
     assert!(!only.contains("trim() → name"), "{only}");
+    // The table of files says how to list them, and a line's view gives
+    // each mutant's verdict.
+    let table = project.supercov(&["runs", "latest", "mutants"]).succeeds();
+    assert!(
+        table.contains("list the mutants the tests let survive: ")
+            && table.contains(" --status survived"),
+        "{table}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js:2"])
+        .succeeds();
+    assert!(line.contains("  strong: survived"), "{line}");
     let markdown = project
         .supercov(&["runs", "latest", "mutants", "--format", "markdown"])
         .succeeds();
@@ -24123,12 +24183,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1395",
+            "fs.write#mutants_test_command.rs:1407",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1395"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1407"),
         "{}",
         unwritten.stderr()
     );
@@ -24213,7 +24273,10 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
             "fake-strong.mjs",
         ])
         .json();
-    assert_eq!(reply["summary"]["error"], errors + 1, "{reply}");
+    // The summary counts extra.js's mutants alone, the ones asked about:
+    // tax.js's errors above are not among them.
+    assert_eq!(reply["summary"]["error"], 1, "{reply}");
+    assert!(errors > 0);
     assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
     assert!(reply["summary"]["equivalent"].as_u64() > Some(0), "{reply}");
     assert_eq!(reply["passes"][0]["driver"], "fake", "{reply}");
@@ -25346,4 +25409,296 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
     }
+}
+
+/// Go's strong pass: every Gremlins mutant of a module, run in test
+/// binaries built once, each mutant against the tests that ran its code.
+/// A mutant that does not compile is `unviable`; a constant Go needs as a
+/// constant is built alone; a loop made endless is a `timeout`; code no
+/// test runs is `no-coverage`.
+#[cfg(unix)]
+#[test]
+fn go_mutants_are_killed_kept_or_found_not_to_compile() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong");
+    // A module older than Go 1.21: each file with a value probe is built
+    // as 1.21.
+    project.write("go.mod", "module example.com/calc\n\ngo 1.20\n");
+    project.write(
+        "calc.go",
+        "package calc\n\nconst Limit = 2 + 3\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Sum(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Half(n int) int { return n / 2 }\n\nfunc Unused(n int) int { return n - 1 }\n",
+    );
+    project.write(
+        "calc_test.go",
+        "package calc\n\nimport \"testing\"\n\nfunc TestClamp(t *testing.T) {\n\tif Clamp(5) != 5 || Clamp(6) != 5 || Clamp(1) != 1 {\n\t\tt.Fatal(\"clamp\")\n\t}\n}\n\nfunc TestSum(t *testing.T) {\n\tif Sum(4) != 6 {\n\t\tt.Fatal(\"sum\")\n\t}\n}\n\nfunc TestJoinAndHalf(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || Half(0) != 0 {\n\t\tt.Fatal(\"join\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["mutants", "--json", "--", go, "test", "./..."],
+            &[("SUPERCOV_MUTANT_HIT_LIMIT", "100000")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]["status"]
+            .clone()
+    };
+    assert_eq!(listed["data"]["mutantSet"], "gremlins@0.6.0", "{listed}");
+    // Built alone: a constant declaration has no place for a switch.
+    assert_eq!(status("calc.go:3:17-3:18:ArithmeticOperator:-"), "killed");
+    // At 5, `n > 5` and `n >= 5` both return 5: no test can tell them.
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:>="), "survived");
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:<="), "killed");
+    // `i--` never ends the loop.
+    assert_eq!(status("calc.go:14:22-14:24:UpdateOperator:--"), "timeout");
+    // Strings have no `-`.
+    assert_eq!(
+        status("calc.go:20:42-20:43:ArithmeticOperator:-"),
+        "unviable"
+    );
+    // `0 * 2` is `0 / 2`: no test tells them apart.
+    assert_eq!(
+        status("calc.go:22:33-22:34:ArithmeticOperator:*"),
+        "survived"
+    );
+    assert_eq!(
+        status("calc.go:24:35-24:36:ArithmeticOperator:+"),
+        "no-coverage"
+    );
+}
+
+/// A Go suite behind `make test`: the strong pass builds its test binaries
+/// with the flags the Makefile gives `go test`, as the measured run recorded
+/// them. Without the tag, the file behind it would not be built at all, and
+/// its mutant could not be killed.
+#[cfg(unix)]
+#[test]
+fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-make");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    let directory = std::path::Path::new(go)
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    project.write(
+        "Makefile",
+        &format!("test:\n\tPATH=\"$$PATH:{directory}\" go test -tags tagged ./...\n"),
+    );
+    project
+        .supercov(&["mutants", "--json", "--", "make", "test"])
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "double.go:5:35-5:36:ArithmeticOperator:/")
+        .unwrap_or_else(|| panic!("{listed}"))
+        .clone();
+    assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
+
+/// Ctrl-C during a JavaScript strong pass, sent to Supercov's process group
+/// as a terminal sends it: the resident runners and what their jobs started
+/// stop, though each runs in a process group of its own, Supercov exits as
+/// the signal does, and what the pass decided is saved.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_javascript_pass_leaves_no_process_running() {
+    use std::os::unix::process::CommandExt;
+    let project = mutants_project("js-strong-interrupted");
+    // A function only this test runs: under a mutant (its value is not 4),
+    // the test starts a process and waits, its pid and the runner's to the
+    // marker.
+    project.write("src/twice.js", "export const twice = (n) => n * 2;\n");
+    project.write(
+        "test/slow.test.js",
+        "import assert from \"node:assert/strict\";\nimport { spawn } from \"node:child_process\";\nimport { renameSync, writeFileSync } from \"node:fs\";\nimport { twice } from \"../src/twice.js\";\ndescribe(\"slow\", () => {\n  it(\"waits under a mutant\", async function () {\n    this.timeout(0);\n    if (twice(2) === 4) return;\n    const sleeper = spawn(\"sleep\", [\"120\"], { stdio: \"ignore\" });\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    writeFileSync(`${marker}.tmp`, `${process.pid} ${sleeper.pid}`);\n    renameSync(`${marker}.tmp`, marker);\n    await new Promise((done) => setTimeout(done, 120000));\n  });\n});\n",
+    );
+    project.commit("slow");
+    project
+        .supercov_with(&["--", "npx", "mocha"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let run = project.latest();
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["runs", "latest", "mutants", "test"])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(120),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    let status = supercov.wait().unwrap();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+    assert_eq!(status.code(), Some(130), "{status:?}");
+    assert!(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json"))
+            .is_file()
+    );
+}
+
+/// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
+/// terminal sends it, stops every test binary the pass started and what
+/// they started, though each runs in a process group of its own.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_go_pass_leaves_no_process_running() {
+    use std::os::unix::process::CommandExt;
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-interrupted");
+    project.write("go.mod", "module example.com/slow\n\ngo 1.22\n");
+    project.write(
+        "slow.go",
+        "package slow\n\nfunc Big(n int) bool { return n > 9 }\n",
+    );
+    // In the strong pass (its binaries are given an active mutant), the
+    // test starts a process and waits: its pid and its own go to the marker.
+    project.write(
+        "slow_test.go",
+        "package slow\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestBig(t *testing.T) {\n\tif !Big(10) {\n\t\tt.Fatal(\"big\")\n\t}\n\tif os.Getenv(\"SUPERCOV_ACTIVE_MUTANT\") == \"\" {\n\t\treturn\n\t}\n\tsleeper := exec.Command(\"sleep\", \"120\")\n\tif err := sleeper.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tmarker := os.Getenv(\"SUPERCOV_TEST_MARKER\")\n\tos.WriteFile(marker+\".tmp\", []byte(fmt.Sprintf(\"%d %d\", os.Getpid(), sleeper.Process.Pid)), 0o644)\n\tos.Rename(marker+\".tmp\", marker)\n\ttime.Sleep(120 * time.Second)\n}\n",
+    );
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["mutants", "--", go, "test", "./..."])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    supercov.wait().unwrap();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+}
+
+/// A mutant `go vet` rejects fails `go test` before any test runs, as one
+/// that does not compile does: the strong pass calls it unviable, with
+/// vet's finding.
+#[cfg(unix)]
+#[test]
+fn a_go_mutant_vet_rejects_is_unviable() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-vet");
+    project.write("go.mod", "module example.com/vet\n\ngo 1.22\n");
+    project.write(
+        "odd.go",
+        "package vet\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n\nfunc Big(x int) bool { return x > 9 }\n",
+    );
+    project.write(
+        "odd_test.go",
+        "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) || !Big(10) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
+    );
+    let text = project
+        .supercov(&["mutants", "--", go, "test", "./..."])
+        .succeeds();
+    assert!(text.contains("  unviable      1\n"), "{text}");
+    let saved = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read(entry.unwrap().path().join("strong-mutation.json")).ok())
+        .next()
+        .expect("verdicts saved");
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    let verdict = &saved["mutants"]["odd.go:3:41-3:43:LogicalOperator:||"];
+    assert_eq!(verdict["status"], "unviable", "{saved}");
+    assert!(
+        verdict["reason"]
+            .as_str()
+            .unwrap()
+            .ends_with("odd.go:3:34: suspect or: x != 1 || x != 2"),
+        "{verdict}"
+    );
 }

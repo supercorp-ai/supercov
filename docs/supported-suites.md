@@ -50,7 +50,7 @@ Supercov reports the level it actually observed. It does not guess.
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; the configuration is read from Jest 27 on (before 29.3 through `jest-config`'s own build) |
 | `node:test` | Exact per test |
 | `bun:test` (Bun 1.2.17 and 1.4.4 verified) | Exact test-body coverage, including concurrent and parameterized tests; lifecycle hooks recorded as setup |
 | Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |
@@ -681,6 +681,14 @@ npx supercov -- go test ./...
 npx supercov -- go test -run TestParser ./internal/...
 npx supercov -- go test ./core/... ./app/...
 ```
+
+### Mutation testing in Go
+
+`npx supercov mutants -- go test ./...` lists Gremlins 0.6.0's mutants of
+every Go source the run measures and runs each against the tests that ran
+its code, in test binaries built once (`go test -c`), one process per
+mutant and package, tests picked by exact name. A mutant that does not
+compile is reported `unviable` rather than run.
 
 ### A Go server under browser tests
 
