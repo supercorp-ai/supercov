@@ -81,6 +81,7 @@ gates! {
     isolation => "isolation-integration.mjs",
     watchdog => "watchdog-integration.mjs",
     html_report => "html-report-integration.mjs",
+    mutation_report_formats => "mutation-report-formats.mjs",
     engine_contract => "engine-contract.mjs",
     agent_commands => "check-agent-commands.mjs",
     workspace_crash => "workspace-crash-integration.mjs",

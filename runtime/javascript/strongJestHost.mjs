@@ -35,7 +35,21 @@ function projectJest(root) {
 
 let jest;
 let base;
+let config;
 const root = process.cwd();
+const reporter = fileURLToPath(new URL("./jestReporter.mjs", import.meta.url));
+
+// Whether a configuration survives being written as JSON: only then is it
+// handed to Jest as JSON, as StrykerJS's runner hands it.
+function plain(value) {
+    if (value === null || ["string", "number", "boolean"].includes(typeof value))
+        return true;
+    if (Array.isArray(value))
+        return value.every(plain);
+    if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype)
+        return Object.values(value).every((item) => item === undefined || plain(item));
+    return false;
+}
 
 async function init(args) {
     jest = projectJest(root);
@@ -43,6 +57,13 @@ async function init(args) {
     // The project's own configuration, read by Supercov's (jest.config.mjs).
     if (base.config && resolve(String(base.config)) !== generatedConfig)
         process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = resolve(String(base.config));
+    // Read once, not for every job (no job is under way, so it leaves no
+    // test file out: a job names its one file by its path). A job's outcome
+    // is Supercov's reporter's alone: the project's reporters (a terminal's,
+    // a JUnit file's) and its console have no reader here.
+    const { default: read } = await import(generatedConfig);
+    const resolved = { ...(await read()), reporters: [reporter] };
+    config = plain(resolved) ? JSON.stringify(resolved) : generatedConfig;
 }
 
 async function runJob({ file, mutant, environment }) {
@@ -55,9 +76,10 @@ async function runJob({ file, mutant, environment }) {
         const argv = {
             ...base,
             _: [file],
-            config: generatedConfig,
+            config,
             runTestsByPath: true,
             runInBand: true,
+            silent: true,
             watch: false,
             watchAll: false,
         };

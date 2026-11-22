@@ -97,8 +97,12 @@ afterAll(() => {
     if (emittedSetupFiles.has(testFile))
         writeFileWork(file, testFile, "after the tests");
 });
+// The test a hook runs for: Vitest before 0.30 gives it as `meta`, and
+// gives an afterEach hook no context of its test where its beforeEach had one.
+let currentTask;
 beforeEach((context) => {
-    const task = context.task;
+    const task = context.task ?? context.meta;
+    currentTask = task;
     currentFile = task.file;
     // A strong pass's job (strongJobs.mjs, where the run also had browser
     // tests): its own tests, none after its first failure.
@@ -157,7 +161,7 @@ beforeEach((context) => {
     runtime.resetCoverage(testId);
 });
 afterEach((context) => {
-    const task = context.task;
+    const task = context?.task ?? context?.meta ?? currentTask;
     if (task.result?.state === "fail")
         strongJob()?.fail();
     const testFile = relative(process.cwd(), task.file.filepath)

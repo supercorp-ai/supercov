@@ -3109,9 +3109,18 @@ mod tests {
         let proxy =
             DockerProxy::start(&directory.join("q.sock"), &gone, settings(&directory)).unwrap();
         let mut stream = UnixStream::connect(directory.join("q.sock")).unwrap();
-        stream
-            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
-            .unwrap();
+        // The relay can find the daemon gone and close the connection before
+        // the request is written: the write then fails with a broken pipe
+        // (or a reset), as it should, and the answer is still nothing.
+        if let Err(error) = stream.write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n") {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ),
+                "{error}"
+            );
+        }
         let mut answer = Vec::new();
         let _ = stream.read_to_end(&mut answer);
         assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));

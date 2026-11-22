@@ -780,7 +780,7 @@ fn explain_failed_command(
     run_id: &str,
     exit_code: i32,
     unrun_build: &[String],
-    command: &str,
+    command: &[String],
 ) {
     let tests = discover_runs(root)
         .ok()
@@ -829,8 +829,21 @@ fn explain_failed_command(
         } else {
             "the run recorded no test"
         };
+        // A command that runs once the copy has the folders this checkout
+        // has: a build that starts by removing its output fails without it.
+        let hint = supercov_engine::javascript_run::build_first(
+            &supercov_engine::javascript_run::build_output_here(root),
+            unrun_build,
+            command,
+        );
         eprintln!(
-            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `{hint}`"
+        );
+    } else if !recorded {
+        // The command builds already, or needs no build: what it printed
+        // says why no test ran.
+        eprintln!(
+            "[supercov] the command exited {exit_code} and the run recorded no test: its own output above says why"
         );
     }
 }
@@ -1984,6 +1997,15 @@ pub(crate) fn load_run_view_filtered(
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
+    load_run_and_view(root, selector, filter).map(|(_, view)| view)
+}
+
+/// The run `selector` picks, and its view for only the tests `filter` picks.
+fn load_run_and_view(
+    root: &Path,
+    selector: Option<&str>,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<(StoredRun, supercov_engine::run_view::RunView), String> {
     if let Some(filter) = filter {
         eprintln!(
             "[supercov] reading only the tests {} picks",
@@ -1992,7 +2014,7 @@ pub(crate) fn load_run_view_filtered(
     }
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    run_view_of(root, run, filter)
+    run_view_of(root, run, filter).map(|view| (run.clone(), view))
 }
 
 /// The view of `run` in the checkout at `root`, for only the tests `filter`
@@ -2088,7 +2110,7 @@ fn point_tests(run: &StoredRun) -> Result<Vec<(String, usize, Vec<String>)>, Str
 /// look like it invokes the tools they are named after.
 fn report_usage() -> String {
     format!(
-        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n",
+        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>]\n",
         supercov_engine::coverage_export::FORMATS
     )
 }
@@ -2129,6 +2151,8 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut force = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
+    // `--diff <base>`: the HTML report's mutants of a change alone.
+    let mut diff_base: Option<String> = None;
     // Dispatch put the word first or second, so there is a first argument.
     if arguments[0] != "report" {
         selector = Some(arguments[0].as_str());
@@ -2145,16 +2169,16 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                 print!("{}", report_usage());
                 return ExitCode::SUCCESS;
             }
-            "--format" | "--output" => {
+            "--format" | "--output" | "--diff" => {
                 let Some(value) = rest.get(index) else {
                     eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
                     return ExitCode::from(2);
                 };
                 index += 1;
-                if argument == "--format" {
-                    format = Some(value.to_ascii_lowercase());
-                } else {
-                    output = Some(PathBuf::from(value));
+                match argument {
+                    "--format" => format = Some(value.to_ascii_lowercase()),
+                    "--output" => output = Some(PathBuf::from(value)),
+                    _ => diff_base = Some(value.clone()),
                 }
             }
             // The coverage of some tests alone, from the run as recorded.
@@ -2175,11 +2199,19 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
         eprintln!("[supercov] report needs --format\n{}", report_usage());
         return ExitCode::from(2);
     };
+    // The other formats have no place for a mutant.
+    if diff_base.is_some() && format != "html" {
+        eprintln!(
+            "[supercov] --diff narrows the HTML report's mutants: give it with --format html\n{}",
+            report_usage()
+        );
+        return ExitCode::from(2);
+    }
 
     let result = (|| -> Result<(), String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view =
-            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
+        let (run, view) =
+            load_run_and_view(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2220,7 +2252,14 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     "The file could not be read from this checkout.".to_owned(),
                 )
             };
-            supercov_engine::coverage_html::html(&view, &sources, &reason)
+            // The run's mutants, of a change alone with `--diff`.
+            let diff = diff_base
+                .as_deref()
+                .map(|base| mutant_diff(&root, base, &run))
+                .transpose()?;
+            let mutants =
+                html_report::run_mutants(&run, (!filter.is_empty()).then_some(&filter), diff)?;
+            supercov_engine::coverage_html::html(&view, &sources, &reason, mutants.as_ref())
         } else {
             let sources = if supercov_engine::coverage_export::needs_source(&format) {
                 read_sources()
@@ -2229,6 +2268,17 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             };
             supercov_engine::coverage_export::export(&view, &format, timestamp, &root, &sources)?
         };
+        // An HTML document is not for a terminal: without `--output` it goes
+        // beside the store's other reports, whose `.gitignore` keeps it out
+        // of a commit, and the path is said. A pipe or a redirect still gets
+        // the document.
+        let to_terminal = output.is_none()
+            && format == "html"
+            && std::io::IsTerminal::is_terminal(&std::io::stdout());
+        // The store's own report is replaced each time, as `report`'s is.
+        let force = force || to_terminal;
+        let output = output
+            .or_else(|| to_terminal.then(|| root.join(".supercov/reports/coverage-report.html")));
         match output {
             Some(path) => {
                 // `--output coverage/report` names a directory for the HTML
@@ -2623,7 +2673,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
-    let command_text = command.join(" ");
+    let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
@@ -2644,7 +2694,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     &result.run_id,
                     result.exit_code,
                     &result.unrun_build,
-                    &command_text,
+                    &command_words,
                 );
             }
             // A server's run directory is named by its run id.
@@ -3272,6 +3322,10 @@ fn execute_coverage_query(
                 run.id
             ));
         }
+    }
+    // The strong verdicts a pass saved: the mutants listing shows each, and
+    // the summary their score.
+    if matches!(request.command.as_str(), "mutants" | "summary") {
         let saved = mutants_test_command::read_saved(run);
         if !saved.is_empty() {
             request.mutants.strong = Some(

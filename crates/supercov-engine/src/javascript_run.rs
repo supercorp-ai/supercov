@@ -1170,7 +1170,7 @@ fn run_javascript(
                 writeln!(
                     diagnostics,
                     "[supercov] running in isolated workspace: {}",
-                    request.command.join(" ")
+                    shell_words(&request.command)
                 )
                 .map_err(|error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
@@ -1796,11 +1796,62 @@ fn missing_build_output_note(missing: &[&str], build: &[String], command: &[Stri
         .map(|folder| format!("`{folder}/`"))
         .collect::<Vec<_>>()
         .join(", ");
-    let build = build.join(" ");
-    let command = command.join(" ");
     format!(
-        "[supercov] the copy the command runs in starts without {folders}, which this checkout has, and the command does not run `{build}`: if the tests need that output, stop and measure `supercov -- sh -c \"{build} && {command}\"` instead"
+        "[supercov] the copy the command runs in starts without {folders}, which this checkout has, and the command does not run `{}`: if the tests need that output, stop and measure `{}` instead",
+        shell_words(build),
+        build_first(missing, build, command)
     )
+}
+
+/// The build output folders this checkout holds, which the copy a command
+/// runs in starts without.
+pub fn build_output_here(root: &Path) -> Vec<&'static str> {
+    BUILD_OUTPUTS
+        .iter()
+        .copied()
+        .filter(|folder| root.join(folder).is_dir())
+        .collect()
+}
+
+/// The command to measure where a suite needs a build the command does not
+/// run: `supercov -- sh -c "mkdir -p dist && npm run build && <command>"`.
+/// The folders are made first, as this checkout has them: a build that
+/// begins by removing its output (`rm -r dist`) fails in a copy without it.
+pub fn build_first(folders: &[&str], build: &[String], command: &[String]) -> String {
+    let make = if folders.is_empty() {
+        String::new()
+    } else {
+        format!("mkdir -p {} && ", folders.join(" "))
+    };
+    let script = format!("{make}{} && {}", shell_words(build), shell_words(command));
+    format!(
+        "supercov -- sh -c \"{}\"",
+        script
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    )
+}
+
+/// A command as a shell takes it back: each word quoted where it needs to
+/// be, so a line that shows it can be run as it reads.
+pub fn shell_words(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|word| {
+            if !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))
+            {
+                word.clone()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The id of the `nth` run published beside `run_id` from the same command:
@@ -2295,6 +2346,35 @@ mod environment_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The hint for a build the command does not run makes the folders the
+    /// checkout has first, and reads back as the shell would take it.
+    #[test]
+    fn a_build_hint_runs_as_it_reads() {
+        let words = |text: &[&str]| text.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            build_first(
+                &["dist"],
+                &words(&["npm", "run", "build"]),
+                &words(&["npx", "vitest", "run"])
+            ),
+            "supercov -- sh -c \"mkdir -p dist && npm run build && npx vitest run\""
+        );
+        assert_eq!(
+            build_first(
+                &[],
+                &words(&["yarn", "build"]),
+                &words(&["sh", "-c", "echo \"$HOME\" `x` \\ it's"])
+            ),
+            "supercov -- sh -c \"yarn build && sh -c 'echo \\\"\\$HOME\\\" \\`x\\` \\\\ it'\\\\''s'\""
+        );
+        assert_eq!(shell_words(&words(&["a", "", "b c"])), "a '' 'b c'");
+        let root = std::env::temp_dir().join(format!("supercov-build-here-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("build"), "a file").unwrap();
+        assert_eq!(build_output_here(&root), ["dist"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn an_interrupted_run_says_by_what() {
         let interrupted = DirectJavascriptRunError::Interrupted {

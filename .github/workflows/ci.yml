@@ -236,6 +236,8 @@ jobs:
       - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
         env:
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
+          # mutations.xml is read by PIT's own reader, with this job's Java.
+          SUPERCOV_REQUIRE_PIT_READER: "1"
       - if: matrix.group == 1
         run: cargo test -p supercov --test cli a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test
         env:

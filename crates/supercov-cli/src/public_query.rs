@@ -84,7 +84,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
     Some(format!("Usage: {usage}\n"))
 }
 
-const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
+const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown|stryker|pit [--output <file>]]
 
 Weak mutation: for each mutant the language's established tool would make
 (StrykerJS for JavaScript and TypeScript; in preview, mutmut for Python,
@@ -115,7 +115,11 @@ Options:
   --json                    the coverage.mutants reply, a page at a time
   --format jsonl            every mutant asked about, one JSON object per line, as --json lists each
   --format markdown         the not-infected and not-reached mutants (or --status's) as a table for a pull
-                            request's comment, the first 25 and the command for the rest
+                            request's comment, the first 25 and the command for the rest; once
+                            mutants test ran, the survivors with their verdicts and the mutation score
+  --format stryker          StrykerJS's mutation.json (the mutation testing report schema), for
+                            mutation-testing-elements, the Stryker Dashboard and CI integrations
+  --format pit              PIT's mutations.xml, for PIT's report aggregator and Sonar's PIT plugin
   --output <file>           with --format, write them there instead of to standard output
 
 Exit codes:
@@ -922,10 +926,24 @@ fn read_stryker_reports(
         if reports.reports.contains(&path) {
             return Ok(());
         }
-        let text = supercov_engine::fault_fs::read_to_string(&path)
+        let bytes = supercov_engine::fault_fs::read(&path)
             .map_err(|error| format!("Could not read {path}: {error}"))?;
-        let mutants = supercov_engine::mutants_query::parse_stryker_report(&text, path_of)
-            .map_err(|reason| format!("Could not read {path} as a StrykerJS report: {reason}"))?;
+        let mutants = if supercov_engine::ruby_mutants::is_mutant_session(&bytes) {
+            // The mutant gem's session results, matched by the methods its
+            // mutations make.
+            supercov_engine::ruby_mutants::parse_mutant_session(&bytes, path_of, |file| {
+                std::fs::read(project.join(file)).ok()
+            })
+            .map_err(|reason| {
+                format!("Could not read {path} as mutant's session results: {reason}")
+            })?
+        } else {
+            let text = String::from_utf8(bytes)
+                .map_err(|error| format!("Could not read {path}: {error}"))?;
+            supercov_engine::mutants_query::parse_stryker_report(&text, path_of).map_err(
+                |reason| format!("Could not read {path} as a StrykerJS report: {reason}"),
+            )?
+        };
         reports.reports.push(path);
         reports.mutants.extend(mutants);
         Ok::<(), String>(())
@@ -948,6 +966,7 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
             } else if path
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                || path.to_string_lossy().ends_with(".json.gz")
             {
                 found.push(path.to_string_lossy().replace('\\', "/"));
             }
@@ -1080,6 +1099,41 @@ pub fn parse_public_query(
 
 #[cfg(test)]
 mod tests {
+    /// `--stryker` reads the mutant gem's session results beside StrykerJS
+    /// reports, and says which session it could not read.
+    #[test]
+    fn mutant_sessions_are_read_beside_stryker_reports() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-mutant-sessions-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session = serde_json::json!({
+            "subject_results": [{
+                "source_path": "lib/none.rb",
+                "identification": "A#b:lib/none.rb:1",
+                "coverage_results": [{
+                    "mutation_result": {
+                        "mutation_type": "evil",
+                        "mutation_source": "def b\n  nil\nend",
+                        "mutation_identification": "evil:A#b:x",
+                    },
+                    "criteria_result": { "test_result": true },
+                }],
+            }],
+        });
+        let good = directory.join("session.json");
+        std::fs::write(&good, session.to_string()).unwrap();
+        let read = read_stryker_reports(&[good.display().to_string()], None).unwrap();
+        assert_eq!(read.reports, [good.display().to_string()]);
+        let bad = directory.join("broken.json.gz");
+        std::fs::write(&bad, [0x1f, 0x8b, 0, 0]).unwrap();
+        let refused = read_stryker_reports(&[bad.display().to_string()], None).unwrap_err();
+        assert!(refused.contains("as mutant's session results"), "{refused}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     /// Each query's help names its own usage; an unknown one, the list.
     #[test]
     fn each_query_s_help_is_its_own_usage() {

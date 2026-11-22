@@ -96,10 +96,26 @@ npx supercov mutants -- npm test
 
 `supercov mutants` measures the command with the probes that record the values
 its mutants' verdicts read (`SUPERCOV_MUTANTS=1`), lists the mutants, and runs
-the strong pass. While the checkout is unchanged, the next `supercov mutants`
-reads that run again and runs nothing it already decided. Without `--` it
-uses the latest run's command. The pass's summary gives the mutation score,
-every verdict counted, and ends with the mutants the tests let survive.
+the strong pass. Without `--` it uses the latest run's command. The pass's
+summary gives the mutation score, every verdict counted, and ends with the
+mutants the tests let survive.
+
+- **Unchanged checkout.** The next `supercov mutants` reads the same run again
+  and runs nothing it already decided.
+- **After an edit.** It measures the checkout again and keeps an earlier
+  verdict for each mutant whose file is as it was and whose candidate tests,
+  and their test files, nothing changed could reach, as `runs latest tests
+  affected` reads a change: a test file's edit reaches its tests, a source's
+  edit the tests that ran the changed code. The rest run, and the summary says
+  how many verdicts were kept and from which run.
+- **Interrupted.** Each verdict is saved as it is made. A pass stopped by
+  Ctrl-C, a killed job or a test worker that never ended keeps what it
+  decided, Ctrl-C stops every process the pass started, and the next pass runs
+  only the rest.
+- **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
+  finds a mutant; `2`, after the answer, when the measured command failed (a
+  failing test kills nothing, so the verdicts cannot gate) or no mutant could
+  be run. A run that recorded no test is refused with exit `2`.
 
 The steps can also be taken one at a time:
 
@@ -145,12 +161,15 @@ npx supercov runs latest mutants --diff origin/main
 npx supercov runs latest mutants --diff origin/main --format markdown --output mutants.md
 npx supercov runs latest mutants --diff origin/main --fail-on not-infected,not-reached
 npx supercov mutants --diff origin/main --fail-on survived
+npx supercov mutants --diff origin/main --format markdown --output mutants.md
 ```
 
 - `--format markdown` writes a table for a pull request's comment: the counts,
   then up to 25 mutants left alive with where they are, what they change and
   why, and the command that lists the rest. Once a strong pass gave verdicts,
-  it has the mutation score and lists the survivors.
+  it has the mutation score and lists the survivors. `supercov mutants` takes
+  `--format markdown` and `--output <file>` too, and writes its own answer
+  that way.
 - `--fail-on` exits `1` when a mutant asked about has one of the statuses
   given. On `runs latest mutants` they are weak statuses, from the run alone;
   on `supercov mutants` and `mutants test` they are verdicts: `survived`,
@@ -205,11 +224,12 @@ and stays the same while that code does.
 
 ### Runners without a driver
 
-A runner Supercov measures but has no strong driver for (another Node-based
-runner, such as tape) still gets the mutants list and the weak report. In a
-strong pass its mutants are `error`, which the score leaves out, and the
-summary counts them in a line per runner (`12 mutant(s) not run: no strong
-driver for tape`). A pass where that is every mutant has no mutation score.
+A test runner Supercov has no adapter for, such as tape, records no test: a
+strong pass over its run is refused with exit `2`, naming the runner and how
+many mutants its command ran. Tests Supercov records under a runner no strong
+driver runs keep the mutants list and the weak report; in a strong pass their
+mutants are `error`, which the score leaves out, counted in a line per runner
+(`12 mutant(s) not run: no strong driver for pytest`), never survivors.
 
 ### Join and export other tools' reports
 
@@ -273,8 +293,7 @@ no mutants shows none of this.
 - **Playwright** carries each test's mutant with its requests, so one server
   serves different mutants to different workers. A mutant of a server's
   start-up runs with the server started again for it. StrykerJS has no
-  Playwright runner, so these verdicts have no reference tool to be compared
-  with.
+  Playwright runner, so Playwright's verdicts are checked by hand (see below).
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.
@@ -386,6 +405,12 @@ m8a.4xlarge), both tools with 15 workers, 2026-11-22. Times in seconds:
 | remix-auth | `bun:test` | 625 | 0 | 7.3 | 0.4 + 1.9 |
 | mini-throttle | Vitest Browser Mode | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
 
+Playwright, which StrykerJS does not run, on playwright-test-coverage (a Vite
+app served by `npm run dev`, three tests): its 9 mutants run are 7 `timeout`
+and 2 `survived`, and each applied by hand to the source, with `npx playwright
+test` as written, agrees: the 7 fail, waiting out Playwright's 30 seconds, and
+the 2 pass.
+
 pathval's 13 are kills StrykerJS makes because it runs every mutant in one
 process: once a mutant left a polluted global behind, one test failed for
 every mutant after it; each applied by hand survives `npx mocha`. The two
@@ -496,8 +521,9 @@ What costs time:
     after an edit (16-CPU AWS c8a.4xlarge, 2026-11-22);
   - Ruby: 1.02 to 1.16 times the whole run (16-CPU AWS c8a and m8a.4xlarge,
     2026-11-22);
-  - JavaScript and TypeScript: TBD(value-probe cost for JavaScript runs,
-    machine and date).
+  - JavaScript and TypeScript: 1.4 to 1.7% on hono and 2.6% on ufo (Vitest),
+    3.6% on cron-parser (Jest) and 4% on negotiator (Mocha), medians of 5
+    (16-CPU AWS c8a and m8a.4xlarge, 2026-11-22).
 - **The strong pass** reruns tests, so it takes about as long as the
   established tool on the same project: the tables above. Use `--diff` on a
   pull request to run only the change's mutants, and `--shard` to split a
