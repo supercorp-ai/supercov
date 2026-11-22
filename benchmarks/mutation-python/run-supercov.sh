@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Measures one corpus project with Supercov and runs its strong pass, timing
-# each step; copies the run's mutants and verdicts to <out>.
-#   run-supercov.sh <project> <dir> <runner: pytest|unittest> <supercov> <out>
+# each step; copies the run's mutants and verdicts to <out>. With `values`
+# the run records its mutants' values (SUPERCOV_MUTANTS=1), and the plan
+# decides more of them without running anything.
+#   run-supercov.sh <project> <dir> <runner: pytest|unittest> <supercov> <out> [values]
 set -uo pipefail
 project=$1
 dir=$(cd "$2" && pwd)
@@ -26,7 +28,9 @@ case "$runner" in
 esac
 now() { date +%s.%N; }
 started=$(now)
+if [ "${6:-}" = values ]; then export SUPERCOV_MUTANTS=1; fi
 "$supercov" -- "${command[@]}" > "$out/measure.log" 2>&1
+unset SUPERCOV_MUTANTS
 measure_exit=$?
 measured=$(now)
 "$supercov" runs latest mutants test --json > "$out/strong.json" 2> "$out/strong.log"
@@ -34,6 +38,7 @@ strong_exit=$?
 ended=$(now)
 run=$(ls -d .supercov/runs/run_* | head -1)
 cp "$run"/strong-mutation.json "$run"/mutants-listed.json "$out"/ 2>/dev/null
+"$supercov" runs latest mutants --json --limit 0 > "$out/weak.json" 2>/dev/null
 for results in .supercov/strong/*/results.jsonl; do
   cat "$results" >> "$out/results.jsonl"
 done
