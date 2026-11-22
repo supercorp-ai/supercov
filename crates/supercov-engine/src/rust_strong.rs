@@ -1080,7 +1080,9 @@ impl DoctestCommand {
         let mut command = Command::new(&self.program);
         command
             .args(&self.arguments)
-            .args(["-p", package, "--", "--exact"])
+            // rustdoc's names do not match `--exact`; each is whole, from
+            // its file's path to its line, and matches only itself.
+            .args(["-p", package, "--"])
             .args(names)
             .current_dir(&self.workspace)
             .env("CARGO_TARGET_DIR", &self.target)
@@ -1352,4 +1354,111 @@ fn run_job(
     }
     results.verdict(&job.id, "survived", None, ran, started, None);
     "survived"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invocation(command: &[&str]) -> CargoTestInvocation {
+        crate::rust_test_runner::cargo_invocation(
+            Path::new("."),
+            &command
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pass_builds_with_the_commands_cargo_options_and_no_filter() {
+        let built = build_invocation(&invocation(&[
+            "cargo",
+            "test",
+            "-p",
+            "a",
+            "--features=x",
+            "name",
+            "--",
+            "--nocapture",
+        ]));
+        assert_eq!(built.arguments, ["test", "-p", "a", "--features=x"]);
+        let built = build_invocation(&invocation(&[
+            "cargo",
+            "nextest",
+            "run",
+            "--workspace",
+            "--release",
+            "filter",
+        ]));
+        assert_eq!(built.kind, RustCargoCommandKind::CargoTest);
+        assert_eq!(built.arguments, ["test", "--workspace", "--release"]);
+    }
+
+    #[test]
+    fn a_doctest_runs_by_the_package_nearest_its_file() {
+        let root =
+            std::env::temp_dir().join(format!("supercov-rust-strong-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("inner/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"inner\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("inner/Cargo.toml"),
+            "[package]\nname = \"inner\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            package_of(&root, "inner/src/lib.rs").as_deref(),
+            Some("inner")
+        );
+        assert_eq!(package_of(&root, "src/lib.rs"), None);
+        // The copy holds what the project holds, and keeps what is the same.
+        let copy = root.join("copy");
+        sync_project(&root.join("inner"), &copy).unwrap();
+        assert!(copy.join("Cargo.toml").exists());
+        let written = std::fs::metadata(copy.join("Cargo.toml"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        sync_project(&root.join("inner"), &copy).unwrap();
+        assert_eq!(
+            std::fs::metadata(copy.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            written
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_error_belongs_to_the_mutant_whose_code_it_is_in() {
+        let mut switched = BTreeMap::new();
+        switched.insert(
+            "src/a.rs".to_owned(),
+            crate::rust_schemata::SwitchedFile {
+                code: String::new(),
+                replacements: vec![(3, 10..20), (4, 30..40)],
+                switches: vec![(0..50, vec![3, 4]), (5..25, vec![3])],
+            },
+        );
+        let error = |range: Range<usize>| CompileError {
+            code: Some("E0308".into()),
+            spans: vec![("src/a.rs".into(), range)],
+            rendered: "mismatched types".into(),
+        };
+        let (own, around) = attribute(&error(12..15), &switched);
+        assert_eq!(own, BTreeSet::from([("src/a.rs".to_owned(), 3)]));
+        assert_eq!(around, BTreeSet::from([("src/a.rs".to_owned(), 3)]));
+        let (own, around) = attribute(&error(44..46), &switched);
+        assert!(own.is_empty());
+        assert_eq!(around.len(), 2);
+        assert!(libtest_ran_nothing("running 0 tests\n"));
+        assert!(!libtest_ran_nothing("running 1 test\n"));
+        assert_eq!(first_line("a\nb"), "a");
+    }
 }

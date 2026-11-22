@@ -1355,4 +1355,89 @@ mod tests {
         assert_eq!(mutants[0].descriptor(), "true");
         assert!(enumerate("fn f( {").is_none());
     }
+
+    /// Each mutant is linked to the points the run measured, and its weak
+    /// verdict read from them: a body by its function, an arm by its own
+    /// selection, a guard by its outcomes.
+    #[test]
+    fn listed_mutants_are_linked_and_judged_by_what_the_run_recorded() {
+        use crate::js_weak_mutation::{Observations, Status, verdict};
+        let file = "src/lib.rs";
+        let source = "pub fn f(n: i32, b: bool) -> i32 {\n    match n {\n        0 => 1,\n        x if x > 2 => 2,\n        _ => if !b { -n } else { n },\n    }\n}\n";
+        let manifest = crate::rust_instrumenter::build_rust_manifest(file, source).unwrap();
+        let mut recorded = manifest
+            .points
+            .iter()
+            .map(|point| point.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        recorded.extend(
+            manifest
+                .decisions
+                .iter()
+                .map(|decision| decision.id.clone()),
+        );
+        recorded.extend(manifest.branches.iter().flat_map(|branch| {
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.clone())
+        }));
+        let listed = list(file, source, &recorded).unwrap();
+        let find = |mutator: &str, replacement: &str| {
+            listed
+                .iter()
+                .find(|mutant| mutant.mutator == mutator && mutant.replacement == replacement)
+                .unwrap_or_else(|| panic!("no {mutator} {replacement}: {listed:?}"))
+        };
+        let body = find("FnValue", "0");
+        assert!(body.function.is_some() && body.statement.is_none());
+        let arm = find("MatchArm", REMOVED);
+        assert!(
+            arm.statement
+                .as_deref()
+                .is_some_and(|id| id.ends_with(":selected"))
+        );
+        let guard = find("MatchArmGuard", "true");
+        assert!(guard.decision.is_some());
+        let mut seen = Observations::default();
+        assert_eq!(verdict(body, &seen).0, Status::NotReached);
+        seen.hits.insert(body.function.clone().unwrap());
+        assert_eq!(verdict(body, &seen).0, Status::Unknown);
+        assert_eq!(verdict(find("FnValue", "1"), &seen).0, Status::Unknown);
+        seen.hits.extend(
+            recorded
+                .iter()
+                .filter(|id| id.starts_with("rs:statement:"))
+                .cloned(),
+        );
+        assert_eq!(verdict(arm, &seen).0, Status::NotReached);
+        seen.hits.insert(arm.statement.clone().unwrap());
+        assert_eq!(verdict(arm, &seen).0, Status::Infected { proxy: true });
+        let decision = guard.decision.as_ref().unwrap().id.clone();
+        assert_eq!(verdict(guard, &seen).0, Status::NotReached);
+        seen.decisions
+            .insert(decision.clone(), vec![(vec![Some(true)], true)]);
+        assert_eq!(verdict(guard, &seen).0, Status::NotInfected);
+        assert_eq!(
+            verdict(find("MatchArmGuard", "false"), &seen).0,
+            Status::Infected { proxy: false }
+        );
+        let not = listed
+            .iter()
+            .find(|mutant| mutant.mutator == "UnaryOperator" && mutant.original.starts_with('!'))
+            .unwrap();
+        assert_eq!(verdict(not, &seen).0, Status::Infected { proxy: false });
+        let negation = listed
+            .iter()
+            .find(|mutant| mutant.mutator == "UnaryOperator" && mutant.original.starts_with('-'))
+            .unwrap();
+        assert_eq!(verdict(negation, &seen).0, Status::Unknown);
+        assert_eq!(
+            verdict(find("BinaryOperator", "=="), &seen).0,
+            Status::Unknown
+        );
+        // A run that measured a point the source no longer has: changed.
+        recorded.insert("rs:statement:gone".into());
+        assert!(list(file, source, &recorded).is_none());
+    }
 }
