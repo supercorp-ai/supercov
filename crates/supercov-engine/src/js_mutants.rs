@@ -9,9 +9,8 @@
 //! StrykerJS's own list and the tests here compare the two on the fixtures in
 //! `tests/fixtures/stryker-parity`.
 //!
-//! Regex mutants come from weapon-regex and are not enumerated. Whether a
-//! regex has any still matters, because a statement call is mutated only when
-//! it is the statement's sole mutant; that is approximated from the pattern.
+//! Regex mutants are weapon-regex's level-1 mutants of a pattern, as
+//! StrykerJS asks for them (`js_regex_mutants`).
 //!
 //! # Descriptors
 //!
@@ -49,11 +48,11 @@ use oxc_ast::{
         Argument, ArrowFunctionExpression, BinaryExpression, CallExpression, ChainElement,
         ChainExpression, ClassElement, Comment, ComputedMemberExpression, Decorator, Directive,
         Expression, Function, FunctionBody, FunctionType, Hashbang, ImportDeclaration,
-        MethodDefinitionKind, PrivateFieldExpression, Program, PropertyKey, RegExpFlags,
-        StaticMemberExpression, StringLiteral, TSAsExpression, TSEnumDeclaration,
-        TSGlobalDeclaration, TSImportEqualsDeclaration, TSInterfaceDeclaration,
-        TSModuleDeclaration, TSType, TSTypeAliasDeclaration, TSTypeAnnotation,
-        TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclaration,
+        MethodDefinitionKind, PrivateFieldExpression, Program, PropertyKey, StaticMemberExpression,
+        StringLiteral, TSAsExpression, TSEnumDeclaration, TSGlobalDeclaration,
+        TSImportEqualsDeclaration, TSInterfaceDeclaration, TSModuleDeclaration, TSType,
+        TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeParameterDeclaration,
+        TSTypeParameterInstantiation, VariableDeclaration,
     },
 };
 use oxc_ast_visit::{Visit, walk};
@@ -114,7 +113,7 @@ pub(crate) fn enumerate(program: &Program<'_>, source: &str) -> Vec<LedgerMutant
     enumerator
         .collected
         .into_iter()
-        .filter(|mutant| !mutant.ignored && !mutant.removed && mutant.mutator != REGEX)
+        .filter(|mutant| !mutant.ignored && !mutant.removed)
         .map(|mutant| LedgerMutant {
             span: mutant.span,
             start: lines.position(mutant.span.start),
@@ -164,6 +163,13 @@ pub(crate) fn descriptor_from_stryker(
             '~' => REMOVED.to_owned(),
             _ => return None,
         },
+        // The mutated pattern: of a regular expression literal, or of the
+        // string `new RegExp` is given.
+        REGEX => with_expression(text, |expression| match expression.without_parentheses() {
+            Expression::RegExpLiteral(literal) => Some(literal.regex.pattern.text.to_string()),
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            _ => None,
+        })?,
         BOOLEAN_LITERAL => {
             if original.starts_with('!') {
                 REMOVED.to_owned()
@@ -467,59 +473,6 @@ fn assignment_replacement(operator: AssignmentOperator) -> Option<&'static str> 
         AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish => "&&=",
         _ => return None,
     })
-}
-
-/// Whether weapon-regex makes any level-1 mutant of `pattern`: an anchor to
-/// remove, a character class or predefined class to negate, a quantifier to
-/// remove, or a lookaround to negate. An approximation of weapon-regex's
-/// parser; only "any or none" matters here.
-fn regex_has_mutants(pattern: &str, unicode: bool) -> bool {
-    let characters: Vec<char> = pattern.chars().collect();
-    let mut index = 0;
-    let mut previous_open_group = false;
-    while index < characters.len() {
-        let character = characters[index];
-        let after_open_group = previous_open_group;
-        previous_open_group = false;
-        match character {
-            '\\' => {
-                match characters.get(index + 1) {
-                    Some('d' | 'D' | 's' | 'S' | 'w' | 'W') => return true,
-                    Some('p' | 'P') if unicode => return true,
-                    _ => {}
-                }
-                index += 2;
-                continue;
-            }
-            '[' | '^' | '$' | '*' | '+' => return true,
-            '?' => {
-                if !after_open_group {
-                    return true;
-                }
-                match (characters.get(index + 1), characters.get(index + 2)) {
-                    (Some('=' | '!'), _) | (Some('<'), Some('=' | '!')) => return true,
-                    _ => {}
-                }
-            }
-            '{' => {
-                let rest: String = characters[index + 1..].iter().collect();
-                if let Some(close) = rest.find('}') {
-                    let inside = &rest[..close];
-                    let (low, high) = inside.split_once(',').unwrap_or((inside, ""));
-                    if !low.is_empty()
-                        && low.chars().all(|digit| digit.is_ascii_digit())
-                        && high.chars().all(|digit| digit.is_ascii_digit())
-                    {
-                        return true;
-                    }
-                }
-            }
-            '(' => previous_open_group = true,
-            _ => {}
-        }
-        index += 1;
-    }
-    false
 }
 
 /// Line starts as Babel counts lines: `\n`, `\r\n`, `\r`, U+2028 and U+2029
@@ -1008,21 +961,22 @@ impl<'s, 'a> Enumerator<'s, 'a> {
             self.emit(span, UPDATE_OPERATOR, replacement);
         }
 
-        // Regex: not enumerated, but a regex with mutants keeps a statement
-        // call from being its statement's sole mutant.
+        // Regex: weapon-regex's level-1 mutants of the pattern
+        // (js_regex_mutants), each named by its pattern.
         match kind {
             AstKind::RegExpLiteral(literal) => {
-                let flags = literal.regex.flags;
-                let unicode = flags.contains(RegExpFlags::U) || flags.contains(RegExpFlags::V);
-                if regex_has_mutants(literal.regex.pattern.text.as_str(), unicode) {
-                    self.emit(span, REGEX, "");
+                let flags = literal.regex.flags.to_string();
+                for pattern in
+                    crate::js_regex_mutants::mutants(literal.regex.pattern.text.as_str(), &flags)
+                {
+                    self.emit(span, REGEX, &pattern);
                 }
             }
             AstKind::StringLiteral(literal) => {
                 if let Some(flags) = self.regexp_constructor_flags(literal) {
-                    let unicode = flags.contains('u') || flags.contains('v');
-                    if regex_has_mutants(literal.value.as_str(), unicode) {
-                        self.emit(span, REGEX, "");
+                    for pattern in crate::js_regex_mutants::mutants(literal.value.as_str(), &flags)
+                    {
+                        self.emit(span, REGEX, &pattern);
                     }
                 }
             }
@@ -1759,7 +1713,12 @@ mod tests {
             descriptor("CallExpression", "go();", ";").as_deref(),
             Some("empty")
         );
-        assert_eq!(descriptor("Regex", "/a+/", "/a/"), None);
+        assert_eq!(descriptor("Regex", "/a+/", "/a/").as_deref(), Some("a"));
+        assert_eq!(
+            descriptor("Regex", "\"a+\"", "\"\\\\d\"").as_deref(),
+            Some("\\d")
+        );
+        assert_eq!(descriptor("Regex", "/a+/", "x"), None);
         assert_eq!(descriptor("Unknown", "a", "b"), None);
     }
 
@@ -1846,31 +1805,6 @@ mod tests {
         assert_eq!(parse("  Stryker disable all"), None);
         assert_eq!(parse("* Stryker disable all"), None);
         assert_eq!(parse(" stryker disable all"), None);
-    }
-
-    #[test]
-    fn js_mutants_regexes_with_level_one_mutants() {
-        for pattern in [
-            "^a", "a$", "[ab]", "\\d", "a*", "a+", "a?", "a{2}", "a{2,}", "(?=a)", "(?<!a)",
-        ] {
-            assert!(regex_has_mutants(pattern, false), "{pattern}");
-        }
-        for pattern in [
-            "",
-            "abc",
-            "a|b",
-            "(a)",
-            "(?:a)",
-            "(?<name>a)",
-            "a.b",
-            "\\.",
-            "\\[",
-            "a{x}",
-        ] {
-            assert!(!regex_has_mutants(pattern, false), "{pattern}");
-        }
-        assert!(regex_has_mutants("\\p{L}", true));
-        assert!(!regex_has_mutants("\\p{L}", false));
     }
 
     #[test]
@@ -1962,14 +1896,6 @@ mod tests {
         assert_eq!(parse_directive("\u{85}Stryker disable all"), None);
         assert_eq!(parse_directive(" Stryker enable all"), None);
         assert_eq!(parse_directive(" Stryker disable"), None);
-    }
-
-    #[test]
-    fn js_mutants_a_brace_is_a_quantifier_only_around_a_closed_numeric_range() {
-        assert!(regex_has_mutants("a{2,3}", false));
-        for pattern in ["a{2", "a{,2}", "a{2,x}"] {
-            assert!(!regex_has_mutants(pattern, false), "{pattern}");
-        }
     }
 
     fn enumerated(name: &str, source: &str) -> Vec<String> {

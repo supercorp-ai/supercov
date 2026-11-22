@@ -1138,6 +1138,176 @@ pub fn prepare_rust_project_for(
     })
 }
 
+impl PreparedRustProject {
+    /// A workspace built as written, with nothing instrumented: a strong
+    /// pass's copy for a mutant built on its own.
+    pub(crate) fn plain(workspace_root: PathBuf) -> Self {
+        Self {
+            target_directory: workspace_root.join("target"),
+            workspace_root,
+            source_files: Vec::new(),
+            crate_roots: Vec::new(),
+            runtime_module: String::new(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
+            },
+            probes: Default::default(),
+            preparation: Default::default(),
+        }
+    }
+}
+
+/// A strong pass's copy of the workspace: the files holding the mutants it
+/// switches, rewritten by `rust_schemata::switch`, and the strong runtime
+/// in the root of each crate that compiles one. Every other file stays as
+/// written, so a build after another pass rebuilds only those crates.
+pub(crate) struct StrongWorkspace {
+    pub project: PreparedRustProject,
+    /// Each switched file, by its path in the workspace.
+    pub switched: BTreeMap<String, crate::rust_schemata::SwitchedFile>,
+    /// Mutants given that were not switched (by file and index), and why:
+    /// their file is not one a crate compiles (`not-compiled`), or a
+    /// proc-macro crate's, which the compiler runs as it builds
+    /// (`proc-macro`).
+    pub declined: Vec<((String, u64), &'static str)>,
+}
+
+/// Switches `mutants` (by file, each with its index there) into the copy at
+/// `workspace`, which holds the project's sources as written.
+pub(crate) fn prepare_rust_strong_project(
+    workspace: &Path,
+    mutants: &BTreeMap<String, Vec<(u64, crate::rust_mutants::RustMutant)>>,
+) -> Result<StrongWorkspace, RustProjectError> {
+    let workspace = canonical_directory(workspace)?;
+    let metadata = cargo_metadata(&workspace)?;
+    let members = metadata
+        .workspace_members
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let packages = metadata
+        .packages
+        .into_iter()
+        .filter(|package| members.contains(&package.id))
+        .collect::<Vec<_>>();
+    if packages.is_empty() {
+        return Err(RustProjectError::NoWorkspacePackages);
+    }
+    let (roots, proc_macro_roots) = crate_roots(&workspace, &packages)?;
+    let mut files = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    let mut owners = BTreeMap::new();
+    resolve_module_tree(
+        &workspace,
+        &roots,
+        &test_target_roots(&packages),
+        &mut files,
+        &mut tests,
+        &mut owners,
+    )?;
+    let sources = files
+        .iter()
+        .map(|path| {
+            let relative = confined_relative(&workspace, path).expect(INSIDE);
+            let source = fs::read_to_string(path).map_err(|error| RustProjectError::Io {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+            Ok((relative, source))
+        })
+        .collect::<Result<BTreeMap<_, _>, RustProjectError>>()?;
+    let runtime_module = runtime_module_name(&sources);
+    let runtime_path = format!("crate::{runtime_module}");
+    let mut switched = BTreeMap::new();
+    let mut declined = Vec::new();
+    let mut needs_runtime = BTreeSet::new();
+    for (file, placed) in mutants {
+        let (Some(source), Some(file_owners)) = (
+            sources.get(file),
+            owners.get(&normalize(&workspace.join(file))),
+        ) else {
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "not-compiled")),
+            );
+            continue;
+        };
+        if file_owners
+            .iter()
+            .any(|root| proc_macro_roots.contains(root))
+        {
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "proc-macro")),
+            );
+            continue;
+        }
+        let chosen = placed
+            .iter()
+            .map(|(ordinal, mutant)| (*ordinal, mutant))
+            .collect::<Vec<_>>();
+        let file_switched = crate::rust_schemata::switch(source, &runtime_path, file, &chosen);
+        let path = workspace.join(file);
+        fs::write(&path, &file_switched.code).map_err(|error| RustProjectError::Io {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
+        needs_runtime.extend(file_owners.iter().cloned());
+        switched.insert(file.clone(), file_switched);
+    }
+    let mut crate_roots = Vec::new();
+    for root in needs_runtime {
+        let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
+            path: root.clone(),
+            reason: error.to_string(),
+        })?;
+        source.push('\n');
+        let relative = confined_relative(&workspace, &root).expect(INSIDE);
+        source.push_str(&crate::rust_schemata::runtime(
+            &runtime_module,
+            &crate_key("strong", &relative),
+        ));
+        fs::write(&root, source).map_err(|error| RustProjectError::Io {
+            path: root.clone(),
+            reason: error.to_string(),
+        })?;
+        crate_roots.push(confined_relative(&workspace, &root).expect(INSIDE));
+    }
+    let mut project = PreparedRustProject {
+        target_directory: copy_target_directory(&workspace),
+        workspace_root: workspace,
+        source_files: sources.into_keys().collect(),
+        crate_roots,
+        runtime_module,
+        manifest: CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        },
+        probes: Default::default(),
+        preparation: Default::default(),
+    };
+    project.probes.token = "strong".into();
+    Ok(StrongWorkspace {
+        project,
+        switched,
+        declined,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

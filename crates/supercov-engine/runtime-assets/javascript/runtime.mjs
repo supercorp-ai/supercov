@@ -186,6 +186,7 @@ for (const name of [
   "__SUPERCOV_TERMINATION_INSTALLED__",
   "__SUPERCOV_WASM_REGIONS__",
   "__SUPERCOV_WASM_REGISTRY__",
+  "__SUPERCOV_WASM_STRONG__",
   "__SUPERCOV_WORKER_EVIDENCE__",
   "__SUPERCOV_WORKER_TOKEN__",
 ]) {
@@ -1152,8 +1153,22 @@ function wasmRegionsWanted() {
     return true;
   return typeof process !== "undefined" && process.env != null && process.env.SUPERCOV_WASM_REGIONS === "1";
 }
+// A strong pass over Rust compiled to wasm: the mutant each instance runs is
+// handed to it through its exports (SUPERCOV_WASM_STRONG names the crates'
+// directories, `docs/design/mutation-drivers.md`).
+function wasmStrongRoots() {
+  if (Array.isArray(runtimeGlobal.__SUPERCOV_WASM_STRONG__))
+    return runtimeGlobal.__SUPERCOV_WASM_STRONG__;
+  const named = typeof process !== "undefined" && process.env != null ? process.env.SUPERCOV_WASM_STRONG : void 0;
+  if (typeof named !== "string" || named === "")
+    return void 0;
+  if (parsedWasmRoots === void 0 || parsedWasmRoots[0] !== named)
+    parsedWasmRoots = [named, JSON.parse(named)];
+  return parsedWasmRoots[1];
+}
+var parsedWasmRoots;
 function installWasmRegistry() {
-  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !wasmRegionsWanted())
+  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !(wasmRegionsWanted() || wasmStrongRoots()))
     return;
   runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ = true;
   if (!runtimeGlobal.__supercovWasm)
@@ -1177,6 +1192,7 @@ function registerWasmRealm(realm) {
   function Recorded(module, imports) {
     const instance = new Instance(module, imports);
     instances.push(instance);
+    activateWasm(instance);
     return instance;
   }
   Recorded.prototype = Instance.prototype;
@@ -1191,13 +1207,59 @@ function registerWasmRealm(realm) {
     try {
       wasm[name] = function() {
         return original.apply(wasm, arguments).then(function(result) {
-          instances.push(result instanceof Instance ? result : result.instance);
+          const instance = result instanceof Instance ? result : result.instance;
+          instances.push(instance);
+          activateWasm(instance);
           return result;
         });
       };
     } catch (e) {
     }
   });
+}
+/**
+ * Switches the active mutant on in a wasm instance, as the Rust strong
+ * runtime exports it: the mutant's file, relative to its crate's Cargo
+ * workspace, written into `__supercov_strong_buffer_<key>`, and its index
+ * given to `__supercov_strong_activate_<key>`. A mutant of no crate's (or
+ * none) switches every crate's off.
+ */
+function activateWasm(instance) {
+  const roots = wasmStrongRoots();
+  const exports = instance && instance.exports;
+  if (!roots || !exports || !exports.memory)
+    return;
+  const strong = strongState();
+  let file = "";
+  let index = BigInt.asUintN(64, BigInt(-1));
+  for (const root of roots) {
+    if (typeof strong.file === "string" && strong.index >= 0 && strong.file.startsWith(root)) {
+      file = strong.file.slice(root.length);
+      index = BigInt(strong.index);
+      break;
+    }
+  }
+  const bytes = new TextEncoder().encode(file);
+  for (const name of Object.keys(exports)) {
+    if (name.indexOf("__supercov_strong_activate_") !== 0)
+      continue;
+    const buffer = exports["__supercov_strong_buffer_" + name.slice("__supercov_strong_activate_".length)];
+    if (typeof buffer !== "function" || bytes.length > 4096)
+      continue;
+    try {
+      new Uint8Array(exports.memory.buffer, Number(buffer()), bytes.length).set(bytes);
+      exports[name](bytes.length, index);
+    } catch (e) {
+    }
+  }
+}
+/** Every instance the runtime remembers runs the active mutant. */
+function activateWasmInstances() {
+  const instances = runtimeGlobal.__supercovWasm;
+  if (!instances || !wasmStrongRoots())
+    return;
+  for (const instance of instances)
+    activateWasm(instance);
 }
 installWasmRegistry();
 function wasmBase64(bytes) {
@@ -2617,6 +2679,12 @@ function probeArithmetic(left, right, op) {
 }
 function probeCounterpart(result, left, right, op) {
   if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  // `+` with a string operand gives a string, and `-` always a number (and
+  // the reverse): they differ, whatever the operands. Working the other out
+  // would also turn a string the program builds by `+` (which V8 keeps as a
+  // rope) flat at every step: a path built a segment at a time copied every
+  // prefix of itself, and dot-prop's test of 100,000 levels ran out of memory.
+  if ((op === 0 || op === 1) && (typeof left === "string" || typeof right === "string")) return "differs";
   let other;
   try {
     other = probeArithmetic(left, right, probeArithmeticSwap[op]);
@@ -2843,6 +2911,7 @@ function setActiveMutant(file, index) {
   const slot = strong.slots.get(file);
   if (slot !== void 0)
     slot.a = index;
+  activateWasmInstances();
 }
 function clearActiveMutant() {
   setActiveMutant(void 0, -1);
