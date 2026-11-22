@@ -264,7 +264,7 @@ strong pass) against Gremlins' whole run.
 | google/uuid v1.6.0 | 205 | 127 / 143 | 1 | 15.0 / 21.0 | 90.0 / 43.7 |
 | spf13/cast v1.7.1 | 190 | 129 / 122 | 7 | 9.0 / 8.4 | 59.4 / 22.9 |
 
-16 CPUs: SoroCI (c8a.4xlarge). 4 CPUs: GitHub's `ubuntu-latest`
+16 CPUs: one c8a.4xlarge machine per tool. 4 CPUs: GitHub's `ubuntu-latest`
 (`.github/workflows/mutation-go.yml`). Counts are the 16-CPU run's; the
 4-CPU run's differ only in golang-lru (117 / 105) and uuid (130 / 143), by
 the flaky and time-dependent mutants below. Gremlins runs one `go test` per
