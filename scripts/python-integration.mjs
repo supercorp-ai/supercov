@@ -787,7 +787,10 @@ try {
       ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-n', '2'],
       { ...strongEnvironment, SUPERCOV_MUTANTS: '1' },
     );
-    const tested = query(strong, ['runs', 'latest', 'mutants', 'test'], strongEnvironment);
+    // `mutants test --json` answers with its reply alone, no envelope.
+    const tested = JSON.parse(
+      successfulSupercov(strong, ['runs', 'latest', 'mutants', 'test', '--json'], strongEnvironment).stdout,
+    );
     assert.equal(tested.summary.error, 0, JSON.stringify(tested));
     assert.equal(tested.passes[0].runner, 'pytest', JSON.stringify(tested));
     const listed = query(strong, ['runs', 'latest', 'mutants', '--limit', '0'], strongEnvironment);
