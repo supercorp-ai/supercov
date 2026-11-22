@@ -16,6 +16,9 @@ case "$project" in
   humanize) export SUPERCOV_SOURCE_ROOTS=src/humanize ;;
 esac
 command=(python -m pytest -q -p no:cacheprovider)
+# humanize's pytest-benchmark tests size their rounds to the speed they
+# measure, so their time does not grow with the code's: each runs once here.
+[ "$project" = humanize ] && command+=(--benchmark-disable)
 best() {
   local best=""
   for _ in 1 2 3; do
