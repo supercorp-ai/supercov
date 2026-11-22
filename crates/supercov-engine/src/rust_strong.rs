@@ -268,6 +268,21 @@ pub fn run_strong_rust(
     request: &StrongRustRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<i32, String> {
+    let outcome = pass(request, diagnostics);
+    discard(&request.root, ".supercov/strong/rust");
+    outcome
+}
+
+/// Remove a pass's copies and builds, whatever its end: they hold no
+/// verdict (the results are the driver's, beside its plan), and a switched
+/// build is a gigabyte or more. The next pass builds afresh.
+fn discard(root: &Path, relative: &str) {
+    let _ = crate::lifecycle::remove_scratch_tree_deferred(root, &root.join(relative));
+    let _ = crate::lifecycle::sweep_trash(root);
+}
+
+/// [`run_strong_rust`], leaving its copies and builds behind.
+fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32, String> {
     let started = Instant::now();
     let plan: Value = serde_json::from_slice(
         &crate::fault_fs::read(&request.plan)
@@ -349,7 +364,8 @@ pub fn run_strong_rust(
             .any(|(name, _)| wanted.contains(&name.as_str()))
     };
     if names(&["GECKODRIVER", "SAFARIDRIVER", "MSEDGEDRIVER"]) && !names(&["CHROMEDRIVER"]) {
-        for job in &jobs {
+        // There is a job at least.
+        jobs.iter().for_each(|job| {
             results.verdict(
                 &job.id,
                 "error",
@@ -360,7 +376,7 @@ pub fn run_strong_rust(
                     "a strong pass switches mutants in wasm tests run in Chrome only, not yet in this browser".into(),
                 ),
             );
-        }
+        });
         results.write(&json!({"summary": true, "mutants": jobs.len(), "browser": true}));
         return Ok(0);
     }
@@ -457,20 +473,24 @@ pub fn run_strong_rust(
     let next = AtomicUsize::new(0);
     let counts = Mutex::new(BTreeMap::<&'static str, usize>::new());
     pool(request.workers.min(switchable.len()), || {
-        while let Some(at) = switchable.get(next.fetch_add(1, Ordering::Relaxed)) {
-            let job = &jobs[*at];
-            let named = format!("{}#{}", job.file, job.ordinal);
-            let status = run_job(
-                job,
-                &tests,
-                &runner,
-                &usable,
-                &limit_of,
-                Some(&named),
-                &results,
-            );
-            *counts.lock().expect("counts").entry(status).or_default() += 1;
-        }
+        // Each worker takes the next mutant until none is left (a worker
+        // started after the others took them all takes none).
+        std::iter::from_fn(|| switchable.get(next.fetch_add(1, Ordering::Relaxed))).for_each(
+            |at| {
+                let job = &jobs[*at];
+                let named = format!("{}#{}", job.file, job.ordinal);
+                let status = run_job(
+                    job,
+                    &tests,
+                    &runner,
+                    &usable,
+                    &limit_of,
+                    Some(&named),
+                    &results,
+                );
+                *counts.lock().expect("counts").entry(status).or_default() += 1;
+            },
+        );
     });
 
     // The mutants built on their own, one at a time.
@@ -1042,6 +1062,30 @@ fn build_switched(
 /// here `cargo build --lib` for wasm, in a scratch copy under `root`.
 /// Returns how many mutants are switched in.
 pub(crate) fn switch_wasm_workspace(
+    root: &Path,
+    prefix: &str,
+    copy: &Path,
+    plan_path: &Path,
+    results_path: &Path,
+    cargo: &WasmCargo,
+    diagnostics: &mut dyn Write,
+) -> Result<usize, String> {
+    let outcome = switch_wasm(
+        root,
+        prefix,
+        copy,
+        plan_path,
+        results_path,
+        cargo,
+        diagnostics,
+    );
+    // The scratch copy only told which mutants compile.
+    discard(root, ".supercov/strong/rust-wasm");
+    outcome
+}
+
+/// [`switch_wasm_workspace`], leaving its scratch copy behind.
+fn switch_wasm(
     root: &Path,
     prefix: &str,
     copy: &Path,
@@ -1752,7 +1796,8 @@ fn baselines(
     let next = AtomicUsize::new(0);
     let found = Mutex::new(BTreeMap::new());
     pool(workers.min(needed.len()), || {
-        while let Some(test) = needed.get(next.fetch_add(1, Ordering::Relaxed)) {
+        // As the mutants: each worker takes the next test until none is left.
+        std::iter::from_fn(|| needed.get(next.fetch_add(1, Ordering::Relaxed))).for_each(|test| {
             let planned = &tests[*test];
             let ran = if planned.runner == "rustdoc" {
                 let package = planned.project.clone().unwrap_or_default();
@@ -1762,11 +1807,11 @@ fn baselines(
             } else {
                 match runner.run(planned, None, 0, Duration::from_secs(600)) {
                     Some(ran) => ran,
-                    None => continue,
+                    None => return,
                 }
             };
             found.lock().expect("baselines").insert(*test, ran);
-        }
+        });
     });
     found.into_inner().expect("baselines")
 }
@@ -1918,6 +1963,17 @@ mod tests {
         ]));
         assert_eq!(built.kind, RustCargoCommandKind::CargoTest);
         assert_eq!(built.arguments, ["test", "--workspace", "--release"]);
+        // A nextest option is left out (its value, read alone, is a filter
+        // to the build), and a Cargo option last keeps no value it lacks.
+        let built = build_invocation(&invocation(&[
+            "cargo",
+            "nextest",
+            "run",
+            "--retries",
+            "2",
+            "-p",
+        ]));
+        assert_eq!(built.arguments, ["test", "-p"]);
     }
 
     #[test]
@@ -2323,6 +2379,8 @@ mod tests {
             format!("error '{{\"code\":\"E0308\"}}' mismatched \"{},{}\" ''", own(4, "0"), own(5, "1")),
             // The same places again: nothing more.
             format!("error null again \"{}\" ''", own(0, "0")),
+            // An error with no place at all, as a linker's: no mutant's.
+            "error null unplaced \"\" ''".to_owned(),
             format!("error null again \"{}\" ''", switch_of(2)),
         ]
         .join("\n");
@@ -2371,6 +2429,26 @@ mod tests {
         // Halving over every switched mutant takes out only `b.rs`' culprit:
         // five are left in the switched build, those no error is traced to.
         assert_eq!(summary["switched"], 5, "{summary}\n{said}");
+        // A build the halving starts that cannot be made ends the pass: the
+        // one with no suspect (the fourth), then the first of the halves.
+        // Each build syncs its copy from one call, a directory at a time:
+        // the project's own four (itself, `src`, `tests`, `bin`).
+        let text = include_str!("rust_strong.rs");
+        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
+        let sync = body[..body.find("sync_project(root, &places.switched)?").unwrap()]
+            .matches('\n')
+            .count()
+            + 1;
+        for build in [4, 5] {
+            let place = format!(
+                "fs.create_dir_all#rust_strong.rs:{sync}@{}",
+                4 * (build - 1) + 1
+            );
+            request.results = root.join(format!("halving-{build}.jsonl"));
+            let failed =
+                crate::fault::during(&place, || run_strong_rust(&request, &mut Vec::new()));
+            assert!(failed.is_err(), "{place}: {failed:?}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2382,7 +2460,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_error_at_no_switch_is_found_by_halving() {
-        let (root, request) = crate_with(
+        let (root, mut request) = crate_with(
             "halving",
             &[
                 (
@@ -2429,6 +2507,55 @@ mod tests {
                 assert_eq!(record["status"], "killed", "{id}\n{said}");
             }
         }
+        // One suspect alone is the culprit, with no halving.
+        let plan: Value = serde_json::from_slice(&std::fs::read(&request.plan).unwrap()).unwrap();
+        let mut one = plan.clone();
+        one["mutants"] = Value::Array(
+            plan["mutants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|mutant| {
+                    mutant["id"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("src/lib.rs:3:9-")
+                })
+                .cloned()
+                .collect(),
+        );
+        std::fs::write(&request.plan, serde_json::to_vec(&one).unwrap()).unwrap();
+        request.results = root.join("one.jsonl");
+        let mut said = Vec::new();
+        assert_eq!(run_strong_rust(&request, &mut said), Ok(0));
+        let found = verdicts(&request);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found.values().all(|record| record["status"] == "unviable"),
+            "{found:?}\n{}",
+            String::from_utf8_lossy(&said)
+        );
+        // The pass's copies and builds are gone with it: a switched build
+        // alone is far more than a megabyte.
+        assert!(!root.join(".supercov/strong/rust").exists());
+        assert!(left_behind(&root) < 1 << 20, "{}", left_behind(&root));
+        // A test artifact Cargo reports without an executable, or built from
+        // a file outside the workspace, is none of the pass's.
+        request.command = vec![
+            script(
+                &root.join("bin/noisy/cargo"),
+                concat!(
+                    "case \" $* \" in *\" --no-run \"*)\n",
+                    "echo '{\"reason\":\"compiler-artifact\",\"profile\":{\"test\":true},\"executable\":null,\"target\":{\"src_path\":\"/nowhere/a.rs\"}}'\n",
+                    "echo '{\"reason\":\"compiler-artifact\",\"profile\":{\"test\":true},\"executable\":\"/bin/true\",\"target\":{\"src_path\":\"/nowhere/b.rs\"}}'\n",
+                    ";; esac\nexec cargo \"$@\"\n",
+                ),
+            ),
+            "test".into(),
+        ];
+        request.results = root.join("noisy.jsonl");
+        assert_eq!(run_strong_rust(&request, &mut Vec::new()), Ok(0));
+        assert_eq!(verdicts(&request).len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2459,6 +2586,10 @@ mod tests {
             error.starts_with("the project does not build without mutants: broken"),
             "{error}"
         );
+        // A pass that ends in an error leaves its copies no more than one
+        // that ends well.
+        assert!(!root.join(".supercov/strong/rust").exists());
+        assert!(left_behind(&root) < 1 << 20, "{}", left_behind(&root));
         request.command = vec![
             script(
                 &root.join("bin/unlisted/cargo"),
@@ -2755,6 +2886,22 @@ mod tests {
             .count();
         assert!(reasons >= 2, "{:?}", verdicts(&request));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The bytes a pass left in the project's `.supercov`.
+    fn left_behind(root: &Path) -> u64 {
+        fn size(path: &Path) -> u64 {
+            std::fs::read_dir(path).map_or(0, |entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| match entry.file_type() {
+                        Ok(kind) if kind.is_dir() => size(&entry.path()),
+                        _ => entry.metadata().map_or(0, |metadata| metadata.len()),
+                    })
+                    .sum()
+            })
+        }
+        size(&root.join(".supercov"))
     }
 
     fn verdicts(request: &StrongRustRequest) -> BTreeMap<String, Value> {
@@ -3176,6 +3323,7 @@ mod tests {
                 // directory inside, and a file written.
                 for operation in [
                     "create_dir_all",
+                    "read_dir entry",
                     "read_dir#@2",
                     "create_dir_all#@2",
                     "symlink_metadata",

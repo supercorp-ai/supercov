@@ -1683,6 +1683,23 @@ fn integration_choice() {
                 "rust-proc-macro-runs-in-the-compiler#src/lib.rs",
             ])
         );
+        // A strong pass declines its mutants: the compiler would run them.
+        let source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let mutants = BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            crate::rust_mutants::enumerate(&source)
+                .unwrap()
+                .into_iter()
+                .take(1)
+                .map(|mutant| (0, mutant))
+                .collect::<Vec<_>>(),
+        )]);
+        let strong = prepare_rust_strong_project(&root, &mutants).unwrap();
+        assert_eq!(
+            strong.declined,
+            [(("src/lib.rs".to_owned(), 0), "proc-macro")]
+        );
+        assert!(strong.switched.is_empty());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2290,6 +2307,10 @@ fn integration_choice() {
             prepare_rust_project(&root, None),
             Err(RustProjectError::NoWorkspacePackages)
         ));
+        assert!(matches!(
+            prepare_rust_strong_project(&root, &BTreeMap::new()),
+            Err(RustProjectError::NoWorkspacePackages)
+        ));
         // A library whose path is a directory has no source to read.
         fs::write(
             root.join("Cargo.toml"),
@@ -2301,6 +2322,52 @@ fn integration_choice() {
             Err(RustProjectError::NoSourceFiles)
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A strong pass's copy whose sources, or a crate root the runtime is
+    /// added to, cannot be read or written fails, naming the file.
+    #[test]
+    fn a_strong_copy_that_cannot_be_read_or_written_fails() {
+        let root = fixture();
+        let source = "pub fn one() -> u8 {\n    1\n}\n";
+        fs::write(root.join("src/lib.rs"), source).unwrap();
+        let mutants = BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            crate::rust_mutants::enumerate(source)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .map(|(index, mutant)| (index as u64, mutant))
+                .collect::<Vec<_>>(),
+        )]);
+        let text = include_str!("rust_project.rs");
+        let body = &text[text
+            .find("pub(crate) fn prepare_rust_strong_project(")
+            .unwrap()..];
+        let start = text.len() - body.len();
+        // The line a call is on, wherever on it the call starts.
+        let line_of = |needle: &str| {
+            text[..start + body.find(needle).unwrap()]
+                .matches('\n')
+                .count()
+                + 1
+        };
+        for (fault, needle) in [
+            ("read_to_string", "fs::read_to_string(path)"),
+            ("read_to_string", "fs::read_to_string(&root)"),
+            ("write", "fs::write(&root, source)"),
+        ] {
+            fs::write(root.join("src/lib.rs"), source).unwrap();
+            let site = format!("fs.{fault}#rust_project.rs:{}", line_of(needle));
+            let failed =
+                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
+            assert!(
+                matches!(failed, Err(RustProjectError::Io { .. })),
+                "{site}: {:?}",
+                failed.err()
+            );
+        }
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

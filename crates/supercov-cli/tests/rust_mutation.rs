@@ -177,6 +177,44 @@ fn a_rust_run_lists_cargo_mutants_mutants_and_runs_them_from_one_build() {
     // `is_big` returned both: whichever value replaces its body differs.
     assert_eq!(status("src/lib.rs:9:5-9:15:FnValue:true"), "infected");
     assert_eq!(status("src/lib.rs:13:5-13:14:FnValue:0"), "not-reached");
+
+    // A returned `a && b` holds its decision's wrappers, one of them ending
+    // where the value does: the value's probe goes around them all, and the
+    // build still compiles. Only `false` was returned, so `true` differs.
+    // Code the target leaves out, and a constant the compiler evaluates,
+    // carry no probe.
+    let both = Project::empty("strong-rust-returned-decision");
+    both.write(
+        "Cargo.toml",
+        "[package]\nname = \"both\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    both.write(
+        "src/lib.rs",
+        concat!(
+            "pub fn both(a: bool, b: bool) -> bool {\n    a && b\n}\n",
+            "#[cfg(not(unix))]\npub fn never(a: u8) -> u8 {\n    a + 1\n}\n",
+            "pub const K: u8 = 2 + 3;\n",
+        ),
+    );
+    both.write(
+        "tests/both.rs",
+        "#[test]\nfn one_is_not_enough() {\n    assert!(!both::both(true, false));\n    assert!(!both::both(false, true));\n}\n",
+    );
+    both.write(".gitignore", "target\n.supercov\n");
+    both.git(&["init", "-q"]);
+    both.supercov_with(&["--", "cargo", "test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let probed = both
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let returned = probed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "src/lib.rs:2:5-2:11:FnValue:true")
+        .unwrap_or_else(|| panic!("no FnValue:true in {probed}"))["status"]
+        .clone();
+    assert_eq!(returned, "infected", "{probed}");
 }
 
 /// Under `cargo nextest run` each test runs through nextest with the

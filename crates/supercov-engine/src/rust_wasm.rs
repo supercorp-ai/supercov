@@ -12,7 +12,7 @@
 
 use crate::fault_fs as fs;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -351,55 +351,57 @@ pub(crate) fn regions_from(value: &Value) -> Option<Vec<(String, Vec<u8>)>> {
 /// (`rust_strong::switch_wasm_workspace`), and the test processes the
 /// environment that hands each wasm instance the active mutant
 /// (`SUPERCOV_WASM_STRONG`, the workspaces' directories in the project).
-/// `None` where the copy has no wasm crate.
+/// Called for a copy with a wasm crate, as the project it was made from has.
 pub fn switch_for_strong_pass(
     root: &Path,
     workspace: &Path,
     strong: &crate::strong_driver::StrongRun,
     diagnostics: &mut dyn Write,
-) -> Result<Option<BTreeMap<String, String>>, String> {
-    let mut cargo_roots = BTreeSet::new();
-    for manifest in wasm_crates(workspace) {
-        let crate_directory = manifest.parent().unwrap_or(workspace).to_owned();
-        cargo_roots.insert(
-            crate::rust_worker::cargo_workspace_root(&crate_directory).unwrap_or(crate_directory),
-        );
-    }
-    if cargo_roots.is_empty() {
-        return Ok(None);
-    }
+) -> Result<BTreeMap<String, String>, String> {
+    // Each crate's Cargo workspace, by its directory in the copy.
+    let cargo_roots = wasm_crates(workspace)
+        .into_iter()
+        .map(|manifest| {
+            let crate_directory = manifest.parent().unwrap_or(workspace).to_owned();
+            crate::rust_worker::cargo_workspace_root(&crate_directory).unwrap_or(crate_directory)
+        })
+        .filter_map(|cargo_root| {
+            let relative = cargo_root.strip_prefix(workspace).ok()?;
+            Some((
+                relative.to_string_lossy().replace('\\', "/"),
+                cargo_root.clone(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
     let cargo = crate::rust_strong::WasmCargo {
         program: std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()),
         rustflags: std::env::var("RUSTFLAGS").unwrap_or_default(),
     };
-    let mut prefixes = Vec::new();
-    for cargo_root in cargo_roots {
-        let Ok(relative) = cargo_root.strip_prefix(workspace) else {
-            continue;
-        };
-        let prefix = relative.to_string_lossy().replace('\\', "/");
+    cargo_roots.iter().try_for_each(|(prefix, cargo_root)| {
         crate::rust_strong::switch_wasm_workspace(
             root,
-            &prefix,
-            &cargo_root,
+            prefix,
+            cargo_root,
             &strong.plan,
             &strong.results,
             &cargo,
             diagnostics,
-        )?;
-        prefixes.push(if prefix.is_empty() {
-            prefix
-        } else {
-            format!("{prefix}/")
-        });
-    }
+        )
+        .map(|_| ())
+    })?;
+    // Each directory as a prefix of the project's paths: `""` at the
+    // project's root, `web/rust/` below it.
+    let prefixes = cargo_roots
+        .keys()
+        .map(|prefix| format!("{prefix}/").trim_start_matches('/').to_owned())
+        .collect::<Vec<_>>();
     let mut environment = wasm_environment(std::env::var("RUSTFLAGS").unwrap_or_default());
     environment.remove("SUPERCOV_WASM_REGIONS");
     environment.insert(
         "SUPERCOV_WASM_STRONG".into(),
         serde_json::to_string(&prefixes).expect("plain data serializes"),
     );
-    Ok(Some(environment))
+    Ok(environment)
 }
 
 #[cfg(test)]
