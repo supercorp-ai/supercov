@@ -1488,7 +1488,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const nextIndex = new Map();
         // Every mutant's files, in the order it would take them; the most
         // work left first (long chains do not end the pass).
-        const remainingOf = (job) => job.chain.reduce((sum, group) => sum + estimateOf(group) + startCost(), 0);
+        // A copy of the whole file costs what its tests took in the measured
+        // run (its whole baseline may never run).
+        const estimateC = (group) => shapeOf(group) === "whole"
+            ? overheadOf(group.file) + (testsOf.get(group.file) ?? []).reduce((sum, id) => sum + testMsOf(id), 0)
+            : estimateOf(group);
+        const scoreC = (group) => ((fileKills.get(group.file) ?? 0) + 1) / ((fileRuns.get(group.file) ?? 0) + 2) / (estimateC(group) + startCost());
+        const remainingOf = (job) => job.chain.reduce((sum, group) => sum + estimateC(group) + startCost(), 0);
         // A mutant's copies running, and its kills waiting on a confirmation.
         for (const job of pending) {
             job.chain = [...job.files];
@@ -1514,7 +1520,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             for (const group of job.chain) {
                 if (!baselineReady(group) || unusable(group))
                     continue;
-                if (!best || killScore(group) > killScore(best))
+                if (!best || scoreC(group) > scoreC(best))
                     best = group;
             }
             return best;
@@ -1750,8 +1756,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
             else if (!outcome.done)
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
-            else if (ranNone(claim, outcome, { order: entry.order ?? testsOf.get(group.file) }, group.file))
-                finishC(job, { status: "error", reason: ranNone(claim, outcome, { order: entry.order ?? testsOf.get(group.file) }, group.file) });
+            else if (ranNone(claim, outcome, entry, group.file))
+                finishC(job, { status: "error", reason: ranNone(claim, outcome, entry, group.file) });
             else
                 conclude(job);
         };
