@@ -1,0 +1,102 @@
+{
+  "project": "trpc",
+  "scenario": "mutator-cold",
+  "shard": "10",
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-20T00:40:36.983Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on trpc's TypeScript 7.1.0-beta: Package subpath './unstable/sync' is not defined by exports"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.729,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.09,
+        "sysS": 0.02,
+        "cpuS": 0.11,
+        "cpuPercent": "17%",
+        "maxRssKiB": 18860,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.74,
+      "wallS": 1.826,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.71,
+        "sysS": 0.16,
+        "cpuS": 0.87,
+        "cpuPercent": "48%",
+        "maxRssKiB": 189688,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.57,
+      "wallS": 4.096,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 13.51,
+        "sysS": 5.15,
+        "cpuS": 18.66,
+        "cpuPercent": "456%",
+        "maxRssKiB": 725576,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @mizchi/mutator@0.5.0",
+      "startOffsetS": 6.67,
+      "wallS": 9.148,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 5.74,
+        "sysS": 2.53,
+        "cpuS": 8.27,
+        "cpuPercent": "90%",
+        "maxRssKiB": 1169324,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "mutator-cold",
+      "command": "node_modules/.bin/mutator --include 'packages/server/src/unstable-core-do-not-import/**/*.ts' --include 'packages/server/src/adapters/node-http/**/*.ts' --exclude 'packages/server/src/**/*.test.ts' --exclude 'packages/server/src/**/*.d.ts' --config vitest.bench.config.ts --reporter json --reporter text --report-dir reports-mutator/mutator-cold --no-typecheck --shard 10/10",
+      "startOffsetS": 15.86,
+      "wallS": 381.606,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1804.45,
+        "sysS": 243.96,
+        "cpuS": 2048.41,
+        "cpuPercent": "536%",
+        "maxRssKiB": 1037076,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-cold.json"
+    }
+  ],
+  "totalS": 397.47
+}

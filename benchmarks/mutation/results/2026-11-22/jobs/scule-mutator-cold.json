@@ -1,0 +1,154 @@
+{
+  "project": "scule",
+  "scenario": "mutator-cold",
+  "shard": null,
+  "commit": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+  "startedAt": "2026-11-20T00:03:27.162Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "9.0.6",
+    "vitest": "5.1.1",
+    "vitestProject": "1.5.3"
+  },
+  "notes": [
+    "Vitest upgraded in this job from 1.5.3 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5",
+    "also added vite@8.3.8: scule's lockfile resolves Vite 5.0.12, which Vitest 5 cannot load (no vite/module-runner export)"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/scule 5bc68048caad7c0e7de35842c83a510e8e1a7c4f && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.216,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0,
+        "cpuS": 0.02,
+        "cpuPercent": "14%",
+        "maxRssKiB": 18924,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@9.0.6 >/dev/null && pnpm --version",
+      "startOffsetS": 0.23,
+      "wallS": 1.234,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.49,
+        "sysS": 0.09,
+        "cpuS": 0.58,
+        "cpuPercent": "47%",
+        "maxRssKiB": 144188,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.46,
+      "wallS": 1.208,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.96,
+        "sysS": 0.46,
+        "cpuS": 3.42,
+        "cpuPercent": "284%",
+        "maxRssKiB": 775432,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-plugins-remove",
+      "command": "pnpm remove @vitest/coverage-v8",
+      "startOffsetS": 2.67,
+      "wallS": 0.788,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.61,
+        "sysS": 0.22,
+        "cpuS": 1.83,
+        "cpuPercent": "235%",
+        "maxRssKiB": 545548,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-upgrade",
+      "command": "pnpm add -D vitest@5.1.1 vite@8.3.8",
+      "startOffsetS": 3.46,
+      "wallS": 1.191,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.35,
+        "sysS": 0.29,
+        "cpuS": 2.64,
+        "cpuPercent": "222%",
+        "maxRssKiB": 820592,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @mizchi/mutator@0.5.0",
+      "startOffsetS": 4.65,
+      "wallS": 1.578,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.95,
+        "sysS": 0.27,
+        "cpuS": 2.22,
+        "cpuPercent": "141%",
+        "maxRssKiB": 681104,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 6.24,
+      "wallS": 0.357,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.31,
+        "sysS": 0.04,
+        "cpuS": 0.35,
+        "cpuPercent": "101%",
+        "maxRssKiB": 130892,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 63,
+        "passed": 63,
+        "failed": 0,
+        "files": 11
+      }
+    },
+    {
+      "name": "mutator-cold",
+      "command": "node_modules/.bin/mutator --include 'src/**/*.ts' --reporter json --reporter text --report-dir reports-mutator/mutator-cold",
+      "startOffsetS": 6.6,
+      "wallS": 6.775,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 19.39,
+        "sysS": 2.48,
+        "cpuS": 21.87,
+        "cpuPercent": "323%",
+        "maxRssKiB": 686356,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-cold.json"
+    }
+  ],
+  "totalS": 13.37
+}

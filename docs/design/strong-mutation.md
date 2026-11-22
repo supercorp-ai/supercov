@@ -173,6 +173,47 @@ spawners sharing the workers were no faster than one. Vitest 1-3 fork
 through tinypool and keep doing so; `SUPERCOV_STRONG_DIRECT_FORK=1` forks
 from Vitest's process. The pass summary counts `spawnedWorkers`.
 
+A copy's worker spends its first few hundred milliseconds before it can
+claim anything: Node starting, Vitest's worker loading, and in a DOM
+environment that environment's package (jsdom took 300 ms on tRPC, where every
+file runs in jsdom). On the public benchmark that was 75 ms of a hono copy's
+205 and 430 ms of a tRPC copy's 860, and tRPC listed 46% of its copies for
+mutants another copy had decided by the time they started: each paid the
+whole start and then ended in its setup file. Two changes take that cost off
+the copies without sharing anything between them:
+
+- **Workers started ahead.** The spawner keeps one worker per Vitest worker
+  started ahead of Vitest's requests, with the entry, arguments and options
+  Vitest gives every worker of the project. Each loads what a fresh worker
+  loads before Vitest tells it anything, in the order it would: Vitest's
+  worker entry, then the package of the built-in environment Vitest named in
+  its first message to a worker (`jsdom`, `happy-dom`), resolved as Vitest
+  resolves it. Then it waits. Its script (`process.argv[1]`) is Vitest's
+  entry and Supercov's variable is gone from its environment before the entry
+  loads, so a test sees the process a fresh worker is; the spawner's own
+  argument list stays in the operating system's view of the process only.
+  Workers started before Vitest named the environment are stopped and
+  started again with it. `SUPERCOV_STRONG_WORKERS_AHEAD=<n>` sets how many
+  (0: each worker starts when Vitest asks). The profile counts
+  `startedAhead` and `usedAhead`.
+- **A process only once the file is known.** A stand-in answers Vitest's
+  first message ("start") itself and keeps it. Vitest's next message ("run")
+  names the test file; the strong reporter then gives the copy its file's
+  next assignment, in the order Vitest starts them, and tells it which
+  through the run's provided context (the setup file's claims race stays for
+  Vitest 1-3 and direct forks). A copy whose mutant was decided meanwhile, or
+  that is beyond its file's assignments, ends there with no process: the
+  reporter records it as its setup file would have. Any other copy takes a
+  worker, which gets the kept "start", answers it, and then gets the "run":
+  the same messages in the same order as a worker forked for it.
+
+Paired on the same machines (hono's six shards, tRPC's shards 1-12), with
+nothing else changed: hono 81 to 73 ms a mutant, tRPC 1,443 to 1,142 ms; a
+copy's start (handover to claim) 76 to 26 ms on hono and 411 to 201 ms on
+tRPC; no mutant changed between detected and not (one hono and one tRPC
+mutant went from timeout to killed, which flips between runs). The five
+libraries took the same time (14-26 ms a mutant) with the same verdicts.
+
 Warm workers were tried and dropped. Each copy ran in a worker Vitest kept
 between test files (`isolate: false` for the pass), and the copy's setup file
 reset the modules and mocks Vitest had evaluated, so only the packages Node
@@ -188,16 +229,33 @@ used 2.3-2.6× less CPU on hono and tRPC, but hono's and tRPC's wall time did
 not drop, because their copies wait on their tests' own timers, not on
 starting.
 
+Nor does the pass choose warm workers per suite. What a run knows of a suite
+(its module graph's size, each file's setup time, its isolation settings, a
+first stage timed cold and warm) says how much warm workers would save, not
+whether a suite's files leave nothing behind in their process: pathe's,
+hono's and tRPC's leaks came from ordinary test files with nothing in their
+configuration to tell them apart, and one leak changes a verdict. A rule that
+picks warm workers where they pay would pick them where they are wrong. The
+sound part of what they saved, a worker's start, is what workers started
+ahead save.
+
 Node's compile cache (`NODE_COMPILE_CACHE`, which Vitest does not turn on) was
 tried as a sound way to start copies faster, and also dropped: the strong pass
 was 3-4% faster on hono, the same on tRPC and the small corpus projects, and
 the measured run the same everywhere. What warm workers saved is starting a
 process and Vitest for each copy, not compiling.
 
+The last version with warm workers (`SUPERCOV_STRONG_WARM=1`) is kept on the
+branch `archive/strong-warm-workers`, for a later attempt to make them exact:
+resetting what a test file leaves behind in its process, or proving per file
+that it leaves nothing.
+
 The pass summary's `profile` records its copies (of mutants, confirmations,
 and those that skipped), the copies stopped and hung, and for each stage its
-copies, its wall time, the copies' own time (claim to end), and when its last
-copy started. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
+copies, its wall time, the copies' own time (claim to end), when its last
+copy started and, on Linux, the share of the machine's CPU time that was busy
+(`cpuBusy`, also for the whole pass). A copy's start (`startMs`) counts from
+when its worker was handed to Vitest. `SUPERCOV_STRONG_CPU_PROFILE=<file>` writes a CPU profile of
 Vitest's own process for the whole pass.
 
 ## Baselines
