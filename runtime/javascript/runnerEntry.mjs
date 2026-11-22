@@ -98,6 +98,12 @@ export async function adaptRunnerEntry(entrypoint) {
         if (strongJob()?.runsFile(entrypoint) === false)
             process.exit(0);
     }
+    // node:test counts a test file with no test() in it as a test of its
+    // own, passing or failing by what its top level asserts. What runs there
+    // is that test's; in a file that has tests it counts for the run, as it
+    // always did.
+    if (process.env.NODE_TEST_CONTEXT && process.env.SUPERCOV_EVIDENCE_DIR && entrypoint)
+        await recordNodeTestTopLevel(entrypoint);
     useGeneratedVitestConfig(entrypoint);
     // The Mocha CLI, the child it forks for Node options, and each --parallel
     // worker run tests through Mocha's Runner, which the adapter patches before
@@ -125,4 +131,20 @@ export async function adaptRunnerEntry(entrypoint) {
         const { adaptTap } = await import(new URL("./tap.mjs", import.meta.url).href);
         await adaptTap(entrypoint);
     }
+}
+
+async function recordNodeTestTopLevel(file) {
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const runtime = globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+    const { runnerExecutionScope, writeRunnerEvidence } = await import(new URL("./runnerEvidence.mjs", import.meta.url).href);
+    const identity = { runner: "node:test", file, name: "(top level)" };
+    const scope = runnerExecutionScope(identity);
+    runtime.beginBufferedServerEvidence(scope);
+    runtime.activateCoverageScope(scope);
+    process.once("exit", (code) => {
+        const registered = globalThis[Symbol.for("supercov.nodeTestRegistrations")] ?? 0;
+        const written = registered === 0 ? identity : { ...identity, role: "background" };
+        writeRunnerEvidence(written, registered > 0 || code === 0 ? "passed" : "failed", scope, process.env.SUPERCOV_EVIDENCE_DIR, runtime.takeNodeAssertionPhases(scope), runtime.flushBufferedServerEvidence(scope));
+    });
 }

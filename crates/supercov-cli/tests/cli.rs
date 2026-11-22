@@ -22044,7 +22044,9 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
 }
 
 /// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
-/// run's command for one test file with the mutant on and only its tests.
+/// run's command for one test file with the mutant on and only its tests. A
+/// node:test file that asserts at its top level, with no test() in it, is a
+/// test of its own, as node:test counts it.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
@@ -22071,7 +22073,7 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
             ),
             (
                 "test/count.test.js",
-                "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\nimport { countdown } from \"../src/cart.js\";\ntest(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+                "import assert from \"node:assert/strict\";\nimport { countdown } from \"../src/cart.js\";\nassert.equal(countdown(3), 0);\n",
             ),
         ],
     );
@@ -22158,7 +22160,8 @@ fn mutants_test_runs_bun_test_mutants_one_job_at_a_time() {
 }
 
 /// `mutants test` under node-tap, installed from the registry as the
-/// failure-output check installs it: each test file is a process of tap's.
+/// failure-output check installs it: each test file is a process of tap's,
+/// and a file that asserts at its top level is a test of its own.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
@@ -22187,7 +22190,7 @@ fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
             ),
             (
                 "test/count.test.js",
-                "import t from \"tap\";\nimport { countdown } from \"../src/cart.js\";\nt.test(\"counts down\", async (t) => t.equal(countdown(3), 0));\n",
+                "import t from \"tap\";\nimport { countdown } from \"../src/cart.js\";\nt.equal(countdown(3), 0);\n",
             ),
         ],
     );
