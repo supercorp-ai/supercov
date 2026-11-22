@@ -41,7 +41,10 @@ pub const TEST_UNIT_RUNNER: &str = "test-unit";
 pub const CUCUMBER_RUNNER: &str = "cucumber";
 
 const TRANSPORT_MAGIC: &[u8; 8] = b"SCVRUBY1";
-const TRANSPORT_VERSION: u32 = 1;
+/// Version 2 checksums records with CRC-32; version 1, which the runtime
+/// writes where it cannot load zlib, with FNV-1a.
+const TRANSPORT_VERSION: u32 = 2;
+const TRANSPORT_VERSION_FNV: u32 = 1;
 const TRANSPORT_HEADER_SIZE: usize = 64;
 const TRANSPORT_RECORD_HEADER_SIZE: usize = 16;
 const TRANSPORT_MAX_RECORD_SIZE: usize = 4 * 1024 * 1024;
@@ -389,7 +392,10 @@ fn transport_u64(bytes: &[u8], offset: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
-fn transport_checksum(payload: &[u8]) -> u32 {
+fn transport_checksum(crc32: bool, payload: &[u8]) -> u32 {
+    if crc32 {
+        return crc32fast::hash(payload);
+    }
     payload.iter().fold(0x811c_9dc5_u32, |value, byte| {
         (value ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
     })
@@ -420,7 +426,10 @@ fn read_evidence_file(
     };
     if contents.len() < TRANSPORT_HEADER_SIZE
         || contents.get(..8) != Some(TRANSPORT_MAGIC.as_slice())
-        || transport_u32(contents, 8) != Some(TRANSPORT_VERSION)
+        || !matches!(
+            transport_u32(contents, 8),
+            Some(TRANSPORT_VERSION | TRANSPORT_VERSION_FNV)
+        )
         || transport_u32(contents, 12) != Some(TRANSPORT_HEADER_SIZE as u32)
     {
         return Err(invalid_transport("header or version does not match"));
@@ -452,6 +461,7 @@ fn read_evidence_file(
     let mut interned = Vec::<String>::new();
     let mut process_started = false;
     let mut process_reported = false;
+    let crc32 = transport_u32(contents, 8) == Some(TRANSPORT_VERSION);
     let mut cursor = TRANSPORT_HEADER_SIZE;
     let mut record_index = 0;
     while cursor + TRANSPORT_RECORD_HEADER_SIZE <= contents.len() {
@@ -494,7 +504,7 @@ fn read_evidence_file(
         }
         let payload = &contents[payload_start..payload_end];
         let expected_checksum = checked_u32(contents, cursor + 8);
-        if transport_checksum(payload) != expected_checksum {
+        if transport_checksum(crc32, payload) != expected_checksum {
             return Err(invalid("payload checksum does not match"));
         }
         let record: Record =
@@ -1822,10 +1832,10 @@ pub(crate) mod tests {
         ruby_instrumenter::build_ruby_obligations,
     };
 
-    fn frame(payload: &[u8]) -> Vec<u8> {
+    fn frame(crc32: bool, payload: &[u8]) -> Vec<u8> {
         let mut bytes = vec![1u8, 0, 0, 0];
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&transport_checksum(payload).to_le_bytes());
+        bytes.extend_from_slice(&transport_checksum(crc32, payload).to_le_bytes());
         bytes.extend_from_slice(&[0, 0, 0, 0]);
         bytes.extend_from_slice(payload);
         while bytes.len() % 8 != 0 {
@@ -1835,14 +1845,24 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn transport(records: &[serde_json::Value]) -> Vec<u8> {
+        transport_of(true, records)
+    }
+
+    /// A transport checksummed with CRC-32 (version 2) or FNV-1a (1).
+    fn transport_of(crc32: bool, records: &[serde_json::Value]) -> Vec<u8> {
         let mut body = Vec::new();
         for record in records {
-            body.extend(frame(record.to_string().as_bytes()));
+            body.extend(frame(crc32, record.to_string().as_bytes()));
         }
         let capacity = TRANSPORT_HEADER_SIZE + body.len();
         let mut bytes = vec![0u8; TRANSPORT_HEADER_SIZE];
         bytes[..8].copy_from_slice(TRANSPORT_MAGIC);
-        bytes[8..12].copy_from_slice(&TRANSPORT_VERSION.to_le_bytes());
+        let version = if crc32 {
+            TRANSPORT_VERSION
+        } else {
+            TRANSPORT_VERSION_FNV
+        };
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
         bytes[12..16].copy_from_slice(&(TRANSPORT_HEADER_SIZE as u32).to_le_bytes());
         bytes[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
         bytes[32..40].copy_from_slice(&7u64.to_le_bytes());
@@ -1857,6 +1877,9 @@ pub(crate) mod tests {
         let process = serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["x.rb"]});
         let exit = serde_json::json!({"t":"exit","at":9});
         let valid = transport(&[process.clone(), exit.clone()]);
+        // A runtime that could not load zlib checksums with FNV-1a, and says
+        // so by its version; a record checksummed the other way is refused.
+        let fnv = transport_of(false, &[process.clone(), exit.clone()]);
         let read = |bytes: &[u8]| match read_evidence_file(
             "main.7.a.mmap",
             bytes,
@@ -1867,6 +1890,10 @@ pub(crate) mod tests {
             Err(error) => error.to_string(),
         };
         assert_eq!(read(&valid), "accepted");
+        assert_eq!(read(&fnv), "accepted");
+        let mut mislabelled = fnv.clone();
+        mislabelled[8..12].copy_from_slice(&TRANSPORT_VERSION.to_le_bytes());
+        assert!(read(&mislabelled).contains("payload checksum does not match"));
         // A transport its process never wrote to holds its header alone.
         assert_eq!(read(&transport(&[])), "accepted");
         // The first frame's header is at 64 and its payload at 80.

@@ -50,7 +50,10 @@ module Supercov
   TRANSPORT_MAGIC = "SCVRUBY1".b
   # The global Hash statement probes store into (see LoadTime.statement_probes).
   LINE_TABLE = "$__supercov_lines"
-  TRANSPORT_VERSION = 1
+  # Version 2 checksums records with CRC-32 (zlib's, in C); version 1 with
+  # FNV-1a computed here byte by byte, where zlib cannot be loaded safely.
+  TRANSPORT_VERSION = 2
+  TRANSPORT_VERSION_FNV = 1
   TRANSPORT_HEADER_SIZE = 64
   TRANSPORT_RECORD_HEADER_SIZE = 16
   TRANSPORT_INITIAL_CAPACITY = 1024 * 1024
@@ -309,7 +312,9 @@ module Supercov
       @cursor = TRANSPORT_HEADER_SIZE
       @dropped = 0
       @lock = Mutex.new
-      header = [TRANSPORT_MAGIC, TRANSPORT_VERSION, TRANSPORT_HEADER_SIZE, @capacity, 0, pid].pack("a8L<L<Q<Q<Q<")
+      @crc32 = Transport.crc32
+      version = @crc32 ? TRANSPORT_VERSION : TRANSPORT_VERSION_FNV
+      header = [TRANSPORT_MAGIC, version, TRANSPORT_HEADER_SIZE, @capacity, 0, pid].pack("a8L<L<Q<Q<Q<")
       @file.pwrite(header.ljust(TRANSPORT_HEADER_SIZE, "\0"), 0)
     end
 
@@ -347,7 +352,29 @@ module Supercov
 
     private
 
+    # zlib's `crc32`, loaded from Ruby's own extension directory by path, so
+    # no zlib gem is activated before Bundler picks the project's: where the
+    # project's lockfile names a zlib of its own, it is left alone. nil where
+    # it cannot be had.
+    def self.crc32
+      return ::Zlib.method(:crc32) if defined?(::Zlib)
+
+      gemfile = ENV["BUNDLE_GEMFILE"].to_s
+      lock = gemfile.empty? ? "Gemfile.lock" : "#{gemfile}.lock"
+      return nil if File.file?(lock) && File.foreach(lock).any? { |line| line.start_with?("    zlib (") }
+
+      extension = File.join(RbConfig::CONFIG["archdir"], "zlib.#{RbConfig::CONFIG['DLEXT']}")
+      return nil unless File.file?(extension)
+
+      require extension
+      ::Zlib.method(:crc32)
+    rescue LoadError, SystemCallError
+      nil
+    end
+
     def checksum(payload)
+      return @crc32.call(payload) if @crc32
+
       value = 0x811C9DC5
       payload.each_byte do |byte|
         value ^= byte
