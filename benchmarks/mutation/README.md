@@ -199,6 +199,40 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
 
+## End to end against StrykerJS
+
+The per-mutant figures below put Supercov's strong pass (baselines included) beside StrykerJS's mutant
+phase (its dry run left out), each on its own shards. This compares whole wall time instead: StrykerJS's
+set-up, dry run and mutants against Supercov's measured run and strong pass, on 16-CPU Linux machines
+(c8a/m8a.4xlarge), measured after the results of 2026-11-23 with the pass's runs bounded (below).
+
+| project | jobs | StrykerJS s | of which repeated per job | without repeats | Supercov s (measure + strong) | of which repeated per job | without repeats |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| hono | 1 each | 258.5 (2.0 + 29.3 dry run + 227.1) | 0 | 258.5 | 177.1 (8.6 + 168.5) | 0 | 177.1 |
+| tRPC | 8 each | 2,782.2 | 656.9 (7 set-ups and dry runs) | 2,125.3 | 2,018.1 (181.3 + 1,836.8) | 265.3 (7 measured runs, 106.7 of baselines) | 1,752.8 |
+
+- **hono** runs in one job for both tools. Supercov's pass is 39 ms a mutant (4,307 run, 2.26 files, 0.05
+  baselines and 0.15 confirmations each) against StrykerJS's 51 (its mutant phase over all 4,480): 31%
+  less wall time end to end. Its verdicts are the 6-job run's but for 8 mutants killed in one and timed
+  out in the other.
+- **tRPC** does not fit one 10-minute job, so both tools ran in 8 jobs: StrykerJS by file
+  (`coldShards`), Supercov `--shard k/8`. Every StrykerJS job repeats the 92 s dry run, every Supercov
+  job its 22.7 s measured run and its baselines (a baseline's wall time is its share of the workers' time,
+  `baselineMs` in the pass profile). Without them: 18% less wall time. Supercov's pass alone is 745 ms a
+  mutant (10.4 files, 0.70 baselines and 0.26 confirmations each), StrykerJS's mutant phase 755.
+- **Sharding costs more than its repeats.** hono in 6 jobs takes 298.7 s of strong pass (69 ms a
+  mutant) against 168.5 s in one, though the repeated baselines are 28 s of it: each job also starts
+  and ends with workers idle. tRPC in 32 jobs takes 2,576.4 s (1,045 ms a mutant, 2.69 baselines each)
+  against 1,836.8 s in 8. The 68 and 1,068 ms below are 6 and 32 jobs, and overstated the gap; the
+  "without repeats" columns for 8 jobs are upper bounds for one, for both tools.
+- **Bounded runs.** One pass over all of hono's mutants listed 50,000 slots, and Vitest's process ran out of
+  memory reading their files as the run started (`diag/strong-report.sh` and `diag/decoder-trace.mjs`
+  found it). A run now has each file's slot and up to 2,000 more; a pass that needs more runs again (hono
+  in one job: 5 runs; tRPC in 8 jobs: 2 or 3 each, in 32: 1). With 1,000 slots tRPC's 32 jobs were 9%
+  slower: between runs the workers wait for the run's last copies.
+- **Verdicts.** The same 10 hono and 2 tRPC disagreements with StrykerJS's full kill matrix, and no
+  extra kill, in the 6- and 32-job runs, the 8-job tRPC run and the one-job hono run.
+
 ## Results of 2026-11-23: the continuous pass
 
 Supercov's cold rows again (`results/2026-11-23/summary.md`), on the continuous pass (no stages;
@@ -518,6 +552,7 @@ not reproduce outside StrykerJS.
 | `supercov-join.mjs` | reads Supercov's mutants and joins them to StrykerJS's (used by `summarize.mjs`) |
 | `build-workflow.mjs` | prints the workflow that builds the Supercov binary and caches it by key |
 | `diag/hono-order.sh`, `diag/strong-rounds.mjs`, `diag/hono-extra.sh`, `diag/hono-overturned.sh`, `diag/trpc-withping.sh`, `diag/diag-*.sh` | the diagnoses of disputed mutants: hand-applied mutants under plain Vitest, evaluation counts, and Supercov's kept strong rounds (`shell-diag` and `supercov-diag` scenarios) |
+| `diag/strong-report.sh`, `diag/decoder-trace.mjs`, `diag/strong-decoders.sh` | the strong pass under Node's fatal-error report and a per-second memory sample, and what text streams Vitest's process decodes (`SUPERCOV_BENCH_STRONG_WRAP`) |
 | `results/<date>/` | a run's summary and every job's `result.json` |
 
 ## Caveats
