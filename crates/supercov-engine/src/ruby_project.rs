@@ -75,63 +75,6 @@ pub struct PreparedRubyProject {
     pub mutants: Option<MutantListing>,
 }
 
-/// The measured files' mutants, listed on a thread of their own while the
-/// tests run: enumerating them is the measured run's largest cost before
-/// the tests start (erubi: 80 ms of a 470 ms run).
-#[derive(Debug, Clone)]
-pub struct MutantListing {
-    pending: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<MutantsFile>>>>,
-    listed: std::sync::Arc<std::sync::OnceLock<MutantsFile>>,
-}
-
-impl MutantListing {
-    fn start(
-        files: Vec<(
-            String,
-            Vec<u8>,
-            crate::ruby_instrumenter::RubyFileObligations,
-        )>,
-    ) -> Self {
-        let thread = std::thread::spawn(move || {
-            let mut mutants = BTreeMap::new();
-            for (relative, source, obligations) in files {
-                let listed = crate::ruby_mutants::candidates(&relative, &source, &obligations);
-                if !listed.is_empty() {
-                    mutants.insert(relative, listed);
-                }
-            }
-            MutantsFile::listed(
-                crate::ruby_mutants::RUBY,
-                crate::ruby_mutants::MUTANT_SET,
-                mutants,
-            )
-        });
-        Self {
-            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(thread))),
-            listed: std::sync::Arc::default(),
-        }
-    }
-
-    /// The listing, once its thread has ended.
-    pub fn get(&self) -> &MutantsFile {
-        self.listed.get_or_init(|| {
-            let thread = self
-                .pending
-                .lock()
-                .expect("no listing panics while holding its thread")
-                .take()
-                .expect("a listing is joined once");
-            thread.join().expect("listing mutants does not panic")
-        })
-    }
-}
-
-impl PartialEq for MutantListing {
-    fn eq(&self, other: &Self) -> bool {
-        self.get() == other.get()
-    }
-}
-
 /// Asked only of a `.rb` file.
 fn is_test_path(relative: &str) -> Option<&'static str> {
     let (directories, file_name) = relative.rsplit_once('/').unwrap_or(("", relative));
@@ -417,6 +360,63 @@ pub fn ruby_integrity_inputs(files: &RubyFiles, command: &[String]) -> ExplicitI
         dependency_files: files.dependency_files.clone(),
         configuration_files: files.configuration_files.clone(),
         execution_configuration,
+    }
+}
+
+/// The measured files' mutants, listed on a thread of their own while the
+/// tests run: enumerating them is the measured run's largest cost before
+/// the tests start (erubi: 80 ms of a 470 ms run).
+#[derive(Debug, Clone)]
+pub struct MutantListing {
+    pending: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<MutantsFile>>>>,
+    listed: std::sync::Arc<std::sync::OnceLock<MutantsFile>>,
+}
+
+impl MutantListing {
+    fn start(
+        files: Vec<(
+            String,
+            Vec<u8>,
+            crate::ruby_instrumenter::RubyFileObligations,
+        )>,
+    ) -> Self {
+        let thread = std::thread::spawn(move || {
+            let mut mutants = BTreeMap::new();
+            for (relative, source, obligations) in files {
+                let listed = crate::ruby_mutants::candidates(&relative, &source, &obligations);
+                if !listed.is_empty() {
+                    mutants.insert(relative, listed);
+                }
+            }
+            MutantsFile::listed(
+                crate::ruby_mutants::RUBY,
+                crate::ruby_mutants::MUTANT_SET,
+                mutants,
+            )
+        });
+        Self {
+            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(thread))),
+            listed: std::sync::Arc::default(),
+        }
+    }
+
+    /// The listing, once its thread has ended.
+    pub fn get(&self) -> &MutantsFile {
+        self.listed.get_or_init(|| {
+            let thread = self
+                .pending
+                .lock()
+                .expect("no listing panics while holding its thread")
+                .take()
+                .expect("a listing is joined once");
+            thread.join().expect("listing mutants does not panic")
+        })
+    }
+}
+
+impl PartialEq for MutantListing {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
     }
 }
 
