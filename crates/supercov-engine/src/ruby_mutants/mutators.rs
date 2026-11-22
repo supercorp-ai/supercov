@@ -156,7 +156,7 @@ const METHOD_OPERATORS: &[&str] = &[
 
 const UNARY_METHOD_OPERATORS: &[&str] = &["~@", "+@", "-@", "!"];
 
-fn binary_method_operator(selector: &str) -> bool {
+pub(crate) fn binary_method_operator(selector: &str) -> bool {
     METHOD_OPERATORS.contains(&selector)
         && !matches!(selector, "[]" | "[]=")
         && !UNARY_METHOD_OPERATORS.contains(&selector)
@@ -556,22 +556,6 @@ pub(crate) fn mutate(input: &N, parent: Option<&Parent<'_>>) -> Vec<Rc<N>> {
             mutate_child(&mut out, 1, parent, |_| true);
         }
         "gvar" | "cvar" | "ivar" | "lvar" | "self" => singletons(&mut out, parent),
-        "casgn" => {
-            if let Some(name) = input.child(1).sym() {
-                out.update(1, sym(&format!("{name}__mutant__").to_uppercase()));
-            }
-            if input.children.len() > 2 && input.node(2).is_some() {
-                mutate_child(&mut out, 2, parent, |_| true);
-                out.emit(s(
-                    "send",
-                    vec![
-                        input.child(0).clone(),
-                        sym("remove_const"),
-                        node(s("sym", vec![input.child(1).clone()])),
-                    ],
-                ));
-            }
-        }
         "gvasgn" | "cvasgn" | "ivasgn" | "lvasgn" => {
             if input.node(1).is_some() {
                 mutate_child(&mut out, 1, parent, |_| true);
@@ -1449,30 +1433,32 @@ fn integer(out: &mut Out<'_>, parent: Option<&Parent<'_>>) {
 /// 0, 1, and one more and one less than the literal.
 fn numeric_values(input: &N) -> Vec<String> {
     let Child::Raw(text) = input.child(0) else {
-        return Vec::new();
+        unreachable!("a rational or imaginary holds its inspected value");
     };
     if input.ty == "rational" {
-        let numerator = text
+        // `(n/d)`, reduced: n ± d over d stays reduced.
+        let (numerator, denominator) = text
             .trim_start_matches('(')
-            .split('/')
-            .next()
-            .and_then(|digits| digits.parse::<i128>().ok());
-        let Some(numerator) = numerator else {
-            return Vec::new();
-        };
-        return [0, 1, numerator + 1, numerator - 1]
-            .into_iter()
-            .map(|value| format!("({value}/1)"))
-            .collect();
+            .trim_end_matches(')')
+            .split_once('/')
+            .expect("a rational's text");
+        let numerator = numerator.parse::<i128>().expect("a numerator");
+        let denominator = denominator.parse::<i128>().expect("a denominator");
+        return [
+            (0, 1),
+            (1, 1),
+            (numerator + denominator, denominator),
+            (numerator - denominator, denominator),
+        ]
+        .into_iter()
+        .map(|(numerator, denominator)| format!("({numerator}/{denominator})"))
+        .collect();
     }
     let imaginary = text
         .trim_start_matches("(0+")
         .trim_end_matches("i)")
         .parse::<i128>()
-        .ok();
-    let Some(imaginary) = imaginary else {
-        return Vec::new();
-    };
+        .expect("an imaginary's text");
     // 0i, 1i, and the literal plus and minus 1i.
     [0, 1, imaginary + 1, imaginary - 1]
         .into_iter()

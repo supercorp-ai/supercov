@@ -21,6 +21,7 @@
 //! hash of the whole.
 
 mod mutators;
+pub(crate) use mutators::selector_replacements;
 pub(crate) mod regexp;
 pub(crate) mod tree;
 
@@ -99,7 +100,6 @@ pub(crate) fn mutator_name(ty: &str) -> &'static str {
         "procarg0" => "ProcargZero",
         "lvar" | "ivar" | "gvar" | "cvar" | "self" => "NamedValue",
         "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" => "VariableAssignment",
-        "casgn" => "ConstantAssignment",
         "op_asgn" => "OpAsgn",
         "or_asgn" => "OrAsgn",
         "and_asgn" => "AndAsgn",
@@ -484,6 +484,15 @@ fn misplaced(node: &N, parent: Option<&N>) -> bool {
     {
         return true;
     }
+    // `^x` pins a variable or a parenthesized expression: `^nil` does not
+    // parse.
+    if node.ty == "pin"
+        && node
+            .node(0)
+            .is_some_and(|pinned| !matches!(pinned.ty, "lvar" | "ivar" | "gvar" | "cvar" | "begin"))
+    {
+        return true;
+    }
     if node.ty == "and"
         && node.node(0).is_some_and(|left| left.ty == "or")
         && parent.is_some_and(|parent| !STATEMENT_PARENTS.contains(&parent.ty))
@@ -722,7 +731,8 @@ pub(crate) fn candidates(
                 let site = format!("{}:{}:{}-{}:{}", file, start.0, start.1, end.0, end.1);
                 obligations
                     .value_sites
-                    .contains(&site)
+                    .get(&site)
+                    .is_some_and(|kinds| kinds.contains(&kind))
                     .then(|| format!("{site}#{kind}"))
             }),
             operator: None,
@@ -976,34 +986,39 @@ pub(crate) fn operator_kinds(operator: &str) -> Vec<String> {
 }
 
 /// The infection probe kind that records `mutant`'s value, where its
-/// located node is a binary operator and its replacement one the probe
-/// computes: another operator, an operand alone, or `!=`'s negations.
+/// replacement is one a probe computes: `true`, `false` or `nil` for the
+/// located node, another operator or method over the same operands, an
+/// operand alone, or `!=`'s negations.
 fn probe_kind(mutant: &RubyMutant) -> Option<String> {
     let replacement = mutant.replacement.as_ref()?;
     let located = path(&mutant.method, &mutant.mutated)
         .last()
         .map(|(original, _)| original.clone())?;
-    if located.ty != "send" || located.children.len() != 3 || located.child(0).is_nil() {
+    if matches!(replacement.ty, "true" | "false" | "nil") && replacement.children.is_empty() {
+        return Some(replacement.ty.to_owned());
+    }
+    if located.ty != "send" || located.children.len() < 2 || located.child(0).is_nil() {
         return None;
     }
-    let operator = located.child(1).sym()?;
+    let selector = located.child(1).sym()?;
     if replacement.ty == "send"
-        && replacement.children.len() == 3
+        && replacement.children.len() == located.children.len()
         && replacement.child(0) == located.child(0)
-        && replacement.child(2) == located.child(2)
+        && replacement.children[2..] == located.children[2..]
     {
         let other = replacement.child(1).sym()?;
-        return operator_kinds(operator)
-            .into_iter()
-            .find(|kind| kind == other);
+        return selector_replacements(selector)
+            .contains(&other)
+            .then(|| other.to_owned());
     }
+    let binary = located.children.len() == 3 && mutators::binary_method_operator(selector);
     if Some(replacement) == located.node(0) {
-        return Some("left".into());
+        return Some(if binary { "left" } else { "receiver" }.into());
     }
-    if Some(replacement) == located.node(2) {
+    if binary && Some(replacement) == located.node(2) {
         return Some("right".into());
     }
-    if operator == "!=" && replacement.ty == "send" && replacement.child(1).sym() == Some("!") {
+    if selector == "!=" && replacement.ty == "send" && replacement.child(1).sym() == Some("!") {
         let inner = replacement.node(0)?;
         let name = inner.child(1).sym()?;
         if inner.child(0) == located.child(0) && inner.child(2) == located.child(2) {

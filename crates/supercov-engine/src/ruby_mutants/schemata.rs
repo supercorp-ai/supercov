@@ -217,7 +217,9 @@ pub(crate) fn switches(
         let (open_tail, closer) = match placement.shape {
             Shape::Expression => (" else (", ") end)"),
             Shape::Statements => (" else ", " end)"),
-            Shape::Body => (" else begin ", " end end)"),
+            // `;` before the `end`: the body may end in a clause header
+            // (`rescue NameError`) that needs one before its own `end`.
+            Shape::Body => (" else begin ", "; end end)"),
             Shape::Empty => (" end); ", ""),
         };
         opener.push_str(open_tail);

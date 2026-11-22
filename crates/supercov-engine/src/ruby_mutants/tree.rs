@@ -17,7 +17,7 @@ use ruby_prism::{Location, Node};
 
 /// One child of a node: a node, or one of the plain values parser stores
 /// beside nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 pub(crate) enum Child {
     Node(Rc<N>),
     Sym(String),
@@ -25,12 +25,49 @@ pub(crate) enum Child {
     Int(i128),
     /// An integer past `i128`, as its decimal digits.
     BigInt(String),
-    /// A float's IEEE bits: equality is bitwise, as Ruby's `eql?` for the
-    /// values parser stores.
+    /// A float's IEEE bits. Equal as Ruby's `eql?` holds floats equal: by
+    /// value, so `-0.0` is `0.0` (mutant drops `-0.0` made `0.0` as no
+    /// change).
     Float(u64),
     /// A rational or imaginary literal, as `inspect` prints its value.
     Raw(String),
     Nil,
+}
+
+impl PartialEq for Child {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Child::Node(left), Child::Node(right)) => left == right,
+            (Child::Sym(left), Child::Sym(right))
+            | (Child::BigInt(left), Child::BigInt(right))
+            | (Child::Raw(left), Child::Raw(right)) => left == right,
+            (Child::Str(left), Child::Str(right)) => left == right,
+            (Child::Int(left), Child::Int(right)) => left == right,
+            (Child::Float(left), Child::Float(right)) => {
+                left == right || f64::from_bits(*left) == f64::from_bits(*right)
+            }
+            (Child::Nil, Child::Nil) => true,
+            _ => false,
+        }
+    }
+}
+
+impl std::hash::Hash for Child {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Child::Node(value) => value.hash(state),
+            Child::Sym(value) | Child::BigInt(value) | Child::Raw(value) => value.hash(state),
+            Child::Str(value) => value.hash(state),
+            Child::Int(value) => value.hash(state),
+            // `-0.0` hashes as `0.0`, which it equals.
+            Child::Float(bits) => {
+                let zero = f64::from_bits(*bits) == 0.0;
+                (if zero { 0 } else { *bits }).hash(state);
+            }
+            Child::Nil => {}
+        }
+    }
 }
 
 impl Child {
@@ -258,20 +295,12 @@ fn marked(value: Rc<N>, syntax: u32) -> Rc<N> {
     Rc::new(copy)
 }
 
-/// The integer value of a Prism integer.
-fn integer(value: ruby_prism::Integer<'_>) -> Child {
+/// A Prism integer in decimal: long division by 10 on its base-2^32 digits.
+fn integer_text(value: ruby_prism::Integer<'_>) -> String {
     let (negative, digits) = value.to_u32_digits();
-    if digits.len() <= 3 {
-        let mut magnitude: i128 = 0;
-        for digit in digits.iter().rev() {
-            magnitude = (magnitude << 32) | i128::from(*digit);
-        }
-        return Child::Int(if negative { -magnitude } else { magnitude });
-    }
-    // Long division by 10 on base-2^32 digits.
     let mut digits = digits.to_vec();
     let mut decimal = Vec::new();
-    while digits.iter().any(|digit| *digit != 0) {
+    loop {
         let mut remainder: u64 = 0;
         for digit in digits.iter_mut().rev() {
             let current = (remainder << 32) | u64::from(*digit);
@@ -279,12 +308,24 @@ fn integer(value: ruby_prism::Integer<'_>) -> Child {
             remainder = current % 10;
         }
         decimal.push(b'0' + remainder as u8);
+        if digits.iter().all(|digit| *digit == 0) {
+            break;
+        }
     }
     if negative {
         decimal.push(b'-');
     }
     decimal.reverse();
-    Child::BigInt(String::from_utf8(decimal).expect("digits"))
+    String::from_utf8(decimal).expect("digits")
+}
+
+/// The integer value of a Prism integer: past `i128`, its decimal text.
+fn integer(value: ruby_prism::Integer<'_>) -> Child {
+    let text = integer_text(value);
+    match text.parse::<i128>() {
+        Ok(number) => Child::Int(number),
+        Err(_) => Child::BigInt(text),
+    }
 }
 
 impl<'s> Converter<'s> {
@@ -860,13 +901,6 @@ impl<'s> Converter<'s> {
         if let Some(cvar) = target.as_class_variable_target_node() {
             return Ok(made("cvasgn", vec![sym(name(&cvar.name()))], at));
         }
-        if let Some(constant) = target.as_constant_target_node() {
-            return Ok(made(
-                "casgn",
-                vec![Child::Nil, sym(name(&constant.name()))],
-                at,
-            ));
-        }
         if let Some(call) = target.as_call_target_node() {
             let receiver = self.convert(&call.receiver())?;
             let ty = if call.is_safe_navigation() {
@@ -995,12 +1029,7 @@ impl<'s> Converter<'s> {
         at: (usize, usize),
     ) -> Built {
         let closing = self.text(closing_loc);
-        let mut options: Vec<char> = closing
-            .iter()
-            .skip(1)
-            .map(|byte| *byte as char)
-            .filter(|character| *character != 'o')
-            .collect();
+        let mut options: Vec<char> = closing.iter().skip(1).map(|byte| *byte as char).collect();
         options.sort_unstable();
         options.dedup();
         let regopt = made(
@@ -1106,19 +1135,27 @@ impl<'s> Converter<'s> {
                 leaf("float", vec![Child::Float(float.value().to_bits())])
             }
             Node::RationalNode { .. } => {
-                let text = String::from_utf8_lossy(self.text(&location)).into_owned();
-                let digits = text.trim_end_matches('r').replace('_', "");
-                match digits.parse::<i128>() {
-                    Ok(numerator) => leaf("rational", vec![Child::Raw(format!("({numerator}/1)"))]),
-                    Err(_) => self.unsupported("a rational literal", &location),
-                }
+                let rational = value.as_rational_node().expect("rational");
+                leaf(
+                    "rational",
+                    vec![Child::Raw(format!(
+                        "({}/{})",
+                        integer_text(rational.numerator()),
+                        integer_text(rational.denominator())
+                    ))],
+                )
             }
             Node::ImaginaryNode { .. } => {
-                let text = String::from_utf8_lossy(self.text(&location)).into_owned();
-                let digits = text.trim_end_matches('i').replace('_', "");
-                match digits.parse::<i128>() {
-                    Ok(imaginary) => leaf("complex", vec![Child::Raw(format!("(0+{imaginary}i)"))]),
-                    Err(_) => self.unsupported("an imaginary literal", &location),
+                let imaginary = value.as_imaginary_node().expect("imaginary");
+                match imaginary.numeric().as_integer_node() {
+                    Some(integer) => leaf(
+                        "complex",
+                        vec![Child::Raw(format!(
+                            "(0+{}i)",
+                            integer_text(integer.value())
+                        ))],
+                    ),
+                    None => self.unsupported("an imaginary literal", &location),
                 }
             }
             Node::StringNode { .. } => self.string(&value.as_string_node().expect("str")),
@@ -1288,13 +1325,17 @@ impl<'s> Converter<'s> {
                 };
                 let label = assoc.operator_loc().is_none();
                 let key_node = self.convert(&key)?;
-                let key_node = match (
-                    label,
-                    key.as_symbol_node().and_then(|symbol| symbol.value_loc()),
-                ) {
-                    (true, Some(value_loc)) => {
+                let key_node = match (label, key.as_symbol_node()) {
+                    (true, Some(symbol)) if symbol.value_loc().is_some() => {
                         let mut copy = (*key_node).clone();
-                        copy.span = Some(span(&value_loc));
+                        // `name:` is the name; `"a b":` its quotes too, as
+                        // parser spans it.
+                        copy.span = Some(match (symbol.opening_loc(), symbol.closing_loc()) {
+                            (Some(opening), Some(closing)) => {
+                                (opening.start_offset(), closing.start_offset() + 1)
+                            }
+                            _ => span(&symbol.value_loc().expect("a label's name")),
+                        });
                         copy.syntax |= syntax::LABEL;
                         Rc::new(copy)
                     }
@@ -1619,14 +1660,6 @@ impl<'s> Converter<'s> {
                 let assigned = self.convert(&write.value())?;
                 leaf("cvasgn", vec![sym(name(&write.name())), node(assigned)])
             }
-            Node::ConstantWriteNode { .. } => {
-                let write = value.as_constant_write_node().expect("casgn");
-                let assigned = self.convert(&write.value())?;
-                leaf(
-                    "casgn",
-                    vec![Child::Nil, sym(name(&write.name())), node(assigned)],
-                )
-            }
             Node::LocalVariableOperatorWriteNode { .. } => {
                 let write = value.as_local_variable_operator_write_node().expect("op");
                 let target = made(
@@ -1704,6 +1737,25 @@ impl<'s> Converter<'s> {
                 );
                 self.operator_write(target, b"||=", &write.value(), at)
             }
+            Node::GlobalVariableAndWriteNode { .. } => {
+                let write = value.as_global_variable_and_write_node().expect("and");
+                let target = made(
+                    "gvasgn",
+                    vec![sym(name(&write.name()))],
+                    span(&write.name_loc()),
+                );
+                self.operator_write(target, b"&&=", &write.value(), at)
+            }
+            Node::ClassVariableOperatorWriteNode { .. } => {
+                let write = value.as_class_variable_operator_write_node().expect("op");
+                let target = made(
+                    "cvasgn",
+                    vec![sym(name(&write.name()))],
+                    span(&write.name_loc()),
+                );
+                let operator = self.text(&write.binary_operator_loc()).to_vec();
+                self.operator_write(target, &operator, &write.value(), at)
+            }
             Node::ClassVariableOrWriteNode { .. } => {
                 let write = value.as_class_variable_or_write_node().expect("or");
                 let target = made(
@@ -1713,15 +1765,17 @@ impl<'s> Converter<'s> {
                 );
                 self.operator_write(target, b"||=", &write.value(), at)
             }
-            Node::ConstantOrWriteNode { .. } => {
-                let write = value.as_constant_or_write_node().expect("or");
+            Node::ClassVariableAndWriteNode { .. } => {
+                let write = value.as_class_variable_and_write_node().expect("and");
                 let target = made(
-                    "casgn",
-                    vec![Child::Nil, sym(name(&write.name()))],
+                    "cvasgn",
+                    vec![sym(name(&write.name()))],
                     span(&write.name_loc()),
                 );
-                self.operator_write(target, b"||=", &write.value(), at)
+                self.operator_write(target, b"&&=", &write.value(), at)
             }
+            // A constant's own writes are dynamic constant assignments in a
+            // method, which Ruby refuses: no method holds one.
             Node::CallOperatorWriteNode { .. }
             | Node::CallOrWriteNode { .. }
             | Node::CallAndWriteNode { .. } => {
@@ -2287,7 +2341,7 @@ fn mark_slots(tree: &Rc<N>, source: &[u8], pattern: bool) -> Rc<N> {
                 }
                 slots
             }
-            "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" | "casgn" => {
+            "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" => {
                 vec![tree.children.len().saturating_sub(1)]
             }
             "op_asgn" => vec![2],

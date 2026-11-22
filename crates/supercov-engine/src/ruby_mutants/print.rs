@@ -220,6 +220,34 @@ fn opens_heredoc(text: &str) -> bool {
     })
 }
 
+/// A rational literal from its inspected value `(n/d)`: `nr`, or in
+/// decimals where `d` divides a power of ten (`(7/2)` is `3.5r`), as a
+/// literal written with a point is.
+fn rational(text: &str) -> Option<String> {
+    let (numerator, denominator) = text
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split_once('/')?;
+    let (numerator, denominator) = (
+        numerator.parse::<i128>().ok()?,
+        denominator.parse::<i128>().ok()?,
+    );
+    if denominator == 1 {
+        return Some(format!("{numerator}r"));
+    }
+    let mut scale: i128 = 1;
+    let mut places = 0;
+    while scale % denominator != 0 {
+        scale = scale.checked_mul(10)?;
+        places += 1;
+    }
+    let scaled = numerator.unsigned_abs() * (scale / denominator).unsigned_abs();
+    let sign = if numerator < 0 { "-" } else { "" };
+    let whole = scaled / scale.unsigned_abs();
+    let fraction = scaled % scale.unsigned_abs();
+    Some(format!("{sign}{whole}.{fraction:0places$}r"))
+}
+
 fn float(bits: u64) -> String {
     let value = f64::from_bits(bits);
     let text = format!("{value:?}");
@@ -295,10 +323,8 @@ impl Printer<'_> {
                 quoted(name.as_bytes())
             });
         }
-        if matches!(
-            replacement.ty,
-            "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" | "casgn"
-        ) && replacement.children.len() == if replacement.ty == "casgn" { 2 } else { 1 }
+        if matches!(replacement.ty, "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn")
+            && replacement.children.len() == 1
         {
             // An operator assignment's target.
             return self.target(replacement);
@@ -678,14 +704,6 @@ impl Printer<'_> {
     fn target(&self, node: &N) -> Option<String> {
         match node.ty {
             "lvasgn" | "ivasgn" | "gvasgn" | "cvasgn" => node.child(0).sym().map(str::to_owned),
-            "casgn" => {
-                let name = node.child(1).sym()?;
-                Some(match node.node(0) {
-                    Some(scope) if scope.ty == "cbase" => format!("::{name}"),
-                    Some(scope) => format!("{}::{name}", self.operand(scope)?),
-                    None => name.to_owned(),
-                })
-            }
             "send" | "csend" => {
                 let receiver = self.operand(node.node(0)?)?;
                 let name = node.child(1).sym()?;
@@ -888,7 +906,7 @@ impl Printer<'_> {
                 _ => return None,
             },
             "rational" => match node.child(0) {
-                Child::Raw(text) => format!("{}r", text.trim_start_matches('(').split('/').next()?),
+                Child::Raw(text) => rational(text)?,
                 _ => return None,
             },
             "complex" => match node.child(0) {
@@ -1023,7 +1041,6 @@ impl Printer<'_> {
                     self.argument(node.node(1)?)?
                 )
             }
-            "casgn" => format!("{} = {}", self.target(node)?, self.argument(node.node(2)?)?),
             "op_asgn" => format!(
                 "{} {}= {}",
                 self.target(node.node(0)?)?,

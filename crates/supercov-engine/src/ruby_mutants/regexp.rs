@@ -54,8 +54,62 @@ pub(crate) fn mutations(body: &str) -> Vec<String> {
     };
     mutate(&root)
         .into_iter()
+        .filter(references_resolve)
         .map(|each| each.to_str())
         .collect()
+}
+
+/// Whether every back reference and subexpression call names a group the
+/// regexp has, as Ruby requires of a regexp literal: a capture made
+/// passive or a name changed leaves `\1` or `\k<x>` without one, and mutant,
+/// whose mutations Ruby parses back, has none such.
+fn references_resolve(root: &Expr) -> bool {
+    fn walk<'e>(
+        expression: &'e Expr,
+        captures: &mut usize,
+        names: &mut Vec<&'e str>,
+        references: &mut Vec<&'e str>,
+    ) {
+        match expression.kind {
+            Kind::Capture => *captures += 1,
+            Kind::Named => names.push(
+                expression
+                    .text
+                    .trim_start_matches("(?<")
+                    .trim_end_matches('>'),
+            ),
+            Kind::Other if expression.text.starts_with('\\') => {
+                references.push(&expression.text[1..])
+            }
+            _ => {}
+        }
+        for child in &expression.children {
+            walk(child, captures, names, references);
+        }
+    }
+    let (mut captures, mut names, mut references) = (0, Vec::new(), Vec::new());
+    walk(root, &mut captures, &mut names, &mut references);
+    references.into_iter().all(|reference| {
+        let number = |text: &str| text.parse::<usize>().ok();
+        let (call, target) = match reference.as_bytes().first() {
+            Some(b'k' | b'g') if reference.len() > 2 => (true, &reference[2..reference.len() - 1]),
+            // `\1`-`\9` refer back; `\0` and longer digits past the groups are
+            // octal escapes.
+            Some(b'1'..=b'9')
+                if reference.len() == 1 || number(reference).is_some_and(|n| n <= captures) =>
+            {
+                (false, reference)
+            }
+            _ => return true,
+        };
+        match number(target) {
+            // `\g<0>` calls the whole regexp.
+            Some(0) if call => true,
+            // A number names a capture, where the regexp has no named ones.
+            Some(group) => names.is_empty() && group <= captures,
+            None => names.contains(&target),
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +372,8 @@ impl Parser<'_> {
                     Some('<') => '>',
                     _ => '\'',
                 };
+                // Past the opening, which for `'` is the closing too.
+                self.at += 1;
                 while let Some(character) = self.peek() {
                     self.at += 1;
                     if character == close {
@@ -585,11 +641,24 @@ fn mutate(expression: &Expr) -> Vec<Expr> {
             }
         }
     }
-    // Quantifier: removed, and `*` as `+`.
+    // Quantifier: removed, and `*` as `+`. An interval followed by `?` or
+    // `+` is two quantifiers in Ruby (`a{2}?` is `(?:a{2})?`, neither
+    // reluctant nor possessive): each is removed apart.
     if let Some(quantifier) = &expression.quantifier {
-        let mut removed = expression.clone();
-        removed.quantifier = None;
-        emit(removed, &mut out);
+        match quantifier.strip_suffix(['?', '+']) {
+            Some(interval) if interval.starts_with('{') => {
+                for kept in [&quantifier[interval.len()..], interval] {
+                    let mut removed = expression.clone();
+                    removed.quantifier = Some(kept.to_owned());
+                    emit(removed, &mut out);
+                }
+            }
+            _ => {
+                let mut removed = expression.clone();
+                removed.quantifier = None;
+                emit(removed, &mut out);
+            }
+        }
         let replaced = match quantifier.as_str() {
             "*" => Some("+"),
             "*+" => Some("++"),
