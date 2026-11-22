@@ -21,7 +21,7 @@
 // ran other tests than its baseline did is confirmed by running the job's
 // tests again without the mutant. A job past 3x its baseline and 10 s is
 // stopped: a timeout, unless a test had already failed.
-import { spawn } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -151,6 +151,104 @@ export function withoutNpx(command, root) {
     return existsSync(binary) ? [binary, ...rest.slice(at + 1)] : command;
 }
 
+// The arguments a command gives Jest, where it starts Jest itself (`jest`,
+// `npx jest`, `node_modules/.bin/jest`): a resident Jest parses them as
+// Jest's CLI would.
+export function jestArguments(command) {
+    const at = command.findIndex((word) => /(?:^|[\\/])jest(?:\.js)?$/.test(word) || /jest-cli[\\/]bin[\\/]jest\.js$/.test(word));
+    return at < 0 ? undefined : command.slice(at + 1);
+}
+
+// Resident Jests (strongJestHost.mjs), each running one job at a time. A
+// host whose job passes its limit is stopped, and the next job starts
+// another.
+function residentJests({ root, environment, log }) {
+    const idle = [];
+    const all = new Set();
+    const host = () => new Promise((resolveHost, rejectHost) => {
+        const child = fork(fileURLToPath(new URL("./strongJestHost.mjs", import.meta.url)), [], {
+            cwd: root,
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+            detached: process.platform !== "win32",
+        });
+        // Its output is drained, and kept for whoever reads why a job failed.
+        const keep = (chunk) => {
+            try {
+                appendFileSync(log, chunk);
+            }
+            catch {
+                // The log is for reading only.
+            }
+        };
+        child.stdout.on("data", keep);
+        child.stderr.on("data", keep);
+        all.add(child);
+        child.once("exit", () => all.delete(child));
+        child.on("message", function started(message) {
+            if (message?.type === "started")
+                child.send({ type: "init", args: jestArgs ?? [] });
+            else if (message?.type === "ready") {
+                child.off("message", started);
+                if (message.error) {
+                    stop(child);
+                    rejectHost(new Error(message.error));
+                }
+                else
+                    resolveHost(child);
+            }
+        });
+        child.once("error", rejectHost);
+    });
+    let jestArgs;
+    let number = 0;
+    return {
+        set args(value) {
+            jestArgs = value;
+        },
+        async run(job, limitMs) {
+            let child;
+            try {
+                child = idle.pop() ?? await host();
+            }
+            catch (error) {
+                return { timedOut: false, error };
+            }
+            const id = ++number;
+            return new Promise((resolveRun) => {
+                let settled = false;
+                const settle = (outcome) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    clearTimeout(timer);
+                    child.off("message", answered);
+                    child.off("exit", exited);
+                    resolveRun(outcome);
+                };
+                const answered = (message) => {
+                    if (message?.type === "done" && message.id === id) {
+                        idle.push(child);
+                        settle({ timedOut: false, error: message.error });
+                    }
+                };
+                const exited = () => settle({ timedOut: false, error: "the resident Jest ended" });
+                const timer = setTimeout(() => {
+                    stop(child);
+                    settle({ timedOut: true });
+                }, limitMs);
+                child.on("message", answered);
+                child.once("exit", exited);
+                child.send({ type: "job", id, ...job });
+            });
+        },
+        close() {
+            for (const child of all)
+                stop(child);
+        },
+    };
+}
+
 function readTimeouts(path) {
     try {
         return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
@@ -223,6 +321,10 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
 
     const run = slots(workers);
+    // Jest's own command: its jobs run in resident Jests, one per worker.
+    const jestArgs = environment.SUPERCOV_STRONG_RESIDENT === "0" ? undefined : jestArguments(withoutNpx(command, root));
+    const jestHosts = residentJests({ root, environment, log: join(work, "jest-hosts.log") });
+    jestHosts.args = jestArgs;
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
 
@@ -239,8 +341,33 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail }));
             const results = join(directory, "results.jsonl");
             const log = join(directory, "output.log");
-            const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
             const begun = Date.now();
+            if (jestArgs && runnerOf.get(file) === "jest") {
+                // A resident Jest runs the job in band (strongJestHost.mjs).
+                const environmentOfJob = {
+                    SUPERCOV_EVIDENCE_DIR: evidence,
+                    SUPERCOV_STRONG_JOB: spec,
+                    SUPERCOV_STRONG_RESULTS: results,
+                    SUPERCOV_STRONG_PLAN: "",
+                };
+                jestHosts.run({ file: join(root, file), mutant: mutant ? { file: mutant.file, index: mutant.index } : null, environment: environmentOfJob }, limitMs).then(({ timedOut, error }) => {
+                    if (timedOut)
+                        profile.stopped += 1;
+                    profile.jobMs += Date.now() - begun;
+                    const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
+                    resolveJob({
+                        statuses: outcomes(evidence),
+                        timedOut,
+                        mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
+                        exitCode: error ? 1 : 0,
+                        error,
+                        durationMs: Date.now() - begun,
+                        directory,
+                    });
+                });
+                return;
+            }
+            const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
             let output;
             try {
                 output = [];
@@ -496,6 +623,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     // Every file's baseline runs the tests of all its mutants: none starts
     // before all are known.
     await Promise.all(pending.map((task) => runMutant(...task)));
+    jestHosts.close();
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }
