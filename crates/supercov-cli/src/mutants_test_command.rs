@@ -56,6 +56,10 @@ command. An entry whose mutant is killed or gone is listed as stale.
 struct Options {
     plan: bool,
     json: bool,
+    /// Keep an earlier run's verdicts no change could move: `supercov
+    /// mutants`, which measures the checkout again after an edit, does;
+    /// `runs <id> mutants test` tests the run it names.
+    carry: bool,
     /// `--format markdown`: the verdicts as a pull request's comment.
     markdown: bool,
     output: Option<PathBuf>,
@@ -289,7 +293,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
     }
     let mut forwarded = vec!["latest".to_owned(), "mutants".to_owned(), "test".to_owned()];
     forwarded.extend(args);
-    command(&forwarded)
+    run_command(&forwarded, true)
 }
 
 /// Why `mutants test` stopped short of an answer.
@@ -310,12 +314,17 @@ impl From<String> for Stop {
 
 /// `args` is `[<run-id>, "mutants", "test", ...]`.
 pub fn command(args: &[String]) -> ExitCode {
+    run_command(args, false)
+}
+
+/// `command`, keeping earlier verdicts where `carry`.
+fn run_command(args: &[String], carry: bool) -> ExitCode {
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
     let options = match parse(&args[3..]) {
-        Ok(options) => options,
+        Ok(options) => Options { carry, ..options },
         Err(message) => {
             return crate::refuse(
                 "runs.mutants.test",
@@ -399,10 +408,10 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .map(|mutant| (mutant.id.clone(), mutant.file.clone()))
         .collect::<Vec<_>>();
     // After an edit, the verdicts no change could have moved.
-    let carried = if options.plan {
-        None
-    } else {
+    let carried = if options.carry && !options.plan {
         carry_over(&root, run, &plan, &saved)
+    } else {
+        None
     };
     if let Some((_, verdicts)) = &carried {
         saved.extend(verdicts.clone());
@@ -1322,7 +1331,11 @@ fn execute(
                 );
                 let (verdicts, passes) = read_results(&results);
                 // Success or failure, the pass keeps only its logs.
-                supercov_engine::strong_driver::finish_work_directory(&work);
+                if !supercov_engine::strong_driver::keeps_work_directories(std::env::var_os(
+                    supercov_engine::strong_driver::KEEP,
+                )) {
+                    supercov_engine::strong_driver::finish_work_directory(&work);
+                }
                 saved.extend(verdicts);
                 executed.passes.extend(passes);
                 remaining.retain(|mutant| !saved.contains_key(&mutant.id));

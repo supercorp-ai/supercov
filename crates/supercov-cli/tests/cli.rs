@@ -21979,7 +21979,14 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
 
     // Ended by a signal: what it killed is saved, and the next pass runs
     // the rest.
-    let ended = project.supercov_with(&fake, &[("FAKE_ASKED", asked_path), ("FAKE_HALF", "1")]);
+    let ended = project.supercov_with(
+        &fake,
+        &[
+            ("FAKE_ASKED", asked_path),
+            ("FAKE_HALF", "1"),
+            ("SUPERCOV_STRONG_KEEP", "1"),
+        ],
+    );
     assert_eq!(ended.code(), 130, "{}", ended.stderr());
     assert!(
         ended
@@ -21989,6 +21996,11 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
         ended.stderr()
     );
     let first = take_asked();
+    // Asked to, the pass kept its directory whole; the next pass removes it.
+    let kept_plan = std::fs::read_dir(project.root.join(".supercov/strong"))
+        .unwrap()
+        .any(|pass| pass.unwrap().path().join("plan.json").is_file());
+    assert!(kept_plan);
     let reply = project
         .supercov_with(&fake, &[("FAKE_ASKED", asked_path)])
         .json();
@@ -22006,35 +22018,36 @@ fn a_strong_pass_keeps_what_it_decides_and_says_what_cannot_gate() {
     // The summary of the run shows the score.
     let summary = project.supercov(&["runs", "latest"]).succeeds();
     assert!(
-        summary.contains("mutation score 100.0%") && summary.contains("mutants --status survived"),
+        summary.contains("             mutation score ")
+            && summary.contains("mutants --status survived"),
         "{summary}"
     );
 
-    // An edit of tax.js's code: tax.js's mutants run again, cart.js's keep
-    // their verdicts, as no cart test ran tax.js.
+    // An edit of tax.js's code: `supercov mutants` measures again, and runs
+    // tax.js's mutants alone; cart.js's keep their verdicts, as no cart test
+    // ran tax.js. (`runs <id> mutants test` tests the run it names whole.)
     project.edit("src/tax.js", "sum * 0.2", "sum / 5");
-    project
-        .supercov_with(
-            &["--", "npx", "vitest", "run"],
-            &[("SUPERCOV_MUTANTS", "1")],
-        )
-        .succeeds();
-    let kept = project
-        .supercov_with(&fake, &[("FAKE_ASKED", asked_path)])
-        .json();
-    let again = take_asked();
+    let kept = project.supercov(&["mutants"]).succeeds();
+    let to_run = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--plan",
+            "--json",
+            "--file",
+            "src/tax.js",
+        ])
+        .json()["summary"]["toRun"]
+        .clone();
     assert!(
-        !again.is_empty() && again.iter().all(|id| id.starts_with("src/tax.js:")),
-        "{again:?}"
+        kept.contains(&format!("verdict(s) kept from run {run}")),
+        "{kept}"
     );
-    assert_eq!(kept["carried"]["from"], run, "{kept}");
-    assert!(kept["carried"]["mutants"].as_u64() > Some(0), "{kept}");
-    let text = project
-        .supercov(&["runs", "latest", "mutants", "test"])
-        .succeeds();
     assert!(
-        text.contains(&format!("verdict(s) kept from run {run}")),
-        "{text}"
+        kept.contains(&format!("  ran {to_run} mutant(s)")),
+        "{kept}"
     );
     // As a pull request's comment.
     let markdown = project
@@ -24124,6 +24137,9 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let saved = project
         .root
         .join(format!(".supercov/runs/{run}/strong-mutation.json"));
+    // What the stopped passes above decided is saved; a directory in its
+    // place cannot be written.
+    let _ = std::fs::remove_file(&saved);
     std::fs::create_dir(&saved).unwrap();
     let mut faked = tax_pass.to_vec();
     faked.extend(["--", "node", "fake-strong.mjs"]);

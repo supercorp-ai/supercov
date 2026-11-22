@@ -447,7 +447,8 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             // 24 MB on nanoid, a gigabyte a pass).
             const read = (outcome) => {
                 const statuses = outcomes(evidence);
-                rmSync(directory, { recursive: true, force: true });
+                if (environment.SUPERCOV_STRONG_KEEP !== "1")
+                    rmSync(directory, { recursive: true, force: true });
                 return { ...outcome, statuses };
             };
             // A runner's own command, started for this job alone.

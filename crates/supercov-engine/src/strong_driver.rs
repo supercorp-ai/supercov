@@ -227,6 +227,15 @@ pub fn work_directory(root: &Path, run_id: &str, nonce: u128) -> PathBuf {
         .join(format!("{run_id}-{nonce}"))
 }
 
+/// Set to `1`: a finished pass keeps its directory whole, each job's
+/// evidence included.
+pub const KEEP: &str = "SUPERCOV_STRONG_KEEP";
+
+/// Whether the environment asks to keep finished passes' directories.
+pub fn keeps_work_directories(environment: Option<std::ffi::OsString>) -> bool {
+    environment.is_some_and(|keep| keep == "1")
+}
+
 /// The file in a pass's directory naming the process that works there.
 const OWNER_FILE: &str = "owner";
 
@@ -240,6 +249,8 @@ pub fn claim_work_directory(work: &Path) -> std::io::Result<()> {
 /// pass's further invocations'). Its plan, results and each job's evidence
 /// are gone once its verdicts are saved into the run; a pass over nanoid's
 /// node:test suite left 1.2 GB.
+/// `SUPERCOV_STRONG_KEEP=1` keeps all of it, for whoever studies a pass
+/// (the caller asks `keeps_work_directories`).
 pub fn finish_work_directory(work: &Path) {
     let Ok(entries) = std::fs::read_dir(work) else {
         return;
@@ -410,6 +421,8 @@ mod tests {
             .collect::<Vec<_>>();
         left.sort();
         assert_eq!(left, ["restart-0.log"]);
+        assert!(keeps_work_directories(Some("1".into())));
+        assert!(!keeps_work_directories(Some("0".into())) && !keeps_work_directories(None));
         // Gone already: nothing to finish.
         finish_work_directory(&root.join("gone"));
         // Another process's: one that runs (this test's parent, say), one
