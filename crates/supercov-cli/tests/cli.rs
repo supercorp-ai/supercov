@@ -22201,7 +22201,7 @@ fn mutants_test_runs_tap_mutants_one_job_at_a_time() {
         project.root.join("node_modules"),
     )
     .unwrap();
-    assert_cart_verdicts(&project, &["npx", "tap"], "tap");
+    assert_cart_verdicts(&project, &["npx", "tap", "--disable-coverage"], "tap");
 }
 
 /// `mutants test` under Vitest's Browser Mode: the job's mutant is switched

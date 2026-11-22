@@ -128,7 +128,7 @@ function nameFromTheCopy(StackUtils) {
 // file's top level, which tap's own report names after the file, and it is
 // written as a test where the file asserts there (or has no subtest), as the
 // file's module setup otherwise.
-const topLevel = { root: undefined, subtests: 0 };
+const topLevel = { subtests: 0, points: 0 };
 
 export async function adaptTap(testFile) {
     const evidenceDirectory = process.env.SUPERCOV_EVIDENCE_DIR;
@@ -143,8 +143,7 @@ export async function adaptTap(testFile) {
     beginBufferedServerEvidence(scope);
     activateCoverageScope(scope);
     process.once("exit", (code) => {
-        const points = topLevel.root?.count ?? topLevel.root?.counts?.total ?? 0;
-        const asserts = topLevel.subtests === 0 || points > topLevel.subtests;
+        const asserts = topLevel.points > 0;
         const written = asserts ? identity : { ...identity, role: "setup" };
         writeRunnerEvidence(written, !asserts || code === 0 ? "passed" : "failed", scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
     });
@@ -175,10 +174,8 @@ function patch(TestBase, testFile, evidenceDirectory) {
         // Supercov.
         const job = strongJob();
         const atTop = !this.parent;
-        if (atTop) {
-            topLevel.root = this;
+        if (atTop)
             topLevel.subtests += 1;
-        }
         if (job && (job.stopped || (atTop && !job.selects(testFile, scope.testId))))
             extra = { ...extra, skip: true };
         beginBufferedServerEvidence(scope);
@@ -218,4 +215,16 @@ function patch(TestBase, testFile, evidenceDirectory) {
         return result;
     };
     TestBase.prototype.sub.supercovTap = true;
+    // Every assertion passes or fails through these: those of a file's top
+    // level, outside any subtest, are counted.
+    for (const name of ["pass", "fail"]) {
+        const assertion = TestBase.prototype[name];
+        if (typeof assertion !== "function")
+            continue;
+        TestBase.prototype[name] = function supercovTapAssertion(...args) {
+            if (!this.parent)
+                topLevel.points += 1;
+            return Reflect.apply(assertion, this, args);
+        };
+    }
 }

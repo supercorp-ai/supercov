@@ -1563,6 +1563,11 @@ function withNodeAssertionPhase(operation, source, callback) {
   // as Jest started from another tool's process. The assertion still fails
   // with the frames its author would see.
   if (!scope) {
+    // An adapter that makes such an assertion a test's (a node:test file's
+    // top level) is told, and the assertion runs as it would have.
+    const unscoped = runtimeGlobal.__SUPERCOV_UNSCOPED_ASSERTION__;
+    if (typeof unscoped === "function")
+      unscoped();
     try {
       return withStackRoom(callback);
     } catch (error) {
