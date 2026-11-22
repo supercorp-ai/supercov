@@ -45,11 +45,13 @@ struct ReportOptions {
     runs: usize,
     /// Only these tests' coverage, in every run the report holds.
     filter: supercov_engine::coverage_report::TestFilter,
+    /// Only the mutants on lines a change made since this base.
+    diff: Option<String>,
 }
 
 fn help() -> &'static str {
     "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 5, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
-                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  --kind <kind>, --runner <runner>, --tag <tag>, --title <text>, --test-file <path>\n                       only the coverage of the tests these pick\n  -h, --help           show this help\n"
+                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  --kind <kind>, --runner <runner>, --tag <tag>, --title <text>, --test-file <path>\n                       only the coverage of the tests these pick\n  --diff <base>        only the mutants on lines the change since <base> made\n  -h, --help           show this help\n"
 }
 
 fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
@@ -59,9 +61,19 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
     let mut open = true;
     let mut runs = DEFAULT_RUNS;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
+    let mut diff = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
+            "--diff" => {
+                index += 1;
+                diff = Some(
+                    arguments
+                        .get(index)
+                        .ok_or_else(|| "--diff requires a base, such as origin/main".to_owned())?
+                        .clone(),
+                );
+            }
             "--compare" => {
                 index += 1;
                 comparison = Some(
@@ -121,6 +133,7 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
         open,
         runs,
         filter,
+        diff,
     })
 }
 
@@ -226,30 +239,41 @@ struct ReportRun {
     lines: Vec<ReportLine>,
     scope: Option<serde_json::Value>,
     sources: BTreeMap<String, ReportSource>,
-    /// The run's mutants, for a JavaScript or TypeScript run that listed
-    /// them; absent otherwise, and the report then shows none.
+    /// The run's mutants, of whatever language, for a run that listed them;
+    /// absent otherwise, and the report then shows none.
     #[serde(skip_serializing_if = "Option::is_none")]
     mutants: Option<ReportMutants>,
 }
 
-/// What the report shows of a run's mutants: the scores and counts, each
-/// file's counts, and the mutants no test infects or reaches, each as
-/// `mutants` lists it.
+/// What the report shows of a run's mutants, whatever their language: the
+/// weak and strong counts and scores, by file and by language, every mutant
+/// with its weak status, strong verdict and why, and, with `--diff`, the
+/// change it was narrowed to.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReportMutants {
     mutant_set: String,
     summary: supercov_engine::mutants_query::MutantsSummary,
-    files: BTreeMap<String, supercov_engine::coverage_index::MutantCounts>,
+    tally: Tally,
+    /// Whether a strong pass gave any of them a verdict.
+    strong: bool,
+    languages: BTreeMap<String, Tally>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diff: Option<supercov_engine::mutants_query::DiffSummary>,
+    files: BTreeMap<String, Tally>,
     mutants: Vec<ReportMutant>,
 }
+
+use supercov_engine::mutation_report::{Outcome, Tally};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReportMutant {
+    id: String,
     file: String,
     line: u32,
     column: u32,
+    end_line: u32,
     mutator: String,
     /// `original → replacement`, or the part it changes, as the command
     /// line shows it.
@@ -260,23 +284,46 @@ struct ReportMutant {
     /// `clock` or `random`: practically out of a test's reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     untestable: Option<supercov_engine::coverage_index::Untestable>,
+    outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    killed_by: Option<String>,
+    /// How many tests the strong pass ran against it, and for how long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    /// Why it has its outcome, in plain words.
+    why: String,
+    /// Left alive by the tests.
+    alive: bool,
 }
 
-/// The run's mutants as the report shows them, or `None` for a run that
-/// listed none.
-fn build_mutants(index: &CoverageIndex<'_>, run: &str) -> Result<Option<ReportMutants>, String> {
-    use supercov_engine::coverage_index::MutantStatus;
+/// The run's mutants as the report shows them, `diff`'s alone when given,
+/// or `None` for a run that listed none.
+fn build_mutants(
+    index: &CoverageIndex<'_>,
+    run: &StoredRun,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
+) -> Result<Option<ReportMutants>, String> {
     use supercov_engine::mutants_query::{
         CoverageMutantsQueryOptions, MutantsOptions, coverage_mutants_query,
     };
+    use supercov_engine::mutation_report as report;
+    let saved = crate::mutants_test_command::read_saved(run);
     let options = MutantsOptions {
-        statuses: vec![MutantStatus::NotInfected, MutantStatus::NotReached],
+        diff,
+        strong: (!saved.is_empty()).then(|| {
+            saved
+                .into_iter()
+                .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
+                .collect()
+        }),
         ..MutantsOptions::default()
     };
     let (data, _) = coverage_mutants_query(
         index,
         CoverageMutantsQueryOptions {
-            run,
+            run: &run.id,
             file: None,
             line: None,
             options: &options,
@@ -284,36 +331,61 @@ fn build_mutants(index: &CoverageIndex<'_>, run: &str) -> Result<Option<ReportMu
             limit: usize::MAX,
         },
     )
-    .map_err(|error| format!("could not read mutants for run {run}: {error:?}"))?;
+    .map_err(|error| format!("could not read mutants for run {}: {error:?}", run.id))?;
     let Some(mutant_set) = data.mutant_set.clone() else {
         return Ok(None);
     };
-    if data.summary.mutants == 0 {
+    // A change with no mutant on its lines still says so.
+    if data.summary.mutants == 0 && data.diff.is_none() {
         return Ok(None);
     }
+    let strong = data.mutants.iter().any(|mutant| mutant.strong.is_some());
     let mutants = data
         .mutants
         .iter()
-        .map(|mutant| ReportMutant {
-            file: mutant.file.clone(),
-            line: mutant.span.start[0],
-            column: mutant.span.start[1],
-            mutator: mutant.mutator.clone(),
-            change: crate::human_query::mutant_change(mutant),
-            status: mutant.status,
-            reason: mutant.weak.reason.clone(),
-            code: mutant.weak.code.clone(),
-            untestable: mutant.weak.untestable,
+        .map(|mutant| {
+            let verdict = report::verdict(mutant);
+            ReportMutant {
+                id: mutant.id.clone(),
+                file: mutant.file.clone(),
+                line: mutant.span.start[0],
+                column: mutant.span.start[1],
+                end_line: mutant.span.end[0],
+                mutator: mutant.mutator.clone(),
+                change: report::change(mutant),
+                status: mutant.status,
+                reason: mutant.weak.reason.clone(),
+                code: mutant.weak.code.clone(),
+                untestable: mutant.weak.untestable,
+                outcome: report::outcome(mutant),
+                killed_by: verdict
+                    .as_ref()
+                    .and_then(|verdict| verdict.killed_by.clone()),
+                tests: verdict.as_ref().map(|verdict| verdict.tests),
+                duration_ms: verdict.as_ref().map(|verdict| verdict.duration_ms),
+                why: report::why(mutant, strong),
+                alive: report::alive(mutant),
+            }
         })
         .collect();
+    let owned = |tallies: BTreeMap<&str, Tally>| {
+        tallies
+            .into_iter()
+            .map(|(key, tally)| (key.to_owned(), tally))
+            .collect::<BTreeMap<_, _>>()
+    };
     Ok(Some(ReportMutants {
         mutant_set,
+        tally: Tally::of(&data.mutants),
+        strong,
+        languages: owned(report::tallies(&data.mutants, |mutant| {
+            report::language(&mutant.file)
+        })),
+        files: owned(report::tallies(&data.mutants, |mutant| {
+            mutant.file.as_str()
+        })),
         summary: data.summary,
-        files: data
-            .files
-            .into_iter()
-            .map(|row| (row.file, row.status))
-            .collect(),
+        diff: data.diff,
         mutants,
     }))
 }
@@ -478,6 +550,7 @@ fn build_run(
     root: &Path,
     run: &StoredRun,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
 ) -> Result<Option<ReportRun>, String> {
     let current_integrity = current_integrity_for_run(root, run);
     let source_exact = current_integrity.as_ref().is_some_and(|current| {
@@ -628,7 +701,7 @@ fn build_run(
         }
     };
     let (sources, omitted_sources) = collect_sources(root, &files, source_exact);
-    let mutants = build_mutants(&index, &run.id)?;
+    let mutants = build_mutants(&index, run, diff)?;
 
     Ok(Some(ReportRun {
         id: run.id.clone(),
@@ -1116,7 +1189,12 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 let _ = std::io::stderr().flush();
             }
             let filter = (!options.filter.is_empty()).then_some(&options.filter);
-            match build_run(&root, run, filter)? {
+            let diff = options
+                .diff
+                .as_deref()
+                .map(|base| crate::mutant_diff(&root, base, run))
+                .transpose()?;
+            match build_run(&root, run, filter, diff)? {
                 Some(built) => runs.push(built),
                 // The run asked for must have the tests; an older one
                 // without them is left out of the comparison.
