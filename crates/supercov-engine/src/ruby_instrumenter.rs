@@ -5377,4 +5377,43 @@ end
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&declared));
     }
+
+    /// Every mutant-parity fixture (methods using most of Ruby's syntax)
+    /// and a file of the operator assignments and guards no method there
+    /// holds, probed with and without value probes, still parses, on the
+    /// same lines.
+    #[test]
+    fn ruby_files_of_every_syntax_probe_into_code_that_parses() {
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mutant-parity");
+        let mut sources: Vec<(String, Vec<u8>)> = std::fs::read_dir(fixtures)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rb"))
+            .map(|path| (path.display().to_string(), std::fs::read(&path).unwrap()))
+            .collect();
+        sources.push((
+            "writes".into(),
+            b"LIMIT ||= 1\nCount &&= 2\n@@total = 1\n$total = 2\ndef w(a, x)\n  @a &&= x\n  $g ||= x\n  a.b ||= x\n  a.b &&= x\n  a[0] &&= x\n  @@c = x\n  $d = x\n  case a\n  in Integer unless x then 1\n  in String if x then 2\n  end\nend\n"
+                .to_vec(),
+        ));
+        for (name, source) in sources {
+            for values in [false, true] {
+                let mut next = 0;
+                let obligations =
+                    build_ruby_obligations_with("lib/l.rb", &source, &mut next, values)
+                        .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+                assert_no_edit_breaks_a_line(&obligations.plan.edits);
+                let probed = apply_edits(&source, &obligations.plan.edits);
+                let errors = ruby_prism::parse(&probed)
+                    .errors()
+                    .map(|error| error.message().to_owned())
+                    .collect::<Vec<_>>();
+                assert!(
+                    errors.is_empty(),
+                    "{name}: {errors:?}\n{}",
+                    String::from_utf8_lossy(&probed)
+                );
+            }
+        }
+    }
 }

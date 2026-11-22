@@ -266,8 +266,6 @@ type Built = Result<Rc<N>, Unsupported>;
 /// compiler does.
 pub(crate) struct Converter<'s> {
     pub source: &'s [u8],
-    /// Anonymous `*`, `**` and `&` the enclosing method forwards.
-    forwarding: Vec<&'static str>,
 }
 
 fn span(location: &Location<'_>) -> (usize, usize) {
@@ -345,10 +343,7 @@ fn integer(value: ruby_prism::Integer<'_>) -> Child {
 
 impl<'s> Converter<'s> {
     pub(crate) fn new(source: &'s [u8]) -> Self {
-        Self {
-            source,
-            forwarding: Vec::new(),
-        }
+        Self { source }
     }
 
     fn text(&self, location: &Location<'_>) -> &'s [u8] {
@@ -387,10 +382,11 @@ impl<'s> Converter<'s> {
         let Some(statements) = statements else {
             return Ok(Child::Nil);
         };
-        let mut converted = Vec::new();
-        for statement in &statements.body() {
-            converted.push(marked(self.convert(&statement)?, syntax::STATEMENT));
-        }
+        let mut converted = statements
+            .body()
+            .iter()
+            .map(|statement| Ok(marked(self.convert(&statement)?, syntax::STATEMENT)))
+            .collect::<Result<Vec<_>, Unsupported>>()?;
         Ok(match converted.len() {
             0 => Child::Nil,
             1 => node(converted.pop().expect("one")),
@@ -406,41 +402,37 @@ impl<'s> Converter<'s> {
     /// A method's tree.
     pub(crate) fn method(&mut self, def: &ruby_prism::DefNode<'s>) -> Built {
         let at = span(&def.location());
-        let saved = std::mem::replace(&mut self.forwarding, forwarding(def.parameters()));
-        let built = (|| {
-            let args = self.def_args(def)?;
-            let body = match def.body() {
-                Some(body) => self.body(&body)?,
-                None => Child::Nil,
-            };
-            let endless = if def.equal_loc().is_some() {
-                syntax::ENDLESS
-            } else {
-                0
-            };
-            Ok(match def.receiver() {
-                Some(receiver) => {
-                    let receiver = match receiver.as_parentheses_node() {
-                        Some(parens) => self.optional(parens.body())?,
-                        None => node(self.convert(&receiver)?),
-                    };
-                    made_with(
-                        "defs",
-                        vec![receiver, sym(name(&def.name())), node(args), body],
-                        at,
-                        endless,
-                    )
-                }
-                None => made_with(
-                    "def",
-                    vec![sym(name(&def.name())), node(args), body],
+        let args = self.def_args(def)?;
+        let body = match def.body() {
+            Some(body) => self.body(&body)?,
+            None => Child::Nil,
+        };
+        let endless = if def.equal_loc().is_some() {
+            syntax::ENDLESS
+        } else {
+            0
+        };
+        let tree = match def.receiver() {
+            Some(receiver) => {
+                let receiver = match receiver.as_parentheses_node() {
+                    Some(parens) => self.optional(parens.body())?,
+                    None => node(self.convert(&receiver)?),
+                };
+                made_with(
+                    "defs",
+                    vec![receiver, sym(name(&def.name())), node(args), body],
                     at,
                     endless,
-                ),
-            })
-        })();
-        self.forwarding = saved;
-        built.map(|tree| mark_slots(&tree, self.source, false))
+                )
+            }
+            None => made_with(
+                "def",
+                vec![sym(name(&def.name())), node(args), body],
+                at,
+                endless,
+            ),
+        };
+        Ok(mark_slots(&tree, self.source, false))
     }
 
     /// A method's or block's body: statements, or a `begin` without its
@@ -550,9 +542,6 @@ impl<'s> Converter<'s> {
             let name = block.name().map_or(Child::Nil, |id| sym(name(&id)));
             return Ok(made("blockarg", vec![name], at));
         }
-        if let Some(block_local) = parameter.as_block_local_variable_node() {
-            return Ok(made("shadowarg", vec![sym(name(&block_local.name()))], at));
-        }
         if let Some(target) = parameter.as_multi_target_node() {
             let mut elements = Vec::new();
             for left in &target.lefts() {
@@ -569,19 +558,24 @@ impl<'s> Converter<'s> {
             return Ok(made("mlhs", elements, at));
         }
         if let Some(splat) = parameter.as_splat_node() {
-            // A destructuring rest, `|(a, *b)|`.
-            let children = match splat.expression() {
-                Some(expression) => match expression.as_required_parameter_node() {
-                    Some(required) => vec![sym(name(&required.name()))],
-                    None => {
-                        return self.unsupported("a destructuring splat", &parameter.location());
-                    }
-                },
-                None => Vec::new(),
-            };
+            // A destructuring rest, `|(a, *b)|`: Ruby names it or leaves it
+            // anonymous.
+            let children = splat
+                .expression()
+                .map(|expression| {
+                    let required = expression
+                        .as_required_parameter_node()
+                        .expect("a destructuring rest names a parameter");
+                    vec![sym(name(&required.name()))]
+                })
+                .unwrap_or_default();
             return Ok(made("restarg", children, at));
         }
-        self.unsupported("a parameter", &parameter.location())
+        // The last kind a block's parameters hold.
+        let block_local = parameter
+            .as_block_local_variable_node()
+            .expect("a parameter of a kind Prism builds");
+        Ok(made("shadowarg", vec![sym(name(&block_local.name()))], at))
     }
 
     fn block_args(
@@ -603,9 +597,9 @@ impl<'s> Converter<'s> {
         if parameters.as_it_parameters_node().is_some() {
             return Ok(sym("it"));
         }
-        let Some(block) = parameters.as_block_parameters_node() else {
-            return self.unsupported("block parameters", &parameters.location());
-        };
+        let block = parameters
+            .as_block_parameters_node()
+            .expect("a block's parameters are numbered, `it` or written");
         let at = span(&block.location());
         let mut children = Vec::new();
         if let Some(inner) = block.parameters() {
@@ -644,9 +638,8 @@ impl<'s> Converter<'s> {
         let Some(block) = block else {
             return Ok(call);
         };
-        let Some(block) = block.as_block_node() else {
-            return Ok(call);
-        };
+        // A block argument (`&b`) is an argument by now: a block is left.
+        let block = block.as_block_node().expect("a block");
         let opening = block.opening_loc();
         let braces = self.text(&opening) == b"{";
         let args = self.block_args(block.parameters(), opening.end_offset())?;
@@ -674,11 +667,7 @@ impl<'s> Converter<'s> {
         let Some(arguments) = arguments else {
             return Ok(Vec::new());
         };
-        let mut out = Vec::new();
-        for argument in &arguments.arguments() {
-            out.push(node(self.convert(&argument)?));
-        }
-        Ok(out)
+        self.all(arguments.arguments().iter())
     }
 
     /// parser's `rewrite_hash_args_to_kwargs`: a braceless hash last (or
@@ -694,12 +683,13 @@ impl<'s> Converter<'s> {
         } else {
             length.checked_sub(1)
         };
+        // Every argument is a node.
         if let Some(index) = index
-            && let Some(hash) = arguments[index].node()
-            && hash.ty == "hash"
-            && hash.has(syntax::SYNTHETIC)
+            && arguments[index]
+                .node()
+                .is_some_and(|hash| hash.ty == "hash" && hash.has(syntax::SYNTHETIC))
         {
-            let mut copy = (**hash).clone();
+            let mut copy = (**arguments[index].node().expect("an argument")).clone();
             copy.ty = "kwargs";
             arguments[index] = node(Rc::new(copy));
         }
@@ -752,23 +742,17 @@ impl<'s> Converter<'s> {
                     children.extend(arguments);
                     return Ok(made("match_with_lvasgn", children, call_at));
                 }
-                "[]" if receiver.is_some() => {
-                    let receiver = self.convert(&receiver.expect("receiver"))?;
+                // `[]` without a call operator is an index: `a[i]`.
+                "[]" => {
+                    let receiver = self.convert(&receiver.expect("an index's receiver"))?;
                     let mut children = vec![node(receiver)];
                     children.extend(arguments);
                     let index = made("index", children, call_at);
                     return self.with_block(index, block, at);
                 }
-                "[]="
-                    if receiver.is_some()
-                        && call
-                            .message_loc()
-                            .is_some_and(|loc| self.text(&loc) != b"[]=")
-                        && call.arguments().is_some()
-                        && block.is_none()
-                        && !call.is_safe_navigation() =>
-                {
-                    let receiver = self.convert(&receiver.expect("receiver"))?;
+                // `a[i] = v` (`a.[]=(i, v)` has a call operator).
+                "[]=" => {
+                    let receiver = self.convert(&receiver.expect("an index's receiver"))?;
                     let mut children = vec![node(receiver)];
                     children.extend(arguments);
                     return Ok(made("indexasgn", children, at));
@@ -880,9 +864,9 @@ impl<'s> Converter<'s> {
                 (start, end),
                 syntax::SYNTHETIC,
             ));
-        } else if begin.else_clause().is_some() {
-            return self.unsupported("an else without rescue", &begin.location());
         }
+        // An `else` without `rescue` is a syntax error: no file holding one
+        // is read.
         if let Some(ensure) = begin.ensure_clause() {
             let ensure_body = self.statements(ensure.statements())?;
             let end = ensure
@@ -946,36 +930,37 @@ impl<'s> Converter<'s> {
             }
             return Ok(made("mlhs", elements, at));
         }
-        if let Some(splat) = target.as_splat_node() {
-            let inner = match splat.expression() {
-                Some(expression) => vec![node(self.target(&expression)?)],
-                None => Vec::new(),
-            };
-            return Ok(made("splat", inner, at));
-        }
-        self.unsupported("an assignment target", &target.location())
+        // The last kind of target: `*a` or `*`.
+        let splat = target
+            .as_splat_node()
+            .expect("an assignment target of a kind Prism builds");
+        let inner = match splat.expression() {
+            Some(expression) => vec![node(self.target(&expression)?)],
+            None => Vec::new(),
+        };
+        Ok(made("splat", inner, at))
     }
 
+    /// An interpolated literal's parts (it has one at least).
     fn string_parts(&mut self, parts: ruby_prism::NodeList<'s>) -> Result<Vec<Child>, Unsupported> {
         let mut out = Vec::new();
-        for part in &parts {
-            if let Some(string) = part.as_string_node() {
-                if string.opening_loc().is_none()
-                    && self.text(&string.content_loc()).contains(&b'\n')
-                {
-                    out.extend(self.lines(&string)?);
-                    continue;
-                }
-                out.push(node(made_with(
-                    "str",
-                    vec![Child::Str(string.unescaped().to_vec())],
-                    span(&part.location()),
-                    syntax::STRING_CONTENT,
-                )));
-                continue;
+        parts.iter().try_for_each(|part| {
+            let Some(string) = part.as_string_node() else {
+                out.push(node(self.convert(&part)?));
+                return Ok(());
+            };
+            if string.opening_loc().is_none() && self.text(&string.content_loc()).contains(&b'\n') {
+                out.extend(self.lines(&string)?);
+                return Ok(());
             }
-            out.push(node(self.convert(&part)?));
-        }
+            out.push(node(made_with(
+                "str",
+                vec![Child::Str(string.unescaped().to_vec())],
+                span(&part.location()),
+                syntax::STRING_CONTENT,
+            )));
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -1269,9 +1254,9 @@ impl<'s> Converter<'s> {
                 let parts = self
                     .string_parts(regexp.parts())?
                     .into_iter()
-                    .map(|part| match part {
-                        Child::Node(part) => node(marked(part, syntax::REGEXP_CONTENT | percent)),
-                        other => other,
+                    .map(|part| {
+                        let part = part.node().expect("a part").clone();
+                        node(marked(part, syntax::REGEXP_CONTENT | percent))
                     })
                     .collect();
                 self.regexp(parts, &regexp.closing_loc(), at)
@@ -1376,10 +1361,8 @@ impl<'s> Converter<'s> {
                         let inner = self.convert(&inner)?;
                         leaf("kwsplat", vec![node(inner)])
                     }
-                    None if self.forwarding.contains(&"**") => {
-                        leaf("forwarded_kwrestarg", Vec::new())
-                    }
-                    None => self.unsupported("an anonymous keyword splat", &location),
+                    // `**` alone parses only where the method forwards it.
+                    None => leaf("forwarded_kwrestarg", Vec::new()),
                 }
             }
             Node::SplatNode { .. } => {
@@ -1389,8 +1372,8 @@ impl<'s> Converter<'s> {
                         let inner = self.convert(&inner)?;
                         leaf("splat", vec![node(inner)])
                     }
-                    None if self.forwarding.contains(&"*") => leaf("forwarded_restarg", Vec::new()),
-                    None => leaf("splat", Vec::new()),
+                    // `*` alone parses only where the method forwards it.
+                    None => leaf("forwarded_restarg", Vec::new()),
                 }
             }
             Node::BlockArgumentNode { .. } => {
@@ -2292,42 +2275,6 @@ fn procarg0(parameters: &ruby_prism::ParametersNode<'_>) -> bool {
         && parameters.keywords().iter().count() == 0
         && parameters.keyword_rest().is_none()
         && parameters.block().is_none()
-}
-
-/// The anonymous arguments a method forwards, as the compiler's
-/// `find_forwarding`.
-fn forwarding(parameters: Option<ruby_prism::ParametersNode<'_>>) -> Vec<&'static str> {
-    let Some(parameters) = parameters else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if parameters
-        .rest()
-        .and_then(|rest| rest.as_rest_parameter_node())
-        .is_some_and(|rest| rest.name().is_none())
-    {
-        out.push("*");
-    }
-    if let Some(rest) = parameters.keyword_rest() {
-        if rest
-            .as_keyword_rest_parameter_node()
-            .is_some_and(|rest| rest.name().is_none())
-        {
-            out.push("**");
-        }
-        if rest.as_forwarding_parameter_node().is_some() {
-            out.push("&");
-            out.push("...");
-        }
-    }
-    if parameters
-        .block()
-        .is_some_and(|block| block.name().is_none())
-        && !out.contains(&"&")
-    {
-        out.push("&");
-    }
-    out
 }
 
 /// `tree` with each node in an expression slot marked `EXPRESSION`: a
