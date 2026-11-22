@@ -122,6 +122,15 @@ such mutant behind a switch reading `Supercov.on(file, index)`
   without them and fails where it relies on them, as PIT's negated jump
   does.
 
+**The copy's static checks.** A Maven build that checks every source
+file (Checkstyle, PMD, SpotBugs, Spotless, Apache RAT's license headers)
+would fail the copy, whose sources are instrumented and which holds
+Supercov's runtime: the measured run and the strong pass skip those
+checks there (`-Dcheckstyle.skip=true` and the like, or through
+`MAVEN_OPTS` for a wrapper) and say so. A build that exits before any test
+reports is named as a build that failed before its tests, not blamed on
+the test framework.
+
 **Unviable mutants.** A switch the compiler refuses (a `+` that was a
 string's after all, an operator a Kotlin type does not have) is reported by
 the build at a position inside its region. The pass maps the compiler's
@@ -160,7 +169,10 @@ between test executions (`SupercovStrongPass.java`).
   included: such a test is found by its name with every `@hash` left out,
   and run by its class with a discovery filter on that name. Two tests of a
   class that read alike without their hashes are not found (`error`). The
-  TestNG driver
+  An engine that registers its tests only as it runs them (Kotest's
+  specs) has none in the discovered plan: such a test runs with its whole
+  class, and its outcome is the one of the test of its name the class
+  registered. The TestNG driver
   runs the class and method (a data provider's invocations together); the
   JUnit 4 driver of Ant's `<junit>` runs `JUnitCore` on the method. A
   candidate the driver cannot find leaves its mutant `error`, never
@@ -188,8 +200,12 @@ between test executions (`SupercovStrongPass.java`).
   left the JVM so that the test fails without it (a static cache filled
   with a mutated value) gets no verdict there, and the JVM stops taking
   mutants.
-- **Time.** A test with a mutant gets the longer of its measured time and
-  its baseline, × 3, and 10 s. The switch counts the active mutant's
+- **Time.** A test with a mutant gets the JavaScript drivers' two limits:
+  first the longer of its measured time and its baseline, × 1.5, and 1 s.
+  A mutant past it gets no verdict yet: it is listed, its test's thread is
+  left running (one such thread a JVM, or the JVM stops taking mutants),
+  and once every other mutant has a verdict the build starts again for the
+  listed ones alone, each with × 3 and 10 s, past which it is a `timeout`. The switch counts the active mutant's
   evaluations and throws `MutantTimeoutError` past 1,000,000
   (`SUPERCOV_MUTANT_HIT_LIMIT`), a `timeout`. A test past its time leaves a
   thread that will not stop: the verdict is written and the JVM takes no
