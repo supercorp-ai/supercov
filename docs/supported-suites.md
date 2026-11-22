@@ -50,7 +50,7 @@ Supercov reports the level it actually observed. It does not guess.
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate; Browser Mode included |
-| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept |
+| Jest | Exact per test, including parameterized tests, with the user's own configuration, setup files and reporters kept; the configuration is read from Jest 27 on (before 29.3 through `jest-config`'s own build) |
 | `node:test` | Exact per test |
 | `bun:test` (Bun 1.2.17 and 1.4.4 verified) | Exact test-body coverage, including concurrent and parameterized tests; lifecycle hooks recorded as setup |
 | Mocha | Exact per test and retry, `--parallel` included, with setup execution kept separate |

@@ -715,7 +715,10 @@ starting the runner for each job:
 - `strongJestHost.mjs` keeps Jest loaded and runs each job's file in band
   (`runCLI` with `runTestsByPath`), in the fresh module registry and
   environment Jest gives every test file; the job's mutant is switched on
-  before the file's modules load.
+  before the file's modules load. It reads the project's configuration once
+  and hands it to Jest as JSON, as StrykerJS's runner does (a configuration
+  that holds a function is read from its file each job), with Supercov's
+  reporter alone and the console silent.
 - `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
   project's CommonJS modules out of `require.cache` before each job and
   loads the job's file with `require`, so it and the code it tests load
@@ -749,7 +752,10 @@ the mutants it ran so far in the pass, over its tests' time and a job's start
 (300 ms), as the Vitest driver orders its copies. So the pass learns as it
 goes, eight times as many mutants as workers are under way at once (enough to
 keep every worker busy while some wait on a file's baseline), and a mutant
-picks its first file when it starts. Jest and Mocha record each test's
+picks its first file when it starts. A later batch's jobs wait behind every
+first file's job (the job queue is ordered by batch, then by arrival): a
+survivor's 37 files at once held luxon's first kills back for two and a half
+minutes. Jest and Mocha record each test's
 duration for this order and for each job's limit; before, every test cost
 the same second.
 
