@@ -20,9 +20,11 @@ Supercov runs the project's own test command and changes no source, tests or con
 Coverage says code ran, not that a test would fail if it were wrong. Mutation testing changes the code one small edit at a time (a mutant) and checks that a test fails. Use it after writing tests, to check that they assert something, when the user asks whether the tests are good enough, and on a pull request or branch.
 
 1. Run `npx supercov mutants -- <test command>`. It measures the suite, lists the mutants and runs each against the tests that reach it. On a branch or pull request, add `--diff <base>` (for example `--diff origin/main`) to keep only the mutants on changed lines.
-2. Read the survivors. `npx supercov runs latest mutants <path>` lists a file's mutants by line, each with what it changes and why: `not-infected` means a test ran the code but never gave it an input where the change matters (for `<` to `<=`, operands that are equal), `not-reached` that no test ran it. Add `--json` for each mutant's strong verdict in `strong.status`: a mutant whose verdict is `survived` lived through every test that reaches it.
+2. Read the survivors. The pass's summary ends with them; `npx supercov runs latest mutants --status survived` lists them all, and `npx supercov runs latest mutants <path>` lists a file's mutants by line, each with what it changes, its verdict and why. A weak status of `not-infected` means a test ran the code but never gave it an input where the change matters (for `<` to `<=`, operands that are equal); `not-reached` that no test ran it.
 3. Write a test that fails on one surviving mutant, with an assertion on the value it changes. Change only tests.
 4. Run `npx supercov mutants` again and report which mutants are now killed and which still survive.
+
+Mutation testing is fully supported for JavaScript and TypeScript, and in preview for Python, Rust, Go and Ruby; Java and Kotlin have no mutants yet. Mutants under a runner Supercov has no strong driver for are `error`, never survivors.
 
 Some mutants no test can tell apart from the original. Do not weaken code to kill them: say why, and the user can list them in `supercov.accepted.json`. Mutation testing reruns the tests, so prefer `--diff` on a large project.
 

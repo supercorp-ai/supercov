@@ -16055,7 +16055,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2624 => main.rs:2624",
+            "fs.canonicalize#main.rs:2625 => main.rs:2625",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
         ],
@@ -24100,12 +24100,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:946",
+            "fs.write#mutants_test_command.rs:948",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:946"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:948"),
         "{}",
         unwritten.stderr()
     );
@@ -24345,7 +24345,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:220")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:222")],
         )
         .exits(2);
     assert!(
@@ -25001,8 +25001,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:943",
-        "fs.read_dir entry#public_query.rs:943",
+        "fs.read_dir#public_query.rs:944",
+        "fs.read_dir entry#public_query.rs:944",
     ] {
         let unlisted = project
             .supercov_with(
@@ -25015,7 +25015,7 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:943"),
+            fired_at(&unlisted, "public_query.rs:944"),
             "{fault}: {unlisted}"
         );
     }

@@ -178,7 +178,7 @@ npx supercov runs <run-id> [query] [options]
 | `runners` | Group coverage by test runner |
 | `scope` | See what is source and what is not, by directory and reason; `--files` lists every file |
 | `assertions` | Read the share of executed statements the tests assert, and the ones they do not; `assertions assess` works it out |
-| `mutants [path[:line]]` | See, for each JavaScript mutant StrykerJS would make and each Python mutant mutmut would make, whether a test reached it and changed its value |
+| `mutants [path[:line]]` | See, for each mutant the language's established tool would make (StrykerJS; in preview mutmut, cargo-mutants, Gremlins and mutant), whether a test reached it and changed its value |
 | `source <path>` | Read matching current project source with line numbers |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
@@ -308,7 +308,9 @@ npx supercov runs <run-id> mutants --diff origin/main --fail-on not-infected,not
 ```
 
 `mutants` reads weak mutation from the run: for each mutant StrykerJS 10.1.1
-(JavaScript, TypeScript) or mutmut 3.8.1 (Python) would make, whether a test
+(JavaScript, TypeScript) would make, or in preview mutmut 3.8.1 (Python),
+cargo-mutants 27.1.0 (Rust), Gremlins 0.6.0 (Go) or mutant 0.17.1 (Ruby) would
+make (see [Mutation testing](mutation.md)), whether a test
 ran the mutated code and whether the mutant's value would have differed there.
 Nothing runs again. A plain run does nothing for mutants and costs nothing
 more for them: a run lists its mutants from its sources the first time they are asked for (by `mutants`,
@@ -470,9 +472,12 @@ start-up run with the server restarted for them. Jest, node:test, Mocha, AVA,
 node-tap, bun:test and Vitest's Browser Mode run one test file per start of the
 command, with the mutant switched on in every process from its start (in the
 page, under Browser Mode) and only that file's candidate tests, stopping at
-the first failure; Jest and Mocha keep resident runners for it. Rust mutants
+the first failure; Jest and Mocha keep resident runners for it. Python, Rust,
+Go and Ruby are in preview. Rust mutants
 run through cargo's tests, or through the JavaScript tests that load the
-crate compiled to wasm. Python suites under pytest or unittest (`python -m
+crate compiled to wasm. Go mutants run each package's test binary, built once.
+Ruby mutants run in a fork of the loaded suite under RSpec, Minitest, test-unit
+or Cucumber. Python suites under pytest or unittest (`python -m
 unittest`) collect their tests once; each mutant then runs in a fork of that
 process, its function switched to mutmut's copy of it, against its candidate
 tests in collection order, stopping at the first failure. A mutant whose code
@@ -1193,8 +1198,8 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_RUN_ID` | Set by Supercov, not by you: in every process a measured command starts, the run's id, so a test or harness can tell it is measured |
 | `SUPERCOV_RUN_ID_FILE` | A file to write the recorded run's id to, for a script to query that run rather than `latest` |
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
-| `SUPERCOV_MUTANTS` | Set to `1` to measure a JavaScript, TypeScript or Python run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
-| `SUPERCOV_STRONG_WORKERS` | How many forks a Python strong pass runs at once (default: one per CPU) |
+| `SUPERCOV_MUTANTS` | Set to `1` to measure a run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
+| `SUPERCOV_STRONG_WORKERS` | How many test processes a JavaScript or Python strong pass runs at once (default: about one per CPU) |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

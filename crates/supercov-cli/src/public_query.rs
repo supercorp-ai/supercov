@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each JavaScript or Python mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -86,11 +86,12 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
 
 const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
 
-Weak mutation: for each mutant StrykerJS (JavaScript, TypeScript) or mutmut
-(Python) would make, whether a test ran the mutated code (reach) and whether
-its value differed there (infection), read from the run without running
-anything. A run lists its mutants from its sources the first time they are
-asked for.
+Weak mutation: for each mutant the language's established tool would make
+(StrykerJS for JavaScript and TypeScript; in preview, mutmut for Python,
+cargo-mutants for Rust, Gremlins for Go and mutant for Ruby), whether a test
+ran the mutated code (reach) and whether its value differed there
+(infection), read from the run without running anything. A run lists its
+mutants from its sources the first time they are asked for.
 
 Without a file, a table of files by how many mutants no test infects, then
 by how many no test reaches; with a file, its mutants by line; with
@@ -98,7 +99,7 @@ file:line, that line's mutants and why.
 
 Options:
   --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent, or strong verdicts: survived, killed, timeout, no-coverage, error, unviable
-  --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
+  --mutator <name>          only this mutator's mutants, by its tool's name (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
   --stryker-root <dir>      the directory the reports' file paths are relative to (default: the project root)
