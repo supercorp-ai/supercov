@@ -67,14 +67,14 @@ Cold: `supercov -- <test command>` (measure: per-test coverage and weak mutation
 
 | project | measure s | strong s | total s | StrykerJS cold s | mutants | statuses | score | joined to truth | score on joined (Supercov / truth) | soundness violations | extra kills | PR: measure / diff s, mutants run of the diff, statuses |
 |---|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---|
-| defu | 1.1 | 1.9 | 2.9 | 3.4 | 103 | K87 S16 | 84.5 | 103 (Supercov only 0, StrykerJS only 0) | 84.5 / 84.5 (103) | 0 | 0 | – |
-| scule | 1.2 | 1.5 | 2.7 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | – |
-| scule (own-vitest) | 1.4 | 3.1 | 4.5 | 2.9 | 78 | K73 S5 | 93.6 | 78 (Supercov only 0, StrykerJS only 3) | 93.6 / 93.6 (78) | 0 | 0 | – |
-| cookie-es | 1.2 | 8.7 | 9.9 | 10.4 | 691 | K573 S84 T32 NC2 | 87.5 | 691 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (691) | 0 | 0 | – |
-| pathe | 3.2 | 8.1 | 11.3 | 10.8 | 490 | K425 S60 T4 NC1 | 87.5 | 490 (Supercov only 0, StrykerJS only 34) | 87.5 / 87.5 (488) | 0 | 0 | – |
-| ufo | 1.3 | 14.5 | 15.7 | 16.9 | 926 | K753 S144 NC18 T11 | 82.5 | 926 (Supercov only 0, StrykerJS only 85) | 82.5 / 82.5 (926) | 0 | 0 | – |
-| hono | 8.2 | 267.5 (6 shards, slowest 48.5) | 275.7 | 258.5 | 4295 | K3625 S507 T86 NC77 | 86.4 | 4292 (Supercov only 3, StrykerJS only 185) | 86.4 / 86.6 (4290) | 10 (0 after diagnosis) | 0 | – |
-| trpc | 22.6 | 2631.8 (32 shards, slowest 108.5) | 2654.4 | 2782.3 | 2688 | K1873 S490 T193 NC119 RE13 | 77.2 | 2664 (Supercov only 24, StrykerJS only 7) | 77.0 / 77.1 (2646) | 2 (0 after diagnosis) | 0 | – |
+| defu | 0.8 | 1.9 | 2.6 | 3.4 | 103 | K87 S16 | 84.5 | 103 (Supercov only 0, StrykerJS only 0) | 84.5 / 84.5 (103) | 0 | 0 | – |
+| scule | 1.1 | 1.6 | 2.6 | 2.9 | 81 | K75 S6 | 92.6 | 81 (Supercov only 0, StrykerJS only 0) | 92.6 / 92.6 (81) | 0 | 0 | – |
+| scule (own-vitest) | 1.3 | 3.2 | 4.5 | 2.9 | 81 | K75 S6 | 92.6 | 81 (Supercov only 0, StrykerJS only 0) | 92.6 / 92.6 (81) | 0 | 0 | – |
+| cookie-es | 0.8 | 10.2 | 11.0 | 10.4 | 725 | K598 S93 T32 NC2 | 86.9 | 725 (Supercov only 0, StrykerJS only 0) | 86.9 / 86.9 (725) | 0 | 0 | – |
+| pathe | 3.4 | 9.3 | 12.7 | 10.8 | 524 | K454 S65 T4 NC1 | 87.4 | 524 (Supercov only 0, StrykerJS only 0) | 87.4 / 87.4 (522) | 0 | 0 | – |
+| ufo | 1.2 | 18.7 | 19.9 | 16.9 | 1011 | K824 S158 NC18 T11 | 82.6 | 1011 (Supercov only 0, StrykerJS only 0) | 82.6 / 82.6 (1011) | 0 | 0 | – |
+| hono | 9.0 | 292.2 (6 shards, slowest 50.9) | 301.2 | 258.5 | 4480 | K3759 S560 T84 NC77 | 85.8 | 4477 (Supercov only 3, StrykerJS only 0) | 85.8 / 86.0 (4475) | 10 (0 after diagnosis) | 0 | – |
+| trpc | 22.6 | 2633.7 (32 shards, slowest 107.2) | 2656.3 | 2782.3 | 2695 | K1881 S493 T189 NC119 RE13 | 77.2 | 2671 (Supercov only 24, StrykerJS only 0) | 77.0 / 77.0 (2653) | 2 (0 after diagnosis) | 0 | – |
 
 ### Where Supercov's time goes
 
@@ -82,20 +82,20 @@ Strong pass per mutant = strong-pass wall (CPU) seconds over the mutants it ran 
 
 | project | plain tests s | measure s | strong pass s | mutants run | strong ms per mutant run (wall / CPU) | StrykerJS mutant phase ms per mutant | strong passes (stalled) | kills confirmed without the mutant / overturned |
 |---|---:|---:|---:|---:|---|---:|---|---|
-| defu | 0.4 | 1.1 | 1.9 | 100 | 19 / 9 | 17 | 1 (0) | 6 / 0 |
-| scule | 0.3 | 1.2 | 1.5 | 77 | 19 / 11 | 17 | 1 (0) | 15 / 0 |
-| scule (own-vitest) | 0.3 | 1.4 | 3.1 | 77 | 40 / 319 | 17 | 1 (0) | 15 / 0 |
-| cookie-es | 0.4 | 1.2 | 8.7 | 680 | 13 / 5 | 12 | 1 (0) | 86 / 0 |
-| pathe | 2.6 | 3.2 | 8.1 | 478 | 17 / 8 | 17 | 1 (0) | 106 / 0 |
-| ufo | 0.4 | 1.3 | 14.5 | 886 | 16 / 6 | 14 | 1 (0) | 161 / 0 |
-| hono | 6.6 | 8.2 | 267.5 | 4122 | 65 / 36 | 51 | 6 (0) | 1437 / 21 |
-| trpc | 20.6 | 22.6 | 2631.8 | 2458 | 1071 / 141 | 755 | 32 (0) | 734 / 0 |
+| defu | 0.4 | 0.8 | 1.9 | 100 | 19 / 10 | 17 | 1 (0) | 6 / 0 |
+| scule | 0.3 | 1.1 | 1.6 | 80 | 19 / 12 | 17 | 1 (0) | 15 / 0 |
+| scule (own-vitest) | 0.3 | 1.3 | 3.2 | 80 | 40 / 329 | 17 | 1 (0) | 15 / 0 |
+| cookie-es | 0.4 | 0.8 | 10.2 | 714 | 14 / 5 | 12 | 1 (0) | 86 / 0 |
+| pathe | 2.6 | 3.4 | 9.3 | 512 | 18 / 9 | 17 | 1 (0) | 107 / 0 |
+| ufo | 0.4 | 1.2 | 18.7 | 971 | 19 / 7 | 14 | 1 (0) | 160 / 0 |
+| hono | 6.6 | 9.0 | 292.2 | 4307 | 68 / 36 | 51 | 6 (0) | 1438 / 19 |
+| trpc | 20.6 | 22.6 | 2633.7 | 2465 | 1068 / 141 | 755 | 32 (0) | 759 / 0 |
 
 ### Verdicts across strong-pass settings
 
 | project | compared with | mutants compared | different verdicts |
 |---|---|---:|---:|
-| scule | own-vitest | 78 | 0 |
+| scule | own-vitest | 81 | 0 |
 
 ### Module-level (static) mutants
 
@@ -104,13 +104,13 @@ StrykerJS's ground truth runs static mutants (no `ignoreStatic`); Supercov switc
 | project | static mutants joined | Supercov statuses | ground-truth statuses |
 |---|---:|---|---|
 | defu | 2 | K2 | K2 |
-| scule | 0 | – | – |
-| scule (own-vitest) | 0 | – | – |
-| cookie-es | 0 | – | – |
-| pathe | 62 | K48 S14 | K46 S14 RE2 |
-| ufo | 5 | S5 | S5 |
-| hono | 320 | K293 S24 T3 | K269 T26 S24 RE1 |
-| trpc | 399 | K277 S87 T33 RE2 | K212 T92 S87 RE8 |
+| scule | 3 | K2 S1 | K2 S1 |
+| scule (own-vitest) | 3 | K2 S1 | K2 S1 |
+| cookie-es | 33 | K24 S9 | K24 S9 |
+| pathe | 92 | K75 S17 | K73 S17 RE2 |
+| ufo | 44 | K30 S14 | K30 S14 |
+| hono | 386 | K340 S45 T1 | K314 S45 T26 RE1 |
+| trpc | 399 | K282 S87 T28 RE2 | K212 T92 S87 RE8 |
 
 ### Every disagreement with the ground truth
 

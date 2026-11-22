@@ -206,12 +206,12 @@ Supercov's cold rows again (`results/2026-11-23/summary.md`), on the continuous 
 
 | project | ms per mutant run, staged (2026-11-22) | continuous | StrykerJS's mutant phase | files / baselines / confirmations per mutant run | soundness violations | extra kills |
 |---|---:|---:|---:|---|---:|---:|
-| defu, scule, cookie-es, pathe, ufo | 14-25 | 13-20 | 12-17 | 1.0-1.4 / 0.01-0.03 / 0.06-0.22 | 0 | 0 |
-| hono (6 shards) | 69 | 65 | 51 | 2.4 / 0.26 / 0.35 | the same 10 | 0 |
-| tRPC (32 shards) | 1,173 | 1,071 | 755 | 10.9 / 2.70 / 0.30 | the same 2 | 0 |
+| defu, scule, cookie-es, pathe, ufo | 14-25 | 14-19 | 12-17 | 1.0-1.6 / 0.01-0.03 / 0.06-0.21 | 0 | 0 |
+| hono (6 shards) | 69 | 68 (63-68 over four full runs) | 51 | 2.5 / 0.25 / 0.33 | the same 10 | 0 |
+| tRPC (32 shards) | 1,173 | 1,068 (1,066-1,071) | 755 | 10.8 / 2.69 / 0.31 | the same 2 | 0 |
 
-- **Files per mutant, by verdict.** hono: killed 1.6, survived 9.3; tRPC: killed 6.4, timed out 3.4,
-  survived 37.5 (StrykerJS's covering tests span 33.5 files for a killed tRPC mutant and 36.6 for a
+- **Files per mutant, by verdict.** hono: killed 1.7, survived 9.8; tRPC: killed 6.3, timed out 2.6,
+  survived 37.2 (StrykerJS's covering tests span 33.5 files for a killed tRPC mutant and 36.6 for a
   survivor). A tRPC survivor runs as many files as StrykerJS's; a killed mutant 6.4.
 - **Baselines** are once per file and shape in each pass: 2.70 per tRPC mutant because each of the 32
   shards is a pass of its own (about 110 files' union baselines and 100 whole ones, for its 77
@@ -219,7 +219,7 @@ Supercov's cold rows again (`results/2026-11-23/summary.md`), on the continuous 
   is outside its mutant phase; Supercov's figure includes them.
 - **Confirmations** run only for a kill by a copy that left out tests its file's baseline ran before
   the failing one.
-- **A failure before the mutant ran** reran its copy 10 times on hono and never changed a verdict
+- **A failure before the mutant ran** reran its copy 7 times on hono and never changed a verdict
   here; in two earlier runs, two timing tests' failures (`errors.test.ts > unauthorized()`,
   `websockets.test.ts > lazy connection where the first connection fails`) had stood as kills the
   ground truth does not have.
