@@ -1,0 +1,10 @@
+{
+  "projects": [
+    ["run-job.sh", "dry-inflector"],
+    ["run-job.sh", "dotenv"],
+    ["run-job.sh", "erubi"],
+    ["by-hand-job.sh", "ostruct"],
+    ["by-hand-job.sh", "json_test_data"]
+  ],
+  "integration": "ruby-coverage-integration.mjs"
+}
