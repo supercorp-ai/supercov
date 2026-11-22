@@ -124,13 +124,16 @@ public final class SupercovAntFormatter implements JUnitResultFormatter, Ignored
   @Override
   public void startTestSuite(JUnitTest suite) {
     this.suite = suite.getName();
+    // The class's own work (`@BeforeClass`, `@ClassRule`, its static
+    // initializer) runs outside its tests: credited to every one of them.
+    armOnce();
+    Supercov.enterSetup(this.suite, RUNNER);
   }
 
   @Override
   public void endTestSuite(JUnitTest suite) {
-    if (armed) {
-      writeEvidence();
-    }
+    Supercov.exitSetup("passed");
+    writeEvidence();
   }
 
   @Override

@@ -69,6 +69,13 @@ public final class Supercov {
   private static List<long[]> runWide = new ArrayList<>();
   private static final List<Record> records = new ArrayList<>();
   private static int current = -1;
+  /// The class-level work open around the running test, innermost last: a
+  /// class's `@BeforeAll`, its parameter sources, a nested class's own.
+  /// What runs while no test does is credited to the innermost.
+  private static final List<Integer> setups = new ArrayList<>();
+  /// Each class's setup record, by its name: a class opened again (a
+  /// nested class's parent, a TestNG class its tests return to) adds to it.
+  private static final java.util.Map<String, Integer> setupRecords = new java.util.HashMap<>();
   private static int open = 0;
   private static boolean overlapped = false;
   private static boolean armed = false;
@@ -96,6 +103,10 @@ public final class Supercov {
     /// never ran, and a suite of nothing but concurrent tests then published
     /// no tests at all.
     boolean unattributed = false;
+    /// Whether this is a test class's own work (`@BeforeAll`, `@AfterAll`,
+    /// a parameter source, a static initializer) rather than a test's: every
+    /// test of the class runs after it, so every one is credited with it.
+    boolean setup = false;
     final List<int[]> probes = new ArrayList<>();
     final List<long[]> vectors = new ArrayList<>();
 
@@ -130,6 +141,9 @@ public final class Supercov {
       runWide.add(new long[0]);
     }
     records.clear();
+    outsideRecord = null;
+    setups.clear();
+    setupRecords.clear();
     current = -1;
     open = 0;
     overlapped = false;
@@ -154,6 +168,7 @@ public final class Supercov {
   /** Binds every probe that fires next to this test, which carries these tags. */
   public static synchronized void enterTest(String name, String runner, String[] tags) {
     harvest();
+    claimOutside(runner);
     if (open > 0) {
       overlap();
     }
@@ -204,7 +219,109 @@ public final class Supercov {
     }
     harvest();
     open = Math.max(0, open - 1);
-    current = -1;
+    current = overlapped || setups.isEmpty() ? -1 : setups.get(setups.size() - 1);
+  }
+
+  /** The status a class's setup record is written with: it is no test. */
+  static final String SETUP = "setup:";
+
+  /**
+   * Opens a test class's own work: what runs from here until a test starts,
+   * and again between its tests and after the last, until {@link
+   * #exitSetup}, is the class's (`@BeforeAll`, a `@MethodSource`, a static
+   * initializer, `@AfterAll`). The engine credits it to every test of the
+   * class's file: each of them runs after it, and a mutant there changes
+   * what they see.
+   */
+  public static synchronized void enterSetup(String name, String runner) {
+    harvest();
+    claimOutside(runner);
+    if (overlapped) {
+      return;
+    }
+    String recordName = name + "#" + SETUP_NAME;
+    Integer at = setupRecords.get(recordName);
+    if (at == null) {
+      Record record = new Record(recordName);
+      record.runner = runner;
+      record.setup = true;
+      records.add(record);
+      at = records.size() - 1;
+      setupRecords.put(recordName, at);
+    }
+    setups.add(at);
+    // Inside a running test (an engine that reports a class within one) the
+    // test keeps what it reaches; the class takes over once it ends.
+    if (open == 0) {
+      current = at;
+    }
+  }
+
+  /**
+   * Passes from one test class to the next where the framework reports no
+   * class boundary (TestNG's tests alone): what ran since the previous
+   * class's last test is its `@AfterClass` or the next one's `@BeforeClass`,
+   * and no telling which, so both classes are credited with it.
+   */
+  public static synchronized void switchSetup(String name, String runner) {
+    if (overlapped || open > 0 || current < 0 || !records.get(current).setup) {
+      exitSetup("passed");
+      enterSetup(name, runner);
+      return;
+    }
+    Record previous = records.get(current);
+    int probes = previous.probes.size();
+    int vectors = previous.vectors.size();
+    harvest();
+    List<int[]> between = new ArrayList<>(previous.probes.subList(probes, previous.probes.size()));
+    List<long[]> evaluated =
+        new ArrayList<>(previous.vectors.subList(vectors, previous.vectors.size()));
+    exitSetup("passed");
+    enterSetup(name, runner);
+    Record next = records.get(current);
+    next.probes.addAll(between);
+    next.vectors.addAll(evaluated);
+  }
+
+  /// What ran while no test and no test class did: a suite's or an
+  /// engine's own setup (`@BeforeSuite`), a class loaded between two others.
+  /// Any test may depend on it, so it names no class.
+  private static Record outside() {
+    if (outsideRecord == null) {
+      outsideRecord = new Record(OUTSIDE);
+      outsideRecord.setup = true;
+      records.add(outsideRecord);
+    }
+    return outsideRecord;
+  }
+
+  private static Record outsideRecord;
+
+  /// The framework whose tests ran around what ran outside them.
+  private static void claimOutside(String runner) {
+    if (outsideRecord != null && outsideRecord.runner.isEmpty() && runner != null) {
+      outsideRecord.runner = runner;
+    }
+  }
+
+  static final String OUTSIDE = "#<outside every test>";
+
+  /// What a setup record's name ends in, after its class's.
+  static final String SETUP_NAME = "<class setup>";
+
+  /** Closes the innermost class's own work, as the framework says it ended. */
+  public static synchronized void exitSetup(String status) {
+    harvest();
+    if (overlapped || setups.isEmpty()) {
+      return;
+    }
+    Record record = records.get(setups.remove(setups.size() - 1));
+    if (!"passed".equals(status)) {
+      record.status = "failed";
+    }
+    if (open == 0) {
+      current = setups.isEmpty() ? -1 : setups.get(setups.size() - 1);
+    }
   }
 
   /// Which record belongs to the test this thread is running, once records
@@ -263,8 +380,10 @@ public final class Supercov {
   }
 
   private static void harvest() {
-    Record into =
-        !overlapped && current >= 0 && current < records.size() ? records.get(current) : null;
+    Record into = null;
+    if (!overlapped) {
+      into = current >= 0 && current < records.size() ? records.get(current) : outside();
+    }
     for (int index = 0; index < HITS.length; index++) {
       int value = HITS[index];
       if (value == 0) {
@@ -473,12 +592,19 @@ public final class Supercov {
       for (int value : global) {
         putLong(out, value);
       }
-      putLong(out, records.size());
+      // A class whose own work reached nothing has nothing to credit.
+      List<Record> written = new ArrayList<>();
       for (Record record : records) {
+        if (!record.setup || !record.probes.isEmpty() || !record.vectors.isEmpty()) {
+          written.add(record);
+        }
+      }
+      putLong(out, written.size());
+      for (Record record : written) {
         byte[] name = record.name.getBytes("UTF-8");
         putLong(out, name.length);
         out.write(name);
-        byte[] status = record.status.getBytes("UTF-8");
+        byte[] status = ((record.setup ? SETUP : "") + record.status).getBytes("UTF-8");
         putLong(out, status.length);
         out.write(status);
         // Whether the probes below are this test's own. Every JUnit Platform
@@ -496,10 +622,17 @@ public final class Supercov {
           putLong(out, bytes.length);
           out.write(bytes);
         }
-        putLong(out, record.probes.size());
+        // A record harvested more than once (a class's setup, around each
+        // of its tests) holds a probe once per harvest: one entry each, with
+        // every bit any harvest saw.
+        java.util.Map<Integer, Integer> probes = new java.util.TreeMap<>();
         for (int[] hit : record.probes) {
-          putLong(out, hit[0]);
-          putLong(out, hit[1]);
+          probes.merge(hit[0], hit[1], (a, b) -> a | b);
+        }
+        putLong(out, probes.size());
+        for (java.util.Map.Entry<Integer, Integer> hit : probes.entrySet()) {
+          putLong(out, hit.getKey());
+          putLong(out, hit.getValue());
         }
         putLong(out, record.vectors.size());
         for (long[] hit : record.vectors) {

@@ -18057,8 +18057,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
-        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
+        ("fs.write#go_run.rs:1064", "go_run.rs:1064"),
+        ("fs.create_dir_all#go_run.rs:1074", "go_run.rs:1074"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18092,11 +18092,11 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.create_dir_all#jvm_run.rs:2775", "jvm_run.rs:2775"),
-        ("fs.create_dir_all#jvm_run.rs:2791", "jvm_run.rs:2791"),
-        ("fs.create_dir_all#jvm_run.rs:2801", "jvm_run.rs:2801"),
-        ("fs.write#jvm_run.rs:2775", "jvm_run.rs:2775"),
-        ("fs.write#jvm_run.rs:2791", "jvm_run.rs:2791"),
+        ("fs.create_dir_all#jvm_run.rs:2811", "jvm_run.rs:2811"),
+        ("fs.create_dir_all#jvm_run.rs:2827", "jvm_run.rs:2827"),
+        ("fs.create_dir_all#jvm_run.rs:2837", "jvm_run.rs:2837"),
+        ("fs.write#jvm_run.rs:2811", "jvm_run.rs:2811"),
+        ("fs.write#jvm_run.rs:2827", "jvm_run.rs:2827"),
     ] {
         let project = Project::cart("browser-java");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19539,6 +19539,110 @@ fn a_junit_4_parameter_named_by_its_identity_hash_decides_its_mutants() {
     assert_eq!(errors, Vec::<String>::new(), "{verdicts}");
 }
 
+/// Code a test class runs for all its tests -- a `@BeforeAll`, a
+/// `@MethodSource` -- is credited to every test of the class: a mutant
+/// there is run against them, though another class's test, which ignores
+/// what it returns, also runs it. Each JVM that shares the pass works in a
+/// directory of its own, made of links to the project's files: a test reads
+/// them by relative path, and the files a test makes are its JVM's alone.
+#[test]
+fn class_setup_is_credited_to_the_class_s_tests_and_each_jvm_has_its_own_directory() {
+    if !std::process::Command::new("mvn")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let project = Project::empty("jvm-class-setup");
+    small_maven_project(&project);
+    project.write(
+        "src/main/java/w/W.java",
+        "package w;\n\npublic class W {\n    public static String label() {\n        return \"set\";\n    }\n\n    public static String source() {\n        return \"given\";\n    }\n\n    public static int twice(int n) {\n        return n * 2 + 0 * n;\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/WTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport java.util.stream.Stream;\nimport org.junit.jupiter.api.BeforeAll;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.params.ParameterizedTest;\nimport org.junit.jupiter.params.provider.MethodSource;\n\nclass WTest {\n    static String label;\n\n    @BeforeAll\n    static void setUp() {\n        label = W.label();\n    }\n\n    static Stream<String> sources() {\n        return Stream.of(W.source());\n    }\n\n    @Test\n    void labelled() {\n        assertEquals(\"set\", label);\n    }\n\n    @ParameterizedTest\n    @MethodSource(\"sources\")\n    void given(String value) {\n        assertEquals(\"given\", value);\n    }\n}\n",
+    );
+    project.write(
+        "src/test/java/w/CallsTest.java",
+        "package w;\n\nimport org.junit.jupiter.api.Test;\n\nclass CallsTest {\n    @Test\n    void calls() {\n        W.label();\n        W.source();\n    }\n}\n",
+    );
+    // Each run of `twice` reads what to expect from a project file by its
+    // relative path, takes long enough for the other JVMs to claim mutants
+    // too, and says where it ran.
+    project.write("src/test/resources/expected.txt", "4\n");
+    project.write(
+        "src/test/java/w/TwiceTest.java",
+        "package w;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport java.nio.file.Files;\nimport java.nio.file.Paths;\nimport java.nio.file.StandardOpenOption;\nimport org.junit.jupiter.api.Test;\n\nclass TwiceTest {\n    @Test\n    void twice() throws Exception {\n        String expected = new String(Files.readAllBytes(Paths.get(\"src/test/resources/expected.txt\"))).trim();\n        Thread.sleep(1000);\n        String log = System.getenv(\"W_LOG\");\n        if (log != null) {\n            Files.write(Paths.get(log), (System.getProperty(\"user.dir\") + \"\\n\").getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);\n        }\n        assertEquals(Integer.parseInt(expected), W.twice(2));\n    }\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("fixture");
+    let log = project.root.join("dirs.log");
+    let log_value = log.display().to_string();
+    let tested = project
+        .supercov_with(
+            &["mutants", "--json", "--", "mvn", "-q", "test"],
+            &[("W_LOG", log_value.as_str()), ("SUPERCOV_STRONG_JVMS", "4")],
+        )
+        .json();
+    let verdicts = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path().join("strong-mutation.json"))
+        .find(|path| path.exists())
+        .map(|path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        })
+        .expect("verdicts saved");
+    let file = "src/main/java/w/W.java";
+    let of_line = |line: u32| {
+        verdicts["mutants"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id.starts_with(&format!("{file}:{line}:")))
+            .map(|(id, mutant)| (id.clone(), mutant["status"].as_str().unwrap().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    // `label()`'s return reached in `@BeforeAll`, `source()`'s in a
+    // `@MethodSource`: each killed by the class's tests.
+    for line in [5, 9, 13] {
+        let mutants = of_line(line);
+        assert!(!mutants.is_empty(), "line {line}: {verdicts}");
+        assert!(
+            mutants
+                .iter()
+                .all(|(_, status)| status == "killed" || status == "survived" && line == 13),
+            "line {line}: {mutants:?}\n{tested}"
+        );
+    }
+    assert!(
+        of_line(13).iter().any(|(_, status)| status == "killed"),
+        "{verdicts}"
+    );
+    // The JVMs that shared the pass each ran in a directory of their own,
+    // removed once they ended; the build's own JVM in the copy's.
+    let directories = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    let own = directories
+        .iter()
+        .filter(|directory| {
+            std::path::Path::new(directory)
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("jvm-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!own.is_empty(), "{directories:?}");
+    for directory in own {
+        assert!(!std::path::Path::new(directory).exists(), "{directory}");
+    }
+}
+
 /// A Maven project with one class and its test.
 /// A JVM test whose class is declared in a file of another name has no
 /// file to name, and is listed without evidence all the same.
@@ -19725,7 +19829,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#jvm_run.rs:2161", "jvm_run.rs:2161"),
+                ("fs.canonicalize#jvm_run.rs:2193", "jvm_run.rs:2193"),
                 ("fs.read_dir#jvm_project.rs:287", "jvm_project.rs:287"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],

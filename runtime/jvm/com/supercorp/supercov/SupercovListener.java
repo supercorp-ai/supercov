@@ -61,7 +61,25 @@ public final class SupercovListener implements TestExecutionListener {
   public void executionStarted(TestIdentifier identifier) {
     if (identifier.isTest()) {
       Supercov.enterTest(name(identifier), RUNNER, tags(identifier));
+    } else if (testClass(identifier) != null) {
+      Supercov.enterSetup(testClass(identifier), RUNNER);
     }
+  }
+
+  /**
+   * The class a container runs, where it is one: its `@BeforeAll` and
+   * `@AfterAll`, its parameter sources and its static initializer run in it,
+   * outside every test (a Kotest spec's body too).
+   */
+  private static String testClass(TestIdentifier identifier) {
+    if (!identifier.isContainer()) {
+      return null;
+    }
+    return identifier
+        .getSource()
+        .filter(source -> source instanceof ClassSource)
+        .map(source -> ((ClassSource) source).getClassName())
+        .orElse(null);
   }
 
   /** The test's `@Tag`s, its class's among them, as `--include-tags` reads them. */
@@ -73,6 +91,8 @@ public final class SupercovListener implements TestExecutionListener {
   public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
     if (identifier.isTest()) {
       Supercov.exitTest(status(result));
+    } else if (testClass(identifier) != null) {
+      Supercov.exitSetup(status(result));
     }
   }
 

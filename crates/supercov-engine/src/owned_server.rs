@@ -175,6 +175,7 @@ fn credit(
             file: Some(test.file.clone()),
             status: status.into(),
             attributed: true,
+            setup: false,
         });
     }
     (
@@ -609,7 +610,7 @@ mod tests {
             (
                 "run_work",
                 &one[..],
-                "fs.create_dir_all#owned_server.rs:294",
+                "fs.create_dir_all#owned_server.rs:295",
                 9,
             ),
             (

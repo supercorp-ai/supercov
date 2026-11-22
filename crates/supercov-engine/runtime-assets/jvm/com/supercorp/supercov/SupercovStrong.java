@@ -126,7 +126,7 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
         // An engine that registers its tests only as it runs them (Kotest's
         // specs, a Spock feature's iterations): the class runs, and the
         // test is the one of that name among those it registered.
-        test.handle = new Object[] {test.className, test.name};
+        test.handle = new Object[] {test.className, test.name, null};
       }
       return test.handle != null;
     }
@@ -252,41 +252,105 @@ public final class SupercovStrong implements PostDiscoveryFilter, TestExecutionL
      */
     private void executeByClass(
         SupercovStrongPass.Test test, final SupercovStrongPass.Outcome outcome) {
-      final Object[] handle = (Object[]) test.handle;
+      Object[] handle = (Object[]) test.handle;
+      String filter = kotestFilter((String) handle[0], (String) handle[1]);
+      if (handle[2] == null) {
+        // The first run is the test's baseline: with Kotest's own filter
+        // where it names the test, the test alone; where it does not run
+        // the test, or the test fails alone, the whole class from then on.
+        handle[2] = Boolean.FALSE;
+        if (filter != null) {
+          SupercovStrongPass.Outcome alone = new SupercovStrongPass.Outcome();
+          if (runClass(handle, filter, alone) && !alone.failed) {
+            handle[2] = Boolean.TRUE;
+            return;
+          }
+        }
+      }
+      runClass(handle, Boolean.TRUE.equals(handle[2]) ? filter : null, outcome);
+    }
+
+    /**
+     * Kotest's test filter (`kotest.filter.tests`) for one test: a pattern
+     * per level of its path (`context`, `context -- test`), since a
+     * container the filter leaves out runs none of its tests. Each pattern
+     * is a regular expression whose every character but a letter, a digit
+     * or a space matches any one: a name's own `(`, `*` or `,` says
+     * nothing to the filter. Null where the name is not under its class.
+     */
+    static String kotestFilter(String className, String name) {
+      if (!name.startsWith(className + "#")) {
+        return null;
+      }
+      StringBuilder patterns = new StringBuilder();
+      StringBuilder path = new StringBuilder();
+      for (String level : name.substring(className.length() + 1).split("#", -1)) {
+        if (path.length() > 0) {
+          path.append(" -- ");
+        }
+        for (int i = 0; i < level.length(); i++) {
+          char c = level.charAt(i);
+          path.append(Character.isLetterOrDigit(c) || c == ' ' ? c : '.');
+        }
+        patterns.append(patterns.length() > 0 ? "," : "").append(path);
+      }
+      return patterns.toString();
+    }
+
+    static final String KOTEST_FILTER = "kotest.filter.tests";
+
+    /** Runs the class (filtered where given); whether the test ran. */
+    private boolean runClass(
+        Object[] handle, String filter, final SupercovStrongPass.Outcome outcome) {
       final String wanted = (String) handle[1];
       final String wantedKey = stableKey(wanted);
       final TestPlan[] running = {null};
       final boolean[] ran = {false};
-      launcher.execute(
-          LauncherDiscoveryRequestBuilder.request()
-              .selectors(DiscoverySelectors.selectClass((String) handle[0]))
-              .build(),
-          new TestExecutionListener() {
-            @Override
-            public void testPlanExecutionStarted(TestPlan plan) {
-              running[0] = plan;
-            }
+      String before = System.getProperty(KOTEST_FILTER);
+      if (filter != null) {
+        System.setProperty(KOTEST_FILTER, filter);
+      }
+      try {
+        launcher.execute(
+            LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClass((String) handle[0]))
+                .build(),
+            new TestExecutionListener() {
+              @Override
+              public void testPlanExecutionStarted(TestPlan plan) {
+                running[0] = plan;
+              }
 
-            @Override
-            public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
-              if (!identifier.isTest()) {
-                return;
+              @Override
+              public void executionFinished(TestIdentifier identifier, TestExecutionResult result) {
+                if (!identifier.isTest()) {
+                  return;
+                }
+                String name = name(running[0], identifier);
+                if (!name.equals(wanted)
+                    && (wantedKey == null || !wantedKey.equals(stableKey(name)))) {
+                  return;
+                }
+                ran[0] = true;
+                if (result.getStatus() == TestExecutionResult.Status.FAILED) {
+                  outcome.fail(result.getThrowable().orElse(null));
+                }
               }
-              String name = name(running[0], identifier);
-              if (!name.equals(wanted)
-                  && (wantedKey == null || !wantedKey.equals(stableKey(name)))) {
-                return;
-              }
-              ran[0] = true;
-              if (result.getStatus() == TestExecutionResult.Status.FAILED) {
-                outcome.fail(result.getThrowable().orElse(null));
-              }
-            }
-          });
+            });
+      } finally {
+        if (filter != null) {
+          if (before == null) {
+            System.clearProperty(KOTEST_FILTER);
+          } else {
+            System.setProperty(KOTEST_FILTER, before);
+          }
+        }
+      }
       if (!ran[0] && !outcome.failed) {
         outcome.failed = true;
         outcome.reason = "the test did not run with its class";
       }
+      return ran[0];
     }
   }
 

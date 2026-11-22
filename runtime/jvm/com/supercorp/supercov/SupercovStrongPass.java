@@ -257,6 +257,10 @@ public final class SupercovStrongPass {
           Thread.currentThread().interrupt();
         }
       }
+      for (File tree : trees) {
+        removeTree(tree);
+      }
+      trees.clear();
     }
   }
 
@@ -300,19 +304,116 @@ public final class SupercovStrongPass {
       command.add("-ea");
     }
     command.add("-D" + MINION + "=true");
-    command.add("-cp");
-    command.add(System.getProperty("java.class.path"));
-    command.add(framework);
-    command.add(module());
+    File cwd = new File(System.getProperty("user.dir")).getAbsoluteFile();
+    File base = new File(System.getenv(CLAIMS)).getAbsoluteFile().getParentFile();
     for (int i = 1; i < jvms; i++) {
+      List<String> own = new ArrayList<>(command);
+      ProcessBuilder builder = new ProcessBuilder(own).inheritIO();
+      // What it says on stderr, beside the pass's other files: a build may
+      // keep its test JVM's output to itself.
+      builder.redirectError(ProcessBuilder.Redirect.appendTo(new File(base, "jvm-" + i + ".log")));
+      // A directory of its own: tests that write files where they run
+      // (`new File("test.txt")`) would otherwise see the files another
+      // JVM's test made or deleted meanwhile.
+      String name = "jvm-" + Long.toHexString(System.nanoTime()) + "-" + i;
+      File directory = new File(base, name);
+      File temporary = new File(base, name + "-tmp");
+      if (linkedTree(cwd, directory, base) && temporary.mkdirs()) {
+        builder.directory(directory);
+        own.add("-Duser.dir=" + directory.getPath());
+        own.add("-Djava.io.tmpdir=" + temporary.getPath());
+        trees.add(directory);
+        trees.add(temporary);
+      }
+      own.add("-cp");
+      own.add(System.getProperty("java.class.path"));
+      own.add(framework);
+      own.add(module());
       try {
-        started.add(new ProcessBuilder(command).inheritIO().start());
+        started.add(builder.start());
       } catch (IOException e) {
         System.err.println("supercov: could not start another JVM for the strong pass: " + e);
         break;
       }
     }
     return started;
+  }
+
+  /** The working directories made for the other JVMs, removed once they end. */
+  private static final List<File> trees = new ArrayList<>();
+
+  /** How many links a JVM's working directory is made of at most. */
+  private static final int TREE_LINKS = 50_000;
+
+  /**
+   * {@code to} made as {@code from} is: its directories made afresh and
+   * every file in them a link to the original, so a test reads the
+   * project's files as they are and the files it makes or deletes are its
+   * JVM's alone. Past {@link #TREE_LINKS} a directory is linked whole. False
+   * where links cannot be made (Windows without the right): the JVM then
+   * shares the directory, as before.
+   */
+  static boolean linkedTree(File from, File to, File skip) {
+    try {
+      int[] links = {0};
+      java.nio.file.Files.createDirectories(skip.toPath());
+      link(from.toPath(), to.toPath(), skip.toPath().toRealPath(), links);
+      return true;
+    } catch (IOException | UnsupportedOperationException | SecurityException e) {
+      System.err.println(
+          "supercov: the strong pass's JVMs share one working directory: " + e.getMessage());
+      return false;
+    }
+  }
+
+  private static void link(
+      java.nio.file.Path from, java.nio.file.Path to, java.nio.file.Path skip, int[] links)
+      throws IOException {
+    java.nio.file.Files.createDirectories(to);
+    try (java.nio.file.DirectoryStream<java.nio.file.Path> entries =
+        java.nio.file.Files.newDirectoryStream(from)) {
+      for (java.nio.file.Path entry : entries) {
+        java.nio.file.Path target = to.resolve(entry.getFileName().toString());
+        boolean directory =
+            java.nio.file.Files.isDirectory(entry, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        // The pass's own directory, where these trees are made.
+        if (directory && entry.toRealPath().equals(skip)) {
+          continue;
+        }
+        links[0]++;
+        if (links[0] < TREE_LINKS && directory) {
+          link(entry, target, skip, links);
+        } else {
+          java.nio.file.Files.createSymbolicLink(target, entry);
+        }
+      }
+    }
+  }
+
+  /** Removes a working directory made of links, never what they point to. */
+  static void removeTree(File tree) {
+    try {
+      java.nio.file.Files.walkFileTree(
+          tree.toPath(),
+          new java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+            @Override
+            public java.nio.file.FileVisitResult visitFile(
+                java.nio.file.Path file, java.nio.file.attribute.BasicFileAttributes attributes)
+                throws IOException {
+              java.nio.file.Files.delete(file);
+              return java.nio.file.FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public java.nio.file.FileVisitResult postVisitDirectory(
+                java.nio.file.Path directory, IOException error) throws IOException {
+              java.nio.file.Files.delete(directory);
+              return java.nio.file.FileVisitResult.CONTINUE;
+            }
+          });
+    } catch (IOException e) {
+      // Left for the engine, which removes the pass's directory.
+    }
   }
 
   /** A minion's whole life: the pass, then the JVM's end. */
@@ -350,6 +451,7 @@ public final class SupercovStrongPass {
       }
       if (!runMutant(mutant, mine, missing)) {
         // This JVM cannot be trusted with another mutant.
+        System.err.println("supercov: this JVM takes no more mutants after " + mutant.id);
         return;
       }
     }
@@ -405,6 +507,13 @@ public final class SupercovStrongPass {
         write(mutant, "timeout", test.name, ran, started, "ran past its time limit");
         return false;
       }
+      if (outcome.mutantTimeout && !retry && slow != null) {
+        // Past its evaluation limit once past the short time limit: tried
+        // again in the round with the generous one, as a test past its time
+        // is. Its thread ended with the error, so this JVM goes on.
+        markSlow(mutant);
+        return true;
+      }
       if (outcome.mutantTimeout) {
         write(mutant, "timeout", test.name, ran, started, "the mutant passed its evaluation limit");
         return true;
@@ -414,6 +523,9 @@ public final class SupercovStrongPass {
         if (confirmation.failed || confirmation.timedOut) {
           // The mutant left the JVM so that the test fails without it: no
           // verdict here, and a fresh JVM for the rest.
+          System.err.println(
+              "supercov: " + test.name + " fails without the mutant too after it ran: "
+                  + confirmation.reason);
           return false;
         }
         write(mutant, "killed", test.name, ran, started, outcome.reason);

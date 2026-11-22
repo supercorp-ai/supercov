@@ -1812,7 +1812,11 @@ fn without_ids(classpath: &str) -> String {
 fn number_repeated_runs(forked: &mut [crate::owned_evidence::OwnedEvidence]) {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     for evidence in forked.iter_mut() {
-        for test in &mut evidence.tests {
+        for test in evidence
+            .tests
+            .iter_mut()
+            .filter(|test| !test.status.starts_with("setup:"))
+        {
             let count = seen.entry(test.name.clone()).or_default();
             *count += 1;
             if *count > 1 {
@@ -1820,6 +1824,34 @@ fn number_repeated_runs(forked: &mut [crate::owned_evidence::OwnedEvidence]) {
             }
         }
     }
+}
+
+/// A class's own work, and what ran outside every test, as one record each
+/// however many JVMs recorded it (each JVM the build forks writes its own):
+/// the union of what they reached.
+fn merge_setups(evidence: &mut crate::owned_evidence::OwnedEvidence) {
+    let mut first = BTreeMap::<String, usize>::new();
+    let mut kept = Vec::with_capacity(evidence.tests.len());
+    for test in std::mem::take(&mut evidence.tests) {
+        if !test.status.starts_with("setup:") {
+            kept.push(test);
+            continue;
+        }
+        let Some(&at) = first.get(&test.name) else {
+            first.insert(test.name.clone(), kept.len());
+            kept.push(test);
+            continue;
+        };
+        let into: &mut crate::owned_evidence::OwnedTestEvidence = &mut kept[at];
+        for (probe, bits) in test.probes {
+            *into.probes.entry(probe).or_default() |= bits;
+        }
+        into.vectors.extend(test.vectors);
+        if test.status != "setup:passed" {
+            into.status = test.status;
+        }
+    }
+    evidence.tests = kept;
 }
 
 /// An Ant build's copy: one module, the whole build, whose tests run in the
@@ -2489,8 +2521,13 @@ pub fn run_direct_jvm(
             if instrumented.build == JvmBuild::Ant {
                 number_repeated_runs(&mut forked);
             }
-            let evidence = merge_evidence(forked);
+            let mut evidence = merge_evidence(forked);
+            merge_setups(&mut evidence);
             outcomes.extend(evidence.tests.iter().map(|test| {
+                // A test class's own work, written as a record of its own
+                // (`Supercov.enterSetup`): every test of the class's file
+                // runs after it.
+                let setup = test.status.strip_prefix("setup:");
                 OwnedTestOutcome {
                     name: test.name.clone(),
                     runner: test.runner.clone(),
@@ -2500,13 +2537,14 @@ pub fn run_direct_jvm(
                     package: module.directory.clone(),
                     file: class_of(&test.name)
                         .and_then(|class| declaring_file(&instrumented.declared_in, class)),
-                    status: test.status.clone(),
+                    status: setup.unwrap_or(&test.status).to_owned(),
                     // True while the suite runs its tests one at a time, which
                     // is what `--exact-attribution` asks for. Left to run as
                     // written, JUnit may run them at once; the runtime says so
                     // per record, and a test that overlapped is credited with
                     // nothing rather than with a neighbour's work.
                     attributed: !test.unattributed,
+                    setup: setup.is_some(),
                 }
             }));
             parts.push(evidence);
@@ -2519,7 +2557,7 @@ pub fn run_direct_jvm(
                 silent.join(", ")
             );
         }
-        if outcomes.is_empty() {
+        if outcomes.iter().all(|outcome| outcome.setup) {
             // An Ant build reports through its own tasks, and one that exits
             // before them has usually failed to build: say which.
             let lifecycle = if instrumented.build == JvmBuild::Ant {
@@ -2621,6 +2659,7 @@ pub fn run_direct_jvm(
             exit_code,
             tests: outcomes
                 .iter()
+                .filter(|outcome| !outcome.setup)
                 .map(|outcome| outcome.name.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
@@ -2667,12 +2706,9 @@ fn add_values(
             }
         }
     }
-    for raw in run
-        .request
-        .raw_results
-        .iter_mut()
-        .filter(|raw| raw.role == "test")
-    {
+    // A test's or a class setup's: the background record is named by no
+    // record of the evidence.
+    for raw in &mut run.request.raw_results {
         let Some(values) = by_name.get(raw.test.as_str()) else {
             continue;
         };
@@ -3206,6 +3242,78 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["A#one", "A#two", "A#one [2]"]);
         number_repeated_runs(&mut []);
+        // A class's setup recorded by two JVMs is not a test run again.
+        let mut setups = [
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![setup("A#<class setup>", "setup:passed", &[(1, 1)])],
+                ..Default::default()
+            },
+            crate::owned_evidence::OwnedEvidence {
+                tests: vec![setup("A#<class setup>", "setup:passed", &[(1, 2)])],
+                ..Default::default()
+            },
+        ];
+        number_repeated_runs(&mut setups);
+        assert!(
+            setups
+                .iter()
+                .all(|evidence| evidence.tests[0].name == "A#<class setup>")
+        );
+    }
+
+    fn setup(
+        name: &str,
+        status: &str,
+        probes: &[(u32, u32)],
+    ) -> crate::owned_evidence::OwnedTestEvidence {
+        crate::owned_evidence::OwnedTestEvidence {
+            name: name.to_owned(),
+            status: status.to_owned(),
+            probes: probes.iter().copied().collect(),
+            vectors: vec![crate::owned_evidence::PackedVector {
+                decision: 0,
+                key: probes.len() as u64,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The records of one class's setup, or of what ran outside every
+    /// test, that several JVMs wrote are one: every probe with every bit
+    /// any saw, every vector, and failed where any failed. Tests are kept
+    /// as they are, in order.
+    #[test]
+    fn setups_several_jvms_recorded_are_merged() {
+        let test = |name: &str| crate::owned_evidence::OwnedTestEvidence {
+            name: name.to_owned(),
+            status: "passed".to_owned(),
+            ..Default::default()
+        };
+        let mut evidence = crate::owned_evidence::OwnedEvidence {
+            tests: vec![
+                setup("#<outside every test>", "setup:passed", &[(1, 1)]),
+                test("A#one"),
+                setup("#<outside every test>", "setup:failed", &[(1, 2), (2, 1)]),
+                test("A#one"),
+                setup("#<outside every test>", "setup:passed", &[(3, 1)]),
+            ],
+            ..Default::default()
+        };
+        merge_setups(&mut evidence);
+        let names = evidence
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["#<outside every test>", "A#one", "A#one"]);
+        let merged = &evidence.tests[0];
+        assert_eq!(merged.status, "setup:failed");
+        assert_eq!(
+            merged.probes,
+            BTreeMap::from([(1, 3), (2, 1), (3, 1)]),
+            "{merged:?}"
+        );
+        assert_eq!(merged.vectors.len(), 3);
     }
 
     /// A file of no tags -- an XML declaration alone -- has no task to
@@ -4451,7 +4559,7 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1846@2", || {
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1878@2", || {
             instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
@@ -4557,13 +4665,13 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1997", || {
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:2029", || {
             instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1974",
+            "fs.read_dir#jvm_run.rs:2006",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {
@@ -5383,7 +5491,12 @@ pub fn run_strong_jvm(
             }
             results.merge_partials(&remaining, &tests);
             remaining.retain(|mutant| !results.decided(&mutant.id));
-            if remaining.len() == before {
+            // A round that only listed mutants for the generous one made
+            // progress too: they wait for it.
+            let listed_now = fs::read_to_string(&slow).unwrap_or_default();
+            if remaining.len() == before
+                && listed_now.lines().count() == listed_slow.lines().count()
+            {
                 let _ = writeln!(
                     diagnostics,
                     "[supercov] the build (exit {exit_code}) gave no verdict for {} mutant(s); build output: {}",
