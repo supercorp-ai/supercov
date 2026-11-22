@@ -5893,4 +5893,115 @@ class K(var count: Int) {
         assert!(on_line(&listed, file, 5).is_empty(), "{listed:?}");
         assert!(!on_line(&listed, file, 6).is_empty(), "{listed:?}");
     }
+
+    /// Every compound assignment's operator, arithmetic in each numeric
+    /// type, constants javac folds through `!`, `^`, `==` and `?:`, a
+    /// condition a constant decides, and the types of ternaries, unary
+    /// operators, `this`, lambdas and a map entry's key.
+    #[test]
+    fn java_operators_constants_and_types() {
+        let file = "a/M.java";
+        let source = r#"package a;
+
+import java.util.Map;
+import java.util.function.Supplier;
+
+public class M {
+    static final boolean A = true;
+    static final boolean B = !A ^ (A == false) != true;
+    static final int TERNARY = A ? 1 : 2;
+    static final boolean DEBUG = false;
+
+    long run(long l, float f, double d, int i, byte b, Map.Entry<String, Integer> e) {
+        i *= 2;
+        i |= 1;
+        i &= 7;
+        i >>= 1;
+        i <<= 1;
+        i /= 3;
+        i %= 5;
+        i ^= 4;
+        i >>>= 1;
+        l = l * 3L;
+        f = f - 1.5f;
+        d = d / 2.0;
+        int n = -b;
+        boolean not = !A;
+        Supplier<M> self = () -> this;
+        Object pick = i > 1 ? null : "x";
+        long mixed = i > 2 ? 1 : 2L;
+        if (DEBUG) {
+            i++;
+        } else {
+            i--;
+        }
+        if (A) {
+            i += 2;
+        }
+        return l + (long) f + (long) d + n + e.getKey().length() + e.getValue();
+    }
+
+    boolean flag(int i) {
+        return i > 0 ? true : false;
+    }
+
+    boolean constant() {
+        return B;
+    }
+}
+"#;
+        let listed = ids(file, source);
+        let mut sorted = |line: u32| {
+            let mut found = on_line(&listed, file, line);
+            found.sort();
+            found
+        };
+        for line in 7..=10 {
+            assert!(sorted(line).is_empty(), "{line}: {listed:?}");
+        }
+        let expected = [
+            (13, "Math:/="),
+            (14, "Math:&="),
+            (15, "Math:|="),
+            (16, "Math:<<="),
+            (17, "Math:>>="),
+            (18, "Math:*="),
+            (19, "Math:*="),
+            (20, "Math:&="),
+            (21, "Math:<<="),
+            (22, "Math:/"),
+            (23, "Math:+"),
+            (24, "Math:*"),
+        ];
+        for (line, mutant) in expected {
+            assert_eq!(sorted(line), [mutant], "{line}: {listed:?}");
+        }
+        assert_eq!(sorted(25), ["InvertNegs:removed"]);
+        // `if (DEBUG)` leaves its consequence out, `if (A)` its
+        // alternative: only the branch that runs is mutated.
+        assert_eq!(sorted(27), ["NullReturnVals:null"]);
+        for line in [28, 29] {
+            assert_eq!(
+                sorted(line),
+                ["ConditionalsBoundary:>=", "NegateConditionals:negated"]
+            );
+        }
+        // `if (DEBUG)` leaves its consequence out, `if (A)` its
+        // alternative: only the branch that runs is mutated.
+        assert!(sorted(31).is_empty(), "{listed:?}");
+        assert_eq!(sorted(33), ["Increments:++"]);
+        assert_eq!(sorted(36), ["Increments:-="]);
+        assert_eq!(sorted(38).len(), 6, "{listed:?}");
+        // `? true : false` returns false where it does not return true.
+        assert_eq!(
+            sorted(42),
+            [
+                "BooleanTrueReturnVals:true",
+                "ConditionalsBoundary:>=",
+                "NegateConditionals:negated"
+            ]
+        );
+        // `B` folds to true: only its replacement with false.
+        assert_eq!(sorted(46), ["BooleanFalseReturnVals:false"]);
+    }
 }
