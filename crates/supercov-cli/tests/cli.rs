@@ -23526,6 +23526,72 @@ fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
     assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
 }
 
+/// A continuous pass gives each Vitest run a bounded number of slots (Vitest
+/// reads every slot's file as the run starts): a pass that needs more runs
+/// again, in the same pass, with the verdicts one run gives.
+#[cfg(unix)]
+#[test]
+fn a_pass_with_more_copies_than_a_run_has_slots_runs_again_with_the_same_verdicts() {
+    let project = vitest_mutants_project("strong-run-slots");
+    project.write(
+        "test/refund.test.js",
+        "import { expect, it } from \"vitest\";\nimport { refund } from \"../src/cart.js\";\nit(\"refunds big orders less\", () => expect(refund(200)).toBe(180));\nit(\"refunds small orders whole\", () => expect(refund(50)).toBe(50));\n",
+    );
+    project.commit("refunds");
+    let verdicts = |slots: &str| {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_RUN_SLOTS", slots)],
+            )
+            .json();
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let statuses = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap_or_default().to_owned(),
+                    mutant["strong"]["status"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (reply, statuses)
+    };
+    let (one_run, expected) = verdicts("");
+    let (runs, statuses) = verdicts("1");
+    assert_eq!(
+        one_run["passes"][0]["profile"]["continuousRuns"], 1,
+        "{one_run}"
+    );
+    assert!(
+        runs["passes"][0]["profile"]["continuousRuns"]
+            .as_u64()
+            .unwrap_or(0)
+            > 1,
+        "{runs}"
+    );
+    assert_eq!(runs["passes"].as_array().map(Vec::len), Some(1), "{runs}");
+    assert_eq!(runs["summary"]["error"], 0, "{runs}");
+    assert!(
+        expected.values().any(|status| status == "killed"),
+        "{expected:?}"
+    );
+    assert_eq!(statuses, expected);
+}
+
 /// A copy that runs none, or only some, of the tests it was to run proves
 /// nothing: here `labels` exists in the measured run only, so the copies of
 /// `label`'s mutants run no test. They are errors that say so, never

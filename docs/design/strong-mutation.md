@@ -107,7 +107,13 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   once a whole copy failed, it made tRPC's pass a third slower (a copy, the
   baseline and the copy again, one after another). Those are the only
   repeats, and none is per copy.
-- **One run.** It lists more worker slots than the pass can use. A slot's stand-in answers Vitest's "start" and waits, at Vitest's
+- **Few runs.** A run lists worker slots: each test file's own, then up
+  to 2,000 more (and at most 1 GB of test files: Vitest reads every slot's
+  file as the run starts, and the 50,000 slots of all of hono's mutants in
+  one pass ran its process out of memory within seconds). A pass that needs
+  more runs again with the same slots, for as long as runs make progress;
+  between runs the workers wait for the last copies (with 1,000 slots this
+  cost tRPC's shards 9%). A slot's stand-in answers Vitest's "start" and waits, at Vitest's
   "run", for work that is ready: a baseline a mutant now needs, a
   confirmation, or the next file of a mutant whose copy before ended with
   every test passing. The worker is then told to run that work's test file
@@ -159,9 +165,21 @@ phase: 51 and 755 ms), with the
 same disagreements with StrykerJS's full kill matrix and no extra kill. A
 tRPC mutant ran 10.8 files (killed 6.3, survived 37.2), 2.69 baselines (each
 shard is a pass with its own) and 0.31 confirmations; a hono mutant 2.5, 0.25
-and 0.33. Where the rest of the gap is: tRPC's baselines, repeated in every
-shard (StrykerJS's dry run is outside its figure), and a copy's start in a
-fresh worker, which StrykerJS pays too.
+and 0.33.
+
+Those figures compare Supercov's pass, baselines included, on 6 and 32
+shards with StrykerJS's mutant phase, its dry run left out. Whole wall time
+on the same machines (`benchmarks/mutation/README.md`, "End to end against
+StrykerJS"), with the runs bounded as above:
+
+| project | jobs | StrykerJS: set-up, dry run, mutants | Supercov: measured run, strong pass |
+| --- | --- | --- | --- |
+| hono | 1 each | 258.5 s | 177.1 s (pass: 39 ms a mutant) |
+| tRPC | 8 each | 2,125.3 s without the 7 repeated dry runs (2,782.2 with) | 1,752.8 s without the 7 repeated measured runs and baselines (2,018.1 with; pass: 745 ms a mutant) |
+
+Sharding cost Supercov more than its repeated baselines: hono's pass takes
+168.5 s in one job and 298.7 s over 6 (28 s of it repeated baselines), as
+each job starts and ends with workers idle.
 
 ## Order and early exit
 

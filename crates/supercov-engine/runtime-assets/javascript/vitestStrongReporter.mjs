@@ -14,7 +14,7 @@
 // in the next stage, and stops at its first kill. Where the project does not
 // isolate files, a stage holds one mutant.
 import childProcess from "node:child_process";
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
@@ -44,6 +44,15 @@ const PROFILED_STAGES = 50;
 const CONTINUOUS_LOOK_MS = 50;
 // How much each of a mutant's batches of later files grows over the one before.
 const BATCH_GROWTH = Math.max(1, Number(process.env["SUPERCOV_STRONG_BATCH_GROWTH"]) || 4);
+// A continuous run's slots beyond each file's own, and the bytes of test
+// files they may name: Vitest reads every slot's file at once as the run
+// starts (with a buffer of up to 512 KB each), and 50,000 slots (a pass over
+// all of hono's mutants at once) ran its main process out of memory within
+// seconds. A pass that needs more slots runs again; between runs its workers
+// wait for the run's last copies, which cost tRPC's shards 9% at 1,000 slots
+// (SUPERCOV_STRONG_RUN_SLOTS sets the count).
+const RUN_SLOTS = Math.max(1, Number(process.env["SUPERCOV_STRONG_RUN_SLOTS"]) || 2_000);
+const RUN_BYTES = 1024 * 1024 * 1024;
 
 function toRelative(root, file) {
     return relative(root, file).split(sep).join("/");
@@ -764,7 +773,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let running;
     // Where the pass's time goes: each stage's wall time against the copies'
     // own (claim to end) and when its last copy started.
-    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, baselineCopies: 0, besideCopies: 0, unevaluatedReruns: 0, filesByStatus: {}, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
+    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, baselineCopies: 0, besideCopies: 0, unevaluatedReruns: 0, filesByStatus: {}, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0, baselineMs: 0 };
     // Runs one stage. `early(at, outcome)` is offered each copy's outcome as
     // soon as the copy ends, and says whether it took it; a stage's copies
     // are otherwise judged when its run has ended. `limitOf(assignment)` is
@@ -1860,6 +1869,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 profile.startMs += startOf(outcome);
                 if (outcome.doneAt)
                     profile.copyMs += outcome.doneAt - outcome.claimedAt;
+                // A baseline's share of the workers' time, start included.
+                if (item.baseline)
+                    profile.baselineMs += startOf(outcome) + (outcome.doneAt ? outcome.doneAt - outcome.claimedAt : 0);
                 if (outcome.hung)
                     profile.hungCopies += 1;
             }
@@ -1950,15 +1962,33 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const firstEstimate = (file) => (testsOf.get(file) ?? []).reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
         files.sort((x, y) => firstEstimate(y) - firstEstimate(x));
         const bound = pending.reduce((sum, job) => sum + job.files.length * 3 + 4, 0) + files.length * 2 + workers;
+        const sizeOf = new Map(files.map((file) => {
+            try {
+                return [file, statSync(`${root}/${file}`).size];
+            }
+            catch {
+                return [file, 0];
+            }
+        }));
         const slots = files.map((file) => specOf.get(file));
-        for (let at = 0; slots.length < bound && files.length; at++)
-            slots.push(specOf.get(files[at % files.length]));
+        let bytes = 0;
+        for (let at = 0; slots.length < bound && files.length; at++) {
+            const file = files[at % files.length];
+            bytes += sizeOf.get(file);
+            if (slots.length > files.length && (bytes > RUN_BYTES || slots.length >= files.length + RUN_SLOTS))
+                break;
+            slots.push(specOf.get(file));
+        }
         setTestTimeout(vitest, Math.max(testTimeoutMs, ...pending.flatMap((job) => job.files.map((group) => claimOf(job, group).testTimeout))));
-        // A slot a waiting copy gives up uses one, so a run can run out of
-        // slots before the pass is over: another run of the same slots goes
-        // on where it stopped, for as long as runs make progress.
-        for (let runs = 0; !over && slots.length; runs++) {
+        // A run's slots are bounded, and a slot a waiting copy gives
+        // up uses one, so a run can run out of slots before the pass is over:
+        // another run of the same slots goes on where it stopped, for as
+        // long as runs make progress, within the slots the pass could need.
+        let offered = 0;
+        for (let runs = 0; !over && slots.length && offered < bound * 2; runs++) {
             const decidedBefore = pending.filter((job) => job.done).length;
+            const copiesBefore = profile.copies;
+            offered += slots.length;
             const runStarted = Date.now();
             let settledRun;
             const ran = runFiles(slots, false).then((result) => {
@@ -1986,7 +2016,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 last = settledRun.result;
             profile.wallMs += Date.now() - runStarted;
             profile.continuousRuns = runs + 1;
-            if (!over && runs > 0 && pending.filter((job) => job.done).length === decidedBefore)
+            if (!over && runs > 0 && pending.filter((job) => job.done).length === decidedBefore && profile.copies === copiesBefore)
                 break;
         }
         claimRun = undefined;
