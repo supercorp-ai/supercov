@@ -128,6 +128,7 @@ for (const [key, status] of theirs) {
   if (kind) {
     disagreements.push({
       key,
+      id: verdict.id,
       kind,
       gremlins: status,
       supercov: verdict.status,

@@ -256,3 +256,14 @@ values only take tests away.
 | runtime switch | `runtime/javascript/runtime.mjs` (`strongSlot`, `setActiveMutant`) |
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
+
+## Go
+
+| Contract | Go |
+| --- | --- |
+| enumerator | `go_mutants.rs` (Gremlins 0.6.0's tokens and order; `docs/design/go-mutation.md`) |
+| schemata | `go_instrumenter.rs` (`strong_rewrite`), with `runtime/go/mutants` (go/types) saying which mutants compile |
+| runtime switch | `runtime/go/supercov/strong.go` (`StrongSlot`, `SUPERCOV_ACTIVE_MUTANT`) |
+| driver | `go_strong.rs`: test binaries built once, `-test.run` by exact name |
+| value probes | `go_instrumenter.rs` (comparison probes), `runtime/go/supercov/mutants.go` |
+
