@@ -51,6 +51,13 @@ pub enum GoProbeTarget {
         branch: String,
         alternative: String,
     },
+    /// A comparison's operands, for weak mutation: the runtime stores the
+    /// relations they were seen in as bits (`lt` 1, `eq` 2, `gt` 4,
+    /// `unordered` 8), and the run reads them as the site's outcomes. `site`
+    /// is the operator's position, `file:line:column`.
+    Comparison {
+        site: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +77,9 @@ pub struct GoFileObligations {
     /// Conditions per decision, in the order the runtime indexes them. The
     /// harness passes this to `Arm` so the runtime can size its vectors.
     pub decision_widths: Vec<u8>,
+    /// Bytes the rewriter removes: a probed comparison's operator, which
+    /// becomes the comma between the probe's arguments.
+    pub removed: Vec<(usize, usize)>,
 }
 
 /// An obligation's identity, derived from what it is rather than from how many
@@ -424,6 +434,9 @@ struct Collector<'a> {
     conditions: std::collections::HashSet<(usize, usize)>,
     /// Decisions used as values in a file without generics.
     unmeasured_values: Vec<(String, usize, usize, String)>,
+    /// Whether comparisons get weak mutation's value probes.
+    comparisons: bool,
+    removed: Vec<(usize, usize)>,
 }
 
 /// A branch whose condition is a single operand needs no independence
@@ -704,8 +717,40 @@ impl<'a> Collector<'a> {
         index_of_decision
     }
 
+    /// `a < b` as `(__supercov.Cmp(<slot>, <op>, a, b) == true)`: the
+    /// operands evaluated once, in order, and the comparison an untyped
+    /// boolean as it was.
+    fn probe_comparison(&mut self, node: Node) {
+        let operator = field(node, "operator");
+        let code = match &self.source[operator.byte_range()] {
+            "<" => 0,
+            "<=" => 1,
+            ">" => 2,
+            _ => 3,
+        };
+        let (line, column) = (
+            operator.start_position().row + 1,
+            operator.start_position().column + 1,
+        );
+        let site = format!("{}:{line}:{column}", self.file);
+        let slot = self.probe(GoProbeTarget::Comparison { site }, node.start_byte());
+        // Inside every wrapper at the same bytes: opened last, closed first.
+        self.edit(
+            node.start_byte(),
+            30,
+            format!("({}.Cmp({slot}, {code}, ", self.alias),
+        );
+        self.edit(operator.start_byte(), 30, ", ".to_owned());
+        self.removed
+            .push((operator.start_byte(), operator.end_byte()));
+        self.edit(node.end_byte(), 1, ") == true)".to_owned());
+    }
+
     fn walk(&mut self, node: Node) {
         let alias = self.alias.to_owned();
+        if self.comparisons && crate::go_mutants::comparison_probe(node, self.source) {
+            self.probe_comparison(node);
+        }
         match node.kind() {
             "function_declaration" | "method_declaration" | "func_literal" => {
                 let label = node
@@ -1107,6 +1152,12 @@ pub struct GoEdit {
 /// moved the column: `./crypto.go:4:38: undefined` for `4:15`. With no file
 /// named, the comment keeps the name the file already has.
 pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
+    rewrite_removing(source, edits, &[])
+}
+
+/// `rewrite`, with each of `removed`'s byte ranges taken out first: no edit
+/// lands inside one, and an edit at its start goes where it was.
+pub fn rewrite_removing(source: &str, edits: &[GoEdit], removed: &[(usize, usize)]) -> String {
     let mut ordered = edits.to_vec();
     ordered.sort_by(|a, b| b.at.cmp(&a.at).then(b.rank.cmp(&a.rank)));
     let lines = std::iter::once(0)
@@ -1114,8 +1165,17 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
         .collect::<Vec<_>>();
     let mut out = source.to_owned();
     let mut placed = None;
+    let mut removals = removed.to_vec();
+    removals.sort_unstable();
     // Every edit is placed at an offset of a node parsed from `source`.
     for edit in ordered {
+        // Removals at or after this offset, before anything lands on it.
+        while let Some(&(start, end)) = removals.last()
+            && start >= edit.at
+        {
+            out.replace_range(start..end, "");
+            removals.pop();
+        }
         if placed != Some(edit.at) {
             placed = Some(edit.at);
             let line = lines.partition_point(|start| *start <= edit.at);
@@ -1123,6 +1183,9 @@ pub fn rewrite(source: &str, edits: &[GoEdit]) -> String {
             out.insert_str(edit.at, &format!("/*line :{line}:{column}*/"));
         }
         out.insert_str(edit.at, &edit.text);
+    }
+    for (start, end) in removals.into_iter().rev() {
+        out.replace_range(start..end, "");
     }
     out
 }
@@ -1189,6 +1252,28 @@ pub fn build_go_obligations_for(
     alias: &str,
     generics: bool,
 ) -> Result<GoFileObligations, GoInstrumenterError> {
+    build_go_obligations_probing(
+        file,
+        source,
+        next_probe,
+        next_decision,
+        alias,
+        generics,
+        false,
+    )
+}
+
+/// `build_go_obligations_for`, and with `comparisons` weak mutation's value
+/// probe on every comparison `go_mutants::comparison_probe` takes.
+pub fn build_go_obligations_probing(
+    file: &str,
+    source: &str,
+    next_probe: &mut u64,
+    next_decision: &mut u32,
+    alias: &str,
+    generics: bool,
+    comparisons: bool,
+) -> Result<GoFileObligations, GoInstrumenterError> {
     let tree = parse(source)?;
     let decision_base = *next_decision;
     let mut collector = Collector {
@@ -1207,6 +1292,8 @@ pub fn build_go_obligations_for(
         generics,
         conditions: std::collections::HashSet::new(),
         unmeasured_values: Vec::new(),
+        comparisons,
+        removed: Vec::new(),
     };
     let mut cursor = tree.root_node().walk();
     for child in tree.root_node().children(&mut cursor) {
@@ -1252,6 +1339,7 @@ pub fn build_go_obligations_for(
         probes: collector.probes,
         edits,
         decision_widths: collector.widths,
+        removed: collector.removed,
     })
 }
 
@@ -1841,24 +1929,11 @@ pub fn strong_rewrite(
     let shift = import.text.len();
     text.insert_str(import.at, &import.text);
     // The language version the switches need, for this file alone.
-    let mut lead = 0;
-    if language < 21 {
-        let header = text.split("\npackage ").next().unwrap_or_default().len();
-        match text[..header].find("//go:build ") {
-            Some(at) => {
-                let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
-                let expression = text[at + "//go:build ".len()..end].trim().to_owned();
-                let line = format!("//go:build ({expression}) && go1.21");
-                lead = line.len() as isize - (end - at) as isize;
-                text.replace_range(at..end, &line);
-            }
-            None => {
-                let line = "//go:build go1.21\n\n";
-                lead = line.len() as isize;
-                text.insert_str(0, line);
-            }
-        }
-    }
+    let lead = if language < 21 {
+        upgrade_to_go_1_21(&mut text)
+    } else {
+        0
+    };
     let key_literal = serde_json::to_string(key).expect("a string serializes");
     text.push_str(&format!(
         "\nvar {slot} = {RUNTIME_ALIAS}.StrongSlot({key_literal})\n"
@@ -1881,6 +1956,42 @@ pub fn strong_rewrite(
     })
 }
 
+/// Compiles one file as Go 1.21 whatever its module's `go` line says: its
+/// `//go:build` line gains `&& go1.21`, or the file gains one. Go 1.21 is
+/// the language the generic switches and probes lean on (its inference of
+/// untyped arguments), and no later, so a loop variable keeps the meaning
+/// it had before 1.22. Returns how many bytes the text grew by before its
+/// package clause.
+pub fn upgrade_to_go_1_21(text: &mut String) -> isize {
+    let header = text.split("\npackage ").next().unwrap_or_default().len();
+    // An old `// +build` line must say what `//go:build` says, or `go vet`
+    // (which `go test` runs) refuses the file; Go reads only the new line.
+    // Each becomes `//`, of the same lines.
+    let mut grown = 0;
+    while let Some(at) = text[..(header as isize + grown) as usize].find("// +build") {
+        let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+        grown -= (end - at - 2) as isize;
+        text.replace_range(at..end, "//");
+    }
+    let header = (header as isize + grown) as usize;
+    grown
+        + match text[..header].find("//go:build ") {
+            Some(at) => {
+                let end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+                let expression = text[at + "//go:build ".len()..end].trim().to_owned();
+                let line = format!("//go:build ({expression}) && go1.21");
+                let longer = line.len() as isize - (end - at) as isize;
+                text.replace_range(at..end, &line);
+                longer
+            }
+            None => {
+                let line = "//go:build go1.21\n\n";
+                text.insert_str(0, line);
+                line.len() as isize
+            }
+        }
+}
+
 /// The switched site a compile error at byte `at` of a strong file is in:
 /// the innermost whose bytes hold it.
 pub fn strong_site_at(file: &StrongFile, at: usize) -> Option<&[usize]> {
@@ -1889,6 +2000,208 @@ pub fn strong_site_at(file: &StrongFile, at: usize) -> Option<&[usize]> {
         .filter(|(start, end, _)| (*start..*end).contains(&at))
         .min_by_key(|(start, end, _)| end - start)
         .map(|(_, _, indices)| indices.as_slice())
+}
+
+#[cfg(test)]
+mod strong_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    /// Every listed mutant of `source`, to switch.
+    fn every(source: &str) -> Vec<StrongMutant> {
+        crate::go_mutants::listed_tokens(source)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (token, mutator, replacement))| StrongMutant {
+                index,
+                token,
+                replacement: replacement.to_owned(),
+                mutator: mutator.to_owned(),
+            })
+            .collect()
+    }
+
+    fn rewritten(source: &str, facts: &HashMap<usize, SiteFacts>, language: u32) -> StrongFile {
+        let file = strong_rewrite(
+            "a/b.go",
+            source,
+            &every(source),
+            facts,
+            &HashSet::new(),
+            language,
+        )
+        .unwrap();
+        parse(&file.text).unwrap_or_else(|error| panic!("{error}\n{}", file.text));
+        file
+    }
+
+    #[test]
+    fn each_operator_gets_the_switch_its_kind_needs() {
+        let source = "package p\n\nfunc f(a, b int, ok bool) (int, bool) {\n\tif a < b && ok {\n\t\ta += b\n\t}\n\tfor i := 0; i < b; i++ {\n\t\tif i == a {\n\t\t\tbreak\n\t\t}\n\t}\n\treturn -a * b, a != b\n}\n";
+        let file = rewritten(source, &HashMap::new(), 22);
+        let slot = strong_slot_name("a/b.go");
+        let text = &file.text;
+        for expected in [
+            format!(
+                "(((bool((__supercov.Lss({slot}, 1, 2, a, b) == true)) != {slot}.Is(0)) && (bool(ok) != {slot}.Is(0))) != {slot}.On(0))"
+            ),
+            format!(
+                "if {slot}.On(3) {{ a -= b }} else if {slot}.On(4) {{ a = b }} else {{ a += b }}"
+            ),
+            format!("func() {{ if {slot}.On(7) {{ i-- }} else {{ i++ }} }}()"),
+            format!("((i == a) != {slot}.On(8))"),
+            format!("if {slot}.On(9) {{ continue }} else {{ break }}"),
+            format!("__supercov.Mul({slot}, 10, __supercov.Neg({slot}, 11, 12, a), b)"),
+            format!("var {slot} = __supercov.StrongSlot(\"a/b.go\")"),
+            "; import __supercov \"github.com/supercorp-ai/supercov/runtime/go/supercov\""
+                .to_owned(),
+        ] {
+            assert!(text.contains(&expected), "{expected}\nin\n{text}");
+        }
+        assert_eq!(file.switched.len(), every(source).len());
+        assert!(file.unplaceable.is_empty(), "{:?}", file.unplaceable);
+        // A compile error inside a switch is laid at its innermost one.
+        let at = text.find("__supercov.Neg").unwrap();
+        assert_eq!(strong_site_at(&file, at), Some(&[11, 12][..]));
+        assert_eq!(strong_site_at(&file, 0), None);
+    }
+
+    #[test]
+    fn a_constant_is_switched_whole_and_a_required_one_not_at_all() {
+        let source = "package p\n\nimport \"time\"\n\nconst n = 1 + 2\n\nfunc f() time.Duration { return time.Second * (2 + 1) }\n";
+        let tokens = crate::go_mutants::listed_tokens(source).unwrap();
+        let root_start = source.find("time.Second *").unwrap();
+        let root = (root_start, source.find("1) }").unwrap() + 2);
+        let mut facts = HashMap::new();
+        facts.insert(
+            tokens[0].0.0,
+            SiteFacts {
+                constant: true,
+                constant_context: true,
+                ..SiteFacts::default()
+            },
+        );
+        for (token, _, _) in &tokens[1..] {
+            facts.insert(
+                token.0,
+                SiteFacts {
+                    constant: true,
+                    root: Some(root),
+                    root_type: "time.Duration".into(),
+                    ..SiteFacts::default()
+                },
+            );
+        }
+        let file = rewritten(source, &facts, 22);
+        assert_eq!(file.unplaceable, [(0, "constant-context".to_owned())]);
+        let slot = strong_slot_name("a/b.go");
+        assert!(
+            file.text.contains(&format!("__supercov.Pick[time.Duration]({slot}, []int32{{1, 2}}, (time.Second * (2 + 1)), (time.Second / (2 + 1)), (time.Second * (2 - 1)))")),
+            "{}",
+            file.text
+        );
+    }
+
+    #[test]
+    fn a_file_of_an_older_go_is_compiled_as_go_1_21() {
+        let source = "//go:build linux\n// +build linux\n\npackage p\n\nfunc f(a int) int { return a + 1 }\n";
+        let file = rewritten(source, &HashMap::new(), 16);
+        assert!(
+            file.text.starts_with("//go:build (linux) && go1.21\n//\n"),
+            "{}",
+            file.text
+        );
+        let file = rewritten(
+            "package p\n\nfunc f(a int) int { return a + 1 }\n",
+            &HashMap::new(),
+            16,
+        );
+        assert!(
+            file.text.starts_with("//go:build go1.21\n\npackage p"),
+            "{}",
+            file.text
+        );
+        // Its switch's bytes moved with what came before them.
+        let (start, end, _) = &file.sites[0];
+        assert!(
+            file.text[*start..*end].starts_with("__supercov.Add("),
+            "{}",
+            &file.text[*start..*end]
+        );
+    }
+
+    #[test]
+    fn a_comparison_gets_a_value_probe_inside_its_branch_wrapper() {
+        let source = "package p\n\nconst k = 1\n\nfunc f(a, b int) bool {\n\tif a<b {\n\t\treturn true\n\t}\n\treturn a >= b && 1 < 2 && a<<1 > b\n}\n";
+        let obligations =
+            build_go_obligations_probing("p.go", source, &mut 0, &mut 0, "rt", true, true).unwrap();
+        let sites = obligations
+            .probes
+            .values()
+            .filter_map(|probe| match &probe.target {
+                GoProbeTarget::Comparison { site } => Some(site.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Literals on both sides, and a shift whose operand takes its type
+        // from the comparison, are left alone.
+        assert_eq!(sites, ["p.go:6:6", "p.go:9:11"]);
+        let text = rewrite_removing(source, &obligations.edits, &obligations.removed);
+        let plain = text
+            .split("/*line ")
+            .map(|part| part.split_once("*/").map_or(part, |(_, rest)| rest))
+            .collect::<String>();
+        // Inside the branch's wrapper and the condition's, the operator a
+        // comma between the operands.
+        assert!(
+            plain.contains("rt.B(2, 3, bool((rt.Cmp(5, 0, a, b) == true)))"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("rt.C(0, 0, (rt.Cmp(10, 3, a ,  b) == true))"),
+            "{plain}"
+        );
+        parse(&plain).unwrap();
+        // Without probes, nothing is removed.
+        let plain = build_go_obligations_probing("p.go", source, &mut 0, &mut 0, "rt", true, false)
+            .unwrap();
+        assert!(plain.removed.is_empty());
+    }
+
+    #[test]
+    fn an_older_file_s_build_lines_say_go_1_21_and_nothing_else() {
+        let mut text = "// +build linux\n//go:build linux\n\npackage p\n".to_owned();
+        let grown = upgrade_to_go_1_21(&mut text);
+        assert_eq!(text, "//\n//go:build (linux) && go1.21\n\npackage p\n");
+        assert_eq!(grown, text.len() as isize - 44);
+    }
+
+    #[test]
+    fn what_has_no_place_is_said_so() {
+        let source = "package p\n\nfunc f(a int) int {\n\tswitch a += 1; a {\n\t}\n\treturn a\n}\n";
+        let mut mutants = every(source);
+        // A token the list never had.
+        mutants.push(StrongMutant {
+            index: 9,
+            token: (0, 7),
+            replacement: "x".into(),
+            mutator: "ArithmeticOperator".into(),
+        });
+        let refused = HashSet::from([mutants[0].token.0]);
+        let file =
+            strong_rewrite("a/b.go", source, &mutants, &HashMap::new(), &refused, 22).unwrap();
+        assert_eq!(
+            file.unplaceable,
+            [
+                (0, "refused-by-compiler".to_owned()),
+                (1, "refused-by-compiler".to_owned()),
+                (9, "node-not-found".to_owned())
+            ]
+        );
+        assert_eq!(file.text, source);
+        assert!(file.switched.is_empty());
+    }
 }
 
 #[cfg(test)]

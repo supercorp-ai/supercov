@@ -1368,10 +1368,9 @@ mod tests {
         assert_eq!(flags.build, ["-tags=integration", "-race"]);
         assert_eq!(flags.test, ["-test.short"]);
         assert_eq!(flags.tags, "integration");
-        assert_eq!(
-            go_flags(&["make".into(), "test".into()]),
-            GoFlags::default()
-        );
+        assert_eq!(flags.program, "go");
+        assert_eq!(go_flags(&["make".into(), "test".into()]).program, "go");
+        assert!(go_flags(&["make".into(), "test".into()]).build.is_empty());
         let flags = go_flags(
             &[
                 "/usr/bin/go",

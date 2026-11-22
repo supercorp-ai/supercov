@@ -401,13 +401,18 @@ pub fn prepare_go_project(
             unparseable.push((relative.clone(), reason.to_owned()));
             continue;
         };
-        match crate::go_instrumenter::build_go_obligations_for(
+        // Weak mutation's value probes, where the run lists its mutants: a
+        // file that has one is compiled as Go 1.21 at least, whose inference
+        // of untyped operands the probe's generic call leans on.
+        let language = language_minor(root, relative, &source);
+        match crate::go_instrumenter::build_go_obligations_probing(
             relative,
             &source,
             &mut next_probe,
             &mut next_decision,
             crate::go_instrumenter::RUNTIME_ALIAS,
-            has_generics(root, relative, &source),
+            language >= 18,
+            crate::go_run::mutants_requested(),
         ) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);
@@ -421,10 +426,15 @@ pub fn prepare_go_project(
                     .extend(obligations.manifest.limitations);
                 probes.extend(obligations.probes);
                 decision_widths.extend(obligations.decision_widths);
-                instrumented.push((
-                    relative.clone(),
-                    crate::go_instrumenter::rewrite(&source, &obligations.edits),
-                ));
+                let mut text = crate::go_instrumenter::rewrite_removing(
+                    &source,
+                    &obligations.edits,
+                    &obligations.removed,
+                );
+                if !obligations.removed.is_empty() && language < 21 {
+                    crate::go_instrumenter::upgrade_to_go_1_21(&mut text);
+                }
+                instrumented.push((relative.clone(), text));
             }
             Err(error) => {
                 manifest
@@ -499,6 +509,7 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
 /// Whether a file's Go has generics (1.18): its module's `go` directive --
 /// 1.16 when it has none, as the toolchain reads it -- unless a
 /// `//go:build go1.N` line above its package clause sets an older one.
+#[cfg(test)]
 fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
     language_minor(root, relative, source) >= 18
 }

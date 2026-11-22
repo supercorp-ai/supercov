@@ -64,16 +64,19 @@ const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/superco
 const RUNTIME_VALUES_SOURCE: &str = include_str!("../runtime-assets/go/supercov/values.go");
 /// Strong mutation's switches and their generic helpers, behind `go1.21`.
 const RUNTIME_STRONG_SOURCE: &str = include_str!("../runtime-assets/go/supercov/strong.go");
+/// Weak mutation's value probes, behind `go1.21`.
+const RUNTIME_MUTANTS_SOURCE: &str = include_str!("../runtime-assets/go/supercov/mutants.go");
 
 /// The runtime package's directory in a module's copy.
 pub(crate) const RUNTIME_DIRECTORY_NAME: &str = RUNTIME_DIRECTORY;
 
 /// The runtime package's files, by name.
-pub(crate) fn runtime_files() -> [(&'static str, &'static str); 3] {
+pub(crate) fn runtime_files() -> [(&'static str, &'static str); 4] {
     [
         ("supercov.go", RUNTIME_SOURCE),
         ("values.go", RUNTIME_VALUES_SOURCE),
         ("strong.go", RUNTIME_STRONG_SOURCE),
+        ("mutants.go", RUNTIME_MUTANTS_SOURCE),
     ]
 }
 
@@ -610,7 +613,7 @@ fn go_flags(
 }
 
 /// Whether the run lists its mutants: `SUPERCOV_MUTANTS` is `1` or `true`.
-fn mutants_requested() -> bool {
+pub(crate) fn mutants_requested() -> bool {
     std::env::var("SUPERCOV_MUTANTS").is_ok_and(|value| matches!(value.trim(), "1" | "true"))
 }
 
@@ -619,12 +622,20 @@ fn list_measured_mutants(
     root: &Path,
     project: &PreparedGoProject,
 ) -> crate::mutant_list::MutantsFile {
+    let probed = project
+        .probes
+        .values()
+        .filter_map(|probe| match &probe.target {
+            crate::go_instrumenter::GoProbeTarget::Comparison { site } => Some(site.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
     let mut files = BTreeMap::new();
     for (relative, _) in &project.instrumented {
         let Ok(source) = fs::read_to_string(root.join(relative)) else {
             continue;
         };
-        if let Ok(mutants) = crate::go_mutants::candidate_mutants(relative, &source)
+        if let Ok(mutants) = crate::go_mutants::candidate_mutants_probed(relative, &source, &probed)
             && !mutants.is_empty()
         {
             files.insert(relative.clone(), mutants);

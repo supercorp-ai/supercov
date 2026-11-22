@@ -241,6 +241,72 @@ pub fn position(source: &str, offset: usize) -> (u32, u32) {
     (line as u32, column as u32)
 }
 
+/// Whether a measured run with mutants puts weak mutation's value probe on
+/// this comparison: a relational one (`<`, `<=`, `>`, `>=`, whose boundary
+/// mutants only equal operands tell apart) inside a function body. The
+/// probe is a generic call over the operands, so not where Go needs a
+/// constant (a constant declaration, an array length), nor where an operand
+/// takes its type from the comparison (an untyped shift, `1 << n`), nor
+/// where both operands are literals, which the call would type alone.
+pub fn comparison_probe(node: Node, source: &str) -> bool {
+    if node.kind() != "binary_expression" {
+        return false;
+    }
+    let Some(operator) = node.child_by_field_name("operator") else {
+        return false;
+    };
+    if !matches!(&source[operator.byte_range()], "<" | "<=" | ">" | ">=") {
+        return false;
+    }
+    let mut in_function = false;
+    let mut at = node.parent();
+    while let Some(ancestor) = at {
+        match ancestor.kind() {
+            "const_declaration" | "array_type" | "type_declaration" => return false,
+            "function_declaration" | "method_declaration" | "func_literal" => in_function = true,
+            _ => {}
+        }
+        at = ancestor.parent();
+    }
+    let literal = |side: &str| {
+        node.child_by_field_name(side).is_some_and(|operand| {
+            matches!(
+                operand.kind(),
+                "int_literal"
+                    | "float_literal"
+                    | "rune_literal"
+                    | "imaginary_literal"
+                    | "interpreted_string_literal"
+                    | "raw_string_literal"
+            )
+        })
+    };
+    let shifted = {
+        let mut stack = vec![node];
+        let mut found = false;
+        while let Some(next) = stack.pop() {
+            if next.kind() == "binary_expression"
+                && next
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| matches!(&source[op.byte_range()], "<<" | ">>"))
+            {
+                found = true;
+                break;
+            }
+            let mut cursor = next.walk();
+            stack.extend(next.named_children(&mut cursor));
+        }
+        found
+    };
+    in_function && !shifted && !(literal("left") && literal("right"))
+}
+
+/// The site a comparison probe at `operator` records under.
+pub fn comparison_site(file: &str, source: &str, operator: usize) -> String {
+    let (line, column) = position(source, operator);
+    format!("{file}:{line}:{column}")
+}
+
 /// Whether coverage gives this node a statement point: a statement in a
 /// statement list (`go_instrumenter`'s rule).
 fn statement_point(node: Node) -> bool {
@@ -291,13 +357,31 @@ pub fn candidate_mutants(
     source: &str,
 ) -> Result<Vec<CandidateMutant>, GoInstrumenterError> {
     let tree = parse(source)?;
-    Ok(candidates_of(file, source, &tree))
+    Ok(candidates_of(
+        file,
+        source,
+        &tree,
+        &std::collections::HashSet::new(),
+    ))
+}
+
+/// `candidate_mutants`, each comparison linked to the value probe the run
+/// put on it (`probed`, by site): only a probe's records say a comparison
+/// never ran.
+pub fn candidate_mutants_probed(
+    file: &str,
+    source: &str,
+    probed: &std::collections::HashSet<String>,
+) -> Result<Vec<CandidateMutant>, GoInstrumenterError> {
+    let tree = parse(source)?;
+    Ok(candidates_of(file, source, &tree, probed))
 }
 
 pub(crate) fn candidates_of(
     file: &str,
     source: &str,
     tree: &tree_sitter::Tree,
+    probed: &std::collections::HashSet<String>,
 ) -> Vec<CandidateMutant> {
     let mut listed = Vec::new();
     for site in sites(tree, source) {
@@ -313,6 +397,8 @@ pub(crate) fn candidates_of(
             .descendant_for_byte_range(site.token.0, site.token.1)
             .unwrap_or(node);
         let (statement, function) = points(file, token);
+        let compare =
+            Some(comparison_site(file, source, site.token.0)).filter(|site| probed.contains(site));
         let original = source[site.node.0..site.node.1].to_owned();
         let start = position(source, site.token.0);
         let end = position(source, site.token.1);
@@ -334,7 +420,7 @@ pub(crate) fn candidates_of(
                 decision: None,
                 branch: None,
                 chain: None,
-                compare: None,
+                compare: compare.clone(),
                 probe: None,
                 arrow: None,
                 equivalent: (site.operator == *replacement).then(|| {

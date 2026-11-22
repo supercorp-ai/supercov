@@ -465,13 +465,34 @@ fn stable_id(prefix: &str, values: &[&str]) -> String {
 fn obligations(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
     probes
         .iter()
-        .map(|(id, probe)| {
+        .filter_map(|(id, probe)| {
             let obligation = match &probe.target {
                 GoProbeTarget::Statement { id } | GoProbeTarget::Function { id } => id.clone(),
                 GoProbeTarget::Alternative { alternative, .. } => alternative.clone(),
+                GoProbeTarget::Comparison { .. } => return None,
             };
-            (*id as u32, obligation)
+            Some((*id as u32, obligation))
         })
+        .collect()
+}
+
+/// Each comparison probe's site, by probe id.
+fn comparison_sites(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
+    probes
+        .iter()
+        .filter_map(|(id, probe)| match &probe.target {
+            GoProbeTarget::Comparison { site } => Some((*id as u32, site.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The relations a comparison probe's bits say its operands were seen in.
+fn relations(bits: u32) -> Vec<String> {
+    [(1, "lt"), (2, "eq"), (4, "gt"), (8, "unordered")]
+        .into_iter()
+        .filter(|(bit, _)| bits & bit != 0)
+        .map(|(_, relation)| relation.to_owned())
         .collect()
 }
 
@@ -480,6 +501,7 @@ fn snapshot(
     evidence: &OwnedTestEvidence,
     manifest: &CoverageManifest,
     by_probe: &BTreeMap<u32, String>,
+    sites: &BTreeMap<u32, String>,
     phase: &str,
 ) -> RuntimeSnapshot {
     let mut events = Vec::new();
@@ -536,11 +558,22 @@ fn snapshot(
             vectors: observed,
         });
     }
+    let comparisons = evidence
+        .probes
+        .iter()
+        .filter_map(|(probe, bits)| {
+            Some(crate::coverage_report::ComparisonSnapshot {
+                id: sites.get(probe)?.clone(),
+                outcomes: relations(*bits),
+            })
+        })
+        .collect();
     RuntimeSnapshot {
         decisions,
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
+        comparisons,
         ..Default::default()
     }
 }
@@ -654,6 +687,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
         .collect::<BTreeSet<_>>();
     let source = declaration.frontend_version.clone();
     let by_probe = obligations(probes);
+    let sites = comparison_sites(probes);
     let recorded = evidence
         .tests
         .iter()
@@ -745,7 +779,14 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                     status: Some(outcome.status.clone()),
                     error: None,
                 }],
-                runtime: vec![snapshot(environment, test, manifest, &by_probe, &phase)],
+                runtime: vec![snapshot(
+                    environment,
+                    test,
+                    manifest,
+                    &by_probe,
+                    &sites,
+                    &phase,
+                )],
                 browser: Vec::new(),
                 server: Vec::new(),
             }
@@ -847,6 +888,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 &background,
                 manifest,
                 &by_probe,
+                &sites,
                 &phase,
             )],
             browser: Vec::new(),
@@ -1337,6 +1379,71 @@ mod tests {
         assert_eq!(result.test, "TestSilent");
         assert_eq!(result.test_id.as_deref(), Some("example.com/p::TestSilent"));
         assert!(result.runtime[0].hits.is_empty());
+    }
+
+    #[test]
+    fn tests_of_one_name_in_two_packages_keep_their_own_evidence() {
+        // golang-lru has a `TestLRU` in its root package and another in
+        // `simplelru`: keyed by name alone, one took the other's probes, and
+        // the root package's code read as run by no test.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let probes = [(1, "go:statement:root"), (2, "go:statement:simple")]
+            .into_iter()
+            .map(|(id, point)| {
+                (
+                    id,
+                    GoProbe {
+                        id,
+                        target: GoProbeTarget::Statement { id: point.into() },
+                        at: 0,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let test = |package: &str, probe: u32| OwnedTestEvidence {
+            name: "TestLRU".into(),
+            package: package.into(),
+            status: "passed".into(),
+            probes: BTreeMap::from([(probe, 2)]),
+            ..Default::default()
+        };
+        let evidence = OwnedEvidence {
+            global: vec![0, 2, 2],
+            tests: vec![test(".", 1), test("simplelru", 2)],
+            ..Default::default()
+        };
+        let outcome = |package: &str| OwnedTestOutcome {
+            name: "TestLRU".into(),
+            runner: String::new(),
+            package: package.into(),
+            file: None,
+            status: "passed".into(),
+            attributed: true,
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[outcome("."), outcome("simplelru")],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        });
+        let hits = |index: usize| run.request.raw_results[index].runtime[0].hits.clone();
+        assert_eq!(hits(0), ["go:statement:root"]);
+        assert_eq!(hits(1), ["go:statement:simple"]);
     }
 
     #[test]

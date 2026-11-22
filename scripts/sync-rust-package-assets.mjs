@@ -102,6 +102,7 @@ const mappings = [
     "supercov/supercov.go",
     "supercov/values.go",
     "supercov/strong.go",
+    "supercov/mutants.go",
     "mutants/main.go",
     "mutants/go.mod",
   ]),
