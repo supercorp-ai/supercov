@@ -139,8 +139,9 @@ pub enum EvidenceArchiveSource {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-struct EntryHeader {
+pub(crate) struct EntryHeader {
     path: String,
     bytes: u64,
 }

@@ -26,6 +26,7 @@ pub(crate) const MUTANTS_SCHEMA_VERSION: u32 = 1;
 /// `mutants.json`: every instrumented file's mutants, or none when the run
 /// did not enumerate them (`mutantSet` null).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(from = "StoredMutants", into = "StoredMutants")]
 pub struct MutantsFile {
     pub schema_version: u32,
@@ -205,6 +206,7 @@ pub(crate) fn list_from_sources(
 /// starts), and a long original is cut to what is shown of it where that
 /// shows exactly the same.
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredMutants {
     schema_version: u32,
@@ -306,6 +308,7 @@ impl From<StoredMutants> for MutantsFile {
 /// the reference tool's in another language. The links past `function` are
 /// what a language's value probes record (`docs/design/mutation-drivers.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CandidateMutant {
     /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`. Left
@@ -374,6 +377,7 @@ pub struct CandidateMutant {
 
 /// A rule's stable code and the sentence that says why it applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StaticNote {
     pub rule: String,
@@ -382,6 +386,7 @@ pub struct StaticNote {
 
 /// An operator and where it is: a byte offset into the mutant's `original`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MutantOperator {
     pub text: String,
@@ -392,6 +397,7 @@ pub struct MutantOperator {
 /// conditions, or exactly its first `prefix` conditions (two or more, made
 /// only of `&&` and `||`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecisionLink {
     pub id: String,
@@ -404,6 +410,7 @@ pub struct DecisionLink {
 /// A logical selection (`a && b`, `a ?? b`, `x ||= y`) the mutant is, or is
 /// an operand of.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchLink {
     pub id: String,
@@ -413,6 +420,7 @@ pub struct BranchLink {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum BranchRole {
     Value,
@@ -423,6 +431,7 @@ pub enum BranchRole {
 /// The optional link the mutant removes, and the optional links of the same
 /// chain evaluated before it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChainLink {
     pub id: String,
@@ -433,6 +442,7 @@ pub struct ChainLink {
 /// A concise arrow's body: whether evaluating it has effects (which the
 /// mutant's `undefined` removes), and whether it can never be `undefined`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArrowLink {
     pub effects: bool,

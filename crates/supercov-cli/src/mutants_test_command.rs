@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use supercov_engine::{
     coverage_report::{ArchiveReportRequest, ExitCodeInput},
     run_store::{StoredRun, discover_runs, select_run},
-    strong_plan::{StrongPlan, plan_for_archive},
+    strong_plan::{StrongPlan, StrongVerdicts, Verdict, plan_for_archive},
 };
 
 pub(crate) const HELP: &str = "\
@@ -276,6 +276,7 @@ pub fn command(args: &[String]) -> ExitCode {
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
+        refuse_without_a_driver(run, &plan)?;
         let mut data = execute(&root, run, plan, saved, &options)?;
         let verdicts = read_saved(run);
         data["gate"] = gate(&root, &asked, &verdicts, &options)?;
@@ -304,6 +305,36 @@ pub fn command(args: &[String]) -> ExitCode {
             }
         }
     }
+}
+
+/// A pass with mutants to run needs a test it can run: one of a runner a
+/// strong driver drives. Without one every mutant would end without a
+/// verdict, and the pass would read as a score of nothing killed.
+fn refuse_without_a_driver(run: &StoredRun, plan: &StrongPlan) -> Result<(), String> {
+    use supercov_engine::strong_driver::STRONG_RUNNERS;
+    let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
+    let drivable = plan
+        .tests
+        .iter()
+        .any(|test| STRONG_RUNNERS.contains(&test.runner.as_str()));
+    if !runs_any || drivable {
+        return Ok(());
+    }
+    let runners = plan
+        .tests
+        .iter()
+        .map(|test| test.runner.as_str())
+        .filter(|runner| *runner != "background")
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "The strong pass runs tests under {}, and run {}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {} mutants` lists them with what the run's own tests tell of each.",
+        STRONG_RUNNERS.join(", "),
+        run.id,
+        run.id,
+    ))
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
@@ -568,30 +599,16 @@ fn gate_text(gate: &Value) -> String {
 
 /// Where a run's strong verdicts are saved.
 pub(crate) fn results_path(run: &StoredRun) -> PathBuf {
-    run.directory.join("strong-mutation.json")
-}
-
-/// One mutant's strong verdict, as saved.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Verdict {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub killed_by: Option<String>,
-    #[serde(default)]
-    pub tests: u64,
-    #[serde(default)]
-    pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    run.directory
+        .join(supercov_engine::strong_plan::STRONG_VERDICTS_FILE)
 }
 
 /// The run's saved verdicts, by mutant id; empty when none were saved.
 pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, Verdict> {
     std::fs::read(results_path(run))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| serde_json::from_value(value["mutants"].clone()).ok())
+        .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())
+        .map(|saved| saved.mutants)
         .unwrap_or_default()
 }
 
@@ -685,12 +702,12 @@ fn save(
     mutant_set: &str,
     saved: &std::collections::BTreeMap<String, Verdict>,
 ) -> Result<(), String> {
-    let document = json!({
-        "schemaVersion": 1,
-        "run": run.id,
-        "mutantSet": mutant_set,
-        "mutants": saved,
-    });
+    let document = StrongVerdicts {
+        schema_version: supercov_engine::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
+        run: run.id.clone(),
+        mutant_set: mutant_set.to_owned(),
+        mutants: saved.clone(),
+    };
     let path = results_path(run);
     std::fs::write(
         &path,

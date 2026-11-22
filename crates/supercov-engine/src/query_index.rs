@@ -31,6 +31,7 @@ const DESCRIPTOR_SIZE: usize = 64;
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct QueryIndexIdentity {
     pub evidence_sha256: [u8; 32],
     pub evidence_bytes: u64,

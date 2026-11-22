@@ -89,6 +89,12 @@ pub struct StrongPass {
     pub strong: StrongRun,
 }
 
+/// The runners whose tests a strong pass runs: those a language's driver
+/// drives. JavaScript's: Vitest and Playwright drive themselves from within
+/// the command (`vitestStrong*.mjs`, `playwrightStrong*.mjs`). A language
+/// adds its runners as it adds its driver.
+pub const STRONG_RUNNERS: &[&str] = &["vitest", "playwright"];
+
 /// Whether `language` has a strong driver.
 pub fn has_driver(language: &str) -> bool {
     matches!(language, crate::mutant_list::JAVASCRIPT)
