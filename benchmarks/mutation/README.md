@@ -199,6 +199,35 @@ into `$RUNNER_TEMP` (or the system temp directory) and installs packages there.
 To re-plan shards after a corpus change:
 `node benchmarks/mutation/plan-shards.mjs hono <stryker-cold.json> 6 --write`.
 
+## Results of 2026-11-23: the continuous pass
+
+Supercov's cold rows again (`results/2026-11-23/summary.md`), on the continuous pass (no stages;
+`docs/design/strong-mutation.md`), on 16-CPU Linux machines (c8a/m8a.4xlarge), as every row before:
+
+| project | ms per mutant run, staged (2026-11-22) | continuous | StrykerJS's mutant phase | files / baselines / confirmations per mutant run | soundness violations | extra kills |
+|---|---:|---:|---:|---|---:|---:|
+| defu, scule, cookie-es, pathe, ufo | 14-25 | 13-20 | 12-17 | 1.0-1.4 / 0.01-0.03 / 0.06-0.22 | 0 | 0 |
+| hono (6 shards) | 69 | 65 | 51 | 2.4 / 0.26 / 0.35 | the same 10 | 0 |
+| tRPC (32 shards) | 1,173 | 1,071 | 755 | 10.9 / 2.70 / 0.30 | the same 2 | 0 |
+
+- **Files per mutant, by verdict.** hono: killed 1.6, survived 9.3; tRPC: killed 6.4, timed out 3.4,
+  survived 37.5 (StrykerJS's covering tests span 33.5 files for a killed tRPC mutant and 36.6 for a
+  survivor). A tRPC survivor runs as many files as StrykerJS's; a killed mutant 6.4.
+- **Baselines** are once per file and shape in each pass: 2.70 per tRPC mutant because each of the 32
+  shards is a pass of its own (about 110 files' union baselines and 100 whole ones, for its 77
+  mutants). Unsharded they would be about 0.1 per mutant. StrykerJS's dry run, which plays their part,
+  is outside its mutant phase; Supercov's figure includes them.
+- **Confirmations** run only for a kill by a copy that left out tests its file's baseline ran before
+  the failing one.
+- **A failure before the mutant ran** reran its copy 10 times on hono and never changed a verdict
+  here; in two earlier runs, two timing tests' failures (`errors.test.ts > unauthorized()`,
+  `websockets.test.ts > lazy connection where the first connection fails`) had stood as kills the
+  ground truth does not have.
+- **Still flaky:** the hono test `Logger by Middleware in NO_COLOR > Time in seconds` (expects `1s`,
+  gets `999ms` under load) and a tRPC reconnect test failed once each in one of the five full runs of
+  this pass while the mutant had run, and stood as kills; no rule that holds for every suite tells
+  such a failure from a real one without running the copy again.
+
 ## Results of 2026-11-22, later: next batches within a stage, decided copies stopped
 
 Supercov's cold rows again (`results/2026-11-22/summary.md`), on the binary of `2cd0441e`, against the morning's binary (`e19bd687`) on the same machine type. A mutant's
