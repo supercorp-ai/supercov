@@ -725,7 +725,8 @@ npx supercov runs report --format html --output coverage/report
 | `sonar` | SonarQube's generic coverage XML | SonarQube and SonarCloud, for any language (`sonar.coverageReportPaths`) |
 
 These formats carry coverage only: none has a place for a mutant, so a run's
-mutants are in `mutants --format stryker` and `--format pit` instead.
+mutants are in `mutants --format stryker` and `--format pit` instead, and in
+the `html` page.
 
 All are written from the same view `check` and `patch` read, so a viewer,
 hosted service or CI integration sees the totals Supercov enforced. `--kind`,
@@ -792,8 +793,20 @@ applicable** (nothing eligible), **partly measured** (Supercov declined some
 obligations, which are excluded from every count) and **stale** (the run no
 longer matches the checkout). A failed suite says so beside its numbers.
 
-This document is of coverage alone; the mutants are in the interactive report
-`supercov report` writes (see [Portable HTML reports](reports.md)).
+For a run whose mutants are listed it also shows its mutation testing, as
+`supercov report` does (see [Mutation testing](reports.md#mutation-testing)):
+a Mutation testing card with the weak and the strong score, every status
+counted, why mutants have no verdict, each language, and the survivors by
+file, each linking to its line; a sortable Mutants column with each file's
+score and survivors; and, under each line of the source, its mutants with
+what they change, both levels and the test that killed one, a survivor set
+apart. `--diff <base>` keeps the mutants on lines a change added or changed
+since its merge base with `<base>`, and the card says so; with another
+format `--diff` is refused, as those formats carry no mutants.
+
+```sh supercov-example
+npx supercov runs latest report --format html --diff origin/main --output coverage/report
+```
 
 Source text is embedded only when the run still matches the checkout; otherwise
 the report shows line numbers and explains why. Embedding makes a report

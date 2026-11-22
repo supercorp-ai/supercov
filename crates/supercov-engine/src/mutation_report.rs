@@ -261,6 +261,110 @@ pub fn tallies<'a>(
         .collect()
 }
 
+/// What an HTML report shows of some mutants, whatever their language: the
+/// weak summary, a tally of them all, of each language and of each file, the
+/// change they were narrowed to, and every mutant with both levels and why.
+/// The interactive report and the static one read the same section.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Section {
+    pub mutant_set: String,
+    pub summary: crate::mutants_query::MutantsSummary,
+    pub tally: Tally,
+    /// Whether a strong pass gave any of them a verdict.
+    pub strong: bool,
+    pub languages: BTreeMap<String, Tally>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<crate::mutants_query::DiffSummary>,
+    pub files: BTreeMap<String, Tally>,
+    pub mutants: Vec<SectionMutant>,
+}
+
+/// One mutant as a report shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionMutant {
+    pub id: String,
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub mutator: String,
+    /// `original → replacement`, or the part it changes.
+    pub change: String,
+    pub status: MutantStatus,
+    pub reason: String,
+    pub code: String,
+    /// `clock` or `random`: practically out of a test's reach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untestable: Option<crate::coverage_index::Untestable>,
+    pub outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
+    /// How many tests the strong pass ran against it, and for how long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Why it has its outcome, in plain words.
+    pub why: String,
+    /// Left alive by the tests.
+    pub alive: bool,
+}
+
+/// The section of every mutant `data` holds; `None` for a run that listed no
+/// mutants, or none where it was not narrowed to a change (a change with
+/// none on its lines still says so).
+pub fn section(data: CoverageMutantsData) -> Option<Section> {
+    let mutant_set = data.mutant_set.clone()?;
+    if data.summary.mutants == 0 && data.diff.is_none() {
+        return None;
+    }
+    let strong = data.mutants.iter().any(|mutant| mutant.strong.is_some());
+    let owned = |tallies: BTreeMap<&str, Tally>| {
+        tallies
+            .into_iter()
+            .map(|(key, tally)| (key.to_owned(), tally))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mutants = data
+        .mutants
+        .iter()
+        .map(|mutant| {
+            let saved = verdict(mutant);
+            SectionMutant {
+                id: mutant.id.clone(),
+                file: mutant.file.clone(),
+                line: mutant.span.start[0],
+                column: mutant.span.start[1],
+                end_line: mutant.span.end[0],
+                mutator: mutant.mutator.clone(),
+                change: change(mutant),
+                status: mutant.status,
+                reason: mutant.weak.reason.clone(),
+                code: mutant.weak.code.clone(),
+                untestable: mutant.weak.untestable,
+                outcome: outcome(mutant),
+                killed_by: saved.as_ref().and_then(|verdict| verdict.killed_by.clone()),
+                tests: saved.as_ref().map(|verdict| verdict.tests),
+                duration_ms: saved.as_ref().map(|verdict| verdict.duration_ms),
+                why: why(mutant, strong),
+                alive: alive(mutant),
+            }
+        })
+        .collect();
+    Some(Section {
+        mutant_set,
+        tally: Tally::of(&data.mutants),
+        strong,
+        languages: owned(tallies(&data.mutants, |mutant| language(&mutant.file))),
+        files: owned(tallies(&data.mutants, |mutant| mutant.file.as_str())),
+        summary: data.summary,
+        diff: data.diff,
+        mutants,
+    })
+}
+
 /// The thresholds StrykerJS reports by default.
 const THRESHOLDS: (u8, u8) = (80, 60);
 

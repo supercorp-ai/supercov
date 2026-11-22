@@ -16106,7 +16106,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2647 => main.rs:2647",
+            "fs.canonicalize#main.rs:2666 => main.rs:2666",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
         ],
@@ -17959,12 +17959,12 @@ fn the_report_leaves_out_a_source_it_cannot_read() {
     project.supercov(&["--", "node", "--test"]).succeeds();
     project.supercov(&["runs", "latest", "--json"]).succeeds();
     for (fault, output, place) in [
-        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:482"),
-        ("fs.read_to_string@6", "unread.html", "html_report.rs:517"),
+        ("fs.canonicalize@2", "unresolved.html", "html_report.rs:388"),
+        ("fs.read_to_string@6", "unread.html", "html_report.rs:423"),
         (
-            "fs.metadata#html_report.rs:504",
+            "fs.metadata#html_report.rs:410",
             "unsized.html",
-            "html_report.rs:504",
+            "html_report.rs:410",
         ),
     ] {
         let ran = project.supercov_with(
@@ -25142,6 +25142,40 @@ fn mutation_reports_show_weak_strong_mixed_languages_and_a_change() {
     assert_eq!(by_id(&ids[1])["alive"], true);
     assert_eq!(by_id(python)["outcome"], "not-run");
     assert_eq!(by_id(python)["why"], "not run: no driver for python yet");
+    // The static page shows the same mutation testing, and a change's.
+    let page = |extra: &[&str]| {
+        let mut command = vec!["runs", "latest", "report", "--format", "html", "--force"];
+        command.extend(extra);
+        project.supercov(&command).succeeds()
+    };
+    contains_all(
+        &page(&[]),
+        &[
+            "<h2>Mutation testing</h2>",
+            "javascript, python",
+            "Strong mutation: 66.7%",
+            "not run: no driver for python",
+            "data-key=\"mutants\"",
+            "<h3>Left alive: ",
+        ],
+    );
+    let changed = page(&["--diff", "base"]);
+    assert!(
+        changed.contains("<strong>This change only:</strong>"),
+        "{changed}"
+    );
+    let unknown = project
+        .supercov(&[
+            "runs", "latest", "report", "--format", "html", "--diff", "nowhere",
+        ])
+        .exits(2);
+    assert!(unknown.contains("nowhere"), "{unknown}");
+    let other = project
+        .supercov(&[
+            "runs", "latest", "report", "--format", "lcov", "--diff", "base",
+        ])
+        .exits(2);
+    assert!(other.contains("give it with --format html"), "{other}");
 
     let markdown = export(&["--format", "markdown"]).succeeds();
     contains_all(

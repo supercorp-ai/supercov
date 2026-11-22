@@ -2099,7 +2099,7 @@ fn point_tests(run: &StoredRun) -> Result<Vec<(String, usize, Vec<String>)>, Str
 /// look like it invokes the tools they are named after.
 fn report_usage() -> String {
     format!(
-        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n",
+        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>]\n",
         supercov_engine::coverage_export::FORMATS
     )
 }
@@ -2140,6 +2140,8 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut force = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
+    // `--diff <base>`: the HTML report's mutants of a change alone.
+    let mut diff_base: Option<String> = None;
     // Dispatch put the word first or second, so there is a first argument.
     if arguments[0] != "report" {
         selector = Some(arguments[0].as_str());
@@ -2156,16 +2158,16 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                 print!("{}", report_usage());
                 return ExitCode::SUCCESS;
             }
-            "--format" | "--output" => {
+            "--format" | "--output" | "--diff" => {
                 let Some(value) = rest.get(index) else {
                     eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
                     return ExitCode::from(2);
                 };
                 index += 1;
-                if argument == "--format" {
-                    format = Some(value.to_ascii_lowercase());
-                } else {
-                    output = Some(PathBuf::from(value));
+                match argument {
+                    "--format" => format = Some(value.to_ascii_lowercase()),
+                    "--output" => output = Some(PathBuf::from(value)),
+                    _ => diff_base = Some(value.clone()),
                 }
             }
             // The coverage of some tests alone, from the run as recorded.
@@ -2186,6 +2188,14 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
         eprintln!("[supercov] report needs --format\n{}", report_usage());
         return ExitCode::from(2);
     };
+    // The other formats have no place for a mutant.
+    if diff_base.is_some() && format != "html" {
+        eprintln!(
+            "[supercov] --diff narrows the HTML report's mutants: give it with --format html\n{}",
+            report_usage()
+        );
+        return ExitCode::from(2);
+    }
 
     let result = (|| -> Result<(), String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -2231,7 +2241,16 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     "The file could not be read from this checkout.".to_owned(),
                 )
             };
-            supercov_engine::coverage_html::html(&view, &sources, &reason)
+            // The run's mutants, of a change alone with `--diff`.
+            let inventory = public_run_inventory(&root).map_err(|error| error.to_string())?;
+            let run = select_run(&inventory, Some(&view.run)).map_err(|error| error.to_string())?;
+            let diff = diff_base
+                .as_deref()
+                .map(|base| mutant_diff(&root, base, run))
+                .transpose()?;
+            let mutants =
+                html_report::run_mutants(run, (!filter.is_empty()).then_some(&filter), diff)?;
+            supercov_engine::coverage_html::html(&view, &sources, &reason, mutants.as_ref())
         } else {
             let sources = if supercov_engine::coverage_export::needs_source(&format) {
                 read_sources()
@@ -4253,7 +4272,7 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2647).
+// Below the lines tests name by number (main.rs:2666).
 mod mutants_export;
 mod mutants_test_command;
 

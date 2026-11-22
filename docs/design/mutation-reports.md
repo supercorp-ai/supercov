@@ -35,7 +35,7 @@ survived + no-coverage)`, as `mutants test` reports it.
 
 ## The HTML report
 
-`supercov report` builds each run's mutants from the same query `mutants`
+`supercov report` builds each run's mutants (`mutation_report::section`) from the same query `mutants`
 answers, with every mutant (not a page) and the run's saved verdicts, and
 with `--diff <base>` the change's (`mutant_diff`, as `mutants --diff`). The
 payload holds the weak summary, a tally (weak counts, strong counts,
@@ -97,7 +97,20 @@ mutation score and each verdict's count, and the table lists the survivors,
 survived and uncovered first, with both levels and why; `--status` still
 picks by weak status.
 
+## The static HTML page
+
+`runs report --format html` reads the same `mutation_report::Section`
+(`html_report::run_mutants`, from the run's index with its saved verdicts and
+`--diff`'s change) and draws it without the interactive report's
+application: the Mutation testing card rendered on the server (both levels,
+four reasons for no verdict and a count of the rest, the language table, the
+survivors by file, five of three, the rest in a `<details>`), a Mutants
+column the page's script sorts, and each line's mutants under it in the
+source view. A survivor's link is `#file:line`, which opens the file and
+scrolls to the line.
+
 ## Coverage formats
 
-`runs report --format lcov|cobertura|istanbul|clover|jacoco|sonar|html` stay
-coverage only: none of those formats has a place for a mutant.
+`runs report --format lcov|cobertura|istanbul|clover|jacoco|sonar` stay
+coverage only: none of those formats has a place for a mutant, and `--diff`
+is refused with them.

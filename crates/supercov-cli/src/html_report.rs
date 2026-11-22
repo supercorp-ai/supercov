@@ -242,73 +242,20 @@ struct ReportRun {
     /// The run's mutants, of whatever language, for a run that listed them;
     /// absent otherwise, and the report then shows none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    mutants: Option<ReportMutants>,
+    mutants: Option<supercov_engine::mutation_report::Section>,
 }
 
-/// What the report shows of a run's mutants, whatever their language: the
-/// weak and strong counts and scores, by file and by language, every mutant
-/// with its weak status, strong verdict and why, and, with `--diff`, the
-/// change it was narrowed to.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReportMutants {
-    mutant_set: String,
-    summary: supercov_engine::mutants_query::MutantsSummary,
-    tally: Tally,
-    /// Whether a strong pass gave any of them a verdict.
-    strong: bool,
-    languages: BTreeMap<String, Tally>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diff: Option<supercov_engine::mutants_query::DiffSummary>,
-    files: BTreeMap<String, Tally>,
-    mutants: Vec<ReportMutant>,
-}
-
-use supercov_engine::mutation_report::{Outcome, Tally};
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReportMutant {
-    id: String,
-    file: String,
-    line: u32,
-    column: u32,
-    end_line: u32,
-    mutator: String,
-    /// `original → replacement`, or the part it changes, as the command
-    /// line shows it.
-    change: String,
-    status: supercov_engine::coverage_index::MutantStatus,
-    reason: String,
-    code: String,
-    /// `clock` or `random`: practically out of a test's reach.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    untestable: Option<supercov_engine::coverage_index::Untestable>,
-    outcome: Outcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    killed_by: Option<String>,
-    /// How many tests the strong pass ran against it, and for how long.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tests: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    duration_ms: Option<u64>,
-    /// Why it has its outcome, in plain words.
-    why: String,
-    /// Left alive by the tests.
-    alive: bool,
-}
-
-/// The run's mutants as the report shows them, `diff`'s alone when given,
-/// or `None` for a run that listed none.
-fn build_mutants(
+/// The run's mutants as a report shows them (`mutation_report::Section`),
+/// `diff`'s alone when given, or `None` for a run that listed none. The
+/// interactive report and `runs report --format html` both read it.
+pub(crate) fn build_mutants(
     index: &CoverageIndex<'_>,
     run: &StoredRun,
     diff: Option<supercov_engine::mutants_query::MutantDiff>,
-) -> Result<Option<ReportMutants>, String> {
+) -> Result<Option<supercov_engine::mutation_report::Section>, String> {
     use supercov_engine::mutants_query::{
         CoverageMutantsQueryOptions, MutantsOptions, coverage_mutants_query,
     };
-    use supercov_engine::mutation_report as report;
     let saved = crate::mutants_test_command::read_saved(run);
     let options = MutantsOptions {
         diff,
@@ -332,62 +279,21 @@ fn build_mutants(
         },
     )
     .map_err(|error| format!("could not read mutants for run {}: {error:?}", run.id))?;
-    let Some(mutant_set) = data.mutant_set.clone() else {
-        return Ok(None);
-    };
-    // A change with no mutant on its lines still says so.
-    if data.summary.mutants == 0 && data.diff.is_none() {
-        return Ok(None);
-    }
-    let strong = data.mutants.iter().any(|mutant| mutant.strong.is_some());
-    let mutants = data
-        .mutants
-        .iter()
-        .map(|mutant| {
-            let verdict = report::verdict(mutant);
-            ReportMutant {
-                id: mutant.id.clone(),
-                file: mutant.file.clone(),
-                line: mutant.span.start[0],
-                column: mutant.span.start[1],
-                end_line: mutant.span.end[0],
-                mutator: mutant.mutator.clone(),
-                change: report::change(mutant),
-                status: mutant.status,
-                reason: mutant.weak.reason.clone(),
-                code: mutant.weak.code.clone(),
-                untestable: mutant.weak.untestable,
-                outcome: report::outcome(mutant),
-                killed_by: verdict
-                    .as_ref()
-                    .and_then(|verdict| verdict.killed_by.clone()),
-                tests: verdict.as_ref().map(|verdict| verdict.tests),
-                duration_ms: verdict.as_ref().map(|verdict| verdict.duration_ms),
-                why: report::why(mutant, strong),
-                alive: report::alive(mutant),
-            }
-        })
-        .collect();
-    let owned = |tallies: BTreeMap<&str, Tally>| {
-        tallies
-            .into_iter()
-            .map(|(key, tally)| (key.to_owned(), tally))
-            .collect::<BTreeMap<_, _>>()
-    };
-    Ok(Some(ReportMutants {
-        mutant_set,
-        tally: Tally::of(&data.mutants),
-        strong,
-        languages: owned(report::tallies(&data.mutants, |mutant| {
-            report::language(&mutant.file)
-        })),
-        files: owned(report::tallies(&data.mutants, |mutant| {
-            mutant.file.as_str()
-        })),
-        summary: data.summary,
-        diff: data.diff,
-        mutants,
-    }))
+    Ok(supercov_engine::mutation_report::section(data))
+}
+
+/// A stored run's mutants for a report, read from its index for the tests
+/// `filter` picks.
+pub(crate) fn run_mutants(
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
+) -> Result<Option<supercov_engine::mutation_report::Section>, String> {
+    let container = crate::open_query_index_for(run, filter)
+        .map_err(|error| format!("could not open run {}: {error}", run.id))?;
+    let index = CoverageIndex::new(&container)
+        .map_err(|error| format!("could not read run {}: {error}", run.id))?;
+    build_mutants(&index, run, diff)
 }
 
 #[derive(Serialize)]

@@ -2000,7 +2000,8 @@
           entry.append(node("strong", "", `${item.alive ? "Left alive \u00b7 " : ""}${mutantHeadline(item)} \u00b7 ${item.mutator}`), node("p", "annotation-assertion", item.change));
           const levelLine = (name, label, text) => { const line = node("p", "mutant-level"); line.append(node("b", "", `${name}: ${label}`), document.createTextNode(` \u2014 ${text}`)); return line; };
           entry.append(levelLine("Weak", mutantStatusLabel(item.status), item.reason));
-          if (item.outcome !== "pending" || mutantData(run).strong) entry.append(levelLine("Strong", mutantOutcomeLabel(item.outcome), item.why));
+          if (!["pending", "not-run"].includes(item.outcome)) entry.append(levelLine("Strong", mutantOutcomeLabel(item.outcome), item.why));
+          else if (item.outcome === "not-run" || mutantData(run).strong) { const line = node("p", "mutant-level"); line.append(node("b", "", "Strong:"), document.createTextNode(` ${item.why}`)); entry.append(line); }
           if (item.killedBy) {
             const killer = mutantKiller(run, item.killedBy);
             const actions = node("div", "card-actions");

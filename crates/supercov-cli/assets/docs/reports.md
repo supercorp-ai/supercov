@@ -228,7 +228,7 @@ substituting content.
 
 ## Other formats
 
-The HTML report is the only one of these files that shows coverage and
+The HTML report and `runs report --format html` are the files that show coverage and
 mutants together. For other tools:
 
 - `runs <id> mutants --format stryker` writes StrykerJS's `mutation.json`,
@@ -240,7 +240,14 @@ mutants together. For other tools:
   and why.
 - `runs report --format lcov|cobertura|istanbul|istanbul-summary|clover|jacoco|sonar`
   write coverage only: those formats have no place for a mutant.
-  `runs report --format html` is a static document of coverage alone.
+- `runs report --format html` writes a static page, without the interactive
+  report's application, that shows the run's mutation testing as this report
+  does: the Mutation testing card with both levels, the reasons for no
+  verdict, each language and the survivors by file (each linking to its
+  line, the rest folded under "and N more"); a Mutants column with each
+  file's score and survivors, sortable; and each line's mutants in the source
+  view with both levels and the test that killed one. `--diff <base>` narrows
+  its mutants to a change and the card says so.
 
 See the [CLI reference](cli.md#mutation-reports-other-tools-read) for each.
 

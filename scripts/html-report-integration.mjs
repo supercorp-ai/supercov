@@ -822,6 +822,28 @@ try {
     assert.match(await page.locator(".file-head-cell.active").textContent(), /Mutants/);
     assert.match(await page.locator(".file-row").filter({ hasText: "src/access.js" }).locator(".file-row-mark").last().getAttribute("title"), /left alive \u00b7 weak score .+ \u00b7 mutation score /);
     assert.deepEqual(failures, [], "a run with strong verdicts renders without errors");
+    // The static page `runs report --format html` writes shows the same
+    // mutation testing: the card, each file's score, the survivors linking to
+    // their lines, and each line's mutants in the source.
+    execFileSync(binary, ["runs", "latest", "report", "--format", "html", "--output", "static.html"], { cwd: project, stdio: "pipe" });
+    await page.goto(`file://${resolve(project, "static.html")}`, { waitUntil: "load" });
+    const staticCard = page.locator("section.mutation");
+    for (const expected of ["Mutation testing", "Weak mutation", "Strong mutation", "not run: no driver for cobol", "Left alive"]) {
+      assert((await staticCard.textContent()).includes(expected), `${expected} in the static card`);
+    }
+    assert.equal(await page.locator('th[data-key="mutants"]').count(), 1);
+    assert.match(await page.locator("#rows tr").filter({ hasText: "src/access.js" }).textContent(), /\d+ alive/);
+    await page.locator('th[data-key="mutants"]').click();
+    assert.equal(await page.locator('th[data-key="mutants"]').getAttribute("aria-sort"), "ascending");
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await staticCard.screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT.replace(/\.png$/, "-static.png") });
+    await staticCard.locator("a").filter({ hasText: `src/access.js:${infected[1].line}` }).first().click();
+    const staticAlive = page.locator("#source .mutants div.alive").first();
+    await staticAlive.waitFor();
+    assert.match(await staticAlive.textContent(), /Left alive/);
+    assert.match(await page.locator("#source").textContent(), /Strong: survived \u2014 every test that reached it passed with it in place/);
+    assert.match(await page.locator("#source").textContent(), /Killed by owner access/);
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await page.locator("#source").screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT.replace(/\.png$/, "-static-source.png") });
+    assert.deepEqual(failures, [], "the static page's mutation testing renders without errors");
     // A pass that gave no verdict a score counts: no score, and why.
     const errors = Object.fromEntries(infected.map(mutant => [mutant.id, { status: "error", tests: 0, durationMs: 0, reason: "the command ended (exit 1) before this mutant's verdict" }]));
     for (const run of readdirSync(resolve(project, ".supercov/runs"))) {
