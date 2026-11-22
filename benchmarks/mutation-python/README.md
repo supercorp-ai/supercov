@@ -33,6 +33,12 @@ its own parameter lists, so the suite cannot run twice in one process).
 - `compare.py <ids.jsonl> <kill-matrix.jsonl> <strong-mutation.json>
   [mutmut-results.json]`: joins the matrix to Supercov's verdicts through
   `scripts/mutmut-parity.py`'s ids, and lists every disagreement.
+- `part.sh <parts.tsv> <part> <dir> <supercov> <out>`: one numbered part of
+  a validation run, as `parts.tsv` lists it (project, scenario, shard), into
+  the directory `compare-all.sh` reads; `part.sh <parts.tsv> list` prints the
+  parts, for a CI matrix whose jobs carry only their numbers.
+- `compare-all.sh <results> <dir> <out>`: every part's results joined into
+  one summary.
 
 The matrix forks after collection, so code a test module's import runs
 (decorators applied at import) runs there without the mutant; mutmut's own
