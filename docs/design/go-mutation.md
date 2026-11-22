@@ -345,8 +345,19 @@ and btree's Example-only kills).
 - A test the plan takes only because its evidence is not its own runs for a
   mutant only where its binary links the mutant's package.
 
+- A compile error in the strong copy was laid at the switch whose bytes
+  held it in the file before its runtime import was written in, so every
+  switch after the import was off by the import's change in length, and a
+  refused switch took the file's others with it. No validation module had a
+  refused switch; the tests' does (a shift whose type, from a dot import,
+  the file cannot write: the generic call infers `int`). Each switch's
+  bytes now move with the import.
+
 ## Not yet
 
 - Value probes for floating-point operations.
+- Value probes for files behind a build tag: the type checker's facts for
+  a measured run are asked without the command's tags, so such a file's
+  operations get no probe and their mutants stay `unknown` (they run).
 - The recording `go` on Windows: there the pass reads flags only from a `go
   test` the command names itself.

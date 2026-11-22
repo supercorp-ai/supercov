@@ -23,9 +23,9 @@ fn go_binary() -> Option<PathBuf> {
         })
 }
 
-const CALC: &str = "package calc\n\nimport \"time\"\n\nconst Limit = 2 + 3\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Loop(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n\nfunc Nap(n int) int {\n\tif n > 0 {\n\t\ttime.Sleep(time.Duration(n) * time.Millisecond)\n\t}\n\treturn n\n}\n";
+const CALC: &str = "package calc\n\nimport (\n\t\"time\"\n\t. \"time\"\n)\n\nconst Limit = 2 + 3\n\nconst Width = 4 * 2\n\n// A type the file cannot write: its switch does not build.\nfunc Scale(n uint) Duration { return 1 << n }\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Loop(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n\nfunc Nap(n int) int {\n\tif n > 0 {\n\t\ttime.Sleep(time.Duration(n) * time.Millisecond)\n\t}\n\treturn n\n}\n";
 
-const CALC_TEST: &str = "package calc\n\nimport \"testing\"\n\nfunc TestClamp(t *testing.T) {\n\tif Clamp(6) != 5 || Clamp(1) != 1 {\n\t\tt.Fatal(\"clamp\")\n\t}\n}\n\nfunc TestLoop(t *testing.T) {\n\tif Loop(4) != 6 {\n\t\tt.Fatal(\"loop\")\n\t}\n}\n\nfunc TestJoinAndMiddle(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || !Middle(3) || Middle(1) || Nap(1) != 1 {\n\t\tt.Fatal(\"join\")\n\t}\n}\n\nfunc TestAsWritten(t *testing.T) {\n\tt.Fatal(\"fails without a mutant\")\n}\n";
+const CALC_TEST: &str = "package calc\n\nimport \"testing\"\n\nfunc TestClamp(t *testing.T) {\n\tif Clamp(6) != 5 || Clamp(1) != 1 {\n\t\tt.Fatal(\"clamp\")\n\t}\n}\n\nfunc TestLoop(t *testing.T) {\n\tif Loop(4) != 6 {\n\t\tt.Fatal(\"loop\")\n\t}\n}\n\nfunc TestJoinAndMiddle(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || !Middle(3) || Middle(1) || Nap(1) != 1 {\n\t\tt.Fatal(\"join\")\n\t}\n}\n\nfunc TestAsWritten(t *testing.T) {\n\tt.Fatal(\"fails without a mutant\")\n}\n\nfunc TestScale(t *testing.T) {\n\tif Scale(2) != 4 {\n\t\tt.Fatal(\"scale\")\n\t}\n}\n";
 
 const OTHER: &str = "package other\n\nfunc Twice(n int) int { return n * 2 }\n";
 
@@ -43,6 +43,17 @@ fn module(name: &str) -> PathBuf {
         ("calc_test.go", CALC_TEST),
         ("other/other.go", OTHER),
         ("other/other_test.go", OTHER_TEST),
+        // A test package that does not build, one with no tests, and one
+        // whose tests pass only with the one that fails as written.
+        (
+            "broken/broken_test.go",
+            "package broken\n\nimport \"testing\"\n\nfunc TestGone(t *testing.T) { undefined() }\n",
+        ),
+        ("notests/notests.go", "package notests\n"),
+        (
+            "shared/shared_test.go",
+            "package shared\n\nimport \"testing\"\n\nvar ran bool\n\nfunc TestFirst(t *testing.T) {\n\tran = true\n\tt.Fatal(\"as written\")\n}\n\nfunc TestAfter(t *testing.T) {\n\tif !ran {\n\t\tt.Fatal(\"alone\")\n\t}\n}\n",
+        ),
         (".git/HEAD", "ref: refs/heads/main\n"),
         ("testdata/note.txt", "kept\n"),
     ] {
@@ -93,6 +104,11 @@ struct Pass {
 
 impl Pass {
     fn new(name: &str, go: &Path, mutants: Vec<Value>) -> Self {
+        Self::with_tests(name, go, mutants, &[])
+    }
+
+    /// A pass whose plan has `extra` tests after the five every pass has.
+    fn with_tests(name: &str, go: &Path, mutants: Vec<Value>, extra: &[&str]) -> Self {
         let root = module(name);
         let work = root.join(".supercov/strong/pass");
         std::fs::create_dir_all(&work).unwrap();
@@ -103,7 +119,10 @@ impl Pass {
             ".::TestJoinAndMiddle",
             ".::TestAsWritten",
             "other::TestTwice",
-        ];
+        ]
+        .iter()
+        .chain(extra)
+        .collect::<Vec<_>>();
         std::fs::write(
             &plan,
             json!({
@@ -161,10 +180,21 @@ fn each_verdict_the_go_pass_gives() {
     let (vetted, vetted_index) = mutant("x != 1 &&", "&&", "LogicalOperator", "||");
     let (equal, equal_index) = mutant("n > 0", ">", "EqualityOperator", ">=");
     let (untested, untested_index) = mutant("total += i", "+=", "AssignmentOperator", "-=");
-    let pass = Pass::new(
+    let (scale, scale_index) = mutant("return 1 << n", "<<", "INVERT_BITWISE", ">>");
+    let (width, width_index) = mutant("Width = ", "*", "ArithmeticOperator", "/");
+    let (bound, bound_index) = mutant("i < n", "<", "EqualityOperator", "<=");
+    let (second, second_index) = mutant("x != 2", "!=", "EqualityOperator", "==");
+    let pass = Pass::with_tests(
         "verdicts",
         &go,
         vec![
+            // Its switch does not build: built alone.
+            planned(&scale, scale_index, &[(5, "infected")]),
+            // Built alone, for a package that does not build.
+            planned(&width, width_index, &[(6, "infected")]),
+            planned(&bound, bound_index, &[(6, "infected")]),
+            // A package with no tests, then one whose tests do not pass.
+            planned(&second, second_index, &[(7, "infected"), (8, "infected")]),
             planned(&boundary, boundary_index, &every),
             planned(&constant, constant_index, &every),
             planned(&endless, endless_index, &[(1, "infected")]),
@@ -178,6 +208,12 @@ fn each_verdict_the_go_pass_gives() {
             json!({"id": "calc.go:1:1-1:2:EqualityOperator:<=", "file": "calc.go", "index": 0, "candidates": []}),
             // Decided by the plan: not run.
             json!({"id": "decided", "file": "calc.go", "index": 0, "decided": "survived"}),
+        ],
+        &[
+            ".::TestScale",
+            "broken::TestGone",
+            "notests::TestNone",
+            "shared::TestAfter",
         ],
     );
     let summary = pass.run("").unwrap();
@@ -205,6 +241,24 @@ fn each_verdict_the_go_pass_gives() {
     assert_eq!(status(&untested), "survived");
     assert_eq!(status("calc.go:1:1-1:2:EqualityOperator:<="), "error");
     assert!(!verdicts.contains_key("decided"));
+    assert_eq!(status(&scale), "killed", "{verdicts:?}");
+    let reason = |id: &str| {
+        verdicts[id]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(reason(&scale).contains("built alone"), "{verdicts:?}");
+    assert_eq!(status(&width), "error");
+    assert!(reason(&width).contains("cannot run it"), "{verdicts:?}");
+    assert!(reason(&width).contains("built alone"), "{verdicts:?}");
+    assert_eq!(status(&bound), "error");
+    assert!(reason(&bound).starts_with("the test package broken cannot run it"));
+    assert_eq!(status(&second), "error");
+    assert!(
+        reason(&second).ends_with("the package has no test binary"),
+        "{verdicts:?}"
+    );
     assert_eq!(summary["retries"], 1, "{summary}");
     assert_eq!(summary["vetRejected"], 1, "{summary}");
     // A second pass in the same place starts from a fresh copy.
@@ -224,6 +278,50 @@ fn a_plan_with_nothing_to_run_writes_only_its_summary() {
     let summary = pass.run("").unwrap();
     assert_eq!(summary["runs"], 0);
     assert!(pass.verdicts().is_empty());
+}
+
+/// A pass with nothing to switch, one with vet turned off, and those that
+/// cannot start or cannot build their copy.
+#[test]
+fn a_go_pass_runs_what_its_command_and_its_copy_allow() {
+    let Some(go) = go_binary() else {
+        return;
+    };
+    let every = [(0, "infected"), (1, "infected"), (2, "infected")];
+    let (strings, strings_index) = mutant("return a + b", "+", "ArithmeticOperator", "-");
+    let pass = Pass::new(
+        "unviable",
+        &go,
+        vec![planned(&strings, strings_index, &every)],
+    );
+    pass.run("").unwrap();
+    assert_eq!(pass.verdicts()[&strings]["status"], "unviable");
+    // With vet off, as `go test -vet=off` runs, what vet refuses runs.
+    let (vetted, vetted_index) = mutant("x != 1 &&", "&&", "LogicalOperator", "||");
+    let mut pass = Pass::new("vet-off", &go, vec![planned(&vetted, vetted_index, &every)]);
+    pass.command.insert(2, "-vet=off".into());
+    pass.run("").unwrap();
+    assert_eq!(pass.verdicts()[&vetted]["status"], "killed");
+    // A copy that does not build outside its switches.
+    let (boundary, boundary_index) = mutant("if n > Limit", ">", "EqualityOperator", "<=");
+    let pass = Pass::new(
+        "unbuildable",
+        &go,
+        vec![planned(&boundary, boundary_index, &every)],
+    );
+    let error = pass.run("go-strong-unbuildable-copy").unwrap_err();
+    assert!(error.contains("not at a switch"), "{error}");
+    // A plan that is not one, and a listed file that does not parse.
+    let pass = Pass::new("bad-plan", &go, Vec::new());
+    std::fs::write(&pass.plan, "{").unwrap();
+    assert!(pass.run("").is_err());
+    let pass = Pass::new(
+        "unparseable",
+        &go,
+        vec![json!({"id": "bad.go:1:1", "file": "bad.go", "index": 0, "candidates": []})],
+    );
+    std::fs::write(pass.root.join("bad.go"), "package calc\n\nfunc (").unwrap();
+    assert!(pass.run("").is_err());
 }
 
 /// Each step of the pass that can fail ends it, and says where.
@@ -261,10 +359,12 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
     let after = |anchor: &'static str, snippet: &'static str| line_from(line(anchor), snippet);
     let (constant, constant_index) = mutant("Limit = ", "+", "ArithmeticOperator", "-");
     let (boundary, boundary_index) = mutant("if n > Limit", ">", "EqualityOperator", "<=");
+    let (vetted, vetted_index) = mutant("x != 1 &&", "&&", "LogicalOperator", "||");
     let mutants = || {
         vec![
             planned(&constant, constant_index, &[(0, "infected")]),
             planned(&boundary, boundary_index, &[(0, "infected")]),
+            planned(&vetted, vetted_index, &[(2, "infected")]),
         ]
     };
     let at = |site: &str, line: usize| format!("{site}#go_strong.rs:{line}");
@@ -403,7 +503,38 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
             at("spawn", after(".arg(\"-gcflags=-e\")", ".launch_output()")),
             true,
         ),
-        // A solo build that cannot be written is the mutant's error.
+        // Vet that cannot run finds nothing; a test binary that cannot be
+        // built or started runs nothing.
+        (
+            at(
+                "spawn",
+                after(
+                    ".args([\"vet\", \"-atomic\", \"-bools\"])",
+                    ".launch_output()",
+                ),
+            ),
+            false,
+        ),
+        (
+            at("spawn", after("fn build_package(", ".launch_output()")),
+            false,
+        ),
+        (
+            at("spawn", after("fn run_binary(", "command.launch() else {")),
+            false,
+        ),
+        // A vet overlay, and a solo build, that cannot be written: vet finds
+        // nothing, and the mutant's error.
+        (
+            format!(
+                "{}@2",
+                at(
+                    "fs.create_dir_all",
+                    line("fs::create_dir_all(directory).map_err(failed(directory))?;"),
+                )
+            ),
+            false,
+        ),
         (
             at(
                 "fs.create_dir_all",

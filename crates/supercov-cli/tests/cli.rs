@@ -24559,7 +24559,9 @@ fn go_mutants_are_killed_kept_or_found_not_to_compile() {
         return;
     };
     let project = Project::empty("go-strong");
-    project.write("go.mod", "module example.com/calc\n\ngo 1.22\n");
+    // A module older than Go 1.21: each file with a value probe is built
+    // as 1.21.
+    project.write("go.mod", "module example.com/calc\n\ngo 1.20\n");
     project.write(
         "calc.go",
         "package calc\n\nconst Limit = 2 + 3\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Sum(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Half(n int) int { return n / 2 }\n\nfunc Unused(n int) int { return n - 1 }\n",
@@ -24622,9 +24624,7 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         return;
     };
     let project = Project::empty("go-strong-make");
-    // A module older than Go 1.21: the probed file is built as 1.21, its
-    // own build constraint kept.
-    project.write("go.mod", "module example.com/tagged\n\ngo 1.20\n");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
     project.write(
         "double.go",
         "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
@@ -24671,11 +24671,11 @@ fn a_go_mutant_vet_rejects_is_unviable() {
     project.write("go.mod", "module example.com/vet\n\ngo 1.22\n");
     project.write(
         "odd.go",
-        "package vet\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n",
+        "package vet\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n\nfunc Big(x int) bool { return x > 9 }\n",
     );
     project.write(
         "odd_test.go",
-        "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
+        "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) || !Big(10) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
     );
     let text = project
         .supercov(&["mutants", "--", go, "test", "./..."])

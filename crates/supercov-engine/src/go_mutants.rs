@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn comparisons_of_clock_or_random_readings_are_untestable() {
-        let source = "package p\n\nvar limit = 3 < 4\n\nfunc f(last int64, n int) bool {\n\tnano := timeNow().UnixNano()\n\tnow := nano >> 8\n\tvar seen int64\n\tseen = now\n\tif seen <= last {\n\t\treturn true\n\t}\n\tif rand.Intn(9) > n {\n\t\treturn false\n\t}\n\treturn n < 2\n}\n";
+        let source = "package p\n\nvar limit = 3 < 4\n\nfunc f(last int64, n int) bool {\n\tnano := timeNow().UnixNano()\n\tnow := nano >> 8\n\tvar seen_at int64\n\tseen_at = now\n\tif seen_at <= last {\n\t\treturn true\n\t}\n\tif rand.Intn(9) > n {\n\t\treturn false\n\t}\n\treturn n < 2\n}\n";
         let rules = candidate_mutants("a.go", source)
             .unwrap()
             .into_iter()

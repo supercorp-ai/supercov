@@ -648,8 +648,12 @@ fn kill_tree(child: &mut std::process::Child) {
 /// How many test binaries the pass runs at once: `SUPERCOV_STRONG_WORKERS`,
 /// or every CPU.
 pub fn workers() -> usize {
-    std::env::var("SUPERCOV_STRONG_WORKERS")
-        .ok()
+    workers_from(std::env::var("SUPERCOV_STRONG_WORKERS").ok())
+}
+
+/// `workers` from the variable's value: a positive number, or every CPU.
+fn workers_from(value: Option<String>) -> usize {
+    value
         .and_then(|value| value.parse().ok())
         .filter(|workers| *workers > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get))
@@ -779,11 +783,16 @@ fn compile_errors(output: &str) -> Vec<(String, usize, usize, String)> {
         .lines()
         .filter_map(|line| {
             let (file, rest) = line.split_once(".go:")?;
-            let mut parts = rest.splitn(3, ':');
-            let line_number = parts.next()?.parse().ok()?;
-            let column = parts.next()?.trim().parse().ok()?;
-            let message = parts.next().unwrap_or_default().trim().to_owned();
-            Some((format!("{}.go", file.trim()), line_number, column, message))
+            let (line_number, rest) = rest.split_once(':')?;
+            let line_number = line_number.parse().ok()?;
+            let (column, message) = rest.split_once(':').unwrap_or((rest, ""));
+            let column = column.trim().parse().ok()?;
+            Some((
+                format!("{}.go", file.trim()),
+                line_number,
+                column,
+                message.trim().to_owned(),
+            ))
         })
         .collect()
 }
@@ -980,9 +989,36 @@ fn render(
                 let text = strong
                     .text
                     .replace(RUNTIME_IMPORT, runtime_for(runtimes, file));
+                // The import comes before every switch: each moves by as
+                // much as it changed, so a compile error is laid at its own.
+                let moved = text.len().cast_signed() - strong.text.len().cast_signed();
+                let sites = strong
+                    .sites
+                    .iter()
+                    .map(|(start, end, indices)| {
+                        (
+                            start.saturating_add_signed(moved),
+                            end.saturating_add_signed(moved),
+                            indices.clone(),
+                        )
+                    })
+                    .collect();
+                // A test's copy that does not build outside its switches.
+                let text = crate::fault::or(
+                    "go-strong-unbuildable-copy",
+                    || format!("{text}\nvar _ int = \"\"\n"),
+                    || text.clone(),
+                );
                 let path = pass.workspace.join(file);
                 fs::write(&path, &text).map_err(failed(&path))?;
-                Ok((file.clone(), StrongFile { text, ..strong }))
+                Ok((
+                    file.clone(),
+                    StrongFile {
+                        text,
+                        sites,
+                        ..strong
+                    },
+                ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let output = Command::new(&pass.flags.program)
@@ -1000,15 +1036,18 @@ fn render(
         let before = refused.values().map(HashSet::len).sum::<usize>();
         compile_errors(&text)
             .into_iter()
-            .filter_map(|(path, line, column, _)| {
-                let relative = path.trim_start_matches("./").to_owned();
-                let strong = rendered.get(&relative)?;
-                let at = offset_of(&strong.text, line, column)?;
+            .map(|(path, line, column, _)| (path.trim_start_matches("./").to_owned(), line, column))
+            // An error in a file with no switch refuses none.
+            .filter(|(relative, _, _)| rendered.contains_key(relative))
+            .map(|(relative, line, column)| {
+                let strong = &rendered[&relative];
+                let at = offset_of(&strong.text, line, column)
+                    .expect("go reports a position inside the file it compiled");
                 // Outside every switch: the file's switches all go.
                 let indices = crate::go_instrumenter::strong_site_at(strong, at)
                     .map(<[usize]>::to_vec)
                     .unwrap_or_else(|| strong.switched.clone());
-                Some((relative, indices))
+                (relative, indices)
             })
             .for_each(|(relative, indices)| {
                 let tokens = &files[&relative].tokens;
@@ -1135,13 +1174,10 @@ fn run_mutants(
     )
     .into_iter()
     .collect::<BTreeMap<_, _>>();
-    linked_directories(pass, &directories)
-        .into_iter()
-        .for_each(|(directory, links)| {
-            if let Some(package) = packages.get_mut(&directory) {
-                package.links = Some(links);
-            }
-        });
+    let mut links = linked_directories(pass, &directories);
+    packages
+        .iter_mut()
+        .for_each(|(directory, package)| package.links = links.remove(directory));
     let _ = writeln!(
         diagnostics,
         "[supercov] built {} test binaries ({} cannot run their mutants)",
@@ -1211,7 +1247,9 @@ fn run_helper(helper: &Path, root: &Path, request: &Value) -> Result<CheckAnswer
     let input = serde_json::to_vec(request).expect("plain data serializes");
     let mut stdin = child.stdin.take().expect("piped");
     let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let output = child.wait_with_output().map_err(failed(helper))?;
+    let output = child
+        .wait_with_output()
+        .expect("a process started with its output piped can be waited on");
     let _ = writer.join();
     if !output.status.success() {
         return Err(format!(
@@ -1318,22 +1356,7 @@ fn linked_directories(
     let plain = |path: &str| path.split(" [").next().unwrap_or_default().to_owned();
     let listed = output
         .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '|');
-            let (import, directory, deps) = (parts.next()?, parts.next()?, parts.next()?);
-            let inside = fs::canonicalize(directory).ok()?;
-            let relative = inside
-                .strip_prefix(&root)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/");
-            let relative = if relative.is_empty() {
-                ".".to_owned()
-            } else {
-                relative
-            };
-            Some((import.to_owned(), relative, deps.to_owned()))
-        })
+        .filter_map(|line| listed_package(line, &root))
         .collect::<Vec<_>>();
     let directory_of_import = listed
         .iter()
@@ -1353,6 +1376,27 @@ fn linked_directories(
         .collect()
 }
 
+/// One line of `linked_directories`' listing: the package's import path, its
+/// directory relative to `root`, and its dependencies; none for a package
+/// outside `root` (the standard library, a module's dependency) or a line
+/// that is not one.
+fn listed_package(line: &str, root: &Path) -> Option<(String, String, String)> {
+    let (import, rest) = line.split_once('|')?;
+    let (directory, deps) = rest.split_once('|')?;
+    let inside = fs::canonicalize(directory).ok()?;
+    let relative = inside
+        .strip_prefix(root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let relative = if relative.is_empty() {
+        ".".to_owned()
+    } else {
+        relative
+    };
+    Some((import.to_owned(), relative, deps.to_owned()))
+}
+
 /// The packages that hold a mutant's candidates, in the order its cheapest
 /// candidate puts them: those whose binary can run its code.
 fn candidate_packages(
@@ -1365,8 +1409,9 @@ fn candidate_packages(
         .candidates
         .iter()
         .filter_map(|candidate| {
-            let (directory, _) = split_test(&plan.tests.get(candidate.test)?.id)?;
-            let package = packages.get(directory)?;
+            let (directory, _) = split_test(&plan.tests[candidate.test].id)
+                .expect("a Go test's id names its package");
+            let package = &packages[directory];
             // A test the plan took only because its evidence is not its own
             // (an Example, a parallel test), in a binary that does not link
             // the mutant's package: it cannot run the mutant's code.
@@ -1569,6 +1614,292 @@ mod tests {
         assert_eq!(flags.build, ["-tags=a,b", "-mod=vendor"]);
         assert_eq!(flags.test, ["-test.cpu=2"]);
         assert_eq!(flags.program, "/usr/bin/go");
+        // Started by another program, with vet turned off.
+        let flags = go_flags(&["env", "A=1", "go", "test", "-vet", "off"].map(String::from));
+        assert!(flags.vet_off);
+        assert!(!go_flags(&["go", "test", "-vet=all"].map(String::from)).vet_off);
+        assert_eq!(
+            go_flags(&["go", "test"].map(String::from)),
+            GoFlags {
+                program: "go".into(),
+                ..GoFlags::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_wrapped_command_s_flags_join_the_command_s_own() {
+        let own = go_flags(&["go", "test", "-tags", "a", "-short", "-race"].map(String::from));
+        let flags = recorded_flags(
+            own,
+            &[
+                [
+                    "test",
+                    "-tags=b",
+                    "-race",
+                    "-mod=vendor",
+                    "-short",
+                    "-cpu=2",
+                ]
+                .map(String::from)
+                .to_vec(),
+                ["test", "-vet=off"].map(String::from).to_vec(),
+            ],
+        );
+        assert_eq!(flags.build, ["-tags=a", "-race", "-mod=vendor"]);
+        assert_eq!(flags.test, ["-test.short", "-test.cpu=2"]);
+        assert_eq!(flags.tags, "a");
+        assert!(flags.vet_off);
+        // A command with no tags of its own takes the first it started.
+        let flags = recorded_flags(
+            GoFlags::default(),
+            &[["test", "-tags", "b"].map(String::from).to_vec()],
+        );
+        assert_eq!(flags.tags, "b");
+    }
+
+    #[test]
+    fn the_workers_are_a_positive_number_or_every_cpu() {
+        let every = workers_from(None);
+        assert!(every > 0);
+        assert_eq!(workers_from(Some("3".into())), 3);
+        assert_eq!(workers_from(Some("0".into())), every);
+        assert_eq!(workers_from(Some("many".into())), every);
+    }
+
+    #[test]
+    fn each_module_of_a_workspace_gets_its_own_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("supercov-go-runtimes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (file, contents) in [
+            ("go.work", "go 1.22\n\nuse (\n\t./a\n\t./a/b\n)\n"),
+            ("a/go.mod", "module example.com/a\n"),
+            ("a/b/go.mod", "module example.com/b\n"),
+        ] {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), contents).unwrap();
+        }
+        let listed = runtimes(&root).unwrap();
+        let runtime = crate::go_run::RUNTIME_DIRECTORY_NAME;
+        assert_eq!(
+            listed,
+            [
+                ("a/b".to_owned(), format!("example.com/b/{runtime}")),
+                ("a".to_owned(), format!("example.com/a/{runtime}")),
+            ]
+        );
+        assert!(root.join("a/b").join(runtime).is_dir());
+        assert_eq!(
+            runtime_for(&listed, "a/b/c.go"),
+            format!("example.com/b/{runtime}")
+        );
+        assert_eq!(
+            runtime_for(&listed, "a/c.go"),
+            format!("example.com/a/{runtime}")
+        );
+        assert_eq!(runtime_for(&listed, "c.go"), "");
+        // A member with no module line cannot get one.
+        std::fs::write(root.join("a/b/go.mod"), "go 1.22\n").unwrap();
+        assert!(runtimes(&root).unwrap_err().contains("no module path"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listed_package_inside_the_copy_is_named_by_its_directory() {
+        let root = std::env::temp_dir().join(format!("supercov-go-listed-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let line = |directory: &Path| format!("x/sub|{}|a,b", directory.display());
+        assert_eq!(
+            listed_package(&line(&root.join("sub")), &root),
+            Some(("x/sub".to_owned(), "sub".to_owned(), "a,b".to_owned()))
+        );
+        assert_eq!(
+            listed_package(&line(&root), &root).map(|listed| listed.1),
+            Some(".".to_owned())
+        );
+        // Outside the copy, gone, or not a line of the listing: none.
+        assert_eq!(listed_package(&line(root.parent().unwrap()), &root), None);
+        assert_eq!(listed_package(&line(&root.join("gone")), &root), None);
+        assert_eq!(listed_package("x/sub", &root), None);
+        assert_eq!(listed_package("x/sub|dir", &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_mutant_runs_in_each_package_of_its_candidates_that_can_run_its_code() {
+        let plan = Plan {
+            tests: vec![
+                PlanTest {
+                    id: ".::TestA".into(),
+                },
+                PlanTest {
+                    id: "b::TestB".into(),
+                },
+            ],
+            mutants: Vec::new(),
+        };
+        let candidate = |test, reason: &str| PlanCandidate {
+            test,
+            reason: reason.into(),
+        };
+        let mutant = PlanMutant {
+            id: "a.go:1:1".into(),
+            file: "a.go".into(),
+            index: 0,
+            decided: None,
+            candidates: vec![
+                // The root package's binary does not link `a.go`'s.
+                candidate(0, "not-exact"),
+                candidate(1, "infected"),
+                // `b` says nothing of what it links.
+                candidate(1, "not-exact"),
+                candidate(0, "infected"),
+            ],
+        };
+        let packages = BTreeMap::from([
+            (
+                ".".to_owned(),
+                Package {
+                    links: Some(HashSet::from(["x".to_owned()])),
+                    ..Package::default()
+                },
+            ),
+            ("b".to_owned(), Package::default()),
+        ]);
+        assert_eq!(candidate_packages(&plan, &mutant, &packages), ["b", "."]);
+    }
+
+    #[test]
+    fn each_run_of_a_mutant_s_package_has_its_verdict() {
+        let outcome = |passed, timed_out, failures: &[&str]| RunOutcome {
+            passed,
+            timed_out,
+            hit_limit: false,
+            failures: failures.iter().map(|name| (*name).to_owned()).collect(),
+            started: 1,
+            elapsed_ms: 5,
+        };
+        let limit = Duration::from_secs(2);
+        let judge = |outcome: &RunOutcome, first| judged(outcome, "p", first, limit);
+        assert_eq!(judge(&outcome(true, false, &[]), true), None);
+        let killed = judge(&outcome(false, true, &["TestA"]), true).unwrap();
+        assert_eq!(
+            (
+                killed.status,
+                killed.killed_by.as_deref(),
+                killed.reason.as_deref()
+            ),
+            (
+                "killed",
+                Some("p::TestA"),
+                Some("a test failed before the time limit")
+            )
+        );
+        assert_eq!(
+            judge(&outcome(false, true, &[]), true).unwrap().status,
+            RETRY
+        );
+        let timeout = judge(&outcome(false, true, &[]), false).unwrap();
+        assert_eq!(timeout.status, "timeout");
+        assert_eq!(
+            timeout.reason.as_deref(),
+            Some("the tests ran past 2000 ms")
+        );
+        let outside = judge(&outcome(false, false, &[]), false).unwrap();
+        assert_eq!(
+            (outside.status, outside.killed_by.as_deref()),
+            ("killed", Some("p"))
+        );
+        let limited = RunOutcome {
+            hit_limit: true,
+            ..outcome(false, false, &[])
+        };
+        assert_eq!(judge(&limited, true).unwrap().status, "timeout");
+    }
+
+    /// A project directory whose type-check helper, already built, is
+    /// `program`.
+    #[cfg(unix)]
+    fn with_helper(name: &str, program: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("supercov-go-helper-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let digest = crate::stable_ids::digest(&[HELPER_SOURCE, HELPER_MODULE]);
+        let directory = root.join(".supercov/cache/go-mutants").join(&digest[..16]);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::os::unix::fs::symlink(program, directory.join(HELPER_NAME)).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_type_checker_s_helper_that_fails_says_so() {
+        let root =
+            std::env::temp_dir().join(format!("supercov-go-helper-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            helper(&root, "false")
+                .unwrap_err()
+                .contains("could not build")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        // `sh` reads the request as a script, and fails.
+        assert!(
+            run_helper(
+                Path::new("/bin/sh"),
+                Path::new("/"),
+                &json!({"mutants": []})
+            )
+            .is_err_and(|error| error.contains("helper failed"))
+        );
+        // `cat` answers with the request: not an answer.
+        assert!(
+            run_helper(
+                Path::new("/bin/cat"),
+                Path::new("/"),
+                &json!({"mutants": 1})
+            )
+            .is_err_and(|error| error.starts_with("the Go type-check helper: "))
+        );
+        assert!(
+            run_helper(
+                Path::new("/bin/cat"),
+                Path::new("/"),
+                &json!({"mutants": []})
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn site_facts_are_none_where_the_type_checker_cannot_say() {
+        // A file that is gone or does not parse asks nothing.
+        let root = with_helper("asked", "/bin/cat");
+        std::fs::write(root.join("bad.go"), "package p\n\nfunc (").unwrap();
+        let facts = site_facts(&root, &["gone.go".into(), "bad.go".into()]).unwrap();
+        assert!(facts.is_empty());
+        // An answer that is not one.
+        std::fs::write(root.join("a.go"), "package p\n\nvar x = 1 + 2\n").unwrap();
+        assert_eq!(site_facts(&root, &["a.go".into()]), None);
+        let _ = std::fs::remove_dir_all(&root);
+        // No helper: the project directory is a file.
+        let file =
+            std::env::temp_dir().join(format!("supercov-go-helper-file-{}", std::process::id()));
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(site_facts(&file, &["a.go".into()]), None);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_broken_package_is_named_by_its_first_line_that_says_something() {
+        assert_eq!(
+            first_line("\n# example.com/x\n  \n./a.go:1:2: no\n"),
+            "./a.go:1:2: no"
+        );
+        assert_eq!(first_line("# only\n"), "# only");
     }
 
     #[test]
@@ -1594,6 +1925,12 @@ mod tests {
         assert_eq!(offset_of("ab\ncd\nef", 3, 2), Some(7));
         assert_eq!(offset_of("ab", 1, 1), Some(0));
         assert_eq!(offset_of("ab", 3, 1), None);
+        assert_eq!(offset_of("ab", 0, 1), None);
+        // What is not a position is not an error.
+        assert_eq!(
+            compile_errors("a.go:x:1: m\na.go:3\na.go:3:y: m\nb.go:4:2"),
+            [("b.go".to_owned(), 4, 2, String::new())]
+        );
     }
 
     #[test]
