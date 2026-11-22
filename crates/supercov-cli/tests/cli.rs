@@ -23295,6 +23295,58 @@ fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
     assert_eq!(ahead, fresh);
 }
 
+/// A mutant that makes a worker drop its channel to Vitest (here it
+/// disconnects): Vitest cannot hear the file finish, so it did not, and the
+/// mutant is killed whatever the copy wrote. Nothing reports a closed
+/// channel as an error of the run, and the pass runs once.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
+    let project = vitest_mutants_project("strong-channel-closed");
+    project.write(
+        "src/bye.js",
+        "export function bye(flag) {\n  if (flag) process.disconnect?.();\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/bye.test.js",
+        "import { expect, it } from \"vitest\";\nimport { bye } from \"../src/bye.js\";\nit(\"stays\", () => expect(bye(false)).toBe(1));\n",
+    );
+    project.commit("bye");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(!said.contains("Channel closed"), "{said}");
+    assert!(!said.contains("Unhandled"), "{said}");
+    assert_eq!(reply["passes"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(
+        said.matches("strong pass: switches in").count(),
+        1,
+        "{said}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/bye.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let disconnects = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/bye.js:2:") && id.ends_with(":ConditionalExpression:true")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
+}
+
 /// A copy that runs none, or only some, of the tests it was to run proves
 /// nothing: here `labels` exists in the measured run only, so the copies of
 /// `label`'s mutants run no test. They are errors that say so, never

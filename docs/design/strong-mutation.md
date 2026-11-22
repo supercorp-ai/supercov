@@ -138,6 +138,18 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   once in a run that way, and stood as kills the ground truth does not
   have). Such a copy runs again, once; a failure that repeats counts, since
   the mutant may have run in a process the copy started.
+- **A copy ends when Vitest saw its file end.** A copy's records say it
+  finished, but its file finished only if Vitest's worker also told Vitest
+  so: a worker whose channel to Vitest closed (a mutant that calls
+  `process.disconnect()`), or that exited first, failed its file as a plain
+  run would, and the mutant is killed.
+- **A closed channel is not an error of the run.** Writes to a worker the
+  pass stopped fail with a closed channel; Vitest 1-3's pool let that
+  reject unhandled, and Vitest reported "Unhandled Rejection: Channel
+  closed" and failed the run, so that the command started the pass again.
+  The stand-ins drop those errors (the worker's exit says the rest) and,
+  while a strong pass runs, Vitest's handlers of unhandled errors do not see
+  them.
 - When every mutant is decided the run is cancelled; its slots left never
   start a process.
 

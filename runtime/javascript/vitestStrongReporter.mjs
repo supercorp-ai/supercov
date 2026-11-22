@@ -146,6 +146,44 @@ function readOutcome(out) {
     return outcome;
 }
 
+// What a write to a worker process that has ended fails with.
+const CLOSED_CHANNEL = new Set(["ERR_IPC_CHANNEL_CLOSED", "EPIPE", "ERR_IPC_DISCONNECTED"]);
+
+// A worker process the pass stopped (past its limit, or decided) leaves its
+// pool's last writes to it failing with a closed channel: Vitest 1-3's
+// tinypool lets that reject unhandled, and Vitest reported it as an error of
+// the run ("Unhandled Rejection: Channel closed") and failed it, so that the
+// command started the pass again. Those, and only those, are not Vitest's
+// to report while a strong pass runs.
+function ignoreClosedChannels() {
+    if (process.supercovClosedChannels)
+        return;
+    process.supercovClosedChannels = true;
+    const events = new Set(["unhandledRejection", "uncaughtException"]);
+    const closed = (error) => CLOSED_CHANNEL.has(error?.code) || String(error?.message ?? "") === "Channel closed";
+    const wrap = (listener) => {
+        if (typeof listener !== "function")
+            return listener;
+        return function (error, ...rest) {
+            if (closed(error))
+                return undefined;
+            return listener.call(this, error, ...rest);
+        };
+    };
+    for (const event of events) {
+        const listeners = process.listeners(event);
+        for (const listener of listeners) {
+            process.off(event, listener);
+            process.on(event, wrap(listener));
+        }
+    }
+    // Listeners Vitest adds later, wrapped as they come.
+    for (const method of ["on", "addListener", "prependListener", "once"]) {
+        const original = process[method].bind(process);
+        process[method] = (event, listener) => original(event, events.has(event) ? wrap(listener) : listener);
+    }
+}
+
 // Whether a process is still running (signal 0 sends nothing).
 function alive(pid) {
     try {
@@ -178,6 +216,9 @@ let mainClaims = false;
 // The continuous pass learns each test file's project and environment from
 // Vitest's "start" to its worker.
 let observeRun;
+// The continuous pass hears how Vitest saw each copy end: its worker's
+// "testfileFinished" (with or without an error), or its exit before one.
+let copyReported;
 // Whether Supercov's spawner forks Vitest's workers.
 let spawnerInstalled = false;
 
@@ -292,7 +333,9 @@ function forkThroughSpawner(ahead) {
                 this.emit("spawn");
             }
             else if (record.error) {
-                this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
+                // A write to a worker that is ending: its exit says the rest.
+                if (!CLOSED_CHANNEL.has(record.error.code))
+                    this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
             }
             else if (record.exit) {
                 this.exited(...record.exit);
@@ -314,6 +357,10 @@ function forkThroughSpawner(ahead) {
                         this.relay(run);
                     return;
                 }
+                if (this.copy && message?.__vitest_worker_response__ && message.type === "testfileFinished") {
+                    copyReported?.(this.copy, message.error ? "error" : "finished");
+                    this.copy = undefined;
+                }
                 this.emit("message", message);
             }
         }
@@ -321,6 +368,10 @@ function forkThroughSpawner(ahead) {
             if (this.ended)
                 return;
             this.ended = true;
+            if (this.copy) {
+                copyReported?.(this.copy, "exited");
+                this.copy = undefined;
+            }
             [this.exitCode, this.signalCode] = [code, signal];
             this.connected = false;
             standIns.delete(this.id);
@@ -341,6 +392,7 @@ function forkThroughSpawner(ahead) {
         run(message, claimed) {
             if (this.ended || this.nothingToRun)
                 return;
+            this.copy = claimed?.copy;
             if (claimed?.nothingToRun) {
                 this.nothingToRun = true;
                 process.nextTick(() => this.emit("message", response("testfileFinished")));
@@ -367,9 +419,11 @@ function forkThroughSpawner(ahead) {
         }
         send(message, ...rest) {
             const callback = rest.find((value) => typeof value === "function");
+            // A worker that ended, or is ending: its exit says the rest, and
+            // an error here would only tell Vitest the channel closed.
             if (!this.connected || !this.spawner.process) {
-                const error = Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" });
-                process.nextTick(() => callback ? callback(error) : this.emit("error", error));
+                if (callback)
+                    process.nextTick(callback, Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" }));
                 return false;
             }
             if (callback)
@@ -616,6 +670,7 @@ export default class SupercovStrongReporter {
         if (!planPath || !resultsPath)
             return;
         forkThroughSpawner(workersAhead(vitest));
+        ignoreClosedChannels();
         const original = vitest.runFiles.bind(vitest);
         vitest.runFiles = async (specs) => {
             const stopProfile = await profileMainProcess();
@@ -1642,7 +1697,12 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             else
                 profile.baselineCopies += 1;
             runningCopies.set(`${key}/${index}`, { item, out: `${directory}/${key}/${index}.out`, records: -1, lastReport: Date.now() });
-            return { index, filepath: `${root}/${item.file}` };
+            return { index, filepath: `${root}/${item.file}`, copy: `${key}/${index}` };
+        };
+        copyReported = (copy, how) => {
+            const entry = runningCopies.get(copy);
+            if (entry)
+                entry.vitest = how;
         };
         const dispatch = () => {
             for (let at = 0; at < waiters.length;) {
@@ -1853,7 +1913,14 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     entry.records = outcome.records;
                     entry.lastReport = now;
                 }
-                let end = outcome.done || gone ? outcome : undefined;
+                // A copy ends when its records say so and Vitest saw its file
+                // finish; a file Vitest saw fail (its worker could not report,
+                // say) did not finish, whatever the copy wrote.
+                let end = gone ? outcome : undefined;
+                if (outcome.done && entry.vitest === "finished")
+                    end = outcome;
+                else if (entry.vitest === "error" || entry.vitest === "exited")
+                    end = { ...outcome, done: false };
                 // Its mutant was decided by another copy meanwhile.
                 if (!end && entry.item.job?.done && outcome.pid && ownWorker(outcome.pid)) {
                     try {
@@ -1944,6 +2011,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         }
         claimRun = undefined;
         observeRun = undefined;
+        copyReported = undefined;
         // Whatever the run left undecided (its slots ran out): an error,
         // which the next `mutants test` runs again.
         for (const job of pending) {
