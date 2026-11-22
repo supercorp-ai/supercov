@@ -892,10 +892,13 @@ mod tests {
             fs::remove_file(root.join("pass/ruby")).unwrap();
             let directory = root.join("pass");
             fs::write(directory.join("plan.json"), full.to_string()).unwrap();
+            // Results that cannot be written to, beside a directory that
+            // can be (the pass's own files go beside its results).
+            std::os::unix::fs::symlink("/dev/full", directory.join("full.jsonl")).unwrap();
             let full_disk = crate::strong_driver::StrongPass {
                 strong: crate::strong_driver::StrongRun {
                     plan: directory.join("plan.json"),
-                    results: "/dev/full".into(),
+                    results: directory.join("full.jsonl"),
                 },
                 ..unparsed.clone()
             };
