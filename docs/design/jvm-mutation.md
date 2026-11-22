@@ -23,7 +23,7 @@ instruction, and PIT's default filters are applied in the same terms.
 | Mutator (PIT's, less `Mutator`) | Source form | Descriptor |
 | --- | --- | --- |
 | `ConditionalsBoundary` | `<` `<=` `>` `>=` wherever they are (always a jump) | the new operator |
-| `NegateConditionals` | every comparison; every other condition (a name, a call, `instanceof`, `is`) where the code branches on it: an `if`, a loop, `?:`, `&&`, `\|\|`, `!`, a bare `when` branch | `negated` |
+| `NegateConditionals` | every comparison; every other condition (a name, a call, `instanceof`, `is`, Kotlin's `x in names` but not a range's `x in a..b`) where the code branches on it: an `if`, a loop, `?:`, `&&`, `\|\|`, `!`, a bare `when` branch; the whole condition of a Kotlin `require` or `check` of `&&` or `\|\|` (its inlined `if (!value) throw`) | `negated` |
 | `Math` | `+ - * / % & \| ^ << >> >>>` on numbers and booleans (Kotlin's `and` `or` `xor` `shl` `shr` `ushr`), `x op= y`, and `x++` on anything but a local `int` | the new operator |
 | `Increments` | `i++`, `i--`, `i += c`, `i -= c` on a local `int` (`IINC`) | the new operator |
 | `InvertNegs` | `-x` | `removed` |
@@ -34,7 +34,16 @@ Where the bytecode depends on a type the source does not spell out, the type
 is inferred from the file's declarations and an index of every method the
 project declares: `s + 1` is a string concatenation (no mutant) where `s` is
 a `String`, a call statement is a `void` call where the project or the JDK
-declares it so, `i++` is `IINC` where `i` is a local `int`.
+declares it so, `i++` is `IINC` where `i` is a local `int`. A lambda returns
+what javac declares its synthetic method to return: the functional
+interface's return type where the source names it, the body's type where
+the interface's is a type variable inferred from it, and `Object` (so
+`NullReturnVals`) where the body is a value of the caller's own type
+variable (`() -> defaultValue` of a `T`). A Kotlin property's `get()`
+returns the property's type, under the name kotlinc gives the method
+(`getArea`, `isOpen`). A Kotlin local is incremented with `IINC`
+(`Increments`) unless a lambda reads it, inlined or not: then kotlinc
+loads, adds and stores (`Math`).
 
 PIT's filters, in source terms: no mutant in a static initializer, a static
 field's initializer, an enum's constructor, an `object`'s or companion's
@@ -48,7 +57,17 @@ folds (`60 * 60`, `CONST + 1`); no return mutant that returns what the code
 already returns (`return 0`, `return a < b`'s `false`, `return ""`,
 `Collections.emptyList()`: `FRETEQUIV`); no `NullReturnVals` of a method
 annotated `@NotNull`, which is every Kotlin function with a non-null return
-type; no return of a try-with-resources body.
+type; no return of a try-with-resources body. An anonymous class declared in
+a static initializer is a class of its own: its methods are mutated.
+
+PIT's filters match bytecode patterns, and a few source forms compile to
+the pattern only sometimes. On commons-csv PIT keeps the counter increment
+ending two `while (pos < len)` loops whose body has an `if` before it, and
+filters it in four others of the same source shape; on commons-cli it
+filters the `hasNext()` of one explicit `for (Iterator it = …; it.hasNext();)`
+loop and keeps it in another written the same way. Supercov applies each
+filter to its source shape every time: those three mutants are listed by
+one tool only.
 
 ### Ids
 
@@ -134,7 +153,14 @@ between test executions (`SupercovStrongPass.java`).
   the identifier with that name. A parameterized or dynamic test's
   invocations are not in a discovered plan (they appear as it runs), so an
   invocation is selected by its template's id and its index
-  (`…/[test-template-invocation:#3]`), as PIT selects it. The TestNG driver
+  (`…/[test-template-invocation:#3]`), as PIT selects it. A JUnit 4
+  parameterized test whose parameter prints as `Object.toString` does
+  (`[com.example.Builder@6c0d7c83]`) carries an identity hash that differs
+  from one JVM to the next, and from one discovery to the next, unique id
+  included: such a test is found by its name with every `@hash` left out,
+  and run by its class with a discovery filter on that name. Two tests of a
+  class that read alike without their hashes are not found (`error`). The
+  TestNG driver
   runs the class and method (a data provider's invocations together); the
   JUnit 4 driver of Ant's `<junit>` runs `JUnitCore` on the method. A
   candidate the driver cannot find leaves its mutant `error`, never
@@ -150,6 +176,12 @@ between test executions (`SupercovStrongPass.java`).
   (Surefire enables assertions on its own loader, not with `-ea`), and a
   minion JVM gets `-ea` where the build had them: typetools' tests check
   with `assert`.
+- **Order.** A mutant's candidates run one at a time until one kills it:
+  first the tests of the test file named after the mutant's file
+  (`JvmAnnotationsTest` for `JvmAnnotations.kt`), then the fastest. On
+  kotlinpoet a mutant in a Kotlin expression body (no statement point of
+  its own, so every test is a candidate) was killed only by its 812th
+  candidate when they ran in name order: about 50 s each.
 - **Baselines and confirmations.** A test runs once without a mutant before
   any mutant runs against it; one that fails then is no candidate. A kill is
   confirmed by running the killing test again with no mutant: a mutant that
@@ -220,4 +252,143 @@ run and strong pass, on public projects pinned to tags
 (`projects.json`), and joins the results with `supercov runs latest
 mutants pit`.
 
-(Results: see the report section below.)
+A project with many files is split into shards by file size (largest first,
+each to the lightest shard), and PIT and Supercov each run a shard's files
+in a job of their own: kotlinpoet in 12. The Ant project (Apache Ant's own
+`util` package) runs PIT through its command line over the classes Ant
+compiled, since PIT's Ant task launches the same.
+
+### Results
+
+Measured on 16-CPU SoroCI machines (c8a/m8a/r8a), 16 threads for PIT and
+16 JVMs for the strong pass, PIT 1.17.1; times are seconds, summed over a
+project's shards. "PIT" is PIT as a team runs it (it stops at a mutant's
+first kill); "PIT matrix" runs every test against every mutant, the ground
+truth the verdicts are compared with.
+
+| project | PIT mutants | Supercov mutants | matched | agree | violations | PIT s | PIT matrix s | measured run s | strong pass s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| commons-cli 1.9.0 (Java, JUnit 5) | 882 | 882 | 881 | 880 | 1 | 35 | 78 | 13 | 24 |
+| commons-csv 1.12.0 (Java, JUnit 5) | 720 | 719 | 717 | 717 | 0 | 46 | 131 | 17 | 27 |
+| typetools 0.6.3 (Java, TestNG) | 216 | 216 | 216 | 214 | 2 | 19 | 20 | 9 | 18 |
+| picnic 0.5.0 (Kotlin, JUnit 4) | 632 | 330 | 306 | 304 | 1 | 34 | 39 | 14 | 24 |
+| kotlinpoet 1.14.2 (Kotlin, JUnit 4, 12 shards) | 2,114 | 1,155 | 1,041 | 1,033 | 8 | 1,041 | 3,567 | 728 | 794 |
+
+The Kotlin enumeration changed after this run (explicit getters' returns,
+`x in names`, a local a lambda reads incremented by `Math`, pairing in the
+order the compiler emits code): joined with the same PIT reports, kotlinpoet
+matches 1,100 of PIT's mutants and picnic 313. Their verdicts were not run
+again.
+
+On the Java projects the measured run and the strong pass together take
+about as long as PIT as a team runs it, and a third to a half of PIT's
+full matrix. On kotlinpoet the strong pass (794 s) is faster than PIT
+(1,041 s); with the measured run it is slower, because each of the 12
+shards runs the whole suite measured (about 60 s a shard) where one run
+would do. Before this round the strong pass on kotlinpoet took longer than
+PIT (658 s against 574 s on 4 of 6 shards): three quarters of one shard's
+time went to mutants of another Gradle module the measured run never ran
+(every test their candidate; the benchmark now mutates the module's own
+files only), and to mutants every test may reach, tried in name order (now
+the mutant's own test file first, see **Order**).
+
+Every violation, checked:
+
+- **commons-cli `OptionBuilder.java:141` (NullReturnVals):** Supercov
+  survived, PIT killed by `testGroovy`. Applied by hand, that test and the
+  whole suite pass: PIT's kill comes from static state an earlier test left
+  in its JVM.
+- **typetools `TypeResolver.java:72` and `:102` (VoidMethodCall):** Supercov
+  killed, PIT survived. The calls (`setAccessible`, `Unsafe.putBoolean`) are
+  in anonymous classes the static initializer runs; without them the
+  initializer's lambda support fails and `LambdaTest` gets `Unknown` for
+  `UUID`. PIT swaps a mutated class into a JVM whose static initializer
+  already ran, so the mutant never runs there.
+- **picnic `textBorder.kt:5` (NegateConditionals):** Supercov killed, PIT
+  survived. The code runs only as the companion object's statics are set
+  up; applied by hand, 42 of 48 tests fail. Same cause as typetools'.
+- **kotlinpoet `CodeWriter.kt:41`, `Taggable.kt:73`:** Supercov killed, PIT
+  no coverage. Both are in Kotlin `inline` functions: their code runs only
+  as copied into callers, compiled before PIT mutates anything, so PIT's
+  mutant of the function itself never runs.
+- **kotlinpoet `Taggable.kt:28`, `:63`:** Supercov killed, PIT survived or
+  no coverage. Only `TaggableTest` reaches them, a JUnit 4 parameterized
+  test whose names carry identity hashes (`AnnotationSpec$Builder@6c0d7c83`).
+  PIT selects a test by its JUnit description in a fresh JVM, where the
+  hashes differ, so it never runs them; Supercov finds them by their names
+  without the hashes (see **One test at a time**).
+- **kotlinpoet `PropertySpec.kt:236`, `:241` (two each):** a pairing error,
+  fixed after the run: `require(a || b)`'s own jump was paired with the
+  operand `a`'s and the other way round. Paired in the order the compiler
+  emits them, the four agree.
+- (earlier, fixed) kotlinpoet `TypeSpec.kt:834`: paired with PIT's
+  surviving `?.` check on line 833 instead of its own line's.
+
+Mutants one tool lists and the other does not:
+
+- **Java:** commons-csv 3 PIT-only (a lambda passed to a library's generic
+  method, whose return type the source does not show; two counter
+  increments PIT's loop filter keeps, see **Which mutants**), 2
+  Supercov-only (`CSVPrinter.java:421`, `:423`, a branch PIT lists nothing
+  for); commons-cli 1 and 1 (a lambda converting a character, stored in a
+  map whose value type is a wildcard; the iterator loop PIT filters once
+  and not once); typetools none. Before this round typetools had 4
+  PIT-only (the static initializer's anonymous classes) and commons-cli 3
+  (lambdas returning a type variable).
+- **Kotlin, PIT-only:** code kotlinc writes that has no source of its own,
+  by `mutants pit`'s categories on kotlinpoet (1,073) and picnic (326):
+  inlined standard-library code reported past the file's end (202, 32),
+  property getters (154, 102), null checks kotlinc adds (107, 3) and those
+  of `?.`, `?:` and `!!` (52, 77), a `require` or `check`'s own jump where
+  its condition is one comparison (the same mutant as the comparison's;
+  111, 2), `for` loop counters (62, 20), `when` subject comparisons and
+  `is` branches (55), inlined `isNotEmpty()` and the like (45), range checks
+  (9), an array constructor's filling loop (8), and 276 and 82 others not
+  yet put down one by one.
+- **Kotlin, Supercov-only:** kotlinpoet 114, picnic 24. Of kotlinpoet's,
+  17 are `+`, `+=` or `-=` on a type the source does not show (a
+  collection, a string) that the compiler refuses: `unviable`. picnic's
+  include `debug { }` lambdas whose code kotlinc removes.
+
+### Ant
+
+Apache Ant 1.10.15's own `util` package (`src/main/org/apache/tools/ant/util/*.java`,
+its tests `org/apache/tools/ant/util/*Test.java` through the build's
+`junit-tests` target, JUnit 4 under `<junit>`), on the same 16-CPU machines:
+
+| | PIT mutants | Supercov mutants | matched | agree | violations | PIT s | PIT matrix s | measured run s | strong pass s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Apache Ant `util` | 2,083 | 2,056 | 2,039 | 2,016 | 22 | 119 | 160 | 11 | 29 |
+
+PIT runs through its command line over the classes Ant compiled, with the
+system properties the build's `<junit>` sets. The violations, with the
+mutant applied to the source and the build's own `junit-tests` run whole
+where marked "checked":
+
+- **Supercov killed, PIT survived (6):** `JAXPUtils.java:105`, `:122`,
+  `:247` (a parser factory cached in a static field; checked for `:105`:
+  `XMLFragmentTest` errors), `JavaEnvUtils.java:529`, `:530` (a static
+  package list built once) and `SymbolicLinkUtils.java:55` (read into a
+  test class's static field). PIT's JVM already holds the cached value, so
+  the mutant changes nothing there; Ant forks a JVM per test class, as
+  Supercov's fresh class loader starts afresh.
+- **Supercov survived, PIT killed (16):** 13 in `FileUtils`, killed in
+  PIT's run by `XMLFragmentTest`, `JavaEnvUtilsTest`, `ResourceUtilsTest`
+  or `LoaderUtilsTest`, and `DeweyDecimal.java:214`. Checked
+  `FileUtils.java:1374` and `:1523`: the whole suite passes with them, so
+  PIT's kills come from its environment (one JVM, tests sharing a
+  `FileUtils` cache and files), not from the project's tests as they run.
+  The others are not checked one by one.
+- **Supercov wrong (1, checked):** `LazyFileOutputStream.java:128`
+  (`write(b, 0, b.length)` removed). `testByteArray` fails with it, as PIT
+  says; the strong pass called it survived. The test asserts a file
+  `test.txt` exists in the working directory, which the class's other tests
+  create and delete: with 16 JVMs in one directory, another JVM's
+  `testOpen` made the file while the mutant ran. The strong pass does not
+  yet isolate tests that share files in the working directory, and a
+  survivor is not confirmed by running its candidates again alone.
+
+`FileUtils.java:1204` (`createNewFile` returns `true`) is decided without
+running: every test saw it return `true`. The pass's one `error` is the
+same file's `createNewFile` mutant, whose run ended the formatter's JVM
+before its verdict (Ant's own classes are the ones under test).
