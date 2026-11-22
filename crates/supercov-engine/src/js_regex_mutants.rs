@@ -89,7 +89,7 @@ impl Parser<'_> {
             if character == '|' || character == ')' {
                 break;
             }
-            let atom = self.atom()?;
+            let atom = self.atom(character)?;
             items.push(self.quantified(atom)?);
         }
         Ok(match items.len() {
@@ -161,9 +161,9 @@ impl Parser<'_> {
         })
     }
 
-    fn atom(&mut self) -> Parsed<Node> {
+    /// The atom at the cursor, whose first character is `character`.
+    fn atom(&mut self, character: char) -> Parsed<Node> {
         let start = self.at;
-        let character = self.peek().ok_or(())?;
         let kind = match character {
             '^' => {
                 self.at += 1;
@@ -295,7 +295,8 @@ impl Parser<'_> {
                 while self.pattern.get(index).is_some_and(|c| *c != '}') {
                     index += 1;
                 }
-                if self.pattern.get(index) != Some(&'}') {
+                // A property is named: `\p{}` is no pattern.
+                if index == self.at + 3 || self.pattern.get(index) != Some(&'}') {
                     return Err(());
                 }
                 self.at = index + 1;
@@ -344,15 +345,15 @@ fn build(pattern: &[char], node: &Node, edit: &Edit) -> Option<String> {
     if (node.start, node.end) == edit.target {
         return edit.replacement.clone();
     }
-    if !(node.start <= edit.target.0 && edit.target.1 <= node.end) {
-        return Some(text(pattern, node.start, node.end));
-    }
-    Some(match &node.kind {
-        Kind::Concat(items) => items
+    // A node the edit is outside of is its own text, as is a leaf, which
+    // holds no other node.
+    let inside = node.start <= edit.target.0 && edit.target.1 <= node.end;
+    Some(match (&node.kind, inside) {
+        (Kind::Concat(items), true) => items
             .iter()
             .filter_map(|item| build(pattern, item, edit))
             .collect(),
-        Kind::Or(alternatives) => alternatives
+        (Kind::Or(alternatives), true) => alternatives
             .iter()
             .filter_map(|alternative| match alternative {
                 None => Some(String::new()),
@@ -360,33 +361,34 @@ fn build(pattern: &[char], node: &Node, edit: &Edit) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("|"),
-        Kind::Quantified(atom, quantifier) => format!(
+        (Kind::Quantified(atom, quantifier), true) => format!(
             "{}{}",
             build(pattern, atom, edit).unwrap_or_default(),
             text(pattern, *quantifier, node.end)
         ),
-        Kind::Group(opening, content) => format!(
+        (Kind::Group(opening, content), true) => format!(
             "{}{})",
             text(pattern, node.start, node.start + opening),
             build(pattern, content, edit).unwrap_or_default()
         ),
-        Kind::Lookaround(at, content) => format!(
+        (Kind::Lookaround(at, content), true) => format!(
             "{}{})",
             text(pattern, node.start, at + 1),
             build(pattern, content, edit).unwrap_or_default()
         ),
-        Kind::Class(negated, items) => {
-            let opening = if *negated { 2 } else { 1 };
-            let mut built = text(pattern, node.start, node.start + opening);
-            for item in items {
-                built.push_str(&build(pattern, item, edit).unwrap_or_default());
-            }
-            built.push(']');
-            built
-        }
-        Kind::Bol | Kind::Eol | Kind::Predefined(_) | Kind::Unicode | Kind::Other => {
-            text(pattern, node.start, node.end)
-        }
+        (Kind::Class(negated, items), true) => format!(
+            "{}{}]",
+            text(
+                pattern,
+                node.start,
+                node.start + if *negated { 2 } else { 1 }
+            ),
+            items
+                .iter()
+                .filter_map(|item| build(pattern, item, edit))
+                .collect::<String>()
+        ),
+        _ => text(pattern, node.start, node.end),
     })
 }
 
@@ -480,10 +482,8 @@ fn edits(pattern: &[char], node: &Node, found: &mut Vec<Edit>) {
 /// asks for them: each a whole pattern. None where it cannot parse it, and
 /// none that are empty.
 pub(crate) fn mutants(pattern: &str, flags: &str) -> Vec<String> {
+    // An empty pattern is no alternative: it has none.
     let characters = pattern.chars().collect::<Vec<_>>();
-    if characters.is_empty() {
-        return Vec::new();
-    }
     let mut parser = Parser {
         pattern: &characters,
         at: 0,
