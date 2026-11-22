@@ -42,6 +42,7 @@ case $command in
     (cd "$dir" && GOFLAGS=-count=1 "$out/bin/gremlins" unleash --silent \
       --integration --coverpkg ./... --timeout-coefficient 10 \
       --invert-assignments --invert-logical --invert-loopctrl --remove-self-assignments \
+      --invert-bitwise --invert-bwassign \
       -o "$out/report.json" . > "$out/log.txt" 2>&1) || true
     echo "gremlins $(echo "$(date +%s.%N) - $start" | bc)" > "$out/time.txt"
     ;;

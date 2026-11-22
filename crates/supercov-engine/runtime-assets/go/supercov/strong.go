@@ -252,3 +252,51 @@ func Pick[T any](s *Strong, indices []int32, values ...T) T {
 	}
 	return values[0]
 }
+
+// And is `x & y`; its mutant `x | y`.
+func And[T Integer](s *Strong, i int32, x, y T) T {
+	if s.On(i) {
+		return x | y
+	}
+	return x & y
+}
+
+// Or is `x | y`; its mutant `x & y`.
+func Or[T Integer](s *Strong, i int32, x, y T) T {
+	if s.On(i) {
+		return x & y
+	}
+	return x | y
+}
+
+// Xor is `x ^ y`; its mutant `x & y`.
+func Xor[T Integer](s *Strong, i int32, x, y T) T {
+	if s.On(i) {
+		return x & y
+	}
+	return x ^ y
+}
+
+// AndNot is `x &^ y`; its mutant `x & y`.
+func AndNot[T Integer](s *Strong, i int32, x, y T) T {
+	if s.On(i) {
+		return x & y
+	}
+	return x &^ y
+}
+
+// Shl is `x << n`; its mutant `x >> n`. The count may be any integer type.
+func Shl[T, U Integer](s *Strong, i int32, x T, n U) T {
+	if s.On(i) {
+		return x >> n
+	}
+	return x << n
+}
+
+// Shr is `x >> n`; its mutant `x << n`.
+func Shr[T, U Integer](s *Strong, i int32, x T, n U) T {
+	if s.On(i) {
+		return x << n
+	}
+	return x >> n
+}

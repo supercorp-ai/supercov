@@ -38,6 +38,8 @@ execFileSync(
     "--invert-logical",
     "--invert-loopctrl",
     "--remove-self-assignments",
+    "--invert-bitwise",
+    "--invert-bwassign",
     "-o",
     report,
     ".",

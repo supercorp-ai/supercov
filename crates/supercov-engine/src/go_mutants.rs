@@ -13,9 +13,8 @@
 //! StrykerJS's: `gremlins_name` maps back), and `scripts/gremlins-parity.mjs`
 //! writes the goldens the tests below compare against.
 //!
-//! Gremlins also has `INVERT_BITWISE` and `INVERT_BWASSIGN`, off by
-//! default there; they are off here too (`MUTATORS`). Of the rest, all are
-//! on, the ones Gremlins leaves off by default among them.
+//! Every Gremlins mutator is listed, the ones Gremlins leaves off by
+//! default among them.
 
 use tree_sitter::Node;
 
@@ -34,11 +33,14 @@ pub const MUTANT_SET: &str = "gremlins@0.6.0";
 /// `ARITHMETIC_BASE`'s, so the two cannot share a name) and
 /// `INVERT_LOOPCTRL`. Gremlins' flags list the same set:
 /// `--invert-assignments --invert-logical --invert-loopctrl
-/// --remove-self-assignments` beside its defaults.
+/// --remove-self-assignments --invert-bitwise --invert-bwassign` beside its
+/// defaults: all of them.
 pub const MUTATORS: &[&str] = &[
     ARITHMETIC_OPERATOR,
     ASSIGNMENT_OPERATOR,
     EQUALITY_OPERATOR,
+    INVERT_BITWISE,
+    INVERT_BWASSIGN,
     INVERT_LOOPCTRL,
     INVERT_NEGATIVES,
     LOGICAL_OPERATOR,
@@ -59,6 +61,11 @@ pub const UNARY_OPERATOR: &str = "UnaryOperator";
 /// `INCREMENT_DECREMENT`.
 pub const UPDATE_OPERATOR: &str = "UpdateOperator";
 pub const INVERT_LOOPCTRL: &str = "INVERT_LOOPCTRL";
+/// `&` `|` `^` `&^` `<<` `>>`, binary and unary, and a type union's `|`:
+/// StrykerJS has no bitwise mutator, so Gremlins' name.
+pub const INVERT_BITWISE: &str = "INVERT_BITWISE";
+/// `&=` `|=` `^=` `&^=` `<<=` `>>=`.
+pub const INVERT_BWASSIGN: &str = "INVERT_BWASSIGN";
 pub const INVERT_NEGATIVES: &str = "INVERT_NEGATIVES";
 
 /// Whether `mutator` is one a Go mutant can carry.
@@ -87,6 +94,8 @@ pub fn gremlins_name(mutator: &str, operator: &str, replacement: &str) -> &'stat
         LOGICAL_OPERATOR => "INVERT_LOGICAL",
         UPDATE_OPERATOR => "INCREMENT_DECREMENT",
         INVERT_NEGATIVES => "INVERT_NEGATIVES",
+        INVERT_BITWISE => "INVERT_BITWISE",
+        INVERT_BWASSIGN => "INVERT_BWASSIGN",
         _ => "INVERT_LOOPCTRL",
     }
 }
@@ -101,7 +110,18 @@ fn mutations(token: &str) -> &'static [(&'static str, &'static str)] {
     match token {
         "+" => &[(ARITHMETIC_OPERATOR, "-")],
         "+=" => &[(ASSIGNMENT_OPERATOR, "-="), (ASSIGNMENT_OPERATOR, "=")],
-        "&=" | "&^=" | "|=" | "<<=" | ">>=" | "^=" => &[(ASSIGNMENT_OPERATOR, "=")],
+        "&=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, "|=")],
+        "|=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, "&=")],
+        "^=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, "&=")],
+        "&^=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, "&=")],
+        "<<=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, ">>=")],
+        ">>=" => &[(ASSIGNMENT_OPERATOR, "="), (INVERT_BWASSIGN, "<<=")],
+        "&" => &[(INVERT_BITWISE, "|")],
+        "|" => &[(INVERT_BITWISE, "&")],
+        "^" => &[(INVERT_BITWISE, "&")],
+        "&^" => &[(INVERT_BITWISE, "&")],
+        "<<" => &[(INVERT_BITWISE, ">>")],
+        ">>" => &[(INVERT_BITWISE, "<<")],
         "break" => &[(INVERT_LOOPCTRL, "continue")],
         "continue" => &[(INVERT_LOOPCTRL, "break")],
         "--" => &[(UPDATE_OPERATOR, "++")],
@@ -157,6 +177,7 @@ pub fn sites(tree: &tree_sitter::Tree, source: &str) -> Vec<GoSite> {
         if let Some(site) = site(node, source) {
             found.push(site);
         }
+        found.extend(union_sites(node));
         let mut cursor = node.walk();
         let children = node.named_children(&mut cursor).collect::<Vec<_>>();
         stack.extend(children.into_iter().rev());
@@ -183,6 +204,9 @@ fn site(node: Node, source: &str) -> Option<GoSite> {
         // `&`, `*`, `<-` have no listed mutator).
         (SiteKind::Unary, "-") => vec![(INVERT_NEGATIVES, "+"), (UNARY_OPERATOR, "+")],
         (SiteKind::Unary, "+") => vec![(UNARY_OPERATOR, "-")],
+        // `&x` and `^x`: Gremlins' table is the binary one's.
+        (SiteKind::Unary, "&") => vec![(INVERT_BITWISE, "|")],
+        (SiteKind::Unary, "^") => vec![(INVERT_BITWISE, "&")],
         (SiteKind::Unary, _) => Vec::new(),
         (_, operator) => mutations(operator).to_vec(),
     };
@@ -230,6 +254,30 @@ pub fn mutant_id(
         "{file}:{}:{}-{}:{}:{mutator}:{replacement}",
         start.0, start.1, end.0, end.1
     )
+}
+
+/// A type union's `|`s (`~int | ~float64`, in a constraint): go/ast reads
+/// `A | B | C` as `(A | B) | C`, binary expressions Gremlins mutates, the
+/// last `|` first. The mutant is never a program Go accepts.
+fn union_sites(node: Node) -> Vec<GoSite> {
+    if node.kind() != "type_elem" {
+        return Vec::new();
+    }
+    let mut cursor = node.walk();
+    let children = node.children(&mut cursor).collect::<Vec<_>>();
+    children
+        .iter()
+        .enumerate()
+        .filter(|(_, child)| child.kind() == "|")
+        .rev()
+        .map(|(at, bar)| GoSite {
+            kind: SiteKind::Binary,
+            node: (node.start_byte(), children[at + 1].end_byte()),
+            token: (bar.start_byte(), bar.end_byte()),
+            operator: "|".to_owned(),
+            mutants: vec![(INVERT_BITWISE, "&")],
+        })
+        .collect()
 }
 
 /// 1-based line and 1-based byte column of `offset`, as Go reports a
@@ -575,7 +623,7 @@ mod tests {
 
     #[test]
     fn unary_operators_without_a_listed_mutator_are_left() {
-        assert!(listed("package p\n\nfunc f(a *int, b bool, c chan int) { _ = *a; _ = !b; _ = <-c; _ = ^*a }\n").is_empty());
+        assert!(listed("package p\n\nfunc f(a *int, b bool, c chan int) { _ = *a; _ = !b; _ = <-c }\n").is_empty());
         assert_eq!(
             listed("package p\n\nfunc f(a int) int { return +a }\n"),
             [(3, 28, "ARITHMETIC_BASE".to_owned(), "-".to_owned())]

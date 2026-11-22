@@ -1640,6 +1640,20 @@ impl Schemata<'_> {
                 };
                 (call(name, indices), ")".to_owned())
             }
+            "&" | "|" | "^" | "&^" | "<<" | ">>" => {
+                let (name, replacement) = match operator {
+                    "&" => ("And", "|"),
+                    "|" => ("Or", "&"),
+                    "^" => ("Xor", "&"),
+                    "&^" => ("AndNot", "&"),
+                    "<<" => ("Shl", ">>"),
+                    _ => ("Shr", "<<"),
+                };
+                (
+                    call(name, Self::index_of(mutants, replacement, 0)),
+                    ")".to_owned(),
+                )
+            }
             _ => return false,
         };
         self.out.push_str(&open);
@@ -1671,7 +1685,12 @@ impl Schemata<'_> {
                 ),
             ),
             "+" => ("Pos", Self::index_of(mutants, "-", 0)),
-            _ => return false,
+            // `^x` to `&x` makes a pointer of a number: no switch holds
+            // both. (`&x` to `|x` never compiles.)
+            _ => {
+                self.refuse(site.token.0, "type-changing");
+                return false;
+            }
         };
         self.out.push_str(&format!(
             "{}.{name}{}({slot}, {indices}, ",

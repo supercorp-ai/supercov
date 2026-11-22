@@ -40,6 +40,8 @@ func Ops(a, b int, x, y float64, s string) (int, float64, string, bool) {
 	c <<= 1
 	c >>= 1
 	c &^= 3
+	p := &c
+	*p = ^*p & a | b ^ a &^ 1 << 2 >> 1
 	z := -x + +y
 	n := -a
 	ok := a < b || a <= b && a > b || a >= b

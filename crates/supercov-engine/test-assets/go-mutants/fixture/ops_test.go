@@ -3,8 +3,8 @@ package fixture
 import "testing"
 
 func TestOps(t *testing.T) {
-	if c, _, s, _ := Ops(3, 4, 1, 2, "x"); c == 0 || s != "x!" {
-		t.Fatal(c, s)
+	if _, _, s, _ := Ops(3, 4, 1, 2, "x"); s != "x!" {
+		t.Fatal(s)
 	}
 	if Loops([]int{1, -1, 2, 200, 0, 3}) == 0 {
 		t.Fatal()
