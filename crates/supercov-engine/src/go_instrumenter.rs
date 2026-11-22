@@ -372,7 +372,7 @@ pub(crate) fn parse_failure(tree: &tree_sitter::Tree, source: &str) -> String {
 /// Statements Go nests directly inside a block. Declarations that cannot
 /// execute -- an import, a type -- carry no coverage question and are absent
 /// rather than counted as uncovered.
-fn is_statement(kind: &str) -> bool {
+pub(crate) fn is_statement(kind: &str) -> bool {
     matches!(
         kind,
         "assignment_statement"
@@ -464,7 +464,7 @@ fn ending_fallthrough(clause: Node) -> Option<Node> {
     (last.kind() == "fallthrough_statement").then_some(last)
 }
 
-fn in_statement_position(node: Node) -> bool {
+pub(crate) fn in_statement_position(node: Node) -> bool {
     node.parent()
         .is_some_and(|parent| parent.kind() == "statement_list")
 }
@@ -1253,6 +1253,633 @@ pub fn build_go_obligations_for(
         edits,
         decision_widths: collector.widths,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Strong mode: mutant schemata (docs/design/strong-mutation.md, Go).
+//
+// Every mutant a strong pass runs is written into its file behind a switch,
+// and the file is otherwise left as written: no coverage probe, no
+// weak-mutation probe. One mutant is active per test-binary process
+// (`SUPERCOV_ACTIVE_MUTANT`), so one build serves the whole pass.
+//
+// Go type-checks every switch, so a switch has to be a program Go accepts
+// whichever way it goes, and the program with the switch off has to be the
+// program as written, evaluated exactly as written. The forms:
+//
+// - `==`, `!=`: `((x == y) != s.On(i))`, an untyped boolean as the original
+//   is, its operands evaluated once.
+// - `&&`, `||`: `((bool(x) != s.Is(i)) && (bool(y) != s.Is(i))) != s.On(i)`,
+//   which is `x && y` with the switch off and `x || y` with it on,
+//   short-circuiting as each does.
+// - `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, unary `-` and `+`: a
+//   generic call of the runtime's (`Lss`, `Add`, `Neg`, ...) taking the
+//   operands once, instantiated with the expression's own type where the
+//   file can write it; a comparison's call is compared with `true`, which
+//   makes it the untyped boolean it was.
+// - a constant expression (`time.Second * 2`, `1 << 10`): `Pick` among the
+//   expression as written and each mutant of it written whole, so the
+//   compiler evaluates every one as a constant -- a switch inside it would
+//   have made the original a run-time computation, which overflows where
+//   the constant does not. Where Go requires a constant (a `const`
+//   declaration, an array length) nothing can switch, and the mutant is
+//   `unplaceable`.
+// - `x += y`, `x++`, `break`: the statement written once per mutant in an
+//   `if s.On(i) { ... } else { <original> }`; where a statement cannot
+//   stand (a `for` clause's post statement, an `if`'s initializer), the
+//   same inside `func() { ... }()`.
+//
+// A mutant that does not compile alone (`go_mutants`' check) gets no switch:
+// it is reported `unviable`. A switch Go still refuses (a type the file
+// cannot write, inference that picks another type) is found by building:
+// the error's position is in a site's range, and that site's mutants are
+// left out and run in builds of their own.
+// ---------------------------------------------------------------------------
+
+/// One mutant a strong pass switches: its place in its file's list, the
+/// token's bytes and what the token becomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongMutant {
+    pub index: usize,
+    pub token: (usize, usize),
+    pub replacement: String,
+    pub mutator: String,
+}
+
+/// What the type checker says of the expression a token is the operator
+/// of (`go_mutants`' check), by the token's offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SiteFacts {
+    pub constant: bool,
+    pub constant_context: bool,
+    pub float: bool,
+    pub string: bool,
+    /// The expression's type as the file writes it; empty for an untyped
+    /// one, and holding a NUL where a package in it is not imported.
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// For a constant: the bytes of the largest constant expression around
+    /// it, which a switch must hold whole.
+    pub root: Option<(usize, usize)>,
+    /// That expression's type, written as `type_name` is.
+    pub root_type: String,
+    /// Whether that expression is a boolean.
+    pub root_bool: bool,
+}
+
+/// A file rewritten with its switches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrongFile {
+    pub text: String,
+    /// The mutants that got a switch.
+    pub switched: Vec<usize>,
+    /// The mutants that could not, and why.
+    pub unplaceable: Vec<(usize, String)>,
+    /// Each switch's bytes in `text`, and its mutants: where a compile error
+    /// there is laid at.
+    pub sites: Vec<(usize, usize, Vec<usize>)>,
+}
+
+/// The name a file's switch record is read under: one per file, since a
+/// package shares its top-level names.
+pub fn strong_slot_name(file: &str) -> String {
+    format!(
+        "__supercovStrong{}",
+        &crate::stable_ids::digest(&[file])[..12]
+    )
+}
+
+struct Schemata<'a> {
+    source: &'a str,
+    alias: &'a str,
+    slot: String,
+    generics: bool,
+    /// Each switched site's token offset, and its mutants as
+    /// `(index, replacement)`.
+    by_token: std::collections::HashMap<usize, Vec<(usize, String)>>,
+    facts: &'a std::collections::HashMap<usize, SiteFacts>,
+    sites: std::collections::HashMap<usize, crate::go_mutants::GoSite>,
+    /// Each site's token offset, by its node's bytes.
+    by_node: std::collections::HashMap<(usize, usize), Vec<usize>>,
+    /// The largest constant expressions holding a switched mutant, by their
+    /// bytes, with the facts of one site in each.
+    roots: std::collections::HashMap<(usize, usize), SiteFacts>,
+    out: String,
+    switched: Vec<usize>,
+    unplaceable: Vec<(usize, String)>,
+    placed: Vec<(usize, usize, Vec<usize>)>,
+}
+
+impl Schemata<'_> {
+    fn facts(&self, token: usize) -> SiteFacts {
+        self.facts.get(&token).cloned().unwrap_or_default()
+    }
+
+    /// The site whose node is exactly `node`, with mutants to switch.
+    fn site_at(&self, node: Node) -> Option<crate::go_mutants::GoSite> {
+        let site = self
+            .by_node
+            .get(&(node.start_byte(), node.end_byte()))?
+            .iter()
+            .map(|token| &self.sites[token])
+            .find(|site| node.kind() == site_kind_name(site.kind, node.kind()))?;
+        self.by_token
+            .contains_key(&site.token.0)
+            .then(|| site.clone())
+    }
+
+    fn refuse(&mut self, token: usize, reason: &str) {
+        if let Some(mutants) = self.by_token.remove(&token) {
+            for (index, _) in mutants {
+                self.unplaceable.push((index, reason.to_owned()));
+            }
+        }
+    }
+
+    /// The node as written, its sites switched.
+    fn emit(&mut self, node: Node) {
+        if let Some(facts) = self.roots.remove(&(node.start_byte(), node.end_byte())) {
+            let start = self.out.len();
+            let indices = self.emit_constant(node, &facts);
+            self.switched.extend(indices.iter().copied());
+            self.placed.push((start, self.out.len(), indices));
+            return;
+        }
+        if let Some(site) = self.site_at(node)
+            && self.emit_site(node, &site)
+        {
+            return;
+        }
+        self.emit_children(node, None);
+    }
+
+    /// The node's children, each emitted, with the source between them; the
+    /// token at `swap` written as its replacement.
+    fn emit_children(&mut self, node: Node, swap: Option<((usize, usize), &str)>) {
+        let mut at = node.start_byte();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.out.push_str(&self.source[at..child.start_byte()]);
+            match swap {
+                Some((token, replacement)) if (child.start_byte(), child.end_byte()) == token => {
+                    self.out.push_str(replacement);
+                }
+                _ => self.emit(child),
+            }
+            at = child.end_byte();
+        }
+        self.out.push_str(&self.source[at..node.end_byte()]);
+    }
+
+    /// The site's switch, or `false` where it has none and is emitted as
+    /// written.
+    fn emit_site(&mut self, node: Node, site: &crate::go_mutants::GoSite) -> bool {
+        let facts = self.facts(site.token.0);
+        let start = self.out.len();
+        let mutants = self.by_token[&site.token.0].clone();
+        let emitted = match site.kind {
+            crate::go_mutants::SiteKind::Binary => self.emit_binary(node, site, &mutants, &facts),
+            crate::go_mutants::SiteKind::Unary => self.emit_unary(node, site, &mutants, &facts),
+            _ => self.emit_statement(node, site, &mutants),
+        };
+        if !emitted {
+            self.out.truncate(start);
+            return false;
+        }
+        let indices = mutants.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        self.switched.extend(indices.iter().copied());
+        self.placed.push((start, self.out.len(), indices));
+        true
+    }
+
+    /// `index` of mutant with `replacement` at this site, or -2: the
+    /// runtime's mark for no switch.
+    fn index_of(mutants: &[(usize, String)], replacement: &str, nth: usize) -> String {
+        mutants
+            .iter()
+            .filter(|(_, candidate)| candidate == replacement)
+            .nth(nth)
+            .map_or("-2".to_owned(), |(index, _)| index.to_string())
+    }
+
+    fn operands<'t>(node: Node<'t>) -> Option<(Node<'t>, Node<'t>)> {
+        Some((
+            node.child_by_field_name("left")?,
+            node.child_by_field_name("right")?,
+        ))
+    }
+
+    /// `[T]` where the file can write the expression's type.
+    fn instantiation(facts: &SiteFacts) -> String {
+        if facts.type_name.is_empty() || facts.type_name.contains('\0') {
+            String::new()
+        } else {
+            format!("[{}]", facts.type_name)
+        }
+    }
+
+    fn emit_binary(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+        facts: &SiteFacts,
+    ) -> bool {
+        let Some((left, right)) = Self::operands(node) else {
+            return false;
+        };
+        let slot = self.slot.clone();
+        let alias = self.alias.to_owned();
+        let operator = site.operator.as_str();
+        let call = |name: &str, indices: String| {
+            format!(
+                "{alias}.{name}{}({slot}, {indices}, ",
+                Self::instantiation(facts)
+            )
+        };
+        let (open, close) = match operator {
+            "==" | "!=" => {
+                let index = Self::index_of(mutants, if operator == "==" { "!=" } else { "==" }, 0);
+                self.out.push_str("((");
+                self.emit_children(node, None);
+                self.out.push_str(&format!(") != {slot}.On({index}))"));
+                return true;
+            }
+            "&&" | "||" => {
+                let index = Self::index_of(mutants, if operator == "&&" { "||" } else { "&&" }, 0);
+                self.out.push_str("(((bool(");
+                self.emit(left);
+                self.out
+                    .push_str(&format!(") != {slot}.Is({index})) {operator} (bool("));
+                self.emit(right);
+                self.out
+                    .push_str(&format!(") != {slot}.Is({index}))) != {slot}.On({index}))"));
+                return true;
+            }
+            "<" | "<=" | ">" | ">=" => {
+                if !self.generics {
+                    self.refuse(site.token.0, "no-generics");
+                    return false;
+                }
+                let (name, boundary, negation) = match operator {
+                    "<" => ("Lss", "<=", ">="),
+                    "<=" => ("Leq", "<", ">"),
+                    ">" => ("Gtr", ">=", "<="),
+                    _ => ("Geq", ">", "<"),
+                };
+                let indices = format!(
+                    "{}, {}",
+                    Self::index_of(mutants, boundary, 0),
+                    Self::index_of(mutants, negation, 0)
+                );
+                // A comparison's own type is a boolean whichever it is:
+                // the call is instantiated with its operands' type.
+                (
+                    format!("({alias}.{name}({slot}, {indices}, "),
+                    ") == true)".to_owned(),
+                )
+            }
+            "+" | "-" | "*" | "/" | "%" => {
+                if !self.generics {
+                    self.refuse(site.token.0, "no-generics");
+                    return false;
+                }
+                let (name, indices) = match operator {
+                    "+" => ("Add", Self::index_of(mutants, "-", 0)),
+                    "-" => (
+                        "Sub",
+                        format!(
+                            "{}, {}",
+                            Self::index_of(mutants, "+", 0),
+                            Self::index_of(mutants, "+", 1)
+                        ),
+                    ),
+                    "*" => ("Mul", Self::index_of(mutants, "/", 0)),
+                    "/" => ("Quo", Self::index_of(mutants, "*", 0)),
+                    _ => ("Rem", Self::index_of(mutants, "*", 0)),
+                };
+                (call(name, indices), ")".to_owned())
+            }
+            _ => return false,
+        };
+        self.out.push_str(&open);
+        self.emit(left);
+        self.out.push_str(", ");
+        self.emit(right);
+        self.out.push_str(&close);
+        true
+    }
+
+    fn emit_unary(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+        facts: &SiteFacts,
+    ) -> bool {
+        let Some(operand) = node.child_by_field_name("operand") else {
+            return false;
+        };
+        if !self.generics {
+            self.refuse(site.token.0, "no-generics");
+            return false;
+        }
+        let slot = self.slot.clone();
+        let (name, indices) = match site.operator.as_str() {
+            "-" => (
+                "Neg",
+                format!(
+                    "{}, {}",
+                    Self::index_of(mutants, "+", 0),
+                    Self::index_of(mutants, "+", 1)
+                ),
+            ),
+            "+" => ("Pos", Self::index_of(mutants, "-", 0)),
+            _ => return false,
+        };
+        self.out.push_str(&format!(
+            "{}.{name}{}({slot}, {indices}, ",
+            self.alias,
+            Self::instantiation(facts)
+        ));
+        self.emit(operand);
+        self.out.push(')');
+        true
+    }
+
+    /// The largest constant expression around switched mutants: `Pick`
+    /// among it as written and each of them written whole. Its mutants.
+    fn emit_constant(&mut self, node: Node, facts: &SiteFacts) -> Vec<usize> {
+        let range = node.start_byte()..node.end_byte();
+        let mut inside = self
+            .by_token
+            .iter()
+            .filter(|(at, _)| range.contains(*at))
+            .flat_map(|(at, mutants)| {
+                mutants
+                    .iter()
+                    .map(move |(index, replacement)| (*index, *at, replacement.clone()))
+            })
+            .collect::<Vec<_>>();
+        inside.sort_unstable();
+        let original = &self.source[range.clone()];
+        let mut values = vec![original.to_owned()];
+        for (_, at, replacement) in &inside {
+            let token = self.sites[at].token;
+            values.push(format!(
+                "{}{replacement}{}",
+                &self.source[range.start..token.0],
+                &self.source[token.1..range.end]
+            ));
+        }
+        let indices = inside
+            .iter()
+            .map(|(index, _, _)| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = values
+            .iter()
+            .map(|value| format!("({value})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let typed = SiteFacts {
+            type_name: facts.root_type.clone(),
+            ..SiteFacts::default()
+        };
+        let call = format!(
+            "{}.Pick{}({}, []int32{{{indices}}}, {values})",
+            self.alias,
+            if facts.root_bool {
+                String::new()
+            } else {
+                Self::instantiation(&typed)
+            },
+            self.slot
+        );
+        if facts.root_bool {
+            // Compared with `true`, it is the untyped boolean it was.
+            self.out.push_str(&format!("({call} == true)"));
+        } else {
+            self.out.push_str(&call);
+        }
+        inside.into_iter().map(|(index, _, _)| index).collect()
+    }
+
+    /// `x += y`, `x++`, `break`: the statement once per mutant, behind `if`.
+    fn emit_statement(
+        &mut self,
+        node: Node,
+        site: &crate::go_mutants::GoSite,
+        mutants: &[(usize, String)],
+    ) -> bool {
+        let parent = node
+            .parent()
+            .map(|parent| parent.kind())
+            .unwrap_or_default();
+        let closure = match parent {
+            "statement_list" | "labeled_statement" => false,
+            "for_clause"
+            | "if_statement"
+            | "expression_switch_statement"
+            | "type_switch_statement" => {
+                if site.kind == crate::go_mutants::SiteKind::Branch {
+                    self.refuse(site.token.0, "statement-position");
+                    return false;
+                }
+                true
+            }
+            _ => {
+                self.refuse(site.token.0, "statement-position");
+                return false;
+            }
+        };
+        if closure {
+            self.out.push_str("func() { ");
+        }
+        for (index, replacement) in mutants {
+            self.out
+                .push_str(&format!("if {}.On({index}) {{ ", self.slot));
+            self.emit_children(node, Some((site.token, replacement)));
+            self.out.push_str(" } else ");
+        }
+        self.out.push_str("{ ");
+        self.emit_children(node, None);
+        self.out.push_str(" }");
+        if closure {
+            self.out.push_str(" }()");
+        }
+        true
+    }
+}
+
+/// The tree-sitter kind a site of `kind` has, `actual` where several do.
+fn site_kind_name(kind: crate::go_mutants::SiteKind, actual: &str) -> &'static str {
+    match kind {
+        crate::go_mutants::SiteKind::Binary => "binary_expression",
+        crate::go_mutants::SiteKind::Unary => "unary_expression",
+        crate::go_mutants::SiteKind::Assignment => "assignment_statement",
+        crate::go_mutants::SiteKind::IncDec if actual == "dec_statement" => "dec_statement",
+        crate::go_mutants::SiteKind::IncDec => "inc_statement",
+        crate::go_mutants::SiteKind::Branch if actual == "continue_statement" => {
+            "continue_statement"
+        }
+        crate::go_mutants::SiteKind::Branch => "break_statement",
+    }
+}
+
+/// `source` (the file mutants.json keys `key`) with a switch for each of
+/// `mutants` that can have one. `refused` are token offsets whose sites a
+/// build refused: they are left as written, their mutants unplaceable.
+/// `generics` says whether the file's language has them (Go 1.21 and
+/// later: the switches lean on its inference of untyped arguments).
+pub fn strong_rewrite(
+    key: &str,
+    source: &str,
+    mutants: &[StrongMutant],
+    facts: &std::collections::HashMap<usize, SiteFacts>,
+    refused: &std::collections::HashSet<usize>,
+    generics: bool,
+) -> Result<StrongFile, GoInstrumenterError> {
+    let tree = parse(source)?;
+    let sites = crate::go_mutants::sites(&tree, source)
+        .into_iter()
+        .map(|site| (site.token.0, site))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut by_token = std::collections::HashMap::<usize, Vec<(usize, String)>>::new();
+    let mut unplaceable = Vec::new();
+    for mutant in mutants {
+        match sites.get(&mutant.token.0) {
+            Some(site) if site.token == mutant.token => {
+                if refused.contains(&mutant.token.0) {
+                    unplaceable.push((mutant.index, "refused-by-compiler".to_owned()));
+                } else {
+                    by_token
+                        .entry(mutant.token.0)
+                        .or_default()
+                        .push((mutant.index, mutant.replacement.clone()));
+                }
+            }
+            _ => unplaceable.push((mutant.index, "node-not-found".to_owned())),
+        }
+    }
+    // Constants: switched as the largest constant expression around them,
+    // where Go lets a switch stand at all.
+    let mut roots = std::collections::HashMap::new();
+    for (token, mutants) in by_token.iter_mut() {
+        let Some(site_facts) = facts.get(token).filter(|facts| facts.constant) else {
+            continue;
+        };
+        let reason = if site_facts.constant_context {
+            Some("constant-context")
+        } else if !generics {
+            Some("no-generics")
+        } else if site_facts.root.is_none() {
+            Some("constant-without-root")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => {
+                for (index, _) in mutants.drain(..) {
+                    unplaceable.push((index, reason.to_owned()));
+                }
+            }
+            None => {
+                roots
+                    .entry(site_facts.root.expect("checked above"))
+                    .or_insert_with(|| site_facts.clone());
+            }
+        }
+    }
+    by_token.retain(|_, mutants| !mutants.is_empty());
+    let requested = by_token
+        .values()
+        .flatten()
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut by_node = std::collections::HashMap::<(usize, usize), Vec<usize>>::new();
+    for site in sites.values() {
+        by_node.entry(site.node).or_default().push(site.token.0);
+    }
+    let mut schemata = Schemata {
+        source,
+        alias: RUNTIME_ALIAS,
+        roots,
+        by_node,
+        slot: strong_slot_name(key),
+        generics,
+        by_token,
+        facts,
+        sites,
+        out: String::with_capacity(source.len() * 2),
+        switched: Vec::new(),
+        unplaceable,
+        placed: Vec::new(),
+    };
+    schemata.emit(tree.root_node());
+    let Schemata {
+        out,
+        mut switched,
+        mut unplaceable,
+        placed,
+        slot,
+        ..
+    } = schemata;
+    switched.sort_unstable();
+    switched.dedup();
+    // A mutant whose site was never reached by the walk (a root no node has
+    // the bytes of) or turned down without a reason has no switch either.
+    for index in requested {
+        if switched.binary_search(&index).is_err()
+            && !unplaceable.iter().any(|(seen, _)| *seen == index)
+        {
+            unplaceable.push((index, "no-switch".to_owned()));
+        }
+    }
+    unplaceable.sort();
+    if switched.is_empty() {
+        return Ok(StrongFile {
+            text: source.to_owned(),
+            switched,
+            unplaceable,
+            sites: Vec::new(),
+        });
+    }
+    // The record, and the runtime's import on the package clause's line: a
+    // line of its own would move every line below it.
+    let mut text = out;
+    let import = import_edit(&text, RUNTIME_ALIAS, RUNTIME_IMPORT)
+        .expect("a parsed file has a package clause");
+    let shift = import.text.len();
+    text.insert_str(import.at, &import.text);
+    let key_literal = serde_json::to_string(key).expect("a string serializes");
+    text.push_str(&format!(
+        "\nvar {slot} = {RUNTIME_ALIAS}.StrongSlot({key_literal})\n"
+    ));
+    let sites = placed
+        .into_iter()
+        .map(|(start, end, indices)| {
+            let moved = |at: usize| if at >= import.at { at + shift } else { at };
+            (moved(start), moved(end), indices)
+        })
+        .collect();
+    Ok(StrongFile {
+        text,
+        switched,
+        unplaceable,
+        sites,
+    })
+}
+
+/// The switched site a compile error at byte `at` of a strong file is in:
+/// the innermost whose bytes hold it.
+pub fn strong_site_at(file: &StrongFile, at: usize) -> Option<&[usize]> {
+    file.sites
+        .iter()
+        .filter(|(start, end, _)| (*start..*end).contains(&at))
+        .min_by_key(|(start, end, _)| end - start)
+        .map(|(_, _, indices)| indices.as_slice())
 }
 
 #[cfg(test)]

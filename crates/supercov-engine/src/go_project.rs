@@ -500,6 +500,13 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
 /// 1.16 when it has none, as the toolchain reads it -- unless a
 /// `//go:build go1.N` line above its package clause sets an older one.
 fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
+    language_minor(root, relative, source) >= 18
+}
+
+/// The minor version of the Go language a file is compiled as: its
+/// module's `go` directive (1.16 where it has none), or an older `//go:build
+/// go1.N` above its package clause.
+pub(crate) fn language_minor(root: &Path, relative: &str, source: &str) -> u32 {
     let minor = |text: &str| -> Option<u32> {
         let rest = text.strip_prefix("1.")?;
         let end = rest
@@ -536,7 +543,7 @@ fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
                 .collect::<Vec<_>>()
         })
         .min();
-    constrained.map_or(declared, |file| file.min(declared)) >= 18
+    constrained.map_or(declared, |file| file.min(declared))
 }
 
 /// The module path declared in `go.mod`, which package identities are relative

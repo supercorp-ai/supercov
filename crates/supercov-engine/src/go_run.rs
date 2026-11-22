@@ -62,6 +62,20 @@ const RUNTIME_SOURCE: &str = include_str!("../runtime-assets/go/supercov/superco
 /// The generic wrappers a decision used as a value calls, in a file of its
 /// own behind `go1.18`, so a module older than generics still builds the rest.
 const RUNTIME_VALUES_SOURCE: &str = include_str!("../runtime-assets/go/supercov/values.go");
+/// Strong mutation's switches and their generic helpers, behind `go1.21`.
+const RUNTIME_STRONG_SOURCE: &str = include_str!("../runtime-assets/go/supercov/strong.go");
+
+/// The runtime package's directory in a module's copy.
+pub(crate) const RUNTIME_DIRECTORY_NAME: &str = RUNTIME_DIRECTORY;
+
+/// The runtime package's files, by name.
+pub(crate) fn runtime_files() -> [(&'static str, &'static str); 3] {
+    [
+        ("supercov.go", RUNTIME_SOURCE),
+        ("values.go", RUNTIME_VALUES_SOURCE),
+        ("strong.go", RUNTIME_STRONG_SOURCE),
+    ]
+}
 
 /// The generated file that declares a package's probe array.
 const PROBE_FILE: &str = "supercov_probes.go";
@@ -302,14 +316,9 @@ fn instrument_sources(
                 at.display()
             )
         })?;
-        write(
-            &at.join(RUNTIME_DIRECTORY).join("supercov.go"),
-            RUNTIME_SOURCE,
-        )?;
-        write(
-            &at.join(RUNTIME_DIRECTORY).join("values.go"),
-            RUNTIME_VALUES_SOURCE,
-        )?;
+        for (name, contents) in runtime_files() {
+            write(&at.join(RUNTIME_DIRECTORY).join(name), contents)?;
+        }
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
         Ok(())
     })?;
