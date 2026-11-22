@@ -349,6 +349,11 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     const mochaArgs = residentAllowed ? mochaArguments(withoutNpx(command, root)) : undefined;
     const jestHosts = residentHosts({ script: "strongJestHost.mjs", args: jestArgs, root, environment, log: join(work, "jest-hosts.log") });
     const mochaHosts = residentHosts({ script: "strongMochaHost.mjs", args: mochaArgs, root, environment, log: join(work, "mocha-hosts.log") });
+    // A suite of ES modules, which cannot be loaded again in one thread,
+    // runs each job in a fresh thread of a resident Mocha
+    // (SUPERCOV_STRONG_MOCHA_ESM=process: a process per job instead).
+    const esmHosts = residentHosts({ script: "strongMochaHost.mjs", args: mochaArgs, root, environment: { ...environment, SUPERCOV_MOCHA_FRESH_WORKERS: "1" }, log: join(work, "mocha-esm-hosts.log") });
+    const esmResident = process.env.SUPERCOV_STRONG_MOCHA_ESM !== "process";
     const commonJs = packageIsCommonJs(root);
     const broken = new Set();
     const residentFor = (file) => {
@@ -357,10 +362,10 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             return undefined;
         if (runner === "jest" && jestArgs)
             return jestHosts;
-        // A Mocha suite of ES modules, which cannot be loaded again in one
-        // process, starts the command per job.
         if (runner === "mocha" && mochaArgs && (/\.cjs$/.test(file) || (commonJs && /\.js$/.test(file))))
             return mochaHosts;
+        if (runner === "mocha" && mochaArgs && esmResident)
+            return esmHosts;
         return undefined;
     };
     const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
@@ -677,6 +682,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     await Promise.all(pending.map((task) => runMutant(...task)));
     jestHosts.close();
     mochaHosts.close();
+    esmHosts.close();
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }

@@ -719,8 +719,15 @@ starting the runner for each job:
 - `strongMochaHost.mjs` keeps Mocha and what `--require` loads, takes the
   project's CommonJS modules out of `require.cache` before each job and
   loads the job's file with `require`, so it and the code it tests load
-  afresh with the mutant on. A suite of ES modules, which cannot be loaded
-  again, runs a process per job.
+  afresh with the mutant on.
+- A suite of ES modules cannot be loaded again in one thread: the host runs
+  each job in a worker thread of its own, which has a module graph of its
+  own, and makes and readies the next job's thread (Mocha and what
+  `--require` loads) while a job runs. On deep-eql (426 mutants) and
+  pathval (123) every verdict is that of a process per job
+  (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
+  against 7.2 s on SoroCI's 16 CPUs, where jobs side by side hide most of a
+  process's start, and 9 s against 27 s on a laptop.
 
 The adapters write each job's evidence into the job's own directory, read
 when each record is written (a journal kept per directory: a resident
@@ -758,6 +765,8 @@ both list, Regex mutants included.
 | ini | tap | tap | 413 | 0 (28 StrykerJS errors) | 13.6 | 1.6 + 6.5 |
 | remix-auth | bun:test | command | 625 | 0 | 7.3 | 0.4 + 1.9 |
 | mini-throttle | Vitest Browser Mode | vitest | 77 | 1 (error) | 32.4 | 9.0 + 28.0 |
+| pathval | Mocha (ES modules) | mocha | 123 | 13 | 1.6 | 0.9 + 1.3 |
+| deep-eql | Mocha (ES modules) | mocha | (StrykerJS cannot run it) | | | 1.1 + 5.9 |
 
 No mutant StrykerJS detected (killed or timed out) is `survived` or
 `no-coverage` in Supercov, and none it let live is detected by Supercov but
@@ -776,6 +785,14 @@ the ones explained here, each applied by hand:
   a function body emptied: no switch could be placed
   (`no-placeable-ancestor`), so Supercov says `error`; StrykerJS kills both.
   An error is no verdict either way.
+- pathval: StrykerJS kills 13 mutants Supercov says survive, each by one
+  test alone, `exclude __proto__`, which first asserts that no global
+  `polluted` exists. StrykerJS runs every mutant in one process: once a
+  mutant let `setPathValue(obj, '__proto__.polluted', true)` through, the
+  global stayed, and that test failed for every mutant after it. Applied by
+  hand (`index.js:84` without `^`, `index.js:174` `===` to `!==`), each
+  survives `npx mocha`. StrykerJS's Mocha runner cannot run deep-eql at all:
+  it needs Mocha's `lib/cli/run-helpers`, which Mocha 12 no longer has.
 - Verdicts StrykerJS and Supercov both detect differ in kind 52 times
   (`Killed`/`Timeout` either way): a mutant that makes a test both slow and
   wrong is whichever the runner sees first.

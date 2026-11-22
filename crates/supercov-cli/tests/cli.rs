@@ -22082,6 +22082,8 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&node, &["node", "--test"], "node:test");
+    // A suite of ES modules runs each job in a fresh thread of a resident
+    // Mocha.
     let mocha = job_runner_project(
         "strong-jobs-mocha",
         "module",
