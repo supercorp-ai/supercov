@@ -243,6 +243,7 @@ struct Profile {
     confirmations: usize,
     overturned: usize,
     runs: usize,
+    retries: usize,
 }
 
 /// One package's test binary and what its baseline said.
@@ -901,6 +902,7 @@ pub fn run_go_strong(
             .collect::<std::collections::VecDeque<_>>(),
     );
     let workers = request.workers.max(1);
+    let retries = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
@@ -910,8 +912,38 @@ pub fn run_go_strong(
                     };
                     let key = (mutant.file.clone(), mutant.index);
                     let verdict = match solo_reasons.get(&key) {
-                        Some(reason) => run_solo(&pass, &plan, mutant, &files, &packages, reason),
-                        None => run_mutant(&pass, &plan, mutant, &packages, None),
+                        Some(reason) => {
+                            run_solo(&pass, &plan, mutant, &files, &packages, reason, true)
+                        }
+                        None => run_mutant(&pass, &plan, mutant, &packages, None, true),
+                    };
+                    if verdict.status == RETRY {
+                        retries.lock().expect("retries").push(mutant);
+                    } else {
+                        pass.record(&mutant.id, &verdict);
+                    }
+                }
+            });
+        }
+    });
+    // The mutants that ran past their first limit, again with the full one,
+    // side by side.
+    let retried = retries.into_inner().expect("retries");
+    pass.profile.lock().expect("profile").retries = retried.len();
+    let queue = Mutex::new(retried.into_iter().collect::<std::collections::VecDeque<_>>());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let Some(mutant) = queue.lock().expect("queue").pop_front() else {
+                        break;
+                    };
+                    let key = (mutant.file.clone(), mutant.index);
+                    let verdict = match solo_reasons.get(&key) {
+                        Some(reason) => {
+                            run_solo(&pass, &plan, mutant, &files, &packages, reason, false)
+                        }
+                        None => run_mutant(&pass, &plan, mutant, &packages, None, false),
                     };
                     pass.record(&mutant.id, &verdict);
                 }
@@ -937,6 +969,7 @@ fn summary(pass: &Pass, started: Instant) -> Value {
         "baselines": profile.baselines,
         "confirmations": profile.confirmations,
         "overturned": profile.overturned,
+        "retries": profile.retries,
         "runs": profile.runs,
     });
     drop(profile);
@@ -1090,6 +1123,19 @@ fn limit_for(package: &Package) -> Duration {
     Duration::from_millis(package.baseline_ms.saturating_mul(3) + 10_000)
 }
 
+/// A mutant's first attempt at a package: one and a half times its baseline
+/// and a second. A run past it is stopped and tried again, in a round of
+/// retries alone, with `limit_for`'s: a mutant that slows its tests down
+/// without hanging them keeps its verdict, and one that hangs holds a
+/// worker for a second or two rather than for ten.
+fn first_limit_for(package: &Package) -> Duration {
+    Duration::from_millis(package.baseline_ms.saturating_mul(3) / 2 + 1_000)
+}
+
+/// What a first attempt past its short limit says: run again, with the
+/// full limit.
+const RETRY: &str = "retry";
+
 /// Each test package's binary's linked package directories, from `go list
 /// -deps -test`, relative to the copy's root; a package `go list` cannot
 /// say has none.
@@ -1200,6 +1246,7 @@ fn run_mutant(
     mutant: &PlanMutant,
     packages: &BTreeMap<String, Package>,
     solo: Option<&BTreeMap<String, Package>>,
+    first: bool,
 ) -> Verdict {
     let started = Instant::now();
     let order = candidate_packages(plan, mutant, packages);
@@ -1241,7 +1288,11 @@ fn run_mutant(
             };
         }
         let selection = (!package.whole).then_some(names.as_slice());
-        let limit = limit_for(package);
+        let limit = if first {
+            first_limit_for(package)
+        } else {
+            limit_for(package)
+        };
         let outcome = pass.run_binary(
             binary,
             directory,
@@ -1250,6 +1301,21 @@ fn run_mutant(
             limit,
         );
         tests += outcome.started.len() as u64;
+        if outcome.timed_out && !outcome.hit_limit {
+            // A test that failed before the limit settles it.
+            if let Some(failed) = &outcome.failed {
+                return Verdict {
+                    status: "killed",
+                    killed_by: Some(format!("{directory}::{failed}")),
+                    tests,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    reason: Some("a test failed before the time limit".into()),
+                };
+            }
+            if first {
+                return Verdict::of(RETRY, "past its first limit");
+            }
+        }
         if outcome.hit_limit || outcome.timed_out {
             return Verdict {
                 status: "timeout",
@@ -1285,6 +1351,9 @@ fn run_mutant(
             tests += again.started.len() as u64;
             if again.passed {
                 continue;
+            }
+            if first && again.timed_out && !again.hit_limit && again.failed.is_none() {
+                return Verdict::of(RETRY, "past its first limit");
             }
             if again.hit_limit || again.timed_out {
                 return Verdict {
@@ -1378,6 +1447,7 @@ fn run_solo(
     files: &BTreeMap<String, FileMutants>,
     packages: &BTreeMap<String, Package>,
     reason: &str,
+    first: bool,
 ) -> Verdict {
     let listed = &files[&mutant.file];
     let (token, _, replacement) = listed.tokens[mutant.index];
@@ -1415,7 +1485,11 @@ fn run_solo(
         pass.profile.lock().expect("profile").solo_builds += 1;
         built.insert(package_directory, package);
     }
-    let mut verdict = run_mutant(pass, plan, mutant, packages, Some(&built));
+    let mut verdict = run_mutant(pass, plan, mutant, packages, Some(&built), first);
+    if verdict.status == RETRY {
+        let _ = std::fs::remove_dir_all(&directory);
+        return verdict;
+    }
     let note = format!("built alone ({reason})");
     verdict.reason = Some(match verdict.reason {
         Some(said) => format!("{said}; {note}"),
