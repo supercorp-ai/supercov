@@ -22,8 +22,8 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
-    process_supervision::{CommandSpec, SupervisionOptions},
+    orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind},
+    process_supervision::CommandSpec,
     python_mutants::{Enumeration, enumerate},
     strong_driver::StrongPass,
 };
@@ -220,20 +220,16 @@ pub fn run_strong_python(
                     &schemata_path,
                     std::env::vars_os(),
                 )),
-                captured_output: None,
+                // What the tests print is held beside the results, and
+                // shown with Supercov's diagnostics where the command fails:
+                // the pass's output is Supercov's.
+                captured_output: Some(work.join("python.log")),
                 console: None,
             },
         },
     };
-    let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
-    let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
-        .map_err(|error| error.to_string())?;
-    if let Some(signal) = execution.interrupted_signal {
-        return Err(format!(
-            "the strong pass was interrupted by {}",
-            signal.name()
-        ));
-    }
+    let execution =
+        crate::python_run::run_supervised(&plan, diagnostics, "this pass saved no verdicts")?;
     Ok(execution.exit_code)
 }
 
@@ -330,6 +326,28 @@ mod tests {
         let schemata: Value =
             serde_json::from_slice(&std::fs::read(work.join("schemata.json")).unwrap()).unwrap();
         assert!(schemata["files"]["a.py"]["units"].is_array());
+        // What the command prints is Supercov's diagnostics where it fails,
+        // never its output.
+        pass.command = vec!["sh".into(), "-c".into(), "echo printed; exit 4".into()];
+        let mut said = Vec::new();
+        assert_eq!(run_strong_python(&pass, &mut said), Ok(4));
+        assert!(String::from_utf8_lossy(&said).contains("printed"));
+        assert!(!work.join("python.log").exists());
+        // Each file the pass writes that cannot be written ends it.
+        for blocked in ["schemata.json", "strong-files.json"] {
+            std::fs::remove_file(work.join(blocked)).unwrap();
+            std::fs::create_dir(work.join(blocked)).unwrap();
+            let refused = run_strong_python(&pass, &mut Vec::new()).unwrap_err();
+            assert!(refused.contains(blocked), "{refused}");
+        }
+        let elsewhere = StrongPass {
+            strong: crate::strong_driver::StrongRun {
+                plan: work.join("plan.json"),
+                results: root.join("a.py").join("results.jsonl"),
+            },
+            ..pass.clone()
+        };
+        assert!(run_strong_python(&elsewhere, &mut Vec::new()).is_err());
         pass.command.clear();
         assert_eq!(
             run_strong_python(&pass, &mut Vec::new()),
@@ -353,6 +371,12 @@ mod tests {
         assert_eq!(value["version"], SCHEMATA_VERSION);
         let files = value["files"].as_object().unwrap();
         assert_eq!(files.keys().collect::<Vec<_>>(), ["good.py"]);
+        assert!(
+            schemata(&root, &[])["files"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -419,5 +443,18 @@ mod tests {
             "supercov_strong_pytest"
         );
         assert_eq!(bare[&OsString::from("PYTHONPATH")], "/r");
+        // An empty plugin list is no list.
+        let emptied = environment(
+            Path::new("/r"),
+            &pass,
+            Path::new("/s"),
+            std::iter::once(("PYTEST_PLUGINS".into(), OsString::new())),
+        )
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            emptied[&OsString::from("PYTEST_PLUGINS")],
+            "supercov_strong_pytest"
+        );
     }
 }

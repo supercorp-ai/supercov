@@ -180,7 +180,10 @@ The command runs as the user wrote it, with `sitecustomize` arming the
 switches instead of the coverage runtime. Once its runner has collected the
 tests, the driver takes over: pytest's `pytest_runtestloop` (the
 `supercov_strong_pytest` plugin, through `PYTEST_PLUGINS`) or unittest's
-`TestProgram.runTests` (`python -m unittest`, `discover` included).
+`TestProgram.runTests` (`python -m unittest`, `discover` included). What
+the command prints is held aside and shown with Supercov's diagnostics only
+where the command fails (or with `SUPERCOV_VERBOSE`), so a `--json` answer
+stays Supercov's alone.
 
 1. Every switched file is compiled before anything forks, so each fork
    shares the code, and a mutant that could not be switched is known.
@@ -299,6 +302,23 @@ pass does not. On python-slugify, whose CLI tests start `python -m slugify`
 in subprocesses, keeping each switched file's compiled code beside the
 schemata took the pass from 147 s to 9.7 s: every subprocess parsed every
 mutant's copy before.
+
+### The measured run's cost
+
+The suite alone, under `supercov --`, and under `supercov --` with
+`SUPERCOV_MUTANTS=1`, each the best of three on 16 CPUs (`overhead.sh`;
+humanize's pytest-benchmark tests run once, since they size their rounds to
+the speed they measure):
+
+| Project | Tests alone | Measured | Measured with values |
+| --- | --- | --- | --- |
+| python-slugify | 0.63 s | 0.85 s (1.33×) | 0.95 s (1.50×) |
+| cachetools | 0.52 s | 0.98 s (1.88×) | 1.92 s (3.65×) |
+| parse | 0.58 s | 0.72 s (1.24×) | 0.83 s (1.43×) |
+| humanize | 1.05 s | 1.25 s (1.19×) | 1.33 s (1.27×) |
+
+These include the interpreter's start and pytest's collection, which the
+probes do not slow. cachetools' values cost has not been profiled yet.
 
 ## Not yet
 

@@ -484,16 +484,8 @@ fn run_direct_python_in(
                 },
             },
         };
-        let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
-        let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
-            .map_err(|error| error.to_string())?;
+        let execution = run_supervised(&plan, diagnostics, "no run was published")?;
         let test_command_ms = elapsed_ms(test_started);
-        if let Some(signal) = execution.interrupted_signal {
-            return Err(format!(
-                "the test command was interrupted by {}; no run was published",
-                signal.name()
-            ));
-        }
 
         let publication_started = Instant::now();
         let verbose = ambient
@@ -905,6 +897,26 @@ impl PythonServer {
 
 fn metadata_id_hint(run_id: &str) -> String {
     format!("{run_id}-python")
+}
+
+/// Runs a Python command's plan under supervision: its result, or why it
+/// has none. A command a signal interrupted is an error that says so, and
+/// `then`, what that left undone.
+pub(crate) fn run_supervised(
+    plan: &ExecutionPlan,
+    diagnostics: &mut dyn std::io::Write,
+    then: &str,
+) -> Result<crate::orchestration::ExecutionResult, String> {
+    let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+    let execution = execute_plan(plan, options, diagnostics, |_, _| Ok(()))
+        .map_err(|error| error.to_string())?;
+    if let Some(signal) = execution.interrupted_signal {
+        return Err(format!(
+            "the test command was interrupted by {}; {then}",
+            signal.name()
+        ));
+    }
+    Ok(execution)
 }
 
 #[cfg(test)]

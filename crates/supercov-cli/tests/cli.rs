@@ -16465,7 +16465,7 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:575",
+        "fs.create_dir_all@6 => python_run.rs:567",
         "fs.read_dir@6 => python_run.rs:112",
         "fs.read_dir@7 => python_run.rs:112",
         "fs.file_type@9 => python_run.rs:115",
@@ -18020,8 +18020,8 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:716", "python_run.rs:716"),
-        ("fs.create_dir_all#python_run.rs:717", "python_run.rs:717"),
+        ("fs.create_dir_all#python_run.rs:708", "python_run.rs:708"),
+        ("fs.create_dir_all#python_run.rs:709", "python_run.rs:709"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
         ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
@@ -18211,8 +18211,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:723@1",
-            "python_run.rs:723",
+            "fs.write#python_run.rs:715@1",
+            "python_run.rs:715",
             "plan.json",
         ),
     ] {
@@ -22169,6 +22169,15 @@ fn mutants_test_runs_python_mutants_under_unittest() {
         .cloned()
         .unwrap_or_default();
     assert_eq!(boundary["status"], "not-infected", "{weak}");
+    // A command timeout that is no number stops the pass before it runs, and
+    // leaves no verdict.
+    let refused = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "soon")],
+    );
+    let said = refused.stderr();
+    assert_ne!(refused.code(), 0, "{said}");
+    assert!(said.contains("SUPERCOV_COMMAND_TIMEOUT_MS"), "{said}");
     let ran = project.supercov_with(
         &["runs", "latest", "mutants", "test", "--json"],
         &[("SUPERCOV_STRONG_WORKERS", "2")],
