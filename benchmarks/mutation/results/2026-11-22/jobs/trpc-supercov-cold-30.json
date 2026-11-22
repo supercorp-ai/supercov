@@ -1,0 +1,138 @@
+{
+  "project": "trpc",
+  "scenario": "supercov-cold",
+  "shard": "30",
+  "variant": null,
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-22T12:39:04.507Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "supercovWrapper": "4.28.0",
+    "supercov": "supercov 4.28.0 (rust contract v1)",
+    "supercovBinaryKey": "7bde1dc6674d633b",
+    "node": "v24.22.3",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 46 files"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.738,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.1,
+        "sysS": 0.03,
+        "cpuS": 0.13,
+        "cpuPercent": "18%",
+        "maxRssKiB": 19032,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.75,
+      "wallS": 1.457,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.76,
+        "sysS": 0.2,
+        "cpuS": 0.96,
+        "cpuPercent": "66%",
+        "maxRssKiB": 188876,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.21,
+      "wallS": 4.295,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 15.38,
+        "sysS": 5.72,
+        "cpuS": 21.1,
+        "cpuPercent": "491%",
+        "maxRssKiB": 793296,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "npm i --prefix /home/runner/work/_temp/mutation-bench/supercov-cli --no-audit --no-fund supercov@4.28.0 >/dev/null && ls /home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin",
+      "startOffsetS": 6.51,
+      "wallS": 3.677,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.34,
+        "sysS": 0.21,
+        "cpuS": 1.55,
+        "cpuPercent": "42%",
+        "maxRssKiB": 350832,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "supercov-measure",
+      "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov -- node_modules/.bin/vitest run --config vitest.bench.config.ts",
+      "startOffsetS": 10.26,
+      "wallS": 22.915,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 83.16,
+        "sysS": 12.18,
+        "cpuS": 95.34,
+        "cpuPercent": "416%",
+        "maxRssKiB": 749344,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "runDir": ".supercov/runs/run_e85f9603d5a75d90"
+    },
+    {
+      "name": "supercov-plan",
+      "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov runs latest mutants test --plan --json --shard 30/32 > /home/runner/work/supercov/supercov/out/supercov-plan.json",
+      "startOffsetS": 33.17,
+      "wallS": 3.056,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.16,
+        "sysS": 0.09,
+        "cpuS": 3.25,
+        "cpuPercent": "106%",
+        "maxRssKiB": 501604,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "supercov-strong",
+      "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov runs latest mutants test --json --shard 30/32 > /home/runner/work/supercov/supercov/out/supercov-strong.result.json",
+      "startOffsetS": 36.23,
+      "wallS": 95.993,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 9.45,
+        "sysS": 1.38,
+        "cpuS": 10.83,
+        "cpuPercent": "11%",
+        "maxRssKiB": 647604,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "result": "supercov-strong.result.json",
+      "strongFile": "supercov-strong.strong-mutation.json",
+      "mutants": "supercov-strong.mutants.jsonl"
+    }
+  ],
+  "totalS": 132.88
+}

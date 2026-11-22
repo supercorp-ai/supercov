@@ -80,9 +80,10 @@ test("each mutant runs against its candidates, file by file, and the first failu
     const rules = {
         // Without any mutant: b2 fails unless b1 ran first, c1 fails, d1
         // never ends.
-        "*": { b2: "subset-fail", c1: "fail", d1: "hang" },
+        // b's tests are slow: a job runs only its mutant's own.
+        "*": { b1: "slow", b2: "slow,subset-fail", c1: "fail", d1: "hang" },
         [on("kill-a")]: { a2: "fail" },
-        [on("kill-b")]: { b1: "fail" },
+        [on("kill-b")]: { b1: "slow,fail" },
         [on("hang")]: { a3: "hang" },
         [on("loop")]: { a3: "loop" },
         [on("crash")]: { a1: "crash" },
@@ -163,6 +164,9 @@ test("a job's command names its file where the runner takes one, and runs a proj
         assert.deepEqual(commandFor(["bun", "test"], "t/a.test.ts", root), ["bun", "test", "./t/a.test.ts"]);
         assert.deepEqual(commandFor(["/usr/bin/bun", "test", "--bail"], "t/a.test.ts", root), ["/usr/bin/bun", "test", "--bail", "./t/a.test.ts"]);
         assert.deepEqual(commandFor(["bun", "run", "test"], "t/a.test.ts", root), ["bun", "run", "test"]);
+        // A tap test file in JavaScript runs by itself, as tap's runner runs it.
+        assert.deepEqual(commandFor(["npx", "tap"], "test/a.js", root, "tap"), [process.execPath, "test/a.js"]);
+        assert.deepEqual(commandFor(["npx", "tap"], "test/a.ts", root, "tap"), ["npx", "tap"]);
         const tool = join(root, "node_modules/.bin/mocha");
         if (process.platform !== "win32") {
             assert.deepEqual(withoutNpx(["npx", "mocha", "--check-leaks"], root), [tool, "--check-leaks"]);

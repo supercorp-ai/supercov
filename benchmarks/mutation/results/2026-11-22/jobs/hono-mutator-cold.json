@@ -1,0 +1,123 @@
+{
+  "project": "hono",
+  "scenario": "mutator-cold",
+  "shard": null,
+  "commit": "75ff8e3ea18485589816881c6278bc9783e56602",
+  "startedAt": "2026-11-19T23:55:43.550Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "12.6.0",
+    "vitest": "5.0.1",
+    "vitestProject": "5.0.1"
+  },
+  "notes": [
+    "mutator flags --no-typecheck: mutator 0.5.0's type check crashes on hono's solution-style tsconfig.json (\"files\": [] plus references): Could not find source file src/compose.ts"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/honojs/hono 75ff8e3ea18485589816881c6278bc9783e56602 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.458,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.05,
+        "sysS": 0.02,
+        "cpuS": 0.07,
+        "cpuPercent": "16%",
+        "maxRssKiB": 18756,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.6.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.47,
+      "wallS": 1.256,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.74,
+        "sysS": 0.19,
+        "cpuS": 0.93,
+        "cpuPercent": "74%",
+        "maxRssKiB": 192300,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.73,
+      "wallS": 0.687,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.86,
+        "sysS": 0.74,
+        "cpuS": 3.6,
+        "cpuPercent": "527%",
+        "maxRssKiB": 260596,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @mizchi/mutator@0.5.0",
+      "startOffsetS": 2.42,
+      "wallS": 1.271,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.81,
+        "sysS": 0.31,
+        "cpuS": 1.12,
+        "cpuPercent": "88%",
+        "maxRssKiB": 269456,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --config vitest.bench.config.ts --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 3.71,
+      "wallS": 6.619,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 21.05,
+        "sysS": 2.76,
+        "cpuS": 23.81,
+        "cpuPercent": "359%",
+        "maxRssKiB": 635920,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 5111,
+        "passed": 5010,
+        "failed": 0,
+        "files": 1427
+      }
+    },
+    {
+      "name": "mutator-cold",
+      "command": "node_modules/.bin/mutator --include 'src/*.ts' --include 'src/router/**/*.ts' --include 'src/utils/**/*.ts' --exclude 'src/**/*.test.ts' --exclude 'src/**/types.ts' --exclude 'src/utils/http-status.ts' --exclude 'src/**/*.d.ts' --config vitest.bench.config.ts --reporter json --reporter text --report-dir reports-mutator/mutator-cold --no-typecheck",
+      "startOffsetS": 10.34,
+      "wallS": 301.397,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1711.12,
+        "sysS": 291.94,
+        "cpuS": 2003.06,
+        "cpuPercent": "664%",
+        "maxRssKiB": 4329468,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-cold.json"
+    }
+  ],
+  "totalS": 311.76
+}

@@ -1,0 +1,216 @@
+{
+  "project": "defu",
+  "scenario": "pr-stryker",
+  "shard": null,
+  "commit": "82632b66f5914e9946edce300e10633a3d5c0cb7",
+  "startedAt": "2026-11-19T23:55:09.752Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "10.33.4",
+    "vitest": "4.1.6",
+    "vitestProject": "4.1.6"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/defu 82632b66f5914e9946edce300e10633a3d5c0cb7 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.209,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0.01,
+        "cpuS": 0.03,
+        "cpuPercent": "17%",
+        "maxRssKiB": 18892,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@10.33.4 >/dev/null && pnpm --version",
+      "startOffsetS": 0.22,
+      "wallS": 1.335,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.68,
+        "sysS": 0.15,
+        "cpuS": 0.83,
+        "cpuPercent": "63%",
+        "maxRssKiB": 143448,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.56,
+      "wallS": 1.06,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.7,
+        "sysS": 0.42,
+        "cpuS": 3.12,
+        "cpuPercent": "296%",
+        "maxRssKiB": 925432,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 2.62,
+      "wallS": 1.569,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.1,
+        "sysS": 0.42,
+        "cpuS": 3.52,
+        "cpuPercent": "225%",
+        "maxRssKiB": 841592,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "stryker-incremental-base",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental-base.json",
+      "startOffsetS": 4.2,
+      "wallS": 3.341,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 19.79,
+        "sysS": 1.64,
+        "cpuS": 21.43,
+        "cpuPercent": "642%",
+        "maxRssKiB": 252628,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental-base.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental-base.json"
+    },
+    {
+      "name": "stryker-lines",
+      "command": "node_modules/.bin/stryker run stryker.stryker-lines.json",
+      "startOffsetS": 7.54,
+      "wallS": 1.657,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.93,
+        "sysS": 0.37,
+        "cpuS": 3.3,
+        "cpuPercent": "200%",
+        "maxRssKiB": 241608,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/defu.ts:33-33"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-lines.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-lines.json"
+    },
+    {
+      "name": "stryker-incremental",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental.json",
+      "startOffsetS": 9.2,
+      "wallS": 1.683,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 3.3,
+        "sysS": 0.39,
+        "cpuS": 3.69,
+        "cpuPercent": "219%",
+        "maxRssKiB": 254860,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental.json"
+    }
+  ],
+  "changedLines": [
+    "src/defu.ts:33-33"
+  ],
+  "totalS": 10.89
+}

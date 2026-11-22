@@ -184,6 +184,7 @@ pub(crate) fn list(
                 original: source[mutant.range].to_owned(),
                 operator: None,
                 value_used: false,
+                effects: false,
                 statement: None,
                 function: None,
                 decision: None,

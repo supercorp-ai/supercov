@@ -1,0 +1,140 @@
+{
+  "project": "trpc",
+  "scenario": "truth",
+  "shard": "s2",
+  "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51",
+  "startedAt": "2026-11-20T01:02:40.560Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "12.4.1",
+    "vitest": "5.1.0",
+    "vitestProject": "5.1.0"
+  },
+  "notes": [
+    "StrykerJS options {\"tsconfigFile\":\"tsconfig.stryker-none.json\",\"vitest\":{\"configFile\":\"vitest.bench.config.ts\",\"pool\":\"forks\"}}: StrykerJS 10.1.1 rewrites tsconfig.json in the sandbox with ts.parseConfigFileTextToJson, which TypeScript 7.1.0-beta lacks, so tsconfigFile points at a missing file (no checker runs anyway); and its Vitest runner starts the threads pool unless told otherwise, where trpc's --expose-gc (execArgv) cannot start a worker, so pool is forks as upstream's default"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/trpc/trpc 596d03d93295f8b4876909cfce86f94a1e6afe51 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.671,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.09,
+        "sysS": 0.02,
+        "cpuS": 0.11,
+        "cpuPercent": "18%",
+        "maxRssKiB": 18884,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@12.4.1 >/dev/null && pnpm --version",
+      "startOffsetS": 0.69,
+      "wallS": 1.982,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.66,
+        "sysS": 0.15,
+        "cpuS": 0.81,
+        "cpuPercent": "41%",
+        "maxRssKiB": 173624,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 2.67,
+      "wallS": 4.143,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 13.68,
+        "sysS": 5.14,
+        "cpuS": 18.82,
+        "cpuPercent": "454%",
+        "maxRssKiB": 760384,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D -w @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 6.81,
+      "wallS": 9.523,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 5.85,
+        "sysS": 2.59,
+        "cpuS": 8.44,
+        "cpuPercent": "88%",
+        "maxRssKiB": 1125736,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "truth",
+      "command": "node_modules/.bin/stryker run stryker.truth.json",
+      "startOffsetS": 16.39,
+      "wallS": 217.62,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 518.72,
+        "sysS": 65.61,
+        "cpuS": 584.33,
+        "cpuPercent": "268%",
+        "maxRssKiB": 507672,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {
+          "configFile": "vitest.bench.config.ts",
+          "pool": "forks"
+        },
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": true,
+        "mutate": [
+          "packages/server/src/unstable-core-do-not-import/procedureBuilder.ts:619-730",
+          "!packages/server/src/**/*.test.ts",
+          "!packages/server/src/**/*.d.ts"
+        ],
+        "ignorePatterns": [
+          ".claude",
+          ".agents",
+          "www",
+          "examples"
+        ],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/truth.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true,
+        "tsconfigFile": "tsconfig.stryker-none.json"
+      },
+      "report": "truth.json"
+    }
+  ],
+  "totalS": 234.01
+}

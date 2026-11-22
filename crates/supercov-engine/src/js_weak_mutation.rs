@@ -681,6 +681,23 @@ fn not_infected_unless_value_used(
 }
 
 fn conditional_expression(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let (status, reason) = conditional_value(mutant, records);
+    if status == Status::NotInfected && mutant.effects {
+        return verdict_of(
+            Status::Unknown,
+            "condition-effects",
+            format!(
+                "{} has effects the replacement skips ({})",
+                quoted(&mutant.original),
+                reason.sentence
+            ),
+        );
+    }
+    (status, reason)
+}
+
+/// `conditional_expression` from the condition's values alone.
+fn conditional_value(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
     let forced = match mutant.replacement.as_str() {
         "true" => true,
         "false" => false,
@@ -1779,6 +1796,7 @@ mod tests {
             original: original.into(),
             operator: None,
             value_used: false,
+            effects: false,
             statement: Some("s".into()),
             function: Some("f".into()),
             decision: None,
@@ -2637,6 +2655,13 @@ mod tests {
             ..mutant("ConditionalExpression", "true", "a && b")
         };
         expect(&decision, &vectors, NOT_INFECTED, "decision-always");
+        // A condition that calls something: always true, yet the literal
+        // skips the call.
+        let calling = CandidateMutant {
+            effects: true,
+            ..decision.clone()
+        };
+        expect(&calling, &vectors, UNKNOWN, "condition-effects");
         // A statement never run is not reached wherever the code lives.
         let mut elsewhere = Observations::default();
         elsewhere.server_hits.insert("t".into());
