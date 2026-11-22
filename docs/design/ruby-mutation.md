@@ -108,14 +108,27 @@ does: one `fork` of the loaded process per mutant, as many at once as
   that fails there is no kill, and its duration sets each mutant's time
   limit (3× its tests' time and 10 s).
 - A mutant's fork switches it on and runs its candidates in the suite's
-  order, stopping at the first failure. RSpec runs the chosen examples with
-  their groups' hooks; Minitest runs each test by class and method.
+  order, stopping at the first failure. RSpec runs the chosen examples
+  through its own `run_specs`, with its reporter, formatters and
+  `before(:suite)` hooks, output thrown away: code a suite hook calls
+  (dotenv's `Dotenv.save`) runs with the mutant on, as under mutant, and a
+  failure outside any example kills. A first version ran the groups
+  itself: 35 of dotenv's 195 examples failed without a mutant, because
+  nothing had loaded `StringIO` as RSpec's formatters do. Minitest runs each
+  test by class and method, after its seed and plugins are set up as
+  `Minitest.run` sets them.
 - A kill is confirmed: the same tests up to the failing one run again
   without the mutant. Where they fail that way too, the candidates' files
   run whole with and without the mutant, and only a test that fails only
   with it kills.
 - A fork past its limit is killed: `timeout`. A fork that ends without
-  reporting (the mutant crashed the process) is `killed`.
+  reporting (the mutant crashed the process) is `killed`. A fork ends with
+  `exit!`, so the suite's `at_exit` hooks (an autorun) do not run in it, and
+  its outcome is read while it runs, so a large one cannot fill the pipe and
+  hold it.
+- A switched file that was loaded before the runtime (a gemspec that
+  requires the library, which `bundle exec` loads before `RUBYOPT`'s own
+  files) has no switches: its mutants are `error`, never `survived`.
 
 `ruby_run::run_strong_ruby` is the driver's Rust half: it checks each
 mutant's id against its file as it is now (a changed file makes its mutants
