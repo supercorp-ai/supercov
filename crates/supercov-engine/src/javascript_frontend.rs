@@ -1722,8 +1722,10 @@ fn write_playwright_config(
              renameSync(`${{file}}.${{process.pid}}`, file);\n\
            }} catch {{}}\n\
          }}\n\
+         // Playwright looks for tests beside the config that names none,\n\
+         // and this one is in `.supercov`: the original's directory is it.\n\
          const normalized = {{ ...resolved,\n\
-           testDir: runtimePath(resolved.testDir),\n\
+           testDir: runtimePath(resolved.testDir ?? originalDirectory),\n\
            outputDir: runtimePath(resolved.outputDir),\n\
            snapshotDir: runtimePath(resolved.snapshotDir),\n\
            projects: resolved.projects?.map(project => ({{ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir) }})),\n\

@@ -6560,6 +6560,41 @@ fn a_one_line_helper_that_returns_a_check_is_still_awaited() {
     assert!(run.contains("1 passed"), "{run}");
 }
 
+/// A Playwright config that names no `testDir` finds its tests beside
+/// itself, as plain Playwright does, though Supercov's config wraps it from
+/// `.supercov/` (playwright-test-coverage: tests in `e2e/`, none named).
+#[cfg(unix)]
+#[test]
+fn a_playwright_config_without_a_test_dir_finds_the_tests_beside_it() {
+    let project = Project::empty("no-test-dir");
+    project.write(
+        "package.json",
+        r#"{ "name": "no-test-dir", "private": true, "type": "module" }"#,
+    );
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n");
+    project.write("src/one.ts", "export const one = () => 1;\n");
+    project.write(
+        "playwright.config.ts",
+        "export default { reporter: \"line\" };\n",
+    );
+    project.write(
+        "e2e/one.test.ts",
+        "import { expect, test } from \"@playwright/test\";\nimport { one } from \"../src/one\";\ntest(\"one\", () => expect(one()).toBe(1));\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("no test dir");
+    let run = project
+        .supercov(&["--", "npx", "playwright", "test"])
+        .succeeds();
+    assert!(run.contains("1 passed"), "{run}");
+}
+
 #[cfg(unix)]
 #[test]
 fn ava_tests_running_at_once_are_attributed_each_to_its_own() {
@@ -16071,7 +16106,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2636 => main.rs:2636",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
+            "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
         ],
     );
 }
@@ -18179,12 +18214,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1837@2",
+            "fs.read_to_string#javascript_frontend.rs:1839@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1837"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1839"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
