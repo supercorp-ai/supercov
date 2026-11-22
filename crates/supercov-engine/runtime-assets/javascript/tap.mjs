@@ -73,6 +73,7 @@ async function subtestClasses() {
             // Frames stay as libtap writes them.
         }
         classes.push(createRequire(import.meta.url)(join(lib, "test.js")));
+        topLevel.libtap = true;
     }
     catch {
         // Neither tap's own classes nor libtap's: tap 14 or older.
@@ -128,7 +129,7 @@ function nameFromTheCopy(StackUtils) {
 // file's top level, which tap's own report names after the file, and it is
 // written as a test where the file asserts there (or has no subtest), as the
 // file's module setup otherwise.
-const topLevel = { subtests: 0, points: 0 };
+const topLevel = { subtests: 0, points: 0, libtap: false };
 
 export async function adaptTap(testFile) {
     const evidenceDirectory = process.env.SUPERCOV_EVIDENCE_DIR;
@@ -143,7 +144,8 @@ export async function adaptTap(testFile) {
     beginBufferedServerEvidence(scope);
     activateCoverageScope(scope);
     process.once("exit", (code) => {
-        const asserts = topLevel.points > 0;
+        // libtap passes or fails a subtest's point on its parent too.
+        const asserts = topLevel.points > (topLevel.libtap ? topLevel.subtests : 0);
         const written = asserts ? identity : { ...identity, role: "setup" };
         writeRunnerEvidence(written, !asserts || code === 0 ? "passed" : "failed", scope, evidenceDirectory, takeNodeAssertionPhases(scope), flushBufferedServerEvidence(scope));
     });
