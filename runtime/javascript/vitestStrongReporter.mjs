@@ -1452,31 +1452,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 slotOf.set(key, file);
         };
 
-        // 1. The baselines every mutant needs, in runs of their own: a union
-        // that fails makes its file's whole baseline needed in the next.
-        for (let round = 0; round < 4; round++) {
-            const items = [];
-            for (const [file, entry] of base) {
-                for (const shape of ["union", "whole"])
-                    if (entry[shape].state === "waiting")
-                        items.push(baselineItem(file, shape));
-            }
-            if (!items.length)
-                break;
-            items.sort((a, b) => b.estimate - a.estimate);
-            profile.baselineCopies += items.length;
-            const { outcomes, handled } = await runStage(items, (at, outcome) => {
-                recordShape(items[at].baseline.file, items[at].baseline.shape, outcome);
-                return true;
-            }, () => undefined, (item) => item.estimate);
-            items.forEach((item, at) => {
-                if (!handled.has(at))
-                    recordShape(item.baseline.file, item.baseline.shape, outcomes[at]);
-            });
-        }
-        observeRun = undefined;
-
-        // 2. The mutants, in one run.
+        // The baselines run in the same run as the mutants, first: each in a
+        // slot of its own test file at the head of the run (Vitest's "start"
+        // for it says the file's project and environment), and a mutant's
+        // file runs once the file's baseline is known.
+        // The run.
         const directory = `${stagesDirectory}/${stageNumber++}`;
         mkdirSync(directory, { recursive: true });
         provide(vitest, { root, stage: directory });
@@ -1500,8 +1480,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         let over = false;
         let testTimeoutMs = BASELINE_TEST_TIMEOUT_MS;
         const hookMs = hookTimeoutOf(vitest);
+        // A file whose own slot has not started yet has no known class: only
+        // its own slots run its work.
         const classOfFile = (file) => classOf.get(file) ?? `file:${file}`;
-        const slotFor = (cls) => slotOf.get(cls) ?? (cls.startsWith("file:") ? cls.slice(5) : undefined);
         // A mutant's next file: the likeliest killer of those whose baseline
         // is known (where a baseline is still running, the mutant waits).
         const nextOf = (job) => {
@@ -1550,10 +1531,15 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             return { mutant: { file: job.mutant.file, index: job.mutant.index }, tests: chosen, wholeFile: whole, unknownBaseline: false, hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000), testTimeout };
         };
         // The work a slot of class `cls` takes now, if any.
-        const take = (cls) => {
+        const take = (cls, slotFile) => {
+            const own = base.get(slotFile);
+            for (const shape of ["union", "whole"]) {
+                if (own?.[shape].state === "waiting")
+                    return baselineItem(slotFile, shape);
+            }
             for (const [file, entry] of base) {
                 for (const shape of ["union", "whole"]) {
-                    if (entry[shape].state === "waiting" && classOfFile(file) === cls)
+                    if (entry[shape].state === "waiting" && classOf.get(file) === cls)
                         return baselineItem(file, shape);
                 }
             }
@@ -1630,7 +1616,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     waiter.resolve({ nothingToRun: true });
                     continue;
                 }
-                const item = over ? undefined : take(waiter.cls);
+                const item = over ? undefined : take(waiter.cls, waiter.slotFile);
                 if (item) {
                     waiters.splice(at, 1);
                     waiter.resolve(assign(item));
@@ -1650,7 +1636,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (over)
                 return { nothingToRun: true };
             return new Promise((resolve) => {
-                waiters.push({ cls: classKeyOf(start), resolve, waiting });
+                waiters.push({ cls: classKeyOf(start), slotFile: toRelative(root, String(filepath)), resolve, waiting });
                 dispatch();
             });
         };
@@ -1850,18 +1836,15 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 over = true;
             dispatch();
         };
-        // Slots: enough for every copy the pass could run, each a file of a
-        // class, the classes in turn.
-        const classes = [...new Set([...base.keys()].map(classOfFile))];
-        const bound = pending.reduce((sum, job) => sum + job.files.length * 2 + 2, 0) + base.size * 2 + workers;
-        const slots = [];
-        for (let at = 0; slots.length < bound && classes.length; at++) {
-            const file = slotFor(classes[at % classes.length]);
-            if (file && specOf.has(file))
-                slots.push(specOf.get(file));
-            else if (at > classes.length * 2 && !slots.length)
-                break;
-        }
+        // Slots: each file's own first (its baseline, the longest first),
+        // then enough for every copy the pass could run, the files in turn.
+        const files = [...base.keys()].filter((file) => specOf.has(file));
+        const firstEstimate = (file) => (testsOf.get(file) ?? []).reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
+        files.sort((x, y) => firstEstimate(y) - firstEstimate(x));
+        const bound = pending.reduce((sum, job) => sum + job.files.length * 2 + 2, 0) + files.length * 2 + workers;
+        const slots = files.map((file) => specOf.get(file));
+        for (let at = 0; slots.length < bound && files.length; at++)
+            slots.push(specOf.get(files[at % files.length]));
         setTestTimeout(vitest, Math.max(testTimeoutMs, ...pending.flatMap((job) => job.files.map((group) => claimOf(job, group).testTimeout))));
         const runStarted = Date.now();
         let settledRun;
@@ -1893,6 +1876,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         if (settledRun.result)
             last = settledRun.result;
         claimRun = undefined;
+        observeRun = undefined;
         profile.wallMs += Date.now() - runStarted;
         // Whatever the run left undecided (its slots ran out): an error,
         // which the next `mutants test` runs again.
