@@ -603,6 +603,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
     }
     const placed = (mutant) => {
+        // A Rust mutant (Rust compiled to wasm) by its index, as the pass's build placed it.
+        if (mutant.language === "rust")
+            return { index: mutant.index };
         const found = indexes.get(mutant.id);
         if (!found)
             return { error: "the copy lists no such mutant: the source changed since the run" };

@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1221")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1228")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1221"),
+        seen.contains("test fault at fs (javascript_run.rs:1228"),
         "{seen}"
     );
 }
@@ -17622,17 +17622,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1364",
         "fs.create_dir_all#javascript_run.rs:752",
-        "fs.write#javascript_run.rs:1086",
+        "fs.write#javascript_run.rs:1093",
         "fs.canonicalize#process_supervision.rs:1796",
-        "fs.create_dir_all#javascript_run.rs:1169",
-        "fs.create_dir_all#javascript_run.rs:1359",
+        "fs.create_dir_all#javascript_run.rs:1176",
+        "fs.create_dir_all#javascript_run.rs:1366",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1634",
-        "fs.create_dir_all#javascript_run.rs:1636",
+        "fs.create_dir_all#javascript_run.rs:1641",
+        "fs.create_dir_all#javascript_run.rs:1643",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1736",
-        "fs.create_dir_all#javascript_run.rs:1738",
+        "fs.create_dir_all#javascript_run.rs:1743",
+        "fs.create_dir_all#javascript_run.rs:1745",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -23659,12 +23659,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:830",
+            "fs.write#mutants_test_command.rs:833",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:830"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:833"),
         "{}",
         unwritten.stderr()
     );

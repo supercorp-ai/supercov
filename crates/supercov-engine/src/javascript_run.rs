@@ -820,7 +820,13 @@ fn run_javascript(
             .map(Server::RustWorker),
         );
     }
-    if serves_rust_wasm {
+    // A strong pass switches the wasm crates' mutants in where a run
+    // instruments them.
+    let mut wasm_strong = None;
+    if serves_rust_wasm && let Some(strong) = &request.strong {
+        wasm_strong =
+            crate::rust_wasm::switch_for_strong_pass(&root, &workspace, strong, diagnostics)?;
+    } else if serves_rust_wasm {
         servers.extend(
             crate::rust_wasm::RustWasmServer::prepare(
                 &root,
@@ -833,7 +839,7 @@ fn run_javascript(
             .map(Server::RustWasm),
         );
     }
-    if project.source_files.is_empty() && servers.is_empty() {
+    if project.source_files.is_empty() && servers.is_empty() && wasm_strong.is_none() {
         return Err(
             crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
@@ -981,6 +987,7 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
+        overrides.extend(wasm_strong.clone().unwrap_or_default());
         if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();

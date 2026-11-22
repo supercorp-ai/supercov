@@ -134,6 +134,8 @@ test('a low score fails', async ({ page }) => {
   },
 ];
 
+// The first suite's strong verdicts: the others run the same tests.
+let expectedVerdicts;
 try {
   for (const entry of suites) {
     if (process.env.ONLY && entry.suite !== process.env.ONLY) continue;
@@ -165,6 +167,28 @@ try {
     const decision = run(cwd, binary, ['runs', rust.id, 'decision', 'rust/src/lib.rs:5']).stdout;
     assert.match(decision, /FF- -> F +tests=1/u, `${entry.suite}\n${decision}`);
     assert.match(decision, /FTT -> T +tests=1/u, `${entry.suite}\n${decision}`);
+    // A strong pass runs the crate's mutants under the JavaScript tests
+    // that load its wasm: the wasm is built from the switched crate, and
+    // each instance is handed the active mutant through its exports.
+    // A page's wasm gets no mutant yet: its mutants are errors, never
+    // survivors.
+    if (entry.suite === 'Playwright') {
+      const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
+      const { summary } = JSON.parse(tested.stdout);
+      assert.ok(summary.ran > 0 && summary.error === summary.ran, `${entry.suite}\n${JSON.stringify(summary)}\n${tested.stderr}`);
+    } else {
+      const tested = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json']);
+      assert.equal(tested.status, 0, `${entry.suite}\n${tested.stdout}${tested.stderr}`);
+      const { summary } = JSON.parse(tested.stdout);
+      const verdicts = JSON.parse(readFileSync(resolve(cwd, '.supercov/runs', rust.id, 'strong-mutation.json'), 'utf8')).mutants;
+      const statuses = Object.fromEntries(Object.entries(verdicts).map(([id, verdict]) => [id.replace(/^rust\/src\/lib\.rs:/u, ''), verdict.status]));
+      console.log(`[rust-wasm-js] ${entry.suite} strong pass: ${JSON.stringify(summary)}\n${JSON.stringify(statuses, null, 1)}`);
+      const reasons = Object.entries(verdicts).filter(([, verdict]) => verdict.status === 'error').map(([id, verdict]) => `${id}: ${verdict.reason}`);
+      assert.equal(summary.error, 0, `${entry.suite}\n${reasons.join('\n')}\n${tested.stderr}`);
+      assert.ok(summary.killed > 0 && summary.survived > 0, `${entry.suite}\n${JSON.stringify(summary)}`);
+      expectedVerdicts ??= statuses;
+      assert.deepEqual(statuses, expectedVerdicts, `${entry.suite}: its verdicts are not node:test's`);
+    }
     // Each step of preparing the crate in the copy, and of reading back
     // what the tests took from it, that fails ends the run, saying where:
     // the project's inputs listed, its sources captured, its integrity

@@ -8,14 +8,15 @@ mod __SUPERCOV_MODULE__ {
     use std::result::Result::Ok;
     use std::string::String;
     use std::borrow::ToOwned;
-    use std::sync::OnceLock;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// The active mutant's index in its file's list; `UNREAD` before the
     /// environment is read, `NONE` where it names none.
     static ACTIVE: AtomicU64 = AtomicU64::new(UNREAD);
-    /// The active mutant's file, as `mutants.json` keys it.
-    static FILE: OnceLock<String> = OnceLock::new();
+    /// The active mutant's file, as `mutants.json` keys it. A wasm host
+    /// may switch another file's mutant on in the same instance.
+    static FILE: Mutex<String> = Mutex::new(String::new());
     static HITS: AtomicU64 = AtomicU64::new(0);
     static LIMIT: AtomicU64 = AtomicU64::new(0);
     const UNREAD: u64 = u64::MAX;
@@ -40,7 +41,7 @@ mod __SUPERCOV_MODULE__ {
         let active = match named.rsplit_once('#') {
             Some((file, index)) => match index.parse::<u64>() {
                 Ok(index) if index < NONE => {
-                    let _ = FILE.set(String::from(file));
+                    set_file(file);
                     index
                 }
                 _ => NONE,
@@ -91,9 +92,25 @@ mod __SUPERCOV_MODULE__ {
     pub extern "C" fn __SUPERCOV_ACTIVATE_EXPORT__(length: u32, index: u64) {
         let length = (length as usize).min(4096);
         let bytes = unsafe { &(*(&raw const BUFFER))[..length] };
-        let _ = FILE.set(String::from_utf8_lossy(bytes).into_owned());
+        set_file(&String::from_utf8_lossy(bytes));
         LIMIT.store(0, Ordering::Relaxed);
         ACTIVE.store(if index < NONE { index } else { NONE }, Ordering::Relaxed);
+    }
+
+    fn set_file(file: &str) {
+        let mut held = match FILE.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        held.clear();
+        held.push_str(file);
+    }
+
+    fn is_file(file: &str) -> bool {
+        match FILE.lock() {
+            Ok(held) => held.as_str() == file,
+            Err(poisoned) => poisoned.into_inner().as_str() == file,
+        }
     }
 
     /// Whether mutant `index` of `file` is the process's active one. Counts
@@ -104,7 +121,7 @@ mod __SUPERCOV_MODULE__ {
         if active == UNREAD {
             active = read();
         }
-        if active != index || FILE.get().map(String::as_str) != Some(file) {
+        if active != index || !is_file(file) {
             return false;
         }
         let hits = HITS.fetch_add(1, Ordering::Relaxed) + 1;

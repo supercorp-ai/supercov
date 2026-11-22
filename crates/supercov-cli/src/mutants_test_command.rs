@@ -802,11 +802,12 @@ fn execute(
                 break;
             }
             let before = remaining.len();
-            // Each language's mutants go to its own driver, one after another.
-            let languages = remaining
-                .iter()
-                .map(|mutant| mutant.language.clone())
-                .collect::<BTreeSet<_>>();
+            // Each language's mutants go to its own driver, one after another
+            // (Rust compiled to wasm under JavaScript tests to JavaScript's).
+            let driver_of = |mutant: &supercov_engine::strong_plan::PlannedMutant| {
+                supercov_engine::strong_driver::driver_of(mutant, &plan.tests).to_owned()
+            };
+            let languages = remaining.iter().map(driver_of).collect::<BTreeSet<_>>();
             // A pass with mutants left has a language of them at least.
             languages
                 .into_iter()
@@ -821,7 +822,7 @@ fn execute(
                     let results = work.join("results.jsonl");
                     let mutants = remaining
                         .iter()
-                        .filter(|mutant| mutant.language == language)
+                        .filter(|mutant| driver_of(mutant) == language)
                         .cloned()
                         .collect::<Vec<_>>();
                     let pass_plan = StrongPlan {

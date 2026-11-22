@@ -67,3 +67,85 @@ test("the probe of + and - on strings says differs without working the other out
   // 2 * 2 and 2 / 2 differ; working them out still decides numbers.
   assert.deepEqual(Object.fromEntries(seen.later)["n:1:1-1:5#arith"], ["differs"]);
 });
+
+// A wasm module as the Rust strong runtime exports its switch: a buffer for
+// the mutant's file at 64, and an activation that keeps what it is given
+// (the file's length and the index) in globals the test reads; its index
+// is 42 until it is switched.
+function strongWasm() {
+  const name = (text) => [text.length, ...new TextEncoder().encode(text)];
+  const section = (id, bytes) => [id, bytes.length, ...bytes];
+  const exported = (text, kind, index) => [...name(text), kind, index];
+  const exports = [
+    exported("memory", 2, 0),
+    exported("__supercov_strong_buffer_k", 0, 0),
+    exported("__supercov_strong_activate_k", 0, 1),
+    exported("index", 3, 0),
+    exported("length", 3, 1),
+  ];
+  const buffer = [0x00, 0x41, 0xc0, 0x00, 0x0b];
+  const activate = [0x00, 0x20, 0x01, 0x24, 0x00, 0x20, 0x00, 0x24, 0x01, 0x0b];
+  return [
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...section(1, [2, 0x60, 0, 1, 0x7f, 0x60, 2, 0x7f, 0x7e, 0]),
+    ...section(3, [2, 0, 1]),
+    ...section(5, [1, 0, 1]),
+    ...section(6, [2, 0x7e, 1, 0x42, 42, 0x0b, 0x7f, 1, 0x41, 0, 0x0b]),
+    ...section(7, [exports.length, ...exports.flat()]),
+    ...section(10, [2, buffer.length, ...buffer, activate.length, ...activate]),
+  ];
+}
+
+// What each instance was switched to: its file and index, as the runtime
+// handed them over.
+function wasmSwitches(script, environment) {
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    const runtime = await import(${JSON.stringify(runtimeUrl)});
+    const bytes = new Uint8Array(${JSON.stringify(strongWasm())});
+    const seen = (instance) => {
+      const { memory, index, length } = instance.exports;
+      const file = new TextDecoder().decode(new Uint8Array(memory.buffer, 64, length.value));
+      return { file, index: index.value === 2n ** 64n - 1n ? -1 : Number(index.value) };
+    };
+    ${script}
+  `], { encoding: "utf8", env: { ...process.env, ...environment } });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout.trim());
+}
+
+test("each wasm instance runs the active Rust mutant, by its file in the crate's workspace", () => {
+  const roots = JSON.stringify(["crate/"]);
+  // Created with the process's mutant on, both ways an instance is made.
+  assert.deepEqual(wasmSwitches(`
+    const made = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+    const { instance } = await WebAssembly.instantiate(bytes);
+    console.log(JSON.stringify([seen(made), seen(instance)]));
+  `, { SUPERCOV_WASM_STRONG: roots, SUPERCOV_ACTIVE_MUTANT: "crate/src/lib.rs#7" }),
+  [{ file: "src/lib.rs", index: 7 }, { file: "src/lib.rs", index: 7 }]);
+  // Switched as the runtime switches: another mutant, one of no crate's, none.
+  assert.deepEqual(wasmSwitches(`
+    const made = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+    const seenAfter = [];
+    runtime.setActiveMutant("crate/src/b.rs", 2);
+    seenAfter.push(seen(made));
+    runtime.setActiveMutant("web/a.js", 1);
+    seenAfter.push(seen(made));
+    runtime.setActiveMutant("crate/src/b.rs", 3);
+    runtime.clearActiveMutant();
+    seenAfter.push(seen(made));
+    console.log(JSON.stringify(seenAfter));
+  `, { SUPERCOV_WASM_STRONG: roots }),
+  [{ file: "src/b.rs", index: 2 }, { file: "", index: -1 }, { file: "", index: -1 }]);
+  // A crate at the project's root keeps its path; without the variable no
+  // instance is switched.
+  assert.deepEqual(wasmSwitches(`
+    const made = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+    console.log(JSON.stringify(seen(made)));
+  `, { SUPERCOV_WASM_STRONG: JSON.stringify([""]), SUPERCOV_ACTIVE_MUTANT: "src/lib.rs#0" }),
+  { file: "src/lib.rs", index: 0 });
+  assert.deepEqual(wasmSwitches(`
+    const made = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+    console.log(JSON.stringify(seen(made)));
+  `, { SUPERCOV_ACTIVE_MUTANT: "src/lib.rs#0" }),
+  { file: "", index: 42 });
+});

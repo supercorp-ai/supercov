@@ -254,51 +254,7 @@ pub fn run_strong_rust(
     }
 
     // Each mutant to run, found again in its file as the plan names it.
-    let mut jobs = Vec::new();
-    let mut sources = BTreeMap::<String, Option<(String, Vec<RustMutant>)>>::new();
-    for planned in plan["mutants"].as_array().into_iter().flatten() {
-        if !planned["decided"].is_null() {
-            continue;
-        }
-        let id = planned["id"].as_str().unwrap_or_default().to_owned();
-        let file = planned["file"].as_str().unwrap_or_default().to_owned();
-        let index = planned["index"].as_u64().unwrap_or(u64::MAX) as usize;
-        let listed = sources.entry(file.clone()).or_insert_with(|| {
-            let source = crate::fault_fs::read_to_string(root.join(&file)).ok()?;
-            let mutants = crate::rust_mutants::enumerate(&source)?;
-            Some((source, mutants))
-        });
-        let Some(mutant) = listed
-            .as_ref()
-            .and_then(|(_, mutants)| mutants.get(index))
-            .filter(|mutant| mutant_id(&file, mutant) == id)
-        else {
-            results.verdict(
-                &id,
-                "error",
-                None,
-                0,
-                started,
-                Some(format!("{file} changed since the run: measure it again")),
-            );
-            continue;
-        };
-        let candidates = planned["candidates"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|candidate| candidate["test"].as_u64())
-            .map(|test| test as usize)
-            .filter(|test| *test < tests.len())
-            .collect::<Vec<_>>();
-        jobs.push(Job {
-            id,
-            file,
-            ordinal: index as u64,
-            mutant: mutant.clone(),
-            candidates,
-        });
-    }
+    let (jobs, sources) = planned_jobs(&plan, &root, &tests, &results, started);
     let _ = writeln!(
         diagnostics,
         "[supercov] strong pass: {} Rust mutant(s) to run",
@@ -573,6 +529,68 @@ pub fn run_strong_rust(
     }));
     Ok(0)
 }
+
+/// The plan's Rust mutants to run, each found again in its file as the
+/// plan names it, and the files read; a mutant whose file changed since the
+/// run gets its `error` here.
+fn planned_jobs(
+    plan: &Value,
+    root: &Path,
+    tests: &[PlannedTest],
+    results: &Results,
+    started: Instant,
+) -> (Vec<Job>, Sources) {
+    let mut jobs = Vec::new();
+    let mut sources = BTreeMap::<String, Option<(String, Vec<RustMutant>)>>::new();
+    for planned in plan["mutants"].as_array().into_iter().flatten() {
+        if !planned["decided"].is_null() {
+            continue;
+        }
+        let id = planned["id"].as_str().unwrap_or_default().to_owned();
+        let file = planned["file"].as_str().unwrap_or_default().to_owned();
+        let index = planned["index"].as_u64().unwrap_or(u64::MAX) as usize;
+        let listed = sources.entry(file.clone()).or_insert_with(|| {
+            let source = crate::fault_fs::read_to_string(root.join(&file)).ok()?;
+            let mutants = crate::rust_mutants::enumerate(&source)?;
+            Some((source, mutants))
+        });
+        let Some(mutant) = listed
+            .as_ref()
+            .and_then(|(_, mutants)| mutants.get(index))
+            .filter(|mutant| mutant_id(&file, mutant) == id)
+        else {
+            results.verdict(
+                &id,
+                "error",
+                None,
+                0,
+                started,
+                Some(format!("{file} changed since the run: measure it again")),
+            );
+            continue;
+        };
+        let candidates = planned["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate["test"].as_u64())
+            .map(|test| test as usize)
+            .filter(|test| *test < tests.len())
+            .collect::<Vec<_>>();
+        jobs.push(Job {
+            id,
+            file,
+            ordinal: index as u64,
+            mutant: mutant.clone(),
+            candidates,
+        });
+    }
+    (jobs, sources)
+}
+
+/// Each file a plan's mutants are in: its source and its mutants, or `None`
+/// where it no longer reads or parses.
+type Sources = BTreeMap<String, Option<(String, Vec<RustMutant>)>>;
 
 /// The name of the package whose manifest is nearest `file`, up from it.
 fn package_of(root: &Path, file: &str) -> Option<String> {
@@ -984,6 +1002,259 @@ fn build_switched(
         switchable.retain(|at| *at != culprit);
         alone.push((culprit, "switch-error"));
     }
+}
+
+/// A JavaScript strong pass over Rust compiled to wasm
+/// (`docs/design/mutation-drivers.md`): switches the plan's Rust mutants of
+/// the Cargo workspace at `prefix` (its directory in the project, `""` at
+/// the project's root) into the copy's workspace at `copy`, where the
+/// command builds the wasm. A mutant a switch cannot hold, or whose file
+/// changed since the run, is an `error` here, and one that does not compile
+/// `unviable`; those are taken out of the plan the JavaScript driver runs.
+/// Which mutants compile is found as the Rust pass finds it, by building:
+/// here `cargo build --lib` for wasm, in a scratch copy under `root`.
+/// Returns how many mutants are switched in.
+pub(crate) fn switch_wasm_workspace(
+    root: &Path,
+    prefix: &str,
+    copy: &Path,
+    plan_path: &Path,
+    results_path: &Path,
+    diagnostics: &mut dyn Write,
+) -> Result<usize, String> {
+    let started = Instant::now();
+    let mut plan: Value = serde_json::from_slice(
+        &crate::fault_fs::read(plan_path).map_err(|e| format!("{}: {e}", plan_path.display()))?,
+    )
+    .map_err(|error| format!("{}: {error}", plan_path.display()))?;
+    let under = |file: &str| -> Option<String> {
+        if prefix.is_empty() {
+            return Some(file.to_owned());
+        }
+        file.strip_prefix(prefix)?
+            .strip_prefix('/')
+            .map(str::to_owned)
+    };
+    let ours = |mutant: &Value| {
+        mutant["decided"].is_null()
+            && mutant["language"] == crate::mutant_list::RUST
+            && mutant["file"].as_str().and_then(under).is_some()
+    };
+    let mut own = plan.clone();
+    own["mutants"] = Value::Array(
+        plan["mutants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|mutant| ours(mutant))
+            .cloned()
+            .collect(),
+    );
+    if own["mutants"].as_array().is_none_or(Vec::is_empty) {
+        return Ok(0);
+    }
+    let results = Results::create(results_path)?;
+    let tests = planned_tests(&own);
+    let (jobs, sources) = planned_jobs(&own, root, &tests, &results, started);
+    let mut switchable = Vec::new();
+    for (at, job) in jobs.iter().enumerate() {
+        let (source, _) = sources[&job.file].as_ref().expect("a job's file was read");
+        let (tree, _) =
+            crate::rust_instrumenter::parse_source(source).expect("the file was enumerated");
+        let tree = ra_ap_syntax::AstNode::syntax(&tree).clone();
+        match crate::rust_schemata::placeable(&tree, &job.mutant) {
+            Some(reason) => results.verdict(
+                &job.id,
+                "error",
+                None,
+                0,
+                started,
+                Some(format!(
+                    "a switch cannot hold it ({reason}), and a JavaScript strong pass builds the wasm once"
+                )),
+            ),
+            None => switchable.push(at),
+        }
+    }
+    // Each mutant by its file in the workspace and its index there.
+    let by_key = jobs
+        .iter()
+        .enumerate()
+        .map(|(at, job)| ((under(&job.file).expect("ours"), job.ordinal), at))
+        .collect::<HashMap<_, _>>();
+    let by_file = |chosen: &[usize]| {
+        let mut by_file = BTreeMap::<String, Vec<(u64, RustMutant)>>::new();
+        for at in chosen {
+            let job = &jobs[*at];
+            by_file
+                .entry(under(&job.file).expect("ours"))
+                .or_default()
+                .push((job.ordinal, job.mutant.clone()));
+        }
+        by_file
+    };
+    let packages = jobs
+        .iter()
+        .filter_map(|job| package_of(root, &job.file))
+        .collect::<BTreeSet<_>>();
+    let scratch = root
+        .join(".supercov/strong/rust-wasm")
+        .join(if prefix.is_empty() { "_" } else { prefix });
+    let checked = scratch.join("switched");
+    let target = scratch.join("target");
+    let source_root = root.join(prefix);
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let build = |chosen: &[usize]| -> Result<_, String> {
+        sync_project(&source_root, &checked)?;
+        let prepared = crate::rust_project::prepare_rust_strong_project(&checked, &by_file(chosen))
+            .map_err(|error| error.to_string())?;
+        let errors = wasm_check(&cargo, &prepared.project.workspace_root, &target, &packages)?;
+        Ok((prepared, errors))
+    };
+    let mut unviable = BTreeMap::<usize, String>::new();
+    let mut builds = 0usize;
+    loop {
+        builds += 1;
+        let _ = writeln!(
+            diagnostics,
+            "[supercov] building {} switched Rust mutant(s) for wasm (build {builds})",
+            switchable.len()
+        );
+        let (prepared, errors) = build(&switchable)?;
+        if errors.is_empty() {
+            break;
+        }
+        let mut out = BTreeSet::new();
+        let mut unexplained = Vec::new();
+        for error in &errors {
+            let (own, at_switch) = attribute(error, &prepared.switched);
+            let typed = error
+                .code
+                .as_deref()
+                .is_some_and(|code| OWN_ERRORS.contains(&code));
+            if own.len() == 1 && typed {
+                if let Some(at) = by_key.get(own.iter().next().expect("one")) {
+                    unviable
+                        .entry(*at)
+                        .or_insert_with(|| first_line(&error.rendered));
+                    out.insert(*at);
+                }
+            } else if !own.is_empty() || !at_switch.is_empty() {
+                for key in own.iter().chain(&at_switch) {
+                    if let Some(at) = by_key.get(key)
+                        && !unviable.contains_key(at)
+                        && out.insert(*at)
+                    {
+                        results.verdict(
+                            &jobs[*at].id,
+                            "error",
+                            None,
+                            0,
+                            started,
+                            Some(format!(
+                                "its switch does not build for wasm: {}",
+                                first_line(&error.rendered)
+                            )),
+                        );
+                    }
+                }
+            } else {
+                unexplained.push(first_line(&error.rendered));
+            }
+        }
+        // Errors no switch explains: the crate does not build as written
+        // (a mutant's switch breaks the build where its own code is; see
+        // `attribute`).
+        if out.is_empty() {
+            return Err(format!(
+                "the crate does not build for wasm: {}",
+                unexplained.join("; ")
+            ));
+        }
+        switchable.retain(|at| !out.contains(at));
+    }
+    for (at, error) in &unviable {
+        results.verdict(
+            &jobs[*at].id,
+            "unviable",
+            None,
+            0,
+            started,
+            Some(format!("does not compile: {error}")),
+        );
+    }
+    crate::rust_project::prepare_rust_strong_project(copy, &by_file(&switchable))
+        .map_err(|error| error.to_string())?;
+    let _ = writeln!(
+        diagnostics,
+        "[supercov] switched {} Rust mutant(s) into the wasm the command builds; {} unviable",
+        switchable.len(),
+        unviable.len()
+    );
+    // The JavaScript driver runs only what is switched in.
+    let kept = switchable
+        .iter()
+        .map(|at| jobs[*at].id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(mutants) = plan["mutants"].as_array_mut() {
+        mutants
+            .retain(|mutant| !ours(mutant) || kept.contains(mutant["id"].as_str().unwrap_or("")));
+    }
+    crate::fault_fs::write(
+        plan_path,
+        serde_json::to_vec(&plan).expect("plain data serializes"),
+    )
+    .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+    Ok(switchable.len())
+}
+
+/// `cargo build --lib` of `packages` for `wasm32-unknown-unknown` in
+/// `workspace` with `cargo`: the compiler's errors, none where it built.
+fn wasm_check(
+    cargo: &str,
+    workspace: &Path,
+    target: &Path,
+    packages: &BTreeSet<String>,
+) -> Result<Vec<CompileError>, String> {
+    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("--cap-lints=warn -A unused_parens");
+    let mut command = Command::new(cargo);
+    command.args([
+        "build",
+        "--lib",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--message-format=json",
+    ]);
+    for package in packages {
+        command.args(["-p", package]);
+    }
+    let output = crate::child_signal_guard::output(
+        command
+            .current_dir(workspace)
+            .env("CARGO_TARGET_DIR", target)
+            .env("RUSTFLAGS", rustflags),
+    )
+    .map_err(|error| format!("cargo: {error}"))?;
+    let errors = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter(|message| {
+            message["reason"] == "compiler-message" && message["message"]["level"] == "error"
+        })
+        .map(|message| compile_error(&message["message"], workspace))
+        .collect::<Vec<_>>();
+    if !output.status.success() && errors.is_empty() {
+        return Err(format!(
+            "cargo build for wasm: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(errors)
 }
 
 /// A mutant by its file and its index there.
@@ -1835,6 +2106,214 @@ mod tests {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter_map(|record| Some((record["id"].as_str()?.to_owned(), record)))
             .collect()
+    }
+
+    /// Whether this machine builds for `wasm32-unknown-unknown`; a job that
+    /// installed the target sets `SUPERCOV_REQUIRE_RUST_WASM=1`, which makes
+    /// its absence a failure.
+    fn builds_wasm() -> bool {
+        let installed = Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("wasm32-unknown-unknown")
+            });
+        assert!(
+            installed || std::env::var("SUPERCOV_REQUIRE_RUST_WASM").as_deref() != Ok("1"),
+            "the wasm32 target is missing where the job installed it"
+        );
+        installed
+    }
+
+    /// A JavaScript strong pass over Rust compiled to wasm switches the
+    /// plan's Rust mutants into the copy's crate where they build for wasm:
+    /// one that does not compile is unviable, one a switch cannot hold or
+    /// whose file changed an error, and the plan the JavaScript driver runs
+    /// keeps only what is switched in, beside its other mutants. A crate
+    /// that does not build as written, a plan it cannot read or write, and
+    /// a Cargo that cannot start end the pass with an error.
+    #[test]
+    fn a_javascript_pass_switches_a_wasm_crate_s_mutants_where_they_build() {
+        if !builds_wasm() {
+            return;
+        }
+        let (fixture_root, _) = fixture("wasm");
+        let source = std::fs::read_to_string(fixture_root.join("src/lib.rs")).unwrap();
+        let root = fixture_root.join("project");
+        let copy = fixture_root.join("copy");
+        for base in [&root, &copy] {
+            std::fs::create_dir_all(base.join("web/rust/src")).unwrap();
+            std::fs::write(
+                base.join("web/rust/Cargo.toml"),
+                "[package]\nname = \"grades\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
+            )
+            .unwrap();
+            std::fs::write(base.join("web/rust/src/lib.rs"), &source).unwrap();
+        }
+        let file = "web/rust/src/lib.rs";
+        let mutants = crate::rust_mutants::enumerate(&source).unwrap();
+        let rust = |index: usize, mutant: &RustMutant| {
+            json!({"id": mutant_id(file, mutant), "file": file, "language": "rust", "index": index,
+                "decided": null, "candidates": [{"test": 0}]})
+        };
+        let plan = json!({
+            "tests": [{"id": "web/a.test.js > a", "file": "web/a.test.js", "name": "a", "runner": "node:test", "runnable": true}],
+            "mutants": mutants.iter().enumerate().map(|(index, mutant)| rust(index, mutant))
+                .chain([
+                    json!({"id": format!("{file}:1:1-1:2:FnValue:gone"), "file": file, "language": "rust", "index": 99, "decided": null, "candidates": [{"test": 0}]}),
+                    json!({"id": "web/a.js:1:1-1:2:BooleanLiteral:false", "file": "web/a.js", "language": "javascript", "index": 0, "decided": null, "candidates": [{"test": 0}]}),
+                    json!({"id": "decided", "file": file, "language": "rust", "index": 0, "decided": "survived"}),
+                ])
+                .collect::<Vec<_>>(),
+        });
+        let plan_path = fixture_root.join("wasm-plan.json");
+        let results = fixture_root.join("wasm-results.jsonl");
+        std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+        let mut said = Vec::new();
+        let switched = switch_wasm_workspace(
+            &root,
+            "web/rust",
+            &copy.join("web/rust"),
+            &plan_path,
+            &results,
+            &mut said,
+        )
+        .unwrap();
+        let request = StrongRustRequest {
+            root: root.clone(),
+            command: Vec::new(),
+            plan: plan_path.clone(),
+            results: results.clone(),
+        };
+        let found = verdicts(&request);
+        let status = |descriptor: &str| found[&format!("{file}:{descriptor}")]["status"].clone();
+        assert_eq!(status("9:9-9:11:BinaryOperator:-="), "unviable");
+        assert_eq!(status("1:1-1:2:FnValue:gone"), "error");
+        assert!(
+            found.values().any(|verdict| verdict["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("a switch cannot hold it"))),
+            "{found:?}"
+        );
+        // The plan keeps what is switched in, the JavaScript mutant and the
+        // decided one.
+        let kept: Value = serde_json::from_slice(&std::fs::read(&plan_path).unwrap()).unwrap();
+        let kept = kept["mutants"].as_array().unwrap();
+        assert_eq!(kept.len(), switched + 2);
+        assert_eq!(found.len() + switched, mutants.len() + 1);
+        assert!(kept.iter().any(|mutant| mutant["language"] == "javascript"));
+        // The copy's crate has the switches.
+        assert_ne!(
+            std::fs::read_to_string(copy.join("web/rust/src/lib.rs")).unwrap(),
+            source
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert!(
+            said.contains(&format!("switched {switched} Rust mutant(s)")),
+            "{said}"
+        );
+
+        // A plan with no Rust mutant of the workspace switches nothing.
+        assert_eq!(
+            switch_wasm_workspace(
+                &root,
+                "elsewhere",
+                &copy,
+                &plan_path,
+                &results,
+                &mut Vec::new()
+            )
+            .unwrap(),
+            0
+        );
+        // A crate at the project's root that does not build as written.
+        let broken = fixture_root.join("broken");
+        std::fs::create_dir_all(broken.join("src")).unwrap();
+        std::fs::write(
+            broken.join("Cargo.toml"),
+            "[package]\nname = \"broken\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            broken.join("src/lib.rs"),
+            "mod other;\npub fn one() -> u32 {\n    1 + other::two()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            broken.join("src/other.rs"),
+            "pub fn two() -> u32 {\n    \"two\"\n}\n",
+        )
+        .unwrap();
+        let lib = std::fs::read_to_string(broken.join("src/lib.rs")).unwrap();
+        let broken_plan = json!({
+            "tests": plan["tests"],
+            "mutants": crate::rust_mutants::enumerate(&lib).unwrap().iter().enumerate()
+                .map(|(index, mutant)| json!({"id": mutant_id("src/lib.rs", mutant), "file": "src/lib.rs", "language": "rust", "index": index, "decided": null, "candidates": [{"test": 0}]}))
+                .collect::<Vec<_>>(),
+        });
+        let broken_plan_path = fixture_root.join("broken-plan.json");
+        std::fs::write(&broken_plan_path, serde_json::to_vec(&broken_plan).unwrap()).unwrap();
+        let error = switch_wasm_workspace(
+            &broken,
+            "",
+            &broken,
+            &broken_plan_path,
+            &results,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("the crate does not build for wasm: "),
+            "{error}"
+        );
+
+        // Its plan unread and unwritten, and a Cargo that does not start or
+        // fails before compiling.
+        let text = include_str!("rust_strong.rs");
+        let body = &text[text.find("pub(crate) fn switch_wasm_workspace(").unwrap()
+            ..text.find("fn wasm_check(").unwrap()];
+        let offset = text[..text.find("pub(crate) fn switch_wasm_workspace(").unwrap()]
+            .lines()
+            .count();
+        for (operation, pattern) in [
+            ("read", "crate::fault_fs::read(plan_path)"),
+            ("write", "crate::fault_fs::write("),
+        ] {
+            let line = offset
+                + body
+                    .lines()
+                    .position(|line| line.contains(pattern))
+                    .unwrap()
+                + 1;
+            std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
+            std::fs::write(copy.join("web/rust/src/lib.rs"), &source).unwrap();
+            let site = format!("fs.{operation}#rust_strong.rs:{line}");
+            let failed = crate::fault::during(&site, || {
+                switch_wasm_workspace(
+                    &root,
+                    "web/rust",
+                    &copy.join("web/rust"),
+                    &plan_path,
+                    &results,
+                    &mut Vec::new(),
+                )
+            });
+            assert!(failed.unwrap_err().contains("wasm-plan.json"), "{site}");
+        }
+        let packages = BTreeSet::from(["grades".to_owned()]);
+        let target = fixture_root.join("wasm-target");
+        assert!(
+            wasm_check("/nonexistent/cargo", &root, &target, &packages)
+                .unwrap_err()
+                .starts_with("cargo: ")
+        );
+        let unknown = BTreeSet::from(["nothing-of-that-name".to_owned()]);
+        assert!(
+            wasm_check("cargo", &root.join("web/rust"), &target, &unknown)
+                .unwrap_err()
+                .starts_with("cargo build for wasm: ")
+        );
+        let _ = std::fs::remove_dir_all(fixture_root);
     }
 
     /// The driver kills, keeps, times out and finds unviable and

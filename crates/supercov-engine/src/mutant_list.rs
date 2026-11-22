@@ -165,7 +165,19 @@ fn list_rust_mutants(
     let files = recorded.keys().cloned().collect::<Vec<_>>();
     let listed = crate::threads::parallel_map(&files, |file| {
         let source = std::fs::read_to_string(root.join(file)).ok()?;
-        crate::rust_mutants::list(file, &source, recorded.get(file)?)
+        let points = recorded.get(file)?;
+        crate::rust_mutants::list(file, &source, points).or_else(|| {
+            // A crate in a directory of the project (Rust compiled to wasm
+            // that JavaScript tests load) names its points by its files'
+            // paths in its Cargo workspace.
+            file.match_indices('/').find_map(|(at, _)| {
+                root.join(&file[..at])
+                    .join("Cargo.toml")
+                    .is_file()
+                    .then(|| crate::rust_mutants::list(&file[at + 1..], &source, points))
+                    .flatten()
+            })
+        })
     });
     let mut mutants = BTreeMap::new();
     let mut changed = Vec::new();
@@ -667,6 +679,32 @@ mod tests {
             ["src/a.rs"]
         );
         assert_eq!(listed.mutants.language_of("src/a.rs"), RUST);
+        // A crate in a directory of its own, its points named by its
+        // files' paths there.
+        std::fs::create_dir_all(root.join("web/rust/src")).unwrap();
+        std::fs::write(root.join("web/rust/Cargo.toml"), "[package]\n").unwrap();
+        let source = "pub fn a(x: u32) -> bool {\n    x > 1\n}\n";
+        std::fs::write(root.join("web/rust/src/lib.rs"), source).unwrap();
+        let points = crate::rust_instrumenter::build_rust_manifest("src/lib.rs", source)
+            .unwrap()
+            .points
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let nested = list_from_sources(
+            &root,
+            &BTreeMap::from([("web/rust/src/lib.rs".to_owned(), points.clone())]),
+        );
+        assert!(nested.changed.is_empty());
+        assert!(!nested.mutants.files["web/rust/src/lib.rs"].is_empty());
+        // Points of another file are a changed file, wherever it is.
+        let mut other = points;
+        other.insert("rs:statement:elsewhere".into());
+        let changed = list_from_sources(
+            &root,
+            &BTreeMap::from([("web/rust/src/lib.rs".to_owned(), other)]),
+        );
+        assert_eq!(changed.changed, ["web/rust/src/lib.rs"]);
         let nothing = list_from_sources(&root, &BTreeMap::new());
         assert_eq!(nothing.mutants, MutantsFile::unlisted());
         std::fs::remove_dir_all(&root).unwrap();

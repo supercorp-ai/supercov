@@ -43,7 +43,7 @@ const tests = [
     test_("b1", "t/b.test.js", 2_000), test_("b2", "t/b.test.js", 2_000),
     test_("c1", "t/c.test.js"), test_("c2", "t/c.test.js"),
     test_("d1", "t/d.test.js"),
-    test_("v1", "t/v.test.js", 1, "vitest"),
+    test_("v1", "t/v.spec.js", 1, "playwright"),
 ];
 const at = (id) => tests.findIndex((one) => one.id === id);
 const mutant = (id, candidates, extra = {}) => ({ id, file: "src/a.js", candidates: candidates.map((name) => ({ test: at(name), reason: "infected" })), ...extra });
@@ -119,8 +119,8 @@ test("each mutant runs against its candidates, file by file, and the first failu
     assert.equal(verdicts["second-file"].killedBy, "t/c.test.js > c2");
     assert.match(verdicts.d.reason, /t\/d\.test\.js does not finish without a mutant/);
     assert.match(verdicts.unplaceable.reason, /function-source/);
-    assert.match(verdicts.elsewhere.reason, /ran under vitest/);
-    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under vitest/);
+    assert.match(verdicts.elsewhere.reason, /ran under playwright/);
+    assert.match(verdicts["partly-elsewhere"].reason, /other candidates ran under playwright/);
     assert.equal(verdicts.nothing.reason, "no-runnable-candidate");
     // b2 alone fails without the mutant too: the kill was no kill, and the
     // whole file let the mutant live.

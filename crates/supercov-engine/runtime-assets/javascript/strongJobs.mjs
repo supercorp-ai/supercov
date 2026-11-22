@@ -625,7 +625,9 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     for (const planned of plan.mutants) {
         if (planned.decided)
             continue;
-        const found = indexes.get(planned.id);
+        // A Rust mutant (Rust compiled to wasm) is switched by its index in
+        // its file's list, as the pass's build placed it.
+        const found = planned.language === "rust" ? { index: planned.index, entry: {} } : indexes.get(planned.id);
         if (!found) {
             write({ id: planned.id, status: "error", reason: "the copy lists no such mutant: the source changed since the run", tests: 0, durationMs: 0 });
             continue;
