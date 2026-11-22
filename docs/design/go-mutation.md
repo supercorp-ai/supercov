@@ -274,23 +274,33 @@ weak verdicts leave. On sixteen CPUs both take seconds and Supercov's
 fixed costs (the measured run, the type check, the builds) are most of its
 time.
 
-Value probes, by the median of two warm runs of `supercov run -- go test
-./...` on 16 CPUs, without probes, with them, and the suite alone:
+Value probes, by the median of two runs of `supercov run -- go test ./...`
+on 16 CPUs after a first, without probes, with them, with them after a
+source changed, and the suite alone (each run starts with a fresh
+workspace and keeps `.supercov/cache`, as a project's next run does):
 
-| Module | Without / with probes / `go test` s | Unknown mutants | Candidate runs | Untestable |
+| Module | Without / with / with, edited / `go test` s | Unknown mutants | Candidate runs | Untestable |
 | --- | --- | --- | --- | --- |
-| go-humanize | 0.29 / 0.55 / 0.13 | 249 to 145 | 2636 to 2557 | 0 |
-| btree | 1.44 / 1.67 / 0.42 | 115 to 37 | 2629 to 2228 | 0 |
-| golang-lru | 0.87 / 1.12 / 0.62 | 82 to 38 | 1393 to 1252 | 1 |
-| uuid | 0.34 / 0.62 / 0.16 | 129 to 29 | 1551 to 1449 | 1 |
-| cast | 0.37 / 0.64 / 0.15 | 67 to 16 | 477 to 420 | 0 |
+| go-humanize | 0.29 / 0.30 / 0.40 / 0.20 | 249 to 145 | 2636 to 2557 | 0 |
+| btree | 1.19 / 1.17 / 1.20 / 0.35 | 115 to 37 | 2629 to 2229 | 0 |
+| golang-lru | 0.85 / 0.86 / 0.90 / 0.71 | 82 to 38 | 1393 to 1252 | 1 |
+| uuid | 0.32 / 0.33 / 0.40 / 0.21 | 129 to 29 | 1551 to 1449 | 1 |
+| cast | 0.38 / 0.40 / 0.49 / 0.23 | 67 to 16 | 477 to 420 | 0 |
 
-The probes' cost is a quarter of a second, about the same on every
-module: most of it is the type checker's facts, which the probes need to
-write an operation's type, not the probes themselves (btree, with the
-most to probe and the longest suite, pays 0.23 s). On the first run the
-type checker's own build adds 4-5 s, once per machine. No weak verdict a
-probe gave is contradicted by a mutant run by hand.
+The probes' own cost is within the noise. What they need beside them is
+the type checker's facts of each operation's type: asked of operations
+only (a comparison's probe infers its type), of the packages without their
+tests (`go list` without `-test` compiles no test dependencies: 0.06 s
+rather than 0.19 s on go-humanize), and kept in
+`.supercov/cache/go-facts.json` under a digest of the run's sources, its
+module's requirements and the environment that picks the build. A run of
+the same sources reads them; one after an edit asks again, 0.04 to 0.11 s.
+The helper that answers is built once into `.supercov/cache/go-mutants`
+(5 MB, built `-trimpath -ldflags=-s -w`), 3-4 s on a machine's first run.
+Both live in the project's `.supercov`, not the run's workspace: a first
+version kept them in the workspace, which each run makes afresh, so every
+run relinked the helper and asked again, +0.24 s (+92%) on go-humanize.
+No weak verdict a probe gave is contradicted by a mutant run by hand.
 
 Every disagreement, with the mutant applied by hand and the suite run whole
 ten times (`benchmarks/mutation-go/by-hand.mjs`):
