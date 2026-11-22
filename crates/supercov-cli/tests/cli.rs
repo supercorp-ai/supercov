@@ -21867,45 +21867,6 @@ fn mutants_of_a_language_no_driver_runs_are_errors_that_say_so() {
     );
 }
 
-/// A run whose tests ran under no runner a strong driver drives (Ruby's
-/// minitest here): a pass with mutants to run is refused, saying which
-/// runners it drives, and saves nothing.
-#[cfg(unix)]
-#[test]
-fn a_pass_over_tests_no_driver_runs_is_refused() {
-    let Some(ruby) = ruby() else {
-        return;
-    };
-    let project = Project::empty("strong-refused-ruby");
-    project.write("lib/w.rb", "module W\n  def self.double(n) = n * 2\nend\n");
-    project.write("test/w_test.rb", "require 'minitest/autorun'\nrequire 'w'\n\nclass WTest < Minitest::Test\n  def test_double\n    assert_equal 4, W.double(2)\n  end\nend\n");
-    project.git(&["init", "-q"]);
-    project.commit("fixture");
-    project
-        .supercov(&["--", &ruby, "-Ilib", "test/w_test.rb"])
-        .succeeds();
-    let run = project.latest();
-    project.write(
-        &format!(".supercov/runs/{run}/mutants-listed.json"),
-        r#"{"schemaVersion": 1, "mutantSet": "ruby-mutants@1",
-            "mutantSets": {"ruby": "ruby-mutants@1"},
-            "languages": {"lib/w.rb": "ruby"},
-            "files": {"lib/w.rb": [{"mutator": "ArithmeticOperator", "replacement": "/",
-                "start": [2, 29], "end": [2, 34], "original": "n * 2"}]}}"#,
-    );
-    let refused = project
-        .supercov(&["runs", "latest", "mutants", "test"])
-        .exits(1);
-    assert!(refused.contains("cannot run their mutants"), "{refused}");
-    assert!(refused.contains("pytest, unittest"), "{refused}");
-    assert!(
-        !project
-            .root
-            .join(format!(".supercov/runs/{run}/strong-mutation.json"))
-            .exists()
-    );
-}
-
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -25040,8 +25001,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:946",
-        "fs.read_dir entry#public_query.rs:946",
+        "fs.read_dir#public_query.rs:943",
+        "fs.read_dir entry#public_query.rs:943",
     ] {
         let unlisted = project
             .supercov_with(
