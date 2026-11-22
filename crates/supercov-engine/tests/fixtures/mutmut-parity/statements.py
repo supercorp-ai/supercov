@@ -98,3 +98,8 @@ def singletons(flag):
     finally:
         x -= 1
     return x
+
+
+def parenthesized_first(a, b):
+    pair = (a), b
+    return pair

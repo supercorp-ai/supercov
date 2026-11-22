@@ -948,11 +948,18 @@ mod tests {
             raw.provenance.runner = runner.into();
             raw
         };
+        // A failed Python test, and a flaky skipped one, do not.
+        let mut failed = skipped("f", "pytest");
+        failed.status = Some("failed".into());
+        let mut flaky = skipped("k", "pytest");
+        flaky.flaky = true;
         let skips = super::plan(
             &[
                 skipped("p", "pytest"),
                 skipped("u", "unittest"),
                 skipped("v", "vitest"),
+                failed,
+                flaky,
             ],
             listed(Vec::new(), &[]),
         )
@@ -963,7 +970,13 @@ mod tests {
                 .iter()
                 .map(|test| (test.id.as_str(), test.runnable))
                 .collect::<Vec<_>>(),
-            [("p", true), ("u", true), ("v", false)]
+            [
+                ("p", true),
+                ("u", true),
+                ("v", false),
+                ("f", false),
+                ("k", false)
+            ]
         );
     }
 

@@ -104,6 +104,7 @@
   {"file": "statements.py", "mutator": "NumberLiteral", "start": [97, 14], "end": [97, 15], "replacement": "2", "mutmut": "x_singletons__mutmut_13", "edit": {"start": [97, 14], "end": [97, 15], "text": "2"}},
   {"file": "statements.py", "mutator": "AugmentedAssignment", "start": [99, 9], "end": [99, 15], "replacement": "=", "mutmut": "x_singletons__mutmut_14", "edit": {"start": [99, 11], "end": [99, 12], "text": ""}},
   {"file": "statements.py", "mutator": "AssignmentOperator", "start": [99, 9], "end": [99, 15], "replacement": "+=", "mutmut": "x_singletons__mutmut_15", "edit": {"start": [99, 11], "end": [99, 12], "text": "+"}},
-  {"file": "statements.py", "mutator": "NumberLiteral", "start": [99, 14], "end": [99, 15], "replacement": "2", "mutmut": "x_singletons__mutmut_16", "edit": {"start": [99, 14], "end": [99, 15], "text": "2"}}
+  {"file": "statements.py", "mutator": "NumberLiteral", "start": [99, 14], "end": [99, 15], "replacement": "2", "mutmut": "x_singletons__mutmut_16", "edit": {"start": [99, 14], "end": [99, 15], "text": "2"}},
+  {"file": "statements.py", "mutator": "AssignmentValue", "start": [104, 5], "end": [104, 18], "replacement": "None", "mutmut": "x_parenthesized_first__mutmut_1", "edit": {"start": [104, 12], "end": [104, 18], "text": "None"}}
 ]
 }

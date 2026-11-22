@@ -145,9 +145,9 @@ pub struct Enumeration {
 
 /// mutmut's mutants of `source`, in mutmut's order.
 pub fn enumerate(source: &str) -> Result<Enumeration, PythonInstrumenterError> {
-    crate::python_instrumenter::within_text_size(source.len())?;
-    let parsed =
-        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))?;
+    let parsed = crate::python_instrumenter::within_text_size(source.len()).and_then(|()| {
+        parse_module(source).map_err(|error| PythonInstrumenterError::Parse(error.to_string()))
+    })?;
     Ok(enumerate_parsed(source, &parsed))
 }
 
@@ -1464,10 +1464,10 @@ fn cased(body: &str, raw: bool, upper: bool) -> String {
             if raw {
                 // The character after a raw backslash is never the start of
                 // a run: a run may not follow a backslash.
-                if let Some((_, next)) = characters.get(index) {
-                    out.push(*next);
-                    index += 1;
-                }
+                // A raw body never ends in a backslash that escapes
+                // nothing: an odd one at its end would escape the quote.
+                out.push(characters[index].1);
+                index += 1;
             }
             continue;
         }
@@ -2238,6 +2238,11 @@ mod tests {
         assert_eq!(cased("Straße", false, true), "STRASSE");
         assert_eq!(escape_length("\\"), 0);
         assert_eq!(escape_length("\\N{}"), 2);
+        // Bytes have none of these escapes: each is a backslash and a
+        // character.
+        assert_eq!(escape_length("\\uZZZZ"), 2);
+        assert_eq!(escape_length("\\UZZ"), 2);
+        assert_eq!(escape_length("\\Nx"), 2);
     }
 
     /// The tokens of a `# pragma: no mutate` comment.
