@@ -658,8 +658,47 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
     if kotlin && line.trim_start().starts_with("for ") {
         return "a Kotlin for loop's counter";
     }
-    if kotlin && line.contains("->") && !line.contains('{') {
+    let code = line.trim_start();
+    if kotlin
+        && ((line.contains("->") && !line.contains('{'))
+            || code.starts_with("is ")
+            || code.starts_with("!is "))
+    {
         return "a `when` branch's comparison with its subject";
+    }
+    if kotlin && mutant.mutator.ends_with("Conditionals") {
+        // `require(c)` is `if (!c) throw`: a jump of its own beside the
+        // comparison's, the same mutant where `c` is one comparison.
+        if ["require(", "check(", "require (", "check ("]
+            .iter()
+            .any(|call| line.contains(call))
+        {
+            return "a Kotlin require or check's own jump";
+        }
+        // `x in a..b` is `a <= x && x <= b`, comparisons the source does not
+        // write.
+        if line.contains(" in ")
+            && ["..", "until", "downTo"]
+                .iter()
+                .any(|range| line.contains(range))
+        {
+            return "a Kotlin range check";
+        }
+        // `isNotEmpty()` and the like are inlined `!isEmpty()`: the negation
+        // is a jump of their own beside the condition's.
+        if [
+            "isNotEmpty()",
+            "isNullOrEmpty()",
+            "isNotBlank()",
+            "isNullOrBlank()",
+            "ifEmpty(",
+            "orEmpty()",
+        ]
+        .iter()
+        .any(|call| line.contains(call))
+        {
+            return "an inlined standard library function's own condition";
+        }
     }
     "other"
 }
@@ -900,6 +939,36 @@ mod tests {
             "{ids:#?}"
         );
         assert_eq!(negated(3).len(), 1, "{ids:#?}");
+    }
+
+    #[test]
+    fn pit_only_kotlin_mutants_are_put_down_to_what_the_compiler_wrote() {
+        let mutant = |line: u32, mutator: &str| PitMutant {
+            file: "a/B.kt".into(),
+            line,
+            mutator: mutator.into(),
+            key: String::new(),
+            class: String::new(),
+            method: "f".into(),
+            description: String::new(),
+            status: "KILLED".into(),
+            killing_tests: Vec::new(),
+            index: 0,
+        };
+        let source = "fun f(c: Char, a: List<Int>, x: Any) {\n    require(a.size > 1) { \"m\" }\n    while (c in '0'..'9') {}\n    if (a.isNotEmpty()) {}\n    when (x) {\n        is String -> {\n        }\n    }\n    g()\n}\n";
+        let category = |line| pit_only_category(&mutant(line, "NegateConditionals"), Some(source));
+        assert_eq!(category(2), "a Kotlin require or check's own jump");
+        assert_eq!(category(3), "a Kotlin range check");
+        assert_eq!(
+            category(4),
+            "an inlined standard library function's own condition"
+        );
+        assert_eq!(category(6), "a `when` branch's comparison with its subject");
+        assert_eq!(category(9), "other");
+        assert_eq!(
+            pit_only_category(&mutant(2, "VoidMethodCall"), Some(source)),
+            "other"
+        );
     }
 
     #[test]
