@@ -2579,6 +2579,12 @@ function probeArithmetic(left, right, op) {
 }
 function probeCounterpart(result, left, right, op) {
   if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  // `+` with a string operand gives a string, and `-` always a number (and
+  // the reverse): they differ, whatever the operands. Working the other out
+  // would also turn a string the program builds by `+` (which V8 keeps as a
+  // rope) flat at every step: a path built a segment at a time copied every
+  // prefix of itself, and dot-prop's test of 100,000 levels ran out of memory.
+  if ((op === 0 || op === 1) && (typeof left === "string" || typeof right === "string")) return "differs";
   let other;
   try {
     other = probeArithmetic(left, right, probeArithmeticSwap[op]);
