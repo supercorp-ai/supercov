@@ -314,6 +314,34 @@ _PLAIN = frozenset((int, float, bool, complex, str, bytes, tuple, list, type(Non
 _TRUTHY = frozenset((bool, int, float, complex, str, bytes, tuple, list, dict, set, frozenset, type(None)))
 
 
+def _set_guard(guards: list | None, index: int) -> None:
+    """Sets the instrumented code's guard `index` (`supercov_instrument.
+    _DecidedNone`): its site is no longer probed where it is."""
+    if guards is not None:
+        guards[index] = True
+
+
+class _ValueState:
+    """What a context's value probes have seen: each site's outcomes, and
+    the outcomes not yet written."""
+
+    __slots__ = ("context", "seen", "buffer", "pending")
+
+    def __init__(self, context: int) -> None:
+        self.context = context
+        self.seen: dict[str, set] = {}
+        self.buffer: list = []
+        self.pending = False
+
+
+# Outcomes that show a mutant infects, or that the probe could not tell:
+# written at once, so a process killed during its test keeps them. The
+# others are written at the context's end; one that is lost reads as never
+# evaluated, which keeps no test from a mutant it could infect.
+_DECISIVE = frozenset(("eq", "differs", "other"))
+_BATCH = 400
+
+
 def _same(a, b) -> bool:
     """Whether two results cannot be told apart: the same type and value,
     a float's sign of zero included. NaN is never the same."""
@@ -421,12 +449,14 @@ class Runtime:
         # The value probe sites whose mutants this context has already
         # infected: no later evaluation there changes a verdict, so their
         # probes only run the program's own operation.
-        self.decided = contextvars.ContextVar("supercov_python_decided", default=set())
-        # The `None` and arithmetic sites decided since the last test
-        # began, whichever thread decided them: the instrumented code skips
-        # their probe. A site skipped where it would have recorded reads as
-        # unknown, never as not infected or not reached.
-        self.shared_decided: set[str] = set()
+        self.background_values = _ValueState(0)
+        self.values = contextvars.ContextVar("supercov_python_values", default=self.background_values)
+        self.pending_values: list = []
+        # The probe sites some test's mutant infected, in this process
+        # (`_infected`): their probes only run the program's operation from
+        # then on, and the instrumented code skips a `None` or arithmetic
+        # site's call altogether.
+        self.decided: set[str] = set()
         self.identities: dict[int, dict] = {}
         # The phase a test started this process in, through SUPERCOV_CONTEXT.
         self.inherited_identity = None
@@ -436,7 +466,6 @@ class Runtime:
         self.probed_sites: set[tuple[int, str, int]] = set()
         self.seen_hits: set = set()
         # (context, site, outcome) a mutant's value probe recorded.
-        self.seen_values: set = set()
         self.seen_vectors: set = set()
         self._id_json: dict = {}
         self.pytest_active = False
@@ -767,8 +796,8 @@ class Runtime:
             del leaving
             self._reclaim()
             self.context.set(context)
-            self.decided.set(set())
-            self.shared_decided.clear()
+            self._flush_values()
+            self.values.set(_ValueState(context) if context else self.background_values)
         return context
 
     def current_identity(self) -> dict | None:
@@ -853,46 +882,70 @@ class Runtime:
             self._ensure_process_output()
             self._write_hit(context, obligation)
 
-    def _value(self, site: str, outcome: str) -> None:
+    def _value(self, site: str, outcome: str, state: _ValueState | None = None) -> None:
         """One outcome of a mutant's value probe in the current context,
         written once per site and outcome, as a first hit is."""
-        context = self.context.get()
-        key = (context, site, outcome)
-        if key in self.seen_values:
+        if state is None:
+            state = self.values.get()
+        outcomes = state.seen.get(site)
+        if outcomes is None:
+            outcomes = state.seen[site] = set()
+        elif outcome in outcomes:
+            return
+        outcomes.add(outcome)
+        if outcome not in _DECISIVE:
+            state.buffer.append((site, outcome))
+            if not state.pending:
+                state.pending = True
+                self.pending_values.append(state)
             return
         with self.lock:
-            if key in self.seen_values:
-                return
-            self.seen_values.add(key)
             if self.closed:
                 return
             self._ensure_process_output()
             self._write_payload(
-                b'{"ctx":%d,"id":%s,"o":"%s","t":"cmp"}' % (context, self._json_id(site), outcome.encode("ascii"))
+                b'{"ctx":%d,"id":%s,"o":"%s","t":"cmp"}' % (state.context, self._json_id(site), outcome.encode("ascii"))
             )
 
-    def _infected(self, site: str) -> None:
-        """A mutant of `site` gives another value in this context: recorded,
-        and the site's probe is decided for the rest of the context."""
-        self._value(site, "differs")
-        self.decided.get().add(site)
+    def _flush_values(self) -> None:
+        """The outcomes contexts saw and have not written, a record of many
+        each."""
+        with self.lock:
+            pending, self.pending_values = self.pending_values, []
+            for state in pending:
+                buffer, state.buffer = state.buffer, []
+                state.pending = False
+                if self.closed or not buffer:
+                    continue
+                self._ensure_process_output()
+                text = self._json_id
+                for start in range(0, len(buffer), _BATCH):
+                    entries = b",".join(
+                        b'[%s,"%s"]' % (text(site), outcome.encode("ascii"))
+                        for site, outcome in buffer[start:start + _BATCH]
+                    )
+                    self._write_payload(b'{"ctx":%d,"t":"cmps","v":[%s]}' % (state.context, entries))
 
-    def _infected_shared(self, site: str) -> None:
-        """`_infected`, for a site whose instrumented code skips its probe
-        once decided."""
-        self._infected(site)
-        self.shared_decided.add(site)
+    def _infected(self, site: str, state: _ValueState | None = None, guards: list | None = None, index: int = 0) -> None:
+        """A mutant of `site` gives another value: recorded, and the site's
+        probe is decided for the rest of the process. Such a mutant is
+        infected, so no verdict waits on the site; a later test that runs it
+        records nothing there, which reads as unknown and keeps the test a
+        candidate, never as not infected or not reached."""
+        self._value(site, "differs", state)
+        self.decided.add(site)
+        _set_guard(guards, index)
 
     def _mutant_compare(self, site: str, op: str, a, b):
         """A relational comparison a boundary mutant changes: the operands'
         relation, where they are numbers, strings or bytes."""
-        decided = self.decided.get()
-        if site in decided:
+        if site in self.decided:
             return getattr(_operator, op)(a, b)
+        state = self.values.get()
         try:
             result = getattr(_operator, op)(a, b)
         except BaseException:
-            self._value(site, "other")
+            self._value(site, "other", state)
             raise
         ta, tb = type(a), type(b)
         if (ta in _ORDERED_NUMBERS and tb in _ORDERED_NUMBERS) or (ta is tb and ta in (str, bytes)):
@@ -904,25 +957,26 @@ class Runtime:
                 relation = "gt"
             else:
                 relation = "unordered"
-            self._value(site, relation)
+            self._value(site, relation, state)
             if relation == "eq":
                 # Equal operands are where the boundary mutant differs.
-                decided.add(site)
+                self.decided.add(site)
         else:
-            self._value(site, "other")
+            self._value(site, "other", state)
         return result
 
-    def _mutant_arith(self, site: str, op: str, mutated: str, a, b):
+    def _mutant_arith(self, site: str, op: str, mutated: str, a, b, guards: list | None = None, index: int = 0):
         """A binary operation whose operator a mutant swaps: whether the
         swapped operator gives the same value, where both operands are
         built-in values the swapped one cannot run code of."""
-        if site in self.decided.get():
+        if site in self.decided:
+            _set_guard(guards, index)
             return getattr(_operator, op)(a, b)
         try:
             result = getattr(_operator, op)(a, b)
         except BaseException:
             # The mutant may not raise: a difference, at worst.
-            self._infected_shared(site)
+            self._infected(site, guards=guards, index=index)
             raise
         if type(a) not in _PLAIN or type(b) not in _PLAIN:
             self._value(site, "other")
@@ -933,31 +987,33 @@ class Runtime:
             if a == 0:
                 self._value(site, "same")
             else:
-                self._infected_shared(site)
+                self._infected(site, guards=guards, index=index)
             return result
         try:
             changed = getattr(_operator, mutated)(a, b)
         except Exception:
-            self._infected_shared(site)
+            self._infected(site, guards=guards, index=index)
             return result
         if _same(result, changed):
             self._value(site, "same")
         else:
-            self._infected_shared(site)
+            self._infected(site, guards=guards, index=index)
         return result
 
-    def _mutant_none(self, site: str, value):
+    def _mutant_none(self, site: str, value, guards: list | None = None, index: int = 0):
         """A value a mutant replaces with `None`: the same only where it is."""
+        if site in self.decided:
+            _set_guard(guards, index)
+            return value
         if value is None:
             self._value(site, "same")
-        elif site not in self.decided.get():
-            self._infected(site)
-            self.shared_decided.add(site)
+        else:
+            self._infected(site, guards=guards, index=index)
         return value
 
     def _mutant_sign(self, site: str, op: str, mutated: str, operand):
         result = getattr(_operator, op)(operand)
-        if site in self.decided.get():
+        if site in self.decided:
             return result
         if type(operand) not in _NUMBERS:
             self._value(site, "other")
@@ -973,7 +1029,7 @@ class Runtime:
         comparing its result with the swapped method's where the receiver is
         a built-in string, whose methods run no code of the program's."""
         method = getattr(receiver, name)
-        if site in self.decided.get():
+        if site in self.decided:
             return method
         if type(receiver) not in (str, bytes):
             self._value(site, "other")
@@ -1003,16 +1059,19 @@ class Runtime:
     def _mutant_test(self, false_site, true_site, value):
         """A conditional's test, which the mutants force false (`and False`)
         or true (`or True`): each is the same where the test already was."""
+        decided = self.decided
+        if (false_site is None or false_site in decided) and (true_site is None or true_site in decided):
+            return value
         if type(value) not in _TRUTHY:
             for site in (false_site, true_site):
-                if site is not None:
+                if site is not None and site not in decided:
                     self._value(site, "other")
             return value
         # The mutant that forces the test the other way differs.
         same, differs = (true_site, false_site) if value else (false_site, true_site)
-        if same is not None:
+        if same is not None and same not in decided:
             self._value(same, "same")
-        if differs is not None and differs not in self.decided.get():
+        if differs is not None and differs not in decided:
             self._infected(differs)
         return value
 
@@ -1279,6 +1338,12 @@ class Runtime:
         self.lock = _thread.RLock()
         self.live_slots = []
         self.free_slots = []
+        # The parent writes what its contexts saw; the child only what it
+        # sees itself.
+        self.pending_values = []
+        for state in [self.background_values, self.values.get()]:
+            state.buffer = []
+            state.pending = False
         if self.closed or self.hits_var is None:
             return
         current = self.hits_var.get()
@@ -1509,7 +1574,7 @@ class Runtime:
                 "mutant_sign": self._mutant_sign,
                 "mutant_method": self._mutant_method,
                 "mutant_test": self._mutant_test,
-                "mutant_decided": self.shared_decided,
+                "mutant_decided": self.decided,
                 "limitation": self.limitation,
             },
             self.probe_sites,
@@ -1609,6 +1674,7 @@ class Runtime:
             # The exit marker is the transport's last record, so it is written
             # while the transport is open -- before `closed` turns every later
             # record away, this one included.
+            self._flush_values()
             self._record({"t": "exit", "at": _now_ms()})
             self.closed = True
             self._close_output()

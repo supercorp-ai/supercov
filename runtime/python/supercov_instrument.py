@@ -649,27 +649,31 @@ _BINARY = {
 
 
 class _DecidedNone(ast.NodeTransformer):
-    """`mn(site, value)` becomes `value if site in dn else mn(site, value)`,
-    and `ma(site, op, mutated, a, b)` `a op b if site in dn else ...`: once
-    the test has seen a site's mutant give another value, the mutant is
-    decided, and the program's own expression runs without a call. Only a
-    small expression is written twice."""
+    """`mn(site, value)` becomes `value if g[i] else mn(site, value, g, i)`,
+    and `ma(site, op, mutated, a, b)` `a op b if g[i] else ma(..., g, i)`,
+    `g` a list of the module's guards that start false: once a test has seen
+    the site's mutant give another value, the mutant is infected, the
+    runtime sets `g[i]`, and the program's own expression runs without a
+    call. A list keeps the module's globals as they were, which Python's
+    lookups of them are specialised on. Only a small expression is written
+    twice."""
 
     LIMIT = 40
 
     def __init__(self, names: dict[str, str]):
         self.none = names["mutant_none"]
         self.arith = names["mutant_arith"]
-        self.decided = names["mutant_decided"]
+        self.guards = names["mutant_decided"]
+        self.count = 0
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         self.generic_visit(node)
         if not isinstance(node.func, ast.Name):
             return node
         if node.func.id == self.none and len(node.args) == 2:
-            site, value = node.args
+            value = node.args[1]
         elif node.func.id == self.arith and len(node.args) == 5 and node.args[1].value in _BINARY:
-            site, operator, _, left, right = node.args
+            _, operator, _, left, right = node.args
             value = ast.BinOp(left=left, op=_BINARY[operator.value](), right=right)
             _at(value.op, node.lineno, node.col_offset)
             value.lineno, value.col_offset = node.lineno, node.col_offset
@@ -678,14 +682,16 @@ class _DecidedNone(ast.NodeTransformer):
             return node
         if sum(1 for _ in ast.walk(value)) > self.LIMIT:
             return node
-        test = ast.Compare(
-            left=ast.Constant(site.value),
-            ops=[ast.In()],
-            comparators=[ast.Name(id=self.decided, ctx=ast.Load())],
+        index = self.count
+        self.count += 1
+        guards = ast.Name(id=self.guards, ctx=ast.Load())
+        node.args += [_at(guards, node.lineno, node.col_offset), _at(ast.Constant(index), node.lineno, node.col_offset)]
+        test = _at(
+            ast.Subscript(value=ast.Name(id=self.guards, ctx=ast.Load()), slice=ast.Constant(index), ctx=ast.Load()),
+            node.lineno,
+            node.col_offset,
         )
         guarded = ast.IfExp(test=test, body=copy.deepcopy(value), orelse=node)
-        for part in (test, test.left, test.comparators[0]):
-            _at(part, node.lineno, node.col_offset)
         guarded.lineno, guarded.col_offset = node.lineno, node.col_offset
         guarded.end_lineno, guarded.end_col_offset = node.end_lineno, node.end_col_offset
         return guarded
@@ -717,16 +723,28 @@ def instrument(tree: ast.Module, probes, report=None) -> ast.Module:
         _MutantProbes(mutant_probes, names).visit(tree)
     inserter = _Inserter(probes, names)
     inserter.visit(tree)
+    guards = 0
     if mutant_probes:
-        _DecidedNone(names).visit(tree)
-    _import_aliases(tree, names)
+        decided = _DecidedNone(names)
+        decided.visit(tree)
+        guards = decided.count
+    after = _import_aliases(tree, names)
+    if guards:
+        # Every guard starts false, so the first evaluation of each site
+        # calls its probe.
+        anchor = tree.body[after - 1]
+        start = ast.Assign(
+            targets=[ast.Name(id=names["mutant_decided"], ctx=ast.Store())],
+            value=ast.BinOp(left=ast.List(elts=[ast.Constant(False)], ctx=ast.Load()), op=ast.Mult(), right=ast.Constant(guards)),
+        )
+        tree.body.insert(after, _at(start, anchor.lineno, anchor.col_offset))
     if report is not None:
         for limitation in inserter.limitations:
             report(*limitation)
     return tree
 
 
-def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
+def _import_aliases(tree: ast.Module, names: dict[str, str]) -> int:
     # The aliases are imported from this module so the probes resolve in
     # whatever namespace the file is executed in. After the docstring and
     # any `from __future__` imports, which nothing may precede.
@@ -754,8 +772,8 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
         "single_probe": "lambda k, value: not not value",
         "site_probe": "lambda file, line: None",
         "mutant_compare": "lambda site, op, a, b: getattr(__import__('operator'), op)(a, b)",
-        "mutant_arith": "lambda site, op, mutated, a, b: getattr(__import__('operator'), op)(a, b)",
-        "mutant_none": "lambda site, value: value",
+        "mutant_arith": "lambda site, op, mutated, a, b, guards=None, index=0: getattr(__import__('operator'), op)(a, b)",
+        "mutant_none": "lambda site, value, guards=None, index=0: value",
         "mutant_sign": "lambda site, op, mutated, operand: getattr(__import__('operator'), op)(operand)",
         "mutant_method": "lambda site, receiver, name, mutated: getattr(receiver, name)",
         "mutant_test": "lambda false_site, true_site, value: value",
@@ -774,3 +792,4 @@ def _import_aliases(tree: ast.Module, names: dict[str, str]) -> None:
     for statement in fallback:
         _at(statement, line, column)
     tree.body[position:position] = fallback
+    return position + len(fallback)

@@ -138,6 +138,11 @@ enum Record {
         id: String,
         o: String,
     },
+    /// Many such outcomes of one context, written as it ends: (id, outcome).
+    Cmps {
+        ctx: u64,
+        v: Vec<(String, String)>,
+    },
     /// Many decision vectors of one context: (id, digits, outcome).
     Decs {
         ctx: u64,
@@ -1331,6 +1336,20 @@ fn apply_transport(
                 .entry(id)
                 .or_default()
                 .insert(o);
+            }
+            Record::Cmps { ctx, v } => {
+                let comparisons = &mut observations(
+                    evidence,
+                    &contexts,
+                    process_worker.as_deref(),
+                    ctx,
+                    name,
+                    line_number,
+                )?
+                .comparisons;
+                for (id, outcome) in v {
+                    comparisons.entry(id).or_default().insert(outcome);
+                }
             }
             Record::Assert { ctx } => {
                 // Only the first marker of a call phase moves anything; a
@@ -3287,18 +3306,18 @@ pub(crate) mod tests {
     fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
         let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
         // Listed: layout.json, the slot, the transport.
-        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:392@2", || {
+        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:397@2", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(read.is_ok(), "{:?}", read.err());
         // Gone by the time it is opened: harvested by a process that closed.
-        let opened = crate::fault::during("fs.open:2#python_evidence.rs:447", || {
+        let opened = crate::fault::during("fs.open:2#python_evidence.rs:452", || {
             read_evidence_directory(&directory, "run-1")
         });
         assert!(opened.is_ok(), "{:?}", opened.err());
         // Opened but no longer readable is refused.
         assert!(
-            crate::fault::during("fs.open:13#python_evidence.rs:447", || {
+            crate::fault::during("fs.open:13#python_evidence.rs:452", || {
                 read_evidence_directory(&directory, "run-1")
             })
             .is_err()
@@ -3426,6 +3445,7 @@ pub(crate) mod tests {
             json!({"t":"hit","ctx":1,"id":statements[1].id}),
             json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"lt"}),
             json!({"t":"cmp","ctx":1,"id":"m.py:2:12","o":"eq"}),
+            json!({"t":"cmps","ctx":1,"v":[["m.py:2:12","gt"],["m.py:3:5","same"]]}),
             json!({"t":"outcome","worker":"main","test":test,"retry":0,"phase":"call","outcome":"passed","xfail":false}),
             json!({"t":"exit","at":9}),
         ];
@@ -3448,9 +3468,10 @@ pub(crate) mod tests {
             .flat_map(|raw| raw.runtime.iter())
             .flat_map(|snapshot| snapshot.comparisons.iter())
             .collect::<Vec<_>>();
-        assert_eq!(comparisons.len(), 1);
+        assert_eq!(comparisons.len(), 2);
         assert_eq!(comparisons[0].id, "m.py:2:12");
-        assert_eq!(comparisons[0].outcomes, ["eq", "lt"]);
+        assert_eq!(comparisons[0].outcomes, ["eq", "gt", "lt"]);
+        assert_eq!(comparisons[1].outcomes, ["same"]);
         assert!(
             !run.archive_entries()
                 .iter()

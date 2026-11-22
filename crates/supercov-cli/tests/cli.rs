@@ -16006,7 +16006,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.read@10",
             "fs.read@6 => source_capture.rs:54",
             "fs.read_dir entry#1 => python_project.rs:125",
-            "fs.read_dir entry#2 => python_evidence.rs:369",
+            "fs.read_dir entry#2 => python_evidence.rs:374",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",

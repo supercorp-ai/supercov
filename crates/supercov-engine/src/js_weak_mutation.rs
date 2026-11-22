@@ -530,6 +530,40 @@ fn reach(mutant: &CandidateMutant, records: &Records<'_>) -> Option<(Status, Rea
 
 const BOUNDARIES: &[(&str, &str)] = &[("<", "<="), ("<=", "<"), (">", ">="), (">=", ">")];
 
+/// A Python probe site: one the runtime stops probing once a test's mutant
+/// infected it, so that a later test records nothing there.
+fn python_site(site: &str) -> bool {
+    let kind = site.rsplit_once('#').map_or("compare", |(_, kind)| kind);
+    let python = site
+        .split(':')
+        .next()
+        .is_some_and(|file| file.ends_with(".py"));
+    python && PYTHON_PROBES.contains(&kind)
+}
+
+/// The kinds of Python's value probes (`python_mutants::ProbeTarget`); a
+/// comparison's site has no kind in its name.
+const PYTHON_PROBES: &[&str] = &[
+    "compare", "arith", "none", "sign", "method", "iffalse", "iftrue",
+];
+
+/// A comparison's probe that recorded nothing: it never ran, or, for
+/// Python, another test's mutant already decided it.
+fn unrecorded_comparison(site: &str) -> (Status, Reason) {
+    if python_site(site) {
+        return verdict_of(
+            Status::Unknown,
+            "value-not-recorded",
+            "no relation recorded: never evaluated, or no longer probed once another test's mutant infected it",
+        );
+    }
+    verdict_of(
+        Status::NotReached,
+        "comparison-not-evaluated",
+        "the comparison never ran",
+    )
+}
+
 fn relational(operator: &str) -> bool {
     matches!(operator, "<" | "<=" | ">" | ">=")
 }
@@ -562,11 +596,7 @@ fn equality_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status
             );
         };
         let Some(relations) = records.comparisons(site) else {
-            return verdict_of(
-                Status::NotReached,
-                "comparison-not-evaluated",
-                "the comparison never ran",
-            );
+            return unrecorded_comparison(site);
         };
         if relations.contains("eq") {
             return verdict_of(INFECTED, "operands-equal", "the operands were equal");
@@ -591,11 +621,7 @@ fn equality_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status
     // one whose operands are not ordered (NaN), which is false either way.
     if let Some(site) = &mutant.compare {
         let Some(outcomes) = records.comparisons(site) else {
-            return verdict_of(
-                Status::NotReached,
-                "comparison-not-evaluated",
-                "the comparison never ran",
-            );
+            return unrecorded_comparison(site);
         };
         if !relational(operator) {
             return verdict_of(INFECTED, "comparison-evaluated", "the comparison ran");
@@ -1048,18 +1074,13 @@ fn probed_operation(mutant: &CandidateMutant, records: &Records<'_>) -> (Status,
     let Some(outcomes) = records.comparisons(site) else {
         // A Python value the mutant replaces with `None` records nothing
         // where its own evaluation raised, which the mutant skips; and a
-        // Python `None` or arithmetic site another context of the same test
-        // decided is not probed again: its silence is no sign the mutant
-        // changes nothing.
-        let python = site
-            .split(':')
-            .next()
-            .is_some_and(|file| file.ends_with(".py"));
-        if site.ends_with("#none") || (python && site.ends_with("#arith")) {
+        // Python site some test's mutant infected is not probed again in
+        // its process: its silence is no sign the mutant changes nothing.
+        if python_site(site) {
             return verdict_of(
                 Status::Unknown,
                 "value-not-recorded",
-                "no value recorded: never evaluated, or its evaluation raised, which the mutant skips",
+                "no value recorded: never evaluated, its evaluation raised (which the mutant skips), or no longer probed once another test's mutant infected it",
             );
         }
         // A method probe records nothing for a receiver that is not a
@@ -2036,6 +2057,13 @@ mod tests {
             "non-primitive-operands",
         );
         expect(&boundary, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        // A Python comparison is no longer probed once a test's mutant
+        // infected it: its silence is unknown.
+        let python_boundary = CandidateMutant {
+            compare: Some("m.py:2:12".into()),
+            ..boundary.clone()
+        };
+        expect(&python_boundary, &ran(), UNKNOWN, "value-not-recorded");
         let unprobed = CandidateMutant {
             compare: None,
             ..boundary
@@ -2073,6 +2101,11 @@ mod tests {
             "non-primitive-operands",
         );
         expect(&negated, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        let python_negated = CandidateMutant {
+            compare: Some("m.py:2:12".into()),
+            ..negated.clone()
+        };
+        expect(&python_negated, &ran(), UNKNOWN, "value-not-recorded");
         // An equality's value recorded where it is a value.
         let equality = CandidateMutant {
             compare: Some("c".into()),

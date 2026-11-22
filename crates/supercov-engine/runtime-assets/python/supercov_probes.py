@@ -101,13 +101,13 @@ site_probe: Callable[[str, int], None] = lambda file, line: None  # noqa: E731
 # Mutants' value probes (`supercov_instrument._MutantProbes`): each returns
 # what the program's own expression gives.
 mutant_compare = lambda site, op, a, b: getattr(__import__("operator"), op)(a, b)  # noqa: E731
-mutant_arith = lambda site, op, mutated, a, b: getattr(__import__("operator"), op)(a, b)  # noqa: E731
-mutant_none = lambda site, value: value  # noqa: E731
+mutant_arith = lambda site, op, mutated, a, b, guards=None, index=0: getattr(__import__("operator"), op)(a, b)  # noqa: E731
+mutant_none = lambda site, value, guards=None, index=0: value  # noqa: E731
 mutant_sign = lambda site, op, mutated, operand: getattr(__import__("operator"), op)(operand)  # noqa: E731
 mutant_method = lambda site, receiver, name, mutated: getattr(receiver, name)  # noqa: E731
 mutant_test = lambda false_site, true_site, value: value  # noqa: E731
-# The `None` probe sites the current test has decided: their value is not
-# probed again until the next test.
+# The probe sites a test's mutant has infected; a module the probes are in
+# binds its list of guards to this alias.
 mutant_decided: frozenset | set = frozenset()
 
 
