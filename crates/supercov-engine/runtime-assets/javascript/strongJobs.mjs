@@ -180,7 +180,7 @@ function stop(child) {
     }
 }
 
-export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env }) {
+export async function drive({ command, plan, resultsPath, root = process.cwd(), workers = parallelism(), environment = process.env, graceMs = 10_000, baselineGraceMs = 60_000 }) {
     const started = Date.now();
     const write = (record) => appendFileSync(resultsPath, `${JSON.stringify(record)}\n`);
     const work = `${resultsPath}.jobs`;
@@ -327,7 +327,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
     const confirmations = new Map();
     const cost = (file, chosen) => (chosen ? [...chosen] : (testsOf.get(file) ?? []).map((test) => test.id))
         .reduce((sum, id) => sum + (byId.get(id)?.durationMs ?? 1_000), 0);
-    const baselineLimit = (file, chosen) => 3 * cost(file, chosen) + 60_000;
+    const baselineLimit = (file, chosen) => 3 * cost(file, chosen) + baselineGraceMs;
     const passedAll = (result, chosen) => !result.timedOut && [...chosen].every((id) => result.statuses.get(id) === "passed");
     async function wholeBaseline(file) {
         const state = fileState(file);
@@ -380,10 +380,12 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             // the command, the job runs them all: a kill is then judged by a
             // baseline that ran the same tests, and needs no confirmation.
             const cheap = !whole && baseline.chosen && cost(group.file, baseline.chosen) <= UNION_MS;
-            const chosen = whole ? null : new Set(cheap ? baseline.chosen : group.tests);
+            const chosen = whole ? null : new Set(cheap ? [...baseline.chosen, ...group.tests] : group.tests);
             const excluded = whole ? (testId) => !baseline.passing.has(testId) : () => false;
-            const limitMs = 3 * baseline.durationMs + 10_000;
-            const result = await job({ mutant, file: group.file, tests: chosen, bail: true, limitMs });
+            const limitMs = 3 * baseline.durationMs + graceMs;
+            // A test that fails without the mutant must not stop the job.
+            const bail = !whole || [...baseline.statuses.values()].every((status) => status === "passed");
+            const result = await job({ mutant, file: group.file, tests: chosen, bail, limitMs });
             const ran = [...result.statuses].filter(([id, status]) => status !== "skipped" && (chosen === null || chosen.has(id)));
             const killer = ran.find(([id, status]) => status === "failed" && !excluded(id))?.[0];
             if (result.mutantTimedOut)
@@ -400,7 +402,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             }
             const name = byId.get(killer)?.name ?? killer;
             // Judged by a baseline that ran the same tests: certain.
-            const same = whole || (baseline.chosen !== null && baseline.chosen.size === chosen.size);
+            const same = whole || (baseline.chosen !== null && baseline.chosen.size === chosen.size && [...chosen].every((id) => baseline.chosen.has(id)));
             if (same || !(await failsWithout(group.file, chosen, killer, baselineLimit(group.file, chosen))))
                 return { status: "killed", killedBy: name, tests: ran.length };
             // The killing test fails without the mutant too, with only these
@@ -480,9 +482,11 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             if (!group.whole)
                 group.tests.forEach((id) => state.union.add(id));
         }
-        pending.push(runMutant(mutant, groups, elsewhere));
+        pending.push([mutant, groups, elsewhere]);
     }
-    await Promise.all(pending);
+    // Every file's baseline runs the tests of all its mutants: none starts
+    // before all are known.
+    await Promise.all(pending.map((task) => runMutant(...task)));
     write({ summary: true, driver: "jobs", workers, ...profile, durationMs: Date.now() - started });
     return 0;
 }
