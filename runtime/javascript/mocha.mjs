@@ -212,7 +212,7 @@ function observe(runner, runtime, write) {
         identities.set(test, value);
         return value;
     }
-    function record(id, status, scope, snapshot) {
+    function record(id, status, scope, snapshot, durationMs) {
         const testFile = localFile(id.file);
         write({
             testId: scope ? scope.testId : runnerExecutionScope(id).testId,
@@ -222,6 +222,9 @@ function observe(runner, runtime, write) {
             title: id.name.split(" > ").at(-1) ?? id.name,
             retry: id.retry ?? 0,
             status,
+            // How long the test took: a strong pass runs a mutant's cheapest
+            // test files first, and gives each its limit.
+            ...(typeof durationMs === "number" ? { durationMs: Math.round(durationMs) } : {}),
             ...(id.role ? { role: id.role } : {}),
             provenance: inferTestProvenance({
                 runner: "mocha",
@@ -250,7 +253,7 @@ function observe(runner, runtime, write) {
         active = undefined;
         if (!current)
             return;
-        record(current.id, current.status, current.scope, runtime.coverageSnapshot());
+        record(current.id, current.status, current.scope, runtime.coverageSnapshot(), current.test.duration);
         runtime.resetCoverage();
         runtime.activateCoverageScope();
     }

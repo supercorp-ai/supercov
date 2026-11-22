@@ -45,6 +45,7 @@ context_headers	6
 failure_output_python	6
 context_cookies	5
 html_report	5
+mutation_report_formats	40
 rust_vite_playwright	5
 mocha_failure_output	5
 rust_direct_vitest	4

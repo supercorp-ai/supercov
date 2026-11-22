@@ -588,6 +588,11 @@ pub fn interrupt_run_state(
     Ok(state)
 }
 
+/// Whether a process with this id runs (or exists under another account).
+pub fn process_alive(pid: u32) -> bool {
+    process_exists(pid)
+}
+
 #[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     if pid == 0 || pid > libc::pid_t::MAX as u32 {
@@ -1724,7 +1729,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1529", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1534", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1749,7 +1754,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1264", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1269", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1757,7 +1762,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1339", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1344", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

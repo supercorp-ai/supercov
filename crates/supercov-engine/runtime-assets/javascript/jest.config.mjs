@@ -32,12 +32,33 @@ function jestConfig() {
     let first;
     for (const base of bases) {
         try {
-            return base("jest-config");
+            const path = base.resolve("jest-config");
+            return { module: base(path), path };
         } catch (error) {
             first ??= error;
         }
     }
     throw first;
+}
+
+// The project's own options, unnormalized, as Jest 29.3 and later read them
+// (`readInitialOptions`). Earlier Jest (27, 28) has the same two steps as
+// modules of its build, which its package's exports hide from a require by
+// name: they are required beside its entry.
+async function readProjectOptions(original) {
+    const { module, path } = jestConfig();
+    if (typeof module.readInitialOptions === "function")
+        return module.readInitialOptions(original, { skipMultipleConfigError: true });
+    if (original && module.isJSONString?.(original))
+        return { config: JSON.parse(original), configPath: null };
+    const internal = createRequire(path);
+    const step = (name) => {
+        const loaded = internal(`./${name}`);
+        return loaded.default ?? loaded;
+    };
+    const configPath = step("resolveConfigPath")(original ?? process.cwd(), process.cwd(), true);
+    const config = await step("readConfigFileAndSetRootDir")(configPath);
+    return { config, configPath };
 }
 
 // A strong pass's job (strongJob.mjs) runs one of the run's test files: the
@@ -62,14 +83,13 @@ function strongJobFiles(config) {
 export default async function supercovJestConfig() {
     let config = { rootDir: process.cwd() };
     try {
-        const { readInitialOptions } = jestConfig();
         const original = process.env["SUPERCOV_ORIGINAL_JEST_CONFIG"] || undefined;
-        const read = await readInitialOptions(original, { skipMultipleConfigError: true });
+        const read = await readProjectOptions(original);
         config = read.config ?? config;
         config.rootDir ??= read.configPath ? dirname(read.configPath) : process.cwd();
     } catch (error) {
-        // jest-config before 29.3 has no readInitialOptions; the project's
-        // configuration is not read and Jest's defaults apply.
+        // A configuration Jest itself could not read either, or a Jest
+        // whose jest-config is not where Jest 27-30 keep it.
         process.emitWarning(`[supercov] the project's Jest configuration was not read (${error?.message ?? error}); Jest's defaults apply`);
     }
     // Jest's coverage measures the instrumented copy, probes included, and a

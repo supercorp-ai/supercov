@@ -65,6 +65,7 @@ mod kotlin_grammar;
 pub mod lifecycle;
 pub mod mutant_list;
 pub mod mutants_query;
+pub mod mutation_report;
 pub mod orchestration;
 pub mod outside_evidence;
 pub mod owned_evidence;

@@ -1722,8 +1722,10 @@ fn write_playwright_config(
              renameSync(`${{file}}.${{process.pid}}`, file);\n\
            }} catch {{}}\n\
          }}\n\
+         // Playwright looks for tests beside the config that names none,\n\
+         // and this one is in `.supercov`: the original's directory is it.\n\
          const normalized = {{ ...resolved,\n\
-           testDir: runtimePath(resolved.testDir),\n\
+           testDir: runtimePath(resolved.testDir ?? originalDirectory),\n\
            outputDir: runtimePath(resolved.outputDir),\n\
            snapshotDir: runtimePath(resolved.snapshotDir),\n\
            projects: resolved.projects?.map(project => ({{ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir) }})),\n\
@@ -2330,8 +2332,8 @@ mod tests {
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
             "javascript-source-path#javascript_frontend.rs:479",
-            "javascript-source-path#javascript_frontend.rs:1906",
-            "javascript-source-path#javascript_frontend.rs:1835",
+            "javascript-source-path#javascript_frontend.rs:1908",
+            "javascript-source-path#javascript_frontend.rs:1837",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));

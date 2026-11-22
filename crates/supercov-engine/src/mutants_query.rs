@@ -264,6 +264,26 @@ impl MutantsSummary {
             status,
         }
     }
+
+    /// The strong verdicts a pass saved into the run, by mutant id: their
+    /// counts and StrykerJS's score over them (killed and timed out over
+    /// those and the survivors and uncovered).
+    pub fn with_strong(mut self, strong: &BTreeMap<String, Value>) -> Self {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for status in strong
+            .values()
+            .filter_map(|verdict| verdict["status"].as_str())
+        {
+            *counts.entry(status.to_owned()).or_default() += 1;
+        }
+        let of = |status: &str| counts.get(status).copied().unwrap_or(0);
+        let detected = of("killed") + of("timeout");
+        let total = detected + of("survived") + of("no-coverage");
+        self.mutation_score =
+            (total > 0).then(|| (detected as f64 / total as f64 * 10_000.0).round() / 10_000.0);
+        self.strong = (!counts.is_empty()).then_some(counts);
+        self
+    }
 }
 
 /// The run summary's line: its mutants and scores.
@@ -1226,6 +1246,31 @@ mod tests {
             0,
         );
         assert_eq!((none.weak_score, none.weak_score_reached), (None, None));
+        // A strong pass's verdicts: counted, and scored over the decided.
+        let verdict = |status: &str| serde_json::json!({ "status": status });
+        let strong = BTreeMap::from([
+            ("a".to_owned(), verdict("killed")),
+            ("b".to_owned(), verdict("timeout")),
+            ("c".to_owned(), verdict("survived")),
+            ("d".to_owned(), verdict("error")),
+            ("e".to_owned(), serde_json::json!({})),
+        ]);
+        let scored = none.clone().with_strong(&strong);
+        assert_eq!(scored.mutation_score, Some(0.6667));
+        assert_eq!(
+            scored.strong,
+            Some(BTreeMap::from([
+                ("error".to_owned(), 1),
+                ("killed".to_owned(), 1),
+                ("survived".to_owned(), 1),
+                ("timeout".to_owned(), 1),
+            ]))
+        );
+        let errors = none
+            .clone()
+            .with_strong(&BTreeMap::from([("d".to_owned(), verdict("error"))]));
+        assert_eq!(errors.mutation_score, None);
+        assert_eq!(none.with_strong(&BTreeMap::new()).strong, None);
     }
 
     #[test]

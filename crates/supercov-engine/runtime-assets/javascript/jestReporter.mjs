@@ -54,7 +54,9 @@ export default class SupercovJestReporter {
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
             tags: testTags(undefined, [result.fullName]),
         });
-        const record = (attempt, attemptStatus, flaky) => {
+        // How long the test took, where Jest says: a strong pass runs a
+        // mutant's cheapest test files first, and gives each its limit.
+        const record = (attempt, attemptStatus, flaky, duration) => {
             const payload = {
                 testId,
                 // Named by its describe blocks, `small > charges`, as every
@@ -66,6 +68,7 @@ export default class SupercovJestReporter {
                 status: attemptStatus,
                 expectedStatus: "passed",
                 flaky,
+                ...(typeof duration === "number" && duration >= 0 ? { durationMs: Math.round(duration) } : {}),
                 provenance,
                 runtime: [],
                 browser: [],
@@ -78,7 +81,7 @@ export default class SupercovJestReporter {
         // adapter wrote each attempt's coverage without an outcome.
         for (let attempt = 0; attempt < retry; attempt += 1)
             record(attempt, "failed", false);
-        record(retry, status, retry > 0 && status === "passed");
+        record(retry, status, retry > 0 && status === "passed", result.duration);
     }
     // Jest calls these on every reporter.
     onRunComplete() { }

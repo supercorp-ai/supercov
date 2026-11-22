@@ -16,6 +16,9 @@ const job = JSON.parse(readFileSync(process.env.SUPERCOV_STRONG_JOB, "utf8"));
 const mutant = process.env.SUPERCOV_ACTIVE_MUTANT ?? "-";
 const rules = { ...(suite.rules["*"] ?? {}), ...(suite.rules[mutant] ?? {}) };
 const evidence = process.env.SUPERCOV_EVIDENCE_DIR;
+// Each process a job starts, noted where FAKE_PIDS says.
+if (process.env.FAKE_PIDS)
+    appendFileSync(process.env.FAKE_PIDS, `${process.pid}\n`);
 mkdirSync(evidence, { recursive: true });
 const write = (testId, status) => appendFileSync(join(evidence, "fake.mcdc.jsonl"), `${JSON.stringify({ testId, status, retry: 0 })}\n`);
 let failed = false;

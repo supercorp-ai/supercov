@@ -997,9 +997,12 @@ fn score(value: Option<f64>) -> String {
 }
 
 /// The run summary's line: `Mutants  2,955 · weak score 85.0% · ...`.
-fn mutants_summary_line(mutants: &supercov_engine::mutants_query::MutantsRunSummary) -> String {
+fn mutants_summary_line(
+    run: &str,
+    mutants: &supercov_engine::mutants_query::MutantsRunSummary,
+) -> String {
     let summary = &mutants.summary;
-    format!(
+    let line = format!(
         "Mutants      {} · weak score {} · {} · {} not reached · {} unknown · {} equivalent",
         count(summary.mutants),
         score(summary.weak_score),
@@ -1007,7 +1010,21 @@ fn mutants_summary_line(mutants: &supercov_engine::mutants_query::MutantsRunSumm
         count(summary.status.not_reached),
         count(summary.status.unknown),
         count(summary.status.equivalent),
-    )
+    );
+    // After a strong pass, its score and verdicts, and where to see them.
+    match &summary.strong {
+        Some(strong) => format!(
+            "{line}\n             mutation score {} · {} · supercov runs {} mutants --status survived",
+            score(summary.mutation_score),
+            strong
+                .iter()
+                .map(|(status, n)| format!("{} {status}", count(*n)))
+                .collect::<Vec<_>>()
+                .join(" · "),
+            shell_quote(run)
+        ),
+        None => line,
+    }
 }
 
 /// `211 not infected`, and how many of them are at a clock or random
@@ -1775,7 +1792,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 lines.extend(assertion_summary_lines(assertions));
             }
             if let Some(mutants) = &data.mutants {
-                lines.push(mutants_summary_line(mutants));
+                lines.push(mutants_summary_line(&data.run, mutants));
             }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);

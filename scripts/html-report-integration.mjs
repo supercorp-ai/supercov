@@ -162,18 +162,25 @@ try {
   // continuation lines can show the state recorded on the first; the fixture
   // has none.
   assert.deepEqual(paired.runs[0].statementSpans, []);
-  // The run's mutants: the scores and counts, each file's counts, and each
-  // mutant no test infects or reaches with what it changes and why.
+  // The run's mutants: the scores and counts, each file's and each
+  // language's, and every mutant with what it changes and why. No strong
+  // pass ran: each is pending, and those the tests leave alive are the ones
+  // no test infects or reaches.
   const mutants = paired.runs[0].mutants;
   assert.equal(mutants.mutantSet, "stryker-js@10.1.1");
+  assert.equal(mutants.strong, false);
   assert(mutants.summary.mutants > 0, JSON.stringify(mutants.summary));
-  assert(mutants.files["src/access.js"]["not-infected"] > 0, JSON.stringify(mutants.files));
-  assert(mutants.mutants.length > 0);
+  assert.equal(mutants.tally.mutants, mutants.summary.mutants);
+  assert(mutants.files["src/access.js"].weak["not-infected"] > 0, JSON.stringify(mutants.files));
+  assert.deepEqual(Object.keys(mutants.languages), ["javascript"]);
+  assert.equal(mutants.mutants.length, mutants.summary.mutants);
   for (const mutant of mutants.mutants) {
-    assert(["not-infected", "not-reached"].includes(mutant.status), mutant.status);
+    assert.equal(mutant.outcome, "pending");
+    assert.equal(mutant.alive, ["not-infected", "not-reached"].includes(mutant.status), mutant.status);
     assert.match(mutant.change, / \u2192 /);
-    assert(mutant.reason.length > 0);
+    assert(mutant.reason.length > 0 && mutant.why.length > 0);
   }
+  assert.equal(mutants.tally.survivors, mutants.mutants.filter(mutant => mutant.alive).length);
   assert.doesNotMatch(JSON.stringify(paired), /\/(Users|home)\/[a-z]/i);
 
   // A snapshot of different bytes must not be folded into the run, however
@@ -432,11 +439,17 @@ try {
     assert.match(await page.locator(".run-test-summary").textContent(), /2 tests passed.*1 skipped/);
     assert.deepEqual(await page.locator(".overview-label").allTextContents(), ["Coverage", "Assertions", "Mutants", "Quality", "Security"]);
     // The run's mutants beside its coverage: the score and the counts by status.
-    assert.match(await page.locator(".mutants-metric .figure-unit").textContent(), /weak mutation score/);
-    const mutantCounts = await page.locator(".mutant-counts li").allTextContents();
-    assert.equal(mutantCounts.length, 5);
-    assert.match(mutantCounts[0], /^\d+ not infected/);
-    assert.match(mutantCounts[4], /^\d+ equivalent$/);
+    assert.match(await page.locator(".mutants-metric .figure-unit").textContent(), /^weak mutation score \u00b7 of \d+/);
+    const mutantCounts = await page.locator(".mutants-metric .mutant-counts li").allTextContents();
+    assert.equal(mutantCounts.length, 4);
+    assert.match(mutantCounts[0], /^\d+ left alive/);
+    assert.match(mutantCounts[1], /^\d+ not infected/);
+    assert.match(mutantCounts[3], /^\d+ infected$/);
+    // The section beside it: both levels, no strong pass yet and how to run one.
+    const section = await page.locator(".mutation-card").textContent();
+    assert.match(section, /Weak mutation.*Strong mutation.*No strong pass has run/s);
+    assert.match(section, /mutants test/);
+    assert.match(section, /\d+ equivalent|not reached/);
     assert.equal(await page.locator(".sidebar-foot").count(), 0);
     await page.getByRole("button", { name: "Close dialog", exact: true }).click();
     assert.equal(await page.getByRole("dialog").count(), 0);
@@ -554,12 +567,16 @@ try {
     const mutantRow = page.locator(".code-row.has-mutants").first();
     assert(await mutantRow.count() > 0, "a mutant the test leaves alive marks its line");
     assert.match(await mutantRow.locator(".code-evidence").getAttribute("title"), /Not infected: .+ \u2192 .+ \u2014 /);
-    assert.match(await mutantRow.locator(".code-evidence").getAttribute("aria-label"), /mutants? no test infects or reaches/);
-    assert.equal(await page.locator(".source-key").filter({ hasText: "Mutant no test infects or reaches" }).count(), 1);
+    assert.match(await mutantRow.locator(".code-evidence").getAttribute("aria-label"), /mutants?, [1-9]\d* left alive/);
+    assert.equal(await page.locator(".source-key").filter({ hasText: "Mutant left alive" }).count(), 1);
     await mutantRow.locator(".code-evidence").click();
     const mutantEvidence = page.locator(".code-annotation");
     assert.equal(await mutantEvidence.locator("h4").filter({ hasText: "Mutants" }).count(), 1);
-    assert.match(await mutantEvidence.textContent(), /Not infected \u00b7 \w+/);
+    assert.match(await mutantEvidence.textContent(), /Left alive \u00b7 Not infected \u00b7 \w+/);
+    assert.match(await mutantEvidence.textContent(), /Weak: Not infected \u2014 /);
+    // No strong pass: no strong line, and the file's survivors listed below.
+    assert.doesNotMatch(await mutantEvidence.textContent(), /Strong: /);
+    assert.match(await page.locator(".file-mutants").textContent(), /Mutants left alive/);
     await mutantEvidence.getByRole("button", { name: "Close", exact: true }).click();
     await page.getByRole("button", { name: "Improve assertions for src/access.js", exact: true }).click();
     const improve = page.getByRole("dialog", { name: "Improve assertions", exact: true });
@@ -629,7 +646,7 @@ try {
     assert.equal(await page.locator(".detail-stat-note").count(), 0);
     assert.match(await page.locator(".file-security").textContent(), /Not assessed/);
     assert.equal(await page.locator(".detail-stats").getByRole("img", { name: "Security: not assessed", exact: true }).count(), 1);
-    assert.deepEqual(await page.locator(".detail-view > .detail-card").evaluateAll(cards => cards.map(card => card.querySelector("h3")?.textContent)), ["Tests covering this file", "Not asserted", "Quality", "Security"]);
+    assert.deepEqual(await page.locator(".detail-view > .detail-card").evaluateAll(cards => cards.map(card => card.querySelector("h3")?.textContent)), ["Tests covering this file", "Not asserted", "Mutants left alive", "Quality", "Security"]);
     assert.equal(await page.locator(".file-tests .evidence-row").count(), 1);
     await page.locator(".file-tests .evidence-row").first().click();
     assert.match(await page.locator(".test-detail-header.detail-card .detail-heading").textContent(), /owner access/);
@@ -750,8 +767,95 @@ try {
     assert.match(await page.locator(".file-security").textContent(), /missing authorization/);
     assert.deepEqual(failures, [], "security findings and standalone assessments render without errors");
 
-    // A run measured without mutants shows none of them.
+    // A partial strong pass, its verdicts written by hand the way `mutants
+    // test` saves them: the mutation score beside the weak one, every verdict
+    // counted, why the rest have none, the survivors, and each line's
+    // mutants with their verdicts and the test that killed one.
     await page.setViewportSize({ width: 1280, height: 900 });
+    const infected = mutants.mutants.filter(mutant => mutant.status === "infected");
+    const unreached = mutants.mutants.filter(mutant => mutant.status === "not-reached");
+    assert(infected.length >= 3, `the fixture has infected mutants: ${infected.length}`);
+    const verdicts = {
+      [infected[0].id]: { status: "killed", killedBy: "owner access", tests: 1, durationMs: 4 },
+      [infected[1].id]: { status: "survived", tests: 1, durationMs: 3 },
+      [infected[2].id]: { status: "error", tests: 0, durationMs: 0, reason: "no strong mutation driver for cobol yet" },
+    };
+    if (infected[3]) verdicts[infected[3].id] = { status: "unviable", tests: 0, durationMs: 0, reason: "it does not type-check" };
+    if (unreached[0]) verdicts[unreached[0].id] = { status: "no-coverage", tests: 0, durationMs: 0 };
+    for (const run of readdirSync(resolve(project, ".supercov/runs"))) {
+      writeFileSync(resolve(project, ".supercov/runs", run, "strong-mutation.json"), JSON.stringify({ schemaVersion: 1, run, mutantSet: "stryker-js@10.1.1", mutants: verdicts }));
+    }
+    execFileSync(binary, ["report", "--runs", "1", "--no-open", "--output", "strong.html"], { cwd: project, stdio: "pipe" });
+    const strongHtml = readFileSync(resolve(project, "strong.html"), "utf8");
+    const strongPayload = JSON.parse(gunzipSync(Buffer.from([...strongHtml.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)][0][1].trim(), "base64")).toString("utf8")).runs[0].mutants;
+    assert.equal(strongPayload.strong, true);
+    assert.equal(strongPayload.tally.strong.killed, 1);
+    assert.equal(strongPayload.tally.strong.survived, 1);
+    assert.equal(strongPayload.tally.strong.notRun, 1);
+    const killedMutant = strongPayload.mutants.find(mutant => mutant.id === infected[0].id);
+    assert.equal(killedMutant.outcome, "killed");
+    assert.equal(killedMutant.killedBy, "owner access");
+    assert.equal(strongPayload.mutants.find(mutant => mutant.id === infected[2].id).why, "not run: no driver for cobol yet");
+    assert(strongPayload.mutants.find(mutant => mutant.id === infected[1].id).alive);
+    await page.goto(`file://${resolve(project, "strong.html")}`, { waitUntil: "load" });
+    const mutationCard = page.locator(".mutation-card");
+    await mutationCard.waitFor();
+    const mutationText = await mutationCard.textContent();
+    for (const expected of ["Weak mutation", "Strong mutation", "killed", "survived", "not run: no driver for cobol", "Left alive", "without a strong verdict yet"]) {
+      assert(mutationText.includes(expected), `${expected} in ${mutationText}`);
+    }
+    assert.match(await page.locator(".mutants-metric .figure-unit").textContent(), /^mutation score \u00b7 of \d+ of \d+ mutants$/);
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await mutationCard.screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT });
+    // A survivor opens its line, whose evidence names both levels.
+    await mutationCard.locator(".survivor-row").filter({ hasText: infected[1].change }).first().click();
+    const opened = page.locator(".code-annotation");
+    await opened.waitFor();
+    assert.match(await opened.textContent(), /Left alive \u00b7 Survived/);
+    assert.match(await opened.textContent(), /Strong: Survived \u2014 every test that reached it passed with it in place \(1 test ran\)/);
+    if (killedMutant.line === infected[1].line) {
+      assert.match(await opened.textContent(), /Killed by owner access/);
+    }
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await page.locator(".detail-view").screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT.replace(/\.png$/, "-file.png") });
+    // The file list's Mutants column sorts by each file's score.
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await page.locator(".file-head-cell").filter({ hasText: "Mutants" }).click();
+    assert.match(await page.locator(".file-head-cell.active").textContent(), /Mutants/);
+    assert.match(await page.locator(".file-row").filter({ hasText: "src/access.js" }).locator(".file-row-mark").last().getAttribute("title"), /left alive \u00b7 weak score .+ \u00b7 mutation score /);
+    assert.deepEqual(failures, [], "a run with strong verdicts renders without errors");
+    // The static page `runs report --format html` writes shows the same
+    // mutation testing: the card, each file's score, the survivors linking to
+    // their lines, and each line's mutants in the source.
+    execFileSync(binary, ["runs", "latest", "report", "--format", "html", "--output", "static.html"], { cwd: project, stdio: "pipe" });
+    await page.goto(`file://${resolve(project, "static.html")}`, { waitUntil: "load" });
+    const staticCard = page.locator("section.mutation");
+    for (const expected of ["Mutation testing", "Weak mutation", "Strong mutation", "not run: no driver for cobol", "Left alive"]) {
+      assert((await staticCard.textContent()).includes(expected), `${expected} in the static card`);
+    }
+    assert.equal(await page.locator('th[data-key="mutants"]').count(), 1);
+    assert.match(await page.locator("#rows tr").filter({ hasText: "src/access.js" }).textContent(), /\d+ alive/);
+    await page.locator('th[data-key="mutants"]').click();
+    assert.equal(await page.locator('th[data-key="mutants"]').getAttribute("aria-sort"), "ascending");
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await staticCard.screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT.replace(/\.png$/, "-static.png") });
+    await staticCard.locator("a").filter({ hasText: `src/access.js:${infected[1].line}` }).first().click();
+    const staticAlive = page.locator("#source .mutants div.alive").first();
+    await staticAlive.waitFor();
+    assert.match(await staticAlive.textContent(), /Left alive/);
+    assert.match(await page.locator("#source").textContent(), /Strong: survived \u2014 every test that reached it passed with it in place/);
+    assert.match(await page.locator("#source").textContent(), /Killed by owner access/);
+    if (process.env.SUPERCOV_REPORT_SCREENSHOT) await page.locator("#source").screenshot({ path: process.env.SUPERCOV_REPORT_SCREENSHOT.replace(/\.png$/, "-static-source.png") });
+    assert.deepEqual(failures, [], "the static page's mutation testing renders without errors");
+    // A pass that gave no verdict a score counts: no score, and why.
+    const errors = Object.fromEntries(infected.map(mutant => [mutant.id, { status: "error", tests: 0, durationMs: 0, reason: "the command ended (exit 1) before this mutant's verdict" }]));
+    for (const run of readdirSync(resolve(project, ".supercov/runs"))) {
+      writeFileSync(resolve(project, ".supercov/runs", run, "strong-mutation.json"), JSON.stringify({ schemaVersion: 1, run, mutantSet: "stryker-js@10.1.1", mutants: errors }));
+    }
+    execFileSync(binary, ["report", "--runs", "1", "--no-open", "--output", "errors.html"], { cwd: project, stdio: "pipe" });
+    await page.goto(`file://${resolve(project, "errors.html")}`, { waitUntil: "load" });
+    await page.locator(".mutation-card").waitFor();
+    assert.match(await page.locator(".mutation-card").textContent(), /No mutation score: none of the \d+ mutants was killed, timed out, survived or left uncovered \(\d+ errors/);
+    assert.deepEqual(failures, [], "a pass with no counted verdict renders without errors");
+
+    // A run measured without mutants shows none of them.
     execFileSync(binary, ["--", "node", "--test"], { cwd: project, stdio: "pipe", env: { ...process.env, SUPERCOV_MUTANTS: "0" } });
     execFileSync(binary, ["report", "--runs", "1", "--no-open", "--output", "no-mutants.html"], { cwd: project, stdio: "pipe" });
     const plainHtml = readFileSync(resolve(project, "no-mutants.html"), "utf8");
