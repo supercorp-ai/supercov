@@ -87,8 +87,21 @@ fn references_resolve(root: &Expr) -> bool {
             walk(child, captures, names, references);
         }
     }
+    /// Whether `expression` calls the whole regexp (`\g<0>`).
+    fn recurses(expression: &Expr) -> bool {
+        matches!(expression.text.as_str(), "\\g<0>" | "\\g'0'")
+            || expression.children.iter().any(recurses)
+    }
     let (mut captures, mut names, mut references) = (0, Vec::new(), Vec::new());
     walk(root, &mut captures, &mut names, &mut references);
+    // A call of the whole regexp ends only through an alternative that
+    // makes none: Ruby refuses `b\g<0>` as never ending.
+    fn ends(expression: &Expr) -> bool {
+        (expression.kind == Kind::Alternation
+            && expression.children.iter().any(|branch| !recurses(branch)))
+            || expression.children.iter().any(ends)
+    }
+    let ends = ends(root);
     references.into_iter().all(|reference| {
         let number = |text: &str| text.parse::<usize>().ok();
         let (call, target) = match reference.as_bytes().first() {
@@ -104,7 +117,7 @@ fn references_resolve(root: &Expr) -> bool {
         };
         match number(target) {
             // `\g<0>` calls the whole regexp.
-            Some(0) if call => true,
+            Some(0) if call => ends,
             // A number names a capture, where the regexp has no named ones.
             Some(group) => names.is_empty() && group <= captures,
             None => names.contains(&target),
@@ -262,34 +275,51 @@ impl Parser<'_> {
     }
 
     /// A quantifier at the cursor: `*`, `+`, `?`, `{n}`, `{n,}`, `{,m}`,
-    /// `{n,m}`, each maybe followed by `?` or `+`.
+    /// `{n,m}`, each maybe followed by `?` or `+`, and intervals after it
+    /// (`a{2}{3}` is `(?:a{2}){3}`).
     fn quantifier_length(&self) -> usize {
         let base = match self.peek() {
             Some('*' | '+' | '?') => 1,
-            Some('{') => {
-                let mut index = self.at + 1;
-                let mut digits = 0;
-                let mut comma = false;
-                while let Some(character) = self.chars.get(index) {
-                    match character {
-                        '0'..='9' => digits += 1,
-                        ',' if !comma => comma = true,
-                        '}' => break,
-                        _ => return 0,
-                    }
-                    index += 1;
-                }
-                if self.chars.get(index) != Some(&'}') || digits == 0 {
-                    return 0;
-                }
-                index + 1 - self.at
-            }
-            _ => return 0,
+            _ => self.interval_length(self.at),
         };
-        match self.peek_at(base) {
+        if base == 0 {
+            return 0;
+        }
+        let mut length = match self.peek_at(base) {
             Some('?' | '+') => base + 1,
             _ => base,
+        };
+        loop {
+            let interval = self.interval_length(self.at + length);
+            if interval == 0 {
+                return length;
+            }
+            length += interval;
         }
+    }
+
+    /// An interval's length at `start`: `{n}`, `{n,}`, `{,m}`, `{n,m}`; 0
+    /// where none is.
+    fn interval_length(&self, start: usize) -> usize {
+        if self.chars.get(start) != Some(&'{') {
+            return 0;
+        }
+        let mut index = start + 1;
+        let mut digits = 0;
+        let mut comma = false;
+        while let Some(character) = self.chars.get(index) {
+            match character {
+                '0'..='9' => digits += 1,
+                ',' if !comma => comma = true,
+                '}' => break,
+                _ => return 0,
+            }
+            index += 1;
+        }
+        if self.chars.get(index) != Some(&'}') || digits == 0 {
+            return 0;
+        }
+        index + 1 - start
     }
 
     fn take_quantifier(&mut self) -> Option<String> {
@@ -573,6 +603,28 @@ fn replacement(expression: &Expr) -> Option<(Kind, &'static str)> {
     })
 }
 
+/// The quantifiers one written quantifier is, as Ruby reads it: `*?`, `+?`,
+/// `{n,m}?` (reluctant) and `*+`, `++` (possessive) are one; an interval
+/// followed by `+`, an exact one by `?` (`a{2}?` is `(?:a{2})?`) and
+/// intervals one after another (`a{2}{3}`) are several.
+fn quantifiers(quantifier: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut rest = quantifier;
+    while !rest.is_empty() {
+        let length = match rest.find('}') {
+            Some(close) if rest.starts_with('{') => {
+                let reluctant = rest[..close].contains(',') && rest[close + 1..].starts_with('?');
+                close + 1 + usize::from(reluctant)
+            }
+            _ if parts.is_empty() && rest[1..].starts_with(['?', '+']) => 2,
+            _ => 1,
+        };
+        parts.push(&rest[..length]);
+        rest = &rest[length..];
+    }
+    parts
+}
+
 /// An expression's mutations: its class's mutators, in the order mutant
 /// registers them, then the quantifier's.
 fn mutate(expression: &Expr) -> Vec<Expr> {
@@ -641,21 +693,21 @@ fn mutate(expression: &Expr) -> Vec<Expr> {
             }
         }
     }
-    // Quantifier: removed, and `*` as `+`. An interval followed by `?` or
-    // `+` is two quantifiers in Ruby (`a{2}?` is `(?:a{2})?`, neither
-    // reluctant nor possessive): each is removed apart.
+    // Quantifier: removed, and `*` as `+`. Where it is several quantifiers
+    // as Ruby reads it, each is removed apart.
     if let Some(quantifier) = &expression.quantifier {
-        match quantifier.strip_suffix(['?', '+']) {
-            Some(interval) if interval.starts_with('{') => {
-                for kept in [&quantifier[interval.len()..], interval] {
-                    let mut removed = expression.clone();
-                    removed.quantifier = Some(kept.to_owned());
-                    emit(removed, &mut out);
-                }
-            }
-            _ => {
+        let parts = quantifiers(quantifier);
+        if parts.len() == 1 {
+            let mut removed = expression.clone();
+            removed.quantifier = None;
+            emit(removed, &mut out);
+        }
+        for index in 0..parts.len() {
+            if parts.len() > 1 {
+                let mut kept = parts.clone();
+                kept.remove(index);
                 let mut removed = expression.clone();
-                removed.quantifier = None;
+                removed.quantifier = Some(kept.concat());
                 emit(removed, &mut out);
             }
         }

@@ -1,0 +1,2795 @@
+{
+  "mutantSet": "mutant@0.17.1",
+  "subjects": [
+    {
+      "subject": "intervals:7",
+      "sexp": "(def :intervals (args (arg :text)) (send (lvar :text) :=~ (regexp (str s\"617b322c7d627b2c337d637b312c327d3f647b327d2b657b787d667b7d677b2c7d\") (regopt))))",
+      "mutants": [
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"617b322c7d627b2c337d637b312c327d3f647b327d2b657b787d667b7d677b2c7d\") (regopt)))"
+        },
+        {
+          "start": [
+            8,
+            5
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"617b322c7d627b2c337d637b312c327d3f647b327d2b657b787d667b7d677b2c7d\") (regopt))"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"61627b2c337d637b312c327d3f647b327d2b657b787d667b7d677b2c7d\")"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"617b322c7d62637b312c327d3f647b327d2b657b787d667b7d677b2c7d\")"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"617b322c7d627b2c337d63647b327d2b657b787d667b7d677b2c7d\")"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"617b322c7d627b2c337d637b312c327d3f642b657b787d667b7d677b2c7d\")"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"617b322c7d627b2c337d637b312c327d3f647b327d657b787d667b7d677b2c7d\")"
+        },
+        {
+          "start": [
+            8,
+            13
+          ],
+          "end": [
+            8,
+            48
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            8,
+            14
+          ],
+          "end": [
+            8,
+            47
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        }
+      ]
+    },
+    {
+      "subject": "references:11",
+      "sexp": "(def :references (args (arg :text)) (begin (send (lvar :text) :=~ (regexp (str s\"286129286229286329286429286529286629286729286829286929286a295c31305c315c3132\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"2861295c673c313e\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"617c625c673c303e\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"283f3c776f72643e61295c6b3c776f72643e5c673c776f72643e5c6b27776f726427\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"286129286229286329286429286529286629286729286829286929286a295c31305c315c3132\") (regopt)))"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"286129286229286329286429286529286629286729286829286929286a295c31305c315c3132\") (regopt))"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a6129286229286329286429286529286629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129283f3a6229286329286429286529286629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229283f3a6329286429286529286629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329283f3a6429286529286629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429283f3a6529286629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429286529283f3a6629286729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429286529286629283f3a6729286829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429286529286629286729283f3a6829286929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429286529286629286729286829283f3a6929286a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"286129286229286329286429286529286629286729286829286929283f3a6a295c31305c315c3132\")"
+        },
+        {
+          "start": [
+            12,
+            13
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            12,
+            14
+          ],
+          "end": [
+            12,
+            52
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            12,
+            5
+          ],
+          "end": [
+            12,
+            53
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"2861295c673c313e\") (regopt)))"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"2861295c673c313e\") (regopt))"
+        },
+        {
+          "start": [
+            13,
+            13
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            13,
+            14
+          ],
+          "end": [
+            13,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            13,
+            5
+          ],
+          "end": [
+            13,
+            23
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"617c625c673c303e\") (regopt)))"
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"617c625c673c303e\") (regopt))"
+        },
+        {
+          "start": [
+            14,
+            14
+          ],
+          "end": [
+            14,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"61\")"
+        },
+        {
+          "start": [
+            14,
+            13
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            14,
+            14
+          ],
+          "end": [
+            14,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            14,
+            5
+          ],
+          "end": [
+            14,
+            23
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"283f3c776f72643e61295c6b3c776f72643e5c673c776f72643e5c6b27776f726427\") (regopt)))"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"283f3c776f72643e61295c6b3c776f72643e5c673c776f72643e5c6b27776f726427\") (regopt))"
+        },
+        {
+          "start": [
+            15,
+            13
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            15,
+            14
+          ],
+          "end": [
+            15,
+            48
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            15,
+            5
+          ],
+          "end": [
+            15,
+            49
+          ],
+          "node": "send",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "escapes:18",
+      "sexp": "(def :escapes (args (arg :text)) (begin (send (lvar :text) :=~ (regexp (str s\"5c7831385c7834315c7834415c757b34317d5c707b416c7068617d5c507b44696769747d5c305c3037\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"5c685c485c525c585c475c5a5c4b\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            55
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            55
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            55
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5c7831385c7834315c7834415c757b34317d5c707b416c7068617d5c507b44696769747d5c305c3037\") (regopt)))"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            19,
+            55
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c7831385c7834315c7834415c757b34317d5c707b416c7068617d5c507b44696769747d5c305c3037\") (regopt))"
+        },
+        {
+          "start": [
+            19,
+            13
+          ],
+          "end": [
+            19,
+            55
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            19,
+            14
+          ],
+          "end": [
+            19,
+            54
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"5c685c485c525c585c475c5a5c4b\") (regopt)))"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5c685c485c525c585c475c5a5c4b\") (regopt)))"
+        },
+        {
+          "start": [
+            20,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c685c485c525c585c475c5a5c4b\") (regopt))"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c485c485c525c585c475c5a5c4b\")"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c685c685c525c585c475c5a5c4b\")"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c685c485c585c585c475c5a5c4b\")"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c685c485c525c525c475c5a5c4b\")"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c685c485c525c585c475c7a5c4b\")"
+        },
+        {
+          "start": [
+            20,
+            13
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            20,
+            14
+          ],
+          "end": [
+            20,
+            28
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            19,
+            5
+          ],
+          "end": [
+            20,
+            29
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"5c7831385c7834315c7834415c757b34317d5c707b416c7068617d5c507b44696769747d5c305c3037\") (regopt)))"
+        }
+      ]
+    },
+    {
+      "subject": "sets:23",
+      "sexp": "(def :sets (args (arg :text)) (begin (send (lvar :text) :=~ (regexp (str s\"5b5b3a616c7068613a5d5d5b615b62635d5d5b5c64612d665d5b615c2d7a5d5b5c7834312d5c7835615d5b2d615d\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"5b5c5d5c5c5d5b612d7a26265b5e6165696f755d5d\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            24,
+            61
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            24,
+            61
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            24,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            24,
+            61
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5b5b3a616c7068613a5d5d5b615b62635d5d5b5c64612d665d5b615c2d7a5d5b5c7834312d5c7835615d5b2d615d\") (regopt)))"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            24,
+            61
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5b5b3a616c7068613a5d5d5b615b62635d5d5b5c64612d665d5b615c2d7a5d5b5c7834312d5c7835615d5b2d615d\") (regopt))"
+        },
+        {
+          "start": [
+            24,
+            14
+          ],
+          "end": [
+            24,
+            60
+          ],
+          "node": "str",
+          "replacement": "(str s\"5b5b3a616c7068613a5d5d5b615b62635d5d5b5c44612d665d5b615c2d7a5d5b5c7834312d5c7835615d5b2d615d\")"
+        },
+        {
+          "start": [
+            24,
+            13
+          ],
+          "end": [
+            24,
+            61
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            24,
+            14
+          ],
+          "end": [
+            24,
+            60
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"5b5c5d5c5c5d5b612d7a26265b5e6165696f755d5d\") (regopt)))"
+        },
+        {
+          "start": [
+            25,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            25,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            25,
+            5
+          ],
+          "end": [
+            25,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            25,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"5b5c5d5c5c5d5b612d7a26265b5e6165696f755d5d\") (regopt)))"
+        },
+        {
+          "start": [
+            25,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5b5c5d5c5c5d5b612d7a26265b5e6165696f755d5d\") (regopt))"
+        },
+        {
+          "start": [
+            25,
+            13
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            25,
+            14
+          ],
+          "end": [
+            25,
+            35
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            24,
+            5
+          ],
+          "end": [
+            25,
+            36
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"5b5b3a616c7068613a5d5d5b615b62635d5d5b5c64612d665d5b615c2d7a5d5b5c7834312d5c7835615d5b2d615d\") (regopt)))"
+        }
+      ]
+    },
+    {
+      "subject": "groups:28",
+      "sexp": "(def :groups (args (arg :text)) (begin (send (lvar :text) :=~ (regexp (str s\"283f236120636f6d6d656e7429283f692961283f693a6229283f6d2d783a6329283f3d6429283f216529283f3c3d6629283f3c216729283f3e6829283f7e6929\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"2828617c62297c286329292b\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            29,
+            79
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            29,
+            79
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            29,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            29,
+            79
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"283f236120636f6d6d656e7429283f692961283f693a6229283f6d2d783a6329283f3d6429283f216529283f3c3d6629283f3c216729283f3e6829283f7e6929\") (regopt)))"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            29,
+            79
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"283f236120636f6d6d656e7429283f692961283f693a6229283f6d2d783a6329283f3d6429283f216529283f3c3d6629283f3c216729283f3e6829283f7e6929\") (regopt))"
+        },
+        {
+          "start": [
+            29,
+            13
+          ],
+          "end": [
+            29,
+            79
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            29,
+            14
+          ],
+          "end": [
+            29,
+            78
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"2828617c62297c286329292b\") (regopt)))"
+        },
+        {
+          "start": [
+            30,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            30,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            30,
+            5
+          ],
+          "end": [
+            30,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            30,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"2828617c62297c286329292b\") (regopt)))"
+        },
+        {
+          "start": [
+            30,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"2828617c62297c286329292b\") (regopt))"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"283f3a28617c62297c28632929\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"28286329292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"2828617c6229292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"28283f3a617c62297c286329292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"282862297c286329292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"282861297c286329292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"2828617c62297c283f3a6329292b\")"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"2828617c62297c28632929\")"
+        },
+        {
+          "start": [
+            30,
+            13
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            30,
+            14
+          ],
+          "end": [
+            30,
+            26
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            29,
+            5
+          ],
+          "end": [
+            30,
+            27
+          ],
+          "node": "begin",
+          "replacement": "(send (lvar :text) :=~ (regexp (str s\"283f236120636f6d6d656e7429283f692961283f693a6229283f6d2d783a6329283f3d6429283f216529283f3c3d6629283f3c216729283f3e6829283f7e6929\") (regopt)))"
+        }
+      ]
+    },
+    {
+      "subject": "anchors:33",
+      "sexp": "(def :anchors (args (arg :text)) (begin (send (lvar :text) :match? (regexp (str s\"5e666f6f\") (regopt))) (send (lvar :text) :match? (regexp (str s\"666f6f24\") (regopt))) (send (lvar :text) :match? (regexp (str s\"666f6f5c5a\") (regopt))) (send (lvar :text) :match? (regexp (str s\"5c41666f6f5c7a\") (regopt))) (send (lvar :text) :match? (regexp (str s\"5c41666f6f\") (regopt))) (send (lvar :text) :match? (regexp (str s\"666f6f5c7a\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5e666f6f\") (regopt))"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            34,
+            18
+          ],
+          "end": [
+            34,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"5c41666f6f\")"
+        },
+        {
+          "start": [
+            34,
+            17
+          ],
+          "end": [
+            34,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            34,
+            18
+          ],
+          "end": [
+            34,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            34,
+            5
+          ],
+          "end": [
+            34,
+            24
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"666f6f24\") (regopt))"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            35,
+            18
+          ],
+          "end": [
+            35,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"666f6f5c7a\")"
+        },
+        {
+          "start": [
+            35,
+            17
+          ],
+          "end": [
+            35,
+            23
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            35,
+            18
+          ],
+          "end": [
+            35,
+            22
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            35,
+            5
+          ],
+          "end": [
+            35,
+            24
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"666f6f5c5a\") (regopt))"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            36,
+            18
+          ],
+          "end": [
+            36,
+            23
+          ],
+          "node": "str",
+          "replacement": "(str s\"666f6f5c7a\")"
+        },
+        {
+          "start": [
+            36,
+            17
+          ],
+          "end": [
+            36,
+            24
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            36,
+            18
+          ],
+          "end": [
+            36,
+            23
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            36,
+            5
+          ],
+          "end": [
+            36,
+            25
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c41666f6f5c7a\") (regopt))"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            37,
+            17
+          ],
+          "end": [
+            37,
+            26
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            37,
+            18
+          ],
+          "end": [
+            37,
+            25
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            37,
+            5
+          ],
+          "end": [
+            37,
+            27
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :start_with? (str s\"666f6f\"))"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"5c41666f6f\") (regopt))"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            38,
+            17
+          ],
+          "end": [
+            38,
+            24
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            38,
+            18
+          ],
+          "end": [
+            38,
+            23
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            38,
+            5
+          ],
+          "end": [
+            38,
+            25
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :end_with? (str s\"666f6f\"))"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(true)"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(false)"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"666f6f5c7a\") (regopt))"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(self)"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match?)"
+        },
+        {
+          "start": [
+            39,
+            17
+          ],
+          "end": [
+            39,
+            24
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            39,
+            18
+          ],
+          "end": [
+            39,
+            23
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            39,
+            5
+          ],
+          "end": [
+            39,
+            25
+          ],
+          "node": "send",
+          "replacement": null
+        }
+      ]
+    },
+    {
+      "subject": "braces:42",
+      "sexp": "(def :braces (args (arg :text)) (begin (send (lvar :text) :=~ (regexp (str s\"617b62\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"7b\") (regopt))) (send (lvar :text) :=~ (regexp (str s\"787b327d7b337d\") (regopt)))))",
+      "mutants": [
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "begin",
+          "replacement": "(send nil :raise)"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "begin",
+          "replacement": "(zsuper)"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "begin",
+          "replacement": null
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"617b62\") (regopt)))"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"617b62\") (regopt))"
+        },
+        {
+          "start": [
+            43,
+            13
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            43,
+            14
+          ],
+          "end": [
+            43,
+            17
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            43,
+            5
+          ],
+          "end": [
+            43,
+            18
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"7b\") (regopt)))"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"7b\") (regopt))"
+        },
+        {
+          "start": [
+            44,
+            13
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            44,
+            14
+          ],
+          "end": [
+            44,
+            15
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            44,
+            5
+          ],
+          "end": [
+            44,
+            16
+          ],
+          "node": "send",
+          "replacement": null
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "send",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "send",
+          "replacement": "(lvar :text)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            9
+          ],
+          "node": "lvar",
+          "replacement": "(nil)"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "send",
+          "replacement": "(send (lvar :text) :match? (regexp (str s\"787b327d7b337d\") (regopt)))"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "send",
+          "replacement": "(regexp (str s\"787b327d7b337d\") (regopt))"
+        },
+        {
+          "start": [
+            45,
+            14
+          ],
+          "end": [
+            45,
+            21
+          ],
+          "node": "str",
+          "replacement": "(str s\"787b337d\")"
+        },
+        {
+          "start": [
+            45,
+            14
+          ],
+          "end": [
+            45,
+            21
+          ],
+          "node": "str",
+          "replacement": "(str s\"787b327d\")"
+        },
+        {
+          "start": [
+            45,
+            13
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "regexp",
+          "replacement": "(regexp (regopt))"
+        },
+        {
+          "start": [
+            45,
+            14
+          ],
+          "end": [
+            45,
+            21
+          ],
+          "node": "str",
+          "replacement": "(str s\"6e6f6d617463685c41\")"
+        },
+        {
+          "start": [
+            45,
+            5
+          ],
+          "end": [
+            45,
+            22
+          ],
+          "node": "send",
+          "replacement": null
+        }
+      ]
+    }
+  ]
+}
