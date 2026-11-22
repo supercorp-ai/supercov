@@ -88,13 +88,12 @@ pub(crate) fn place(
     };
     for node in tree.syntax().descendants().filter(|node| !skip(node)) {
         if let Some(binary) = ast::BinExpr::cast(node.clone()) {
-            let (Some(left), Some(right), Some((_, operator))) =
-                (binary.lhs(), binary.rhs(), binary.op_details())
-            else {
-                continue;
-            };
-            let (Some(left), Some(right)) = (operand(runtime, &left), operand(runtime, &right))
-            else {
+            // A file that parses has every operator's operands and token.
+            let (_, operator) = binary.op_details().expect("an operator");
+            let (Some(left), Some(right)) = (
+                operand(runtime, &binary.lhs().expect("a left operand")),
+                operand(runtime, &binary.rhs().expect("a right operand")),
+            ) else {
                 continue;
             };
             let range = node.text_range();

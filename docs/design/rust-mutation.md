@@ -262,8 +262,8 @@ soundness violations on all three):
 | semver | 65 / 0 / 31 / 269 | 182 / 13 / 31 / 139 |
 
 The measured run's cost, each from a cold build of its own copy (seconds,
-16-CPU machines, 2026-11-22, before the probes' length check and the
-`open` gate below):
+16-CPU Linux machines (c8a/m8a.4xlarge), 2026-11-22, before the probes'
+length check and the `open` gate below):
 
 | Crate | `cargo test` | Supercov | Supercov with value probes |
 | --- | --- | --- | --- |
@@ -272,7 +272,8 @@ The measured run's cost, each from a cold build of its own copy (seconds,
 | semver | 0.63 | 1.15 (1.84×) | 3.41 (5.44×) |
 
 The same, warm: each kind run once to build, then seven times, the median
-(seconds, 16-CPU machines, 2026-11-22, this tree):
+(seconds, 16-CPU Linux machines (c8a/m8a.4xlarge), 2026-11-22, this
+tree):
 
 | Crate | `cargo test` | Supercov | Supercov with value probes | Probes over Supercov |
 | --- | --- | --- | --- | --- |

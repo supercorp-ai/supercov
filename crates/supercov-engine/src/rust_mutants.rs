@@ -399,9 +399,8 @@ impl Walker<'_> {
     }
 
     fn binary(&mut self, node: &SyntaxNode) {
-        if excluded(node) {
-            return;
-        }
+        // No attribute skips an operator: `syn` gives `#[a] x + y`'s
+        // attribute to `x`, and cargo-mutants mutates the `+`.
         // A file that parses has every operator's operands and token.
         let (token, operator) = ast::BinExpr::cast(node.clone())
             .and_then(|binary| binary.op_details())
@@ -447,11 +446,10 @@ impl Walker<'_> {
             .unwrap_or_default();
         let wildcard = |arm: &ast::MatchArm| matches!(arm.pat(), Some(ast::Pat::WildcardPat(_)));
         if arms.iter().any(wildcard) {
-            // An arm that parsed has its pattern.
             for (arm, pattern) in arms
                 .iter()
                 .filter(|arm| !wildcard(arm) && arm.guard().is_none())
-                .filter_map(|arm| Some((arm, arm.pat()?)))
+                .map(|arm| (arm, arm.pat().expect("an arm that parsed has its pattern")))
             {
                 let range =
                     TextRange::new(visible_start(arm.syntax()), arm.syntax().text_range().end());
@@ -605,9 +603,9 @@ fn visible_start(node: &SyntaxNode) -> ra_ap_syntax::TextSize {
         })
 }
 
+/// A comment token that documents: `///`, `//!`, `/** */`, `/*! */`.
 fn doc_comment(token: &SyntaxToken) -> bool {
-    token.kind() == SyntaxKind::COMMENT
-        && ast::Comment::cast(token.clone()).is_some_and(|comment| comment.kind().doc.is_some())
+    ast::Comment::cast(token.clone()).is_some_and(|comment| comment.kind().doc.is_some())
 }
 
 /// Whitespace and comments that are not documentation: what `syn` drops.
@@ -689,11 +687,8 @@ fn is_name(token: &str) -> bool {
 fn read_path(tokens: &[String]) -> (Vec<String>, &[String]) {
     let mut path = Vec::new();
     let mut at = 0;
-    // `a::` ends at the stream's end.
-    while let Some(token) = tokens.get(at) {
-        if !is_name(token) {
-            break;
-        }
+    // Names joined by `::`, up to whatever is not a name.
+    while let Some(token) = tokens.get(at).filter(|token| is_name(token)) {
         path.push(token.clone());
         at += 1;
         if tokens.get(at).map(String::as_str) == Some("::") {
@@ -972,16 +967,22 @@ fn maybe_collection_or_container(path: &ast::Path) -> Option<(String, ast::Type)
     }
 }
 
+/// A bound's trait, inside any parentheses: `impl (Iterator<Item = T>)` is
+/// an iterator to `syn` too.
+fn bound_path(ty: ast::Type) -> Option<ast::Path> {
+    match ty {
+        ast::Type::ParenType(inner) => bound_path(inner.ty()?),
+        other => path_of(&other),
+    }
+}
+
 fn impl_iterator_item(ty: &ast::ImplTraitType) -> Option<ast::Type> {
     // The first `Iterator<Item = T>` among its bounds (a lifetime bound has
     // no type).
     ty.type_bound_list()
         .into_iter()
         .flat_map(|list| list.bounds())
-        .filter_map(|bound| match bound.ty()? {
-            ast::Type::PathType(path) => path.path(),
-            _ => None,
-        })
+        .filter_map(|bound| bound_path(bound.ty()?))
         .filter(|path| last_name(path).as_deref() == Some("Iterator"))
         .find_map(|path| {
             match generic_arguments(&path).and_then(|arguments| arguments.into_iter().next()) {
@@ -1578,6 +1579,12 @@ mod tests {
         assert_eq!(printed("f::<u8>(a, 1) - -1"), "{f::<u8>(a, 1)--1}");
         assert_eq!(printed("b!(); a.c"), "{b!(); a.c}");
         assert_eq!(printed("fn g() -> T {}"), "{fn g()-> T{}}");
+        // A `|` after a group is spaced; `||` and a leading `|` are not
+        // spaced before (what follows a `|` is).
+        assert_eq!(printed("f() | g()"), "{f() | g()}");
+        assert_eq!(printed("a || b"), "{a || b}");
+        assert_eq!(printed("|x| x"), "{| x | x}");
+        assert_eq!(printed("x = y"), "{x = y}");
     }
 
     /// Links are made only to what the run recorded, and every kind of site
@@ -1587,6 +1594,19 @@ mod tests {
         let file = "src/lib.rs";
         let source = "pub fn f(a: u8, b: bool) -> u8 {\n    let c = |x: u8| x == a;\n    match a { 0 => 1, x if b => 2, _ => S { y: -1, ..S::d() }.y }\n}\n";
         assert!(list(file, "fn broken( {", &Default::default()).is_none());
+        // No function or block at all, and blocks of items and statements
+        // with no tail.
+        assert!(
+            list(file, "struct S;\n", &Default::default()).is_some_and(|listed| listed.is_empty())
+        );
+        assert!(
+            list(
+                file,
+                "fn g(a: u8) {\n    fn inner() {}\n    let b = a + 1;\n}\n",
+                &Default::default()
+            )
+            .is_some_and(|listed| !listed.is_empty())
+        );
         // Nothing recorded: no link at all.
         let bare = list(file, source, &Default::default()).unwrap();
         assert!(bare.iter().all(|mutant| mutant.statement.is_none()
