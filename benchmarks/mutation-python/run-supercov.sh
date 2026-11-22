@@ -13,6 +13,13 @@ out=$(cd "$out" && pwd)
 cd "$dir/src"
 rm -rf .supercov
 export PATH="$dir/.venv/bin:$PATH"
+# The same sources mutmut mutates: what `mutmut-config.sh` names.
+case "$project" in
+  python-slugify) export SUPERCOV_SOURCE_ROOTS=slugify ;;
+  cachetools) export SUPERCOV_SOURCE_ROOTS=src/cachetools ;;
+  parse) export SUPERCOV_SOURCE_ROOTS=parse ;;
+  humanize) export SUPERCOV_SOURCE_ROOTS=src/humanize ;;
+esac
 case "$runner" in
   pytest) command=(python -m pytest -p no:cacheprovider) ;;
   unittest) command=(python -m unittest discover -s tests -t .) ;;
