@@ -60,6 +60,7 @@
     "sources": "src/main/org/apache/tools/ant/util",
     "targets": "org.apache.tools.ant.util.*",
     "targetTests": "org.apache.tools.ant.util.*Test",
+    "excludedTests": "org.apache.tools.ant.util.*.*",
     "antClasspath": "build/classes,build/testcases,src/tests/junit,src/etc/testcases,lib/optional/*.jar",
     "antSourceDir": "src/main",
     "antJvmArgs": "-Droot=ROOT,-Dbuild.tests.value=ROOT/build/testcases,-Dbuild.classes.value=ROOT/build/classes,-Dant.home=ANTHOME,-Doffline=true",

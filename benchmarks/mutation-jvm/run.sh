@@ -168,13 +168,14 @@ run_pit() {
     local full=false
     [ "$matrix" = 1 ] && full=true
     # shellcheck disable=SC2046
-    # The project's class path on PIT's own as well: its JUnit 4 support
-    # looks for JUnit there.
+    # The project's class path is PIT's own (its JUnit 4 support looks for
+    # JUnit there); given again as --classPath, each test would run twice.
     java -cp "$(ls "$work"/pit-cli/*.jar | paste -sd: -):$(echo "$classpath" | tr , :)" \
       org.pitest.mutationtest.commandline.MutationCoverageReport \
       --reportDir pit-reports --timestampedReports=false --outputFormats XML \
       --targetClasses "$targets" --targetTests "$target_tests" \
-      --sourceDirs "$(field antSourceDir)" --classPath "$classpath" \
+      --sourceDirs "$(field antSourceDir)" \
+      --excludedTestClasses "$(field excludedTests)" \
       --threads "$threads" --fullMutationMatrix="$full" \
       --timeoutConst 10000 --verbose \
       --jvmArgs "$(field antJvmArgs | sed "s|ROOT|$PWD|g; s|ANTHOME|${ANT_HOME:-}|g")" >&2
