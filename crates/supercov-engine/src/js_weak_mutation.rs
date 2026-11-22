@@ -1968,6 +1968,179 @@ mod tests {
         expect(&probed, &ran(), NOT_REACHED, "not-evaluated");
     }
 
+    /// cargo-mutants' mutants, read from reach, a guard's outcomes and the
+    /// value probes `rust_value_probes` places.
+    #[test]
+    fn rust_mutants_are_decided_by_their_probes_and_otherwise_by_reach() {
+        let with =
+            |mutant: CandidateMutant, probe: Option<&str>, compare: Option<&str>| CandidateMutant {
+                probe: probe.map(str::to_owned),
+                compare: compare.map(str::to_owned),
+                ..mutant
+            };
+        // Without a probe: a function emptied ran, a value it returns is
+        // unknown, an arm selected, a guard's outcomes, `==` negated.
+        expect(
+            &mutant("FnValue", "()", "{ f() }"),
+            &ran(),
+            PROXY,
+            "function-ran",
+        );
+        expect(
+            &mutant("FnValue", "0", "{ 1 }"),
+            &ran(),
+            UNKNOWN,
+            "no-return-probe",
+        );
+        expect(
+            &mutant("MatchArm", "removed", "A => 1"),
+            &ran(),
+            PROXY,
+            "arm-selected",
+        );
+        let guard = mutant("MatchArmGuard", "true", "x > 1");
+        expect(&guard, &ran(), UNKNOWN, "no-decision");
+        let guard = CandidateMutant {
+            decision: decided("d", None, None),
+            ..guard
+        };
+        expect(&guard, &ran(), NOT_REACHED, "guard-not-evaluated");
+        expect(
+            &guard,
+            &with_vectors(&[(&[Some(false)], false)]),
+            INFECTED,
+            "guard-differs",
+        );
+        expect(
+            &guard,
+            &with_vectors(&[(&[Some(true)], true)]),
+            NOT_INFECTED,
+            "guard-always-same",
+        );
+        let negated = operated("BinaryOperator", "!=", "a == b", "==");
+        expect(&negated, &ran(), INFECTED, "comparison-evaluated");
+        expect(
+            &operated("BinaryOperator", "-", "a + b", "+"),
+            &ran(),
+            UNKNOWN,
+            "no-operand-probe",
+        );
+        expect(
+            &mutant("StructField", "removed", "a: 1"),
+            &ran(),
+            UNKNOWN,
+            "no-field-probe",
+        );
+
+        // A comparison site: each evaluation's relation, the original's
+        // value against the replacement's.
+        let less = with(
+            operated("BinaryOperator", "<=", "a < b", "<"),
+            None,
+            Some("c"),
+        );
+        expect(&less, &ran(), NOT_REACHED, "comparison-not-evaluated");
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "eq"]),
+            INFECTED,
+            "comparison-differs",
+        );
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "gt"]),
+            NOT_INFECTED,
+            "comparison-same",
+        );
+        expect(
+            &less,
+            &with_outcomes("c", &["lt", "other"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        // NaN: `==` false, `!=` true.
+        let equal = with(
+            operated("BinaryOperator", "!=", "a == b", "=="),
+            None,
+            Some("c"),
+        );
+        expect(
+            &equal,
+            &with_outcomes("c", &["unordered"]),
+            INFECTED,
+            "comparison-differs",
+        );
+        expect(
+            &equal,
+            &with_outcomes("c", &["eq"]),
+            INFECTED,
+            "comparison-differs",
+        );
+
+        // A negation removed, read through its operand's probe.
+        let negative = with(mutant("UnaryOperator", "removed", "-x"), Some("p"), None);
+        expect(
+            &negative,
+            &with_outcomes("p", &["nonzero"]),
+            INFECTED,
+            "replacement-differs",
+        );
+        expect(
+            &negative,
+            &with_outcomes("p", &["zero"]),
+            NOT_INFECTED,
+            "replacement-same",
+        );
+        expect(
+            &negative,
+            &with_outcomes("p", &["unknown"]),
+            UNKNOWN,
+            "non-primitive-operands",
+        );
+        expect(&negative, &ran(), NOT_REACHED, "not-evaluated");
+
+        // A function's value replaced: a return of another class infects;
+        // one of the same, an unknown one, or a replacement no class holds
+        // proves nothing.
+        for (replacement, returned) in [("true", "0"), ("0", "1"), ("-1.0", "1"), ("1.0", "-1")] {
+            let value = with(mutant("FnValue", replacement, "{ g() }"), Some("p"), None);
+            expect(
+                &value,
+                &with_outcomes("p", &[returned]),
+                INFECTED,
+                "returned-other",
+            );
+            expect(
+                &value,
+                &with_outcomes("p", &[replacement_class(replacement), "unknown"]),
+                UNKNOWN,
+                "returned-same",
+            );
+        }
+        let other = with(
+            mutant("FnValue", "Default::default()", "{ g() }"),
+            Some("p"),
+            None,
+        );
+        expect(
+            &other,
+            &with_outcomes("p", &["1"]),
+            UNKNOWN,
+            "returned-same",
+        );
+        let unrecorded = with(mutant("FnValue", "true", "{ g() }"), Some("p"), None);
+        expect(&unrecorded, &ran(), UNKNOWN, "returned-same");
+    }
+
+    /// The class a function's replacement value is recorded under.
+    fn replacement_class(replacement: &str) -> &'static str {
+        match replacement {
+            "true" | "1.0" => "1",
+            "0" => "0",
+            _ => "-1",
+        }
+    }
+
     #[test]
     fn removed_blocks_and_calls_are_infected_by_proxy() {
         let call = mutant("CallExpression", "empty", "f();");

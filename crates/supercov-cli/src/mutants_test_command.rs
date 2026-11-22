@@ -37,18 +37,32 @@ Options:
   --critical <glob> source files where every mutant must be killed or
                     accepted (repeatable); a survivor there fails the command
   --json            the answer as JSON
+  --format markdown the verdicts as a table for a pull request's comment,
+                    in place of the summary
+  --output <file>   write that table to a file
+  -- <command>      run this command instead of the run's own
+
+It exits 2, after its answer, where the run's command failed (a failing test
+kills nothing, so the verdicts cannot gate) or no mutant could be run, and
+refuses a run that recorded no test.
 
 Accepted mutants: supercov.accepted.json at the project root, a list of
 { \"id\": <mutant id>, \"reason\": <why no test can tell it apart> }. An
 accepted mutant still runs; it is shown as accepted and never fails the
 command. An entry whose mutant is killed or gone is listed as stale.
-  -- <command>      run this command instead of the run's own
 ";
 
 #[derive(Debug, Default)]
 struct Options {
     plan: bool,
     json: bool,
+    /// Keep an earlier run's verdicts no change could move: `supercov
+    /// mutants`, which measures the checkout again after an edit, does;
+    /// `runs <id> mutants test` tests the run it names.
+    carry: bool,
+    /// `--format markdown`: the verdicts as a pull request's comment.
+    markdown: bool,
+    output: Option<PathBuf>,
     files: Vec<String>,
     diff: Option<String>,
     fail_on: Vec<String>,
@@ -66,6 +80,26 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match args[index].as_str() {
             "--plan" => options.plan = true,
             "--json" => options.json = true,
+            "--format" => {
+                index += 1;
+                match args.get(index).map(String::as_str) {
+                    Some("markdown") => options.markdown = true,
+                    other => {
+                        return Err(format!(
+                            "--format takes markdown, not {}",
+                            other.unwrap_or("nothing")
+                        ));
+                    }
+                }
+            }
+            "--output" => {
+                index += 1;
+                let path = args
+                    .get(index)
+                    .filter(|path| !path.is_empty())
+                    .ok_or("--output needs a file")?;
+                options.output = Some(PathBuf::from(path));
+            }
             "--file" => {
                 index += 1;
                 let file = args
@@ -125,22 +159,40 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
         index += 1;
     }
+    if options.output.is_some() && !options.markdown {
+        return Err("--output writes the --format markdown table: give --format markdown".into());
+    }
+    if options.markdown && options.json {
+        return Err("--format markdown and --json are two answers: give one".into());
+    }
+    if options.markdown && options.plan {
+        return Err(
+            "--format markdown lists a pass's verdicts, and --plan runs none: give one".into(),
+        );
+    }
+    if options.markdown && options.files.len() > 1 {
+        return Err("--format markdown takes one --file at most".into());
+    }
     Ok(options)
 }
 
 pub(crate) const MUTANTS_HELP: &str = "\
 Usage: supercov mutants [options] [-- <test command>]
 
-Mutation-tests the project: lists the mutants of every JavaScript and
-TypeScript source the tests ran, runs each against only the tests that run
-its code, and saves the verdicts (killed, survived, timeout) into the run.
+Mutation-tests the project: lists the mutants of every source the tests ran,
+as each language's established tool makes them (StrykerJS for JavaScript and
+TypeScript, mutmut for Python, cargo-mutants for Rust, Gremlins for Go,
+mutant for Ruby, PIT for Java and Kotlin), runs each against only the tests
+that run its code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,
 or it is a plain run (supercov -- <tests>), which does nothing for mutants
 and costs nothing more for them. Its own run records the values the mutants'
 expressions take, which spares the strong pass the tests that cannot tell a
 mutant apart; while the checkout is unchanged, the next supercov mutants
-reads that run again.
+reads that run again. After an edit, a mutant keeps its verdict where
+neither its file nor any test that could kill it changed, and could reach
+nothing that changed.
 
 Options are those of `supercov runs <run-id> mutants test`; the ones asked
 most:
@@ -148,8 +200,14 @@ most:
   --file <path>     only this source file's mutants (repeatable)
   --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
                     no-coverage or error
+  --format markdown the verdicts as a table for a pull request's comment
+  --output <file>   write that table to a file
   --plan            print what would run, and run nothing
   --json            the answer as JSON
+
+It exits 2, after its answer, where the measured command failed (a failing
+test kills nothing) or no mutant could be run, and refuses a run that
+recorded no test.
 ";
 
 /// `supercov mutants [options] [-- <command>]`: the latest run's mutants
@@ -159,11 +217,20 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         print!("{MUTANTS_HELP}");
         return ExitCode::SUCCESS;
     }
-    let given = args
-        .iter()
-        .position(|a| a == "--")
-        .map(|at| args[at + 1..].to_vec())
-        .filter(|command| !command.is_empty());
+    // Every option is checked before anything runs: a mistake costs no
+    // measured run.
+    let options = match parse(&args) {
+        Ok(options) => options,
+        Err(message) => {
+            return crate::refuse(
+                "mutants",
+                args.iter().any(|a| a == "--json"),
+                message,
+                MUTANTS_HELP,
+            );
+        }
+    };
+    let given = options.command.clone();
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -209,7 +276,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         );
         // Measured as `supercov -- <command>` would be, its report on the
         // standard error: the standard output is this command's answer.
-        // Failing tests still leave a run; their tests kill nothing.
+        // Failing tests still leave a run; the pass says what they cost.
         let measured = std::env::current_exe().and_then(|program| {
             use supercov_engine::fault_process::Launch;
             std::process::Command::new(program)
@@ -226,17 +293,38 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
     }
     let mut forwarded = vec!["latest".to_owned(), "mutants".to_owned(), "test".to_owned()];
     forwarded.extend(args);
-    command(&forwarded)
+    run_command(&forwarded, true)
+}
+
+/// Why `mutants test` stopped short of an answer.
+enum Stop {
+    /// Something went wrong: exit 1.
+    Failed(String),
+    /// The run cannot be mutation-tested as it is: exit 2.
+    Refused(String),
+    /// A signal ended the pass: its exit code. What it decided is saved.
+    Interrupted(i32),
+}
+
+impl From<String> for Stop {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
 }
 
 /// `args` is `[<run-id>, "mutants", "test", ...]`.
 pub fn command(args: &[String]) -> ExitCode {
+    run_command(args, false)
+}
+
+/// `command`, keeping earlier verdicts where `carry`.
+fn run_command(args: &[String], carry: bool) -> ExitCode {
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
     let options = match parse(&args[3..]) {
-        Ok(options) => options,
+        Ok(options) => Options { carry, ..options },
         Err(message) => {
             return crate::refuse(
                 "runs.mutants.test",
@@ -246,46 +334,21 @@ pub fn command(args: &[String]) -> ExitCode {
             );
         }
     };
-    let result = (|| -> Result<Value, String> {
-        let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
-        let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
-        let mut plan = run_plan(&root, run)?;
-        narrow(&mut plan, &root, run, &options)?;
-        let saved = read_saved(run);
-        let asked = plan
-            .mutants
-            .iter()
-            .map(|mutant| (mutant.id.clone(), mutant.file.clone()))
-            .collect::<Vec<_>>();
-        // A second pass over the same run runs only what has no verdict.
-        plan.mutants
-            .retain(|mutant| !saved.contains_key(&mutant.id));
-        // A shard: every n-th mutant to run, from the k-th; the decided ones
-        // with the first shard.
-        if let Some((k, n)) = options.shard {
-            let mut position = 0usize;
-            plan.mutants.retain(|mutant| {
-                if mutant.decided.is_some() {
-                    return k == 1;
-                }
-                position += 1;
-                (position - 1) % n == k - 1
-            });
-        }
-        if options.plan {
-            return Ok(plan_json(run, &plan));
-        }
-        let mut data = execute(&root, run, plan, saved, &options)?;
-        let verdicts = read_saved(run);
-        data["gate"] = gate(&root, &asked, &verdicts, &options)?;
-        data["survivors"] = survivors(run, &asked, &verdicts);
-        Ok(data)
-    })();
-    match result {
+    match answer(&args[0], &options) {
         Ok(data) => {
+            let mut exit = if data["gate"]["failed"].as_bool() == Some(true) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            };
+            let refused = data["result"] == "error";
             if options.json {
                 println!("{}", serde_json::to_string(&data).expect("JSON"));
+            } else if options.markdown {
+                let printed = markdown(&data, &options);
+                if printed != ExitCode::SUCCESS {
+                    exit = printed;
+                }
             } else {
                 print!("{}", plan_text(&data));
                 print!(
@@ -294,13 +357,21 @@ pub fn command(args: &[String]) -> ExitCode {
                 );
                 print!("{}", gate_text(&data["gate"]));
             }
-            if data["gate"]["failed"].as_bool() == Some(true) {
-                ExitCode::from(1)
-            } else {
-                ExitCode::SUCCESS
+            for reason in data["reasons"].as_array().into_iter().flatten() {
+                eprintln!("[supercov] {}", reason.as_str().unwrap_or_default());
             }
+            if refused { ExitCode::from(2) } else { exit }
         }
-        Err(message) => {
+        Err(Stop::Refused(message)) => {
+            crate::refuse("runs.mutants.test", options.json, message, "")
+        }
+        Err(Stop::Interrupted(code)) => {
+            eprintln!(
+                "[supercov] interrupted: the verdicts the pass reached are saved into the run, and the next pass runs the rest"
+            );
+            ExitCode::from(u8::try_from(code).unwrap_or(1))
+        }
+        Err(Stop::Failed(message)) => {
             if options.json {
                 crate::refuse("runs.mutants.test", true, message, HELP)
             } else {
@@ -309,6 +380,222 @@ pub fn command(args: &[String]) -> ExitCode {
             }
         }
     }
+}
+
+/// The pass over run `selector`, or `--plan`'s answer.
+fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let inventory = discover_runs(&root).map_err(|e| e.to_string())?;
+    let run = select_run(&inventory, Some(selector)).map_err(|e| e.to_string())?;
+    let mut plan = run_plan(&root, run)?;
+    // A run with no test has nothing to run a mutant against: said, not
+    // reported as a score of nothing killed.
+    if plan.tests.is_empty() {
+        return Err(Stop::Refused(no_test_message(
+            &run.id,
+            &run.metadata.command,
+            run.metadata.test_exit_code,
+            &plan,
+        )));
+    }
+    let total = plan.mutants.len();
+    narrow(&mut plan, &root, run, options)?;
+    let narrowed = plan.clone();
+    let mut saved = read_saved(run);
+    let asked = plan
+        .mutants
+        .iter()
+        .map(|mutant| (mutant.id.clone(), mutant.file.clone()))
+        .collect::<Vec<_>>();
+    // After an edit, the verdicts no change could have moved.
+    let carried = if options.carry && !options.plan {
+        carry_over(&root, run, &plan, &saved)
+    } else {
+        None
+    };
+    if let Some((_, verdicts)) = &carried {
+        saved.extend(verdicts.clone());
+        save(run, &plan.mutant_set, &saved)?;
+    }
+    // A second pass over the same run runs only what has no verdict.
+    plan.mutants
+        .retain(|mutant| !saved.contains_key(&mutant.id));
+    // A shard: every n-th mutant to run, from the k-th; the decided ones
+    // with the first shard.
+    if let Some((k, n)) = options.shard {
+        let mut position = 0usize;
+        plan.mutants.retain(|mutant| {
+            if mutant.decided.is_some() {
+                return k == 1;
+            }
+            position += 1;
+            (position - 1) % n == k - 1
+        });
+    }
+    if options.plan {
+        return Ok(plan_json(run, &plan));
+    }
+    let running = plan
+        .mutants
+        .iter()
+        .filter(|m| m.decided.is_none())
+        .map(|m| m.id.clone())
+        .collect::<Vec<_>>();
+    let to_run = running.len();
+    let started = std::time::Instant::now();
+    let executed = execute(&root, run, plan.clone(), &mut saved, options)?;
+    let verdicts = read_saved(run);
+    let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
+    data["summary"]["durationMs"] = json!(started.elapsed().as_millis() as u64);
+    data["scope"] = json!({
+        "diff": options.diff,
+        "files": options.files,
+        "mutants": asked.len(),
+        "of": total,
+    });
+    if let Some((from, verdicts)) = &carried {
+        data["carried"] = json!({"from": from, "mutants": verdicts.len()});
+    }
+    data["gate"] = gate(&root, &asked, &verdicts, options)?;
+    data["survivors"] = survivors(run, &asked, &verdicts);
+    // What keeps this pass from gating, as `runs patch` says of a failed
+    // suite: the answer stands, and the command exits 2.
+    let mut reasons = Vec::new();
+    if let Some(failed) = failed_command(&run.id, run.metadata.test_exit_code, &narrowed) {
+        reasons.push(failed);
+    }
+    // A pass that had mutants to run and ran none of them.
+    let ran_any = running.iter().any(|id| {
+        verdicts
+            .get(id)
+            .is_some_and(|verdict| verdict.status != "error")
+    });
+    if to_run > 0 && !ran_any {
+        reasons.push(format!(
+            "no mutant of the {to_run} this pass had to run could be run: each is an error, said above"
+        ));
+    }
+    if !reasons.is_empty() {
+        data["result"] = json!("error");
+        data["reasons"] = json!(reasons);
+    }
+    Ok(data)
+}
+
+/// Why a run that recorded no test is refused.
+fn no_test_message(
+    run: &str,
+    command: &[String],
+    exit_code: Option<i32>,
+    plan: &StrongPlan,
+) -> String {
+    let reached = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.weak != "not-reached" && mutant.weak != "equivalent")
+        .count();
+    let runner = runner_of_command(command);
+    let command = supercov_engine::javascript_run::shell_words(command);
+    let exited = match exit_code {
+        Some(0) | None => String::new(),
+        Some(code) => format!(", and exited {code}"),
+    };
+    if reached == 0 {
+        return format!(
+            "run {run} recorded no test: its command ({command}) ran none{exited}, so there is nothing to run its {} mutant(s) against",
+            plan.mutants.len()
+        );
+    }
+    format!(
+        "run {run} recorded no test: its command ({command}) ran the code of {reached} mutant(s){exited}, but no runner Supercov drives reported a test there, so none can be run against one\n  {reached} mutant(s) not run: no strong driver for {runner}"
+    )
+}
+
+/// The runner a command starts, by name, for a run no known runner
+/// reported: `npx tape 'test/**/*.js'` is tape's.
+fn runner_of_command(command: &[String]) -> String {
+    let mut words = command.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        let name = name.strip_suffix(".cmd").unwrap_or(name);
+        match name {
+            // An option, or a variable set for the command.
+            _ if word.starts_with('-') || word.contains('=') => {}
+            "npx" | "bunx" | "pnpx" | "exec" | "env" | "node" | "bun" | "deno" | "dlx" => {}
+            // A package script: the command is its name.
+            "test" | "t" | "run" | "run-script" => return command.join(" "),
+            "npm" | "pnpm" | "yarn" => {}
+            "sh" | "bash" | "zsh" => {
+                let script = words
+                    .find(|word| !word.starts_with('-'))
+                    .unwrap_or_default();
+                let inner = script
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if inner.is_empty() {
+                    break;
+                }
+                return runner_of_command(&inner);
+            }
+            _ => return name.to_owned(),
+        }
+    }
+    command.join(" ")
+}
+
+/// Where the run's command failed: what it cost, in one sentence. A test that
+/// failed is no candidate, so its mutants ran against the others, and a
+/// pass over a failing suite cannot gate.
+fn failed_command(run: &str, code: Option<i32>, plan: &StrongPlan) -> Option<String> {
+    if code == Some(0) {
+        return None;
+    }
+    let not_passed = plan
+        .tests
+        .iter()
+        .filter(|test| !test.runnable)
+        .map(|test| test.name.as_str())
+        .collect::<Vec<_>>();
+    let exited = code.map_or_else(
+        || "ended without an exit status".to_owned(),
+        |code| format!("exited {code}"),
+    );
+    let tests = match not_passed.len() {
+        0 => "no test it reported failed".to_owned(),
+        count => format!(
+            "{count} of its {} test(s) did not pass ({}{})",
+            plan.tests.len(),
+            not_passed
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", "),
+            if count > 3 { ", ..." } else { "" }
+        ),
+    };
+    Some(format!(
+        "run {run}'s command {exited}: {tests}. A test that does not pass kills nothing, so these verdicts are the passing tests' alone, and cannot gate; fix the suite and measure it again"
+    ))
+}
+
+/// The answer as a pull request's comment, `runs <id> mutants --format
+/// markdown`'s table over the mutants asked about.
+fn markdown(data: &Value, options: &Options) -> ExitCode {
+    let mut arguments = vec![
+        data["run"].as_str().unwrap_or("latest").to_owned(),
+        "mutants".to_owned(),
+    ];
+    arguments.extend(options.files.iter().cloned());
+    if let Some(base) = &options.diff {
+        arguments.extend(["--diff".to_owned(), base.clone()]);
+    }
+    arguments.extend(["--format".to_owned(), "markdown".to_owned()]);
+    if let Some(output) = &options.output {
+        arguments.extend(["--output".to_owned(), output.display().to_string()]);
+    }
+    crate::mutants_export::command(&arguments)
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
@@ -434,8 +721,36 @@ fn plan_text(data: &Value) -> String {
                 "  {count} mutant(s) not run: no strong driver for {runner}\n"
             ));
         }
+        // The mutants asked about, where they are not the run's all.
+        let scope = &data["scope"];
+        let of = scope["of"].as_u64().unwrap_or(0);
+        let asked = scope["mutants"].as_u64().unwrap_or(of);
+        let mut narrowed = Vec::new();
+        if let Some(base) = scope["diff"].as_str() {
+            narrowed.push(format!("on lines changed since {base}"));
+        }
+        let files = scope["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if !files.is_empty() {
+            narrowed.push(format!("in {}", files.join(", ")));
+        }
+        let header = if narrowed.is_empty() {
+            String::new()
+        } else {
+            format!(" ({asked} of its {of} mutants, {})", narrowed.join(" and "))
+        };
+        if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
+            extra.push_str(&format!(
+                "  {carried} verdict(s) kept from run {}: nothing they depend on changed\n",
+                data["carried"]["from"].as_str().unwrap_or("")
+            ));
+        }
         return format!(
-            "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
+            "Strong mutation for {}{header}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
             data["run"].as_str().unwrap_or(""),
             summary["killed"],
             summary["timeout"],
@@ -739,17 +1054,30 @@ fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> 
 /// How often a running pass says how far it got.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// While a pass runs: every `PROGRESS_INTERVAL` (or
+/// How often a running pass's verdicts so far are saved into the run.
+const SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Verdicts saved as a pass makes them: what it had decided before, and
+/// where they go.
+struct Saving {
+    path: PathBuf,
+    run: String,
+    mutant_set: String,
+    before: std::collections::BTreeMap<String, Verdict>,
+}
+
+/// While a pass runs: every second, the verdicts its driver wrote so far
+/// saved into the run, so a pass that is interrupted or killed keeps them
+/// and the next runs the rest; and every `PROGRESS_INTERVAL` (or
 /// `SUPERCOV_PROGRESS_INTERVAL_MS`), a line on stderr with the verdicts so
-/// far, read from the pass's results as its driver writes them, and the time
-/// left at this pace. Whatever the driver, Vitest's or Playwright's.
+/// far and the time left at this pace. Whatever the driver.
 struct Progress {
     stop: std::sync::mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Progress {
-    fn start(results: PathBuf, total: usize) -> Self {
+    fn start(results: PathBuf, total: usize, saving: Saving) -> Self {
         let interval = std::env::var("SUPERCOV_PROGRESS_INTERVAL_MS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -757,10 +1085,23 @@ impl Progress {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let started = std::time::Instant::now();
         let thread = std::thread::spawn(move || {
+            let mut said = std::time::Instant::now();
+            let mut seen = 0;
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                stopped.recv_timeout(interval)
+                stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
-                eprintln!("{}", progress_line(&results, total, started.elapsed()));
+                let verdicts = read_results(&results).0;
+                if verdicts.len() > seen {
+                    seen = verdicts.len();
+                    let mut all = saving.before.clone();
+                    all.extend(verdicts);
+                    // A save that fails here is made again when the pass ends.
+                    let _ = save_to(&saving.path, &saving.run, &saving.mutant_set, &all);
+                }
+                if said.elapsed() >= interval {
+                    said = std::time::Instant::now();
+                    eprintln!("{}", progress_line(&results, total, started.elapsed()));
+                }
             }
         });
         Self {
@@ -775,6 +1116,31 @@ impl Drop for Progress {
         let _ = self.stop.send(());
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
+}
+
+/// A pass's results so far: each mutant's verdict, and what its driver said
+/// of itself.
+fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>, Vec<Value>) {
+    let text = std::fs::read_to_string(results).unwrap_or_default();
+    let mut verdicts = std::collections::BTreeMap::new();
+    let mut passes = Vec::new();
+    for line in text.lines() {
+        // A line cut short by a driver still writing it says nothing yet.
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["summary"] == true {
+            passes.push(record);
+            continue;
+        }
+        let Some(id) = record["id"].as_str() else {
+            continue;
+        };
+        if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
+            verdicts.insert(id.to_owned(), verdict);
+        }
+    }
+    (verdicts, passes)
 }
 
 /// How far a pass got: its verdicts so far of the `total` it runs.
@@ -817,30 +1183,55 @@ fn save(
     mutant_set: &str,
     saved: &std::collections::BTreeMap<String, Verdict>,
 ) -> Result<(), String> {
+    save_to(&results_path(run), &run.id, mutant_set, saved)
+}
+
+/// Writes verdicts to `path` whole, then renames them into place: a pass
+/// killed while it saves leaves the last whole save.
+fn save_to(
+    path: &Path,
+    run: &str,
+    mutant_set: &str,
+    saved: &std::collections::BTreeMap<String, Verdict>,
+) -> Result<(), String> {
     let document = StrongVerdicts {
         schema_version: supercov_engine::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
-        run: run.id.clone(),
+        run: run.to_owned(),
         mutant_set: mutant_set.to_owned(),
         mutants: saved.clone(),
     };
-    let path = results_path(run);
-    std::fs::write(
-        &path,
+    let partial = path.with_extension("json.partial");
+    supercov_engine::fault_fs::write(
+        &partial,
         serde_json::to_vec_pretty(&document).expect("plain data serializes"),
     )
+    .and_then(|()| supercov_engine::fault_fs::rename(&partial, path))
     .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Runs the plan's mutants and saves every verdict into the run.
+/// What running a plan's mutants did, beside the verdicts it saved.
+struct Executed {
+    command_exit: Option<i32>,
+    /// What each invocation's driver said of itself.
+    passes: Vec<Value>,
+}
+
+/// A pass's exit codes that mean a signal ended it: Ctrl-C, a hang-up, a
+/// termination.
+fn interrupted(exit: i32) -> bool {
+    matches!(exit, 129 | 130 | 143)
+}
+
+/// Runs the plan's mutants and saves every verdict into the run, as it
+/// comes.
 fn execute(
     root: &Path,
     run: &StoredRun,
     plan: StrongPlan,
-    mut saved: std::collections::BTreeMap<String, Verdict>,
+    saved: &mut std::collections::BTreeMap<String, Verdict>,
     options: &Options,
-) -> Result<Value, String> {
+) -> Result<Executed, Stop> {
     use supercov_engine::strong_plan::Decided;
-    let started = std::time::Instant::now();
     // Decided without running.
     for mutant in &plan.mutants {
         let status = match mutant.decided {
@@ -861,18 +1252,22 @@ fn execute(
         );
     }
     let to_run = plan.mutants.iter().filter(|m| m.decided.is_none()).count();
-    let mut command_exit = None;
-    // What each invocation's driver said of itself: a Playwright pass's
-    // canaries, and how many mutants ran alone.
-    let mut passes = Vec::new();
+    let mut executed = Executed {
+        command_exit: None,
+        passes: Vec::new(),
+    };
     if to_run > 0 {
         let command = options
             .command
             .clone()
             .unwrap_or_else(|| run.metadata.command.clone());
         if command.is_empty() {
-            return Err("the run recorded no command: give one after --".into());
+            return Err(Stop::Failed(
+                "the run recorded no command: give one after --".into(),
+            ));
         }
+        // What earlier passes left behind, the ones killed included.
+        supercov_engine::strong_driver::prune_work_directories(root);
         let mut remaining = plan
             .mutants
             .iter()
@@ -906,6 +1301,7 @@ fn execute(
                 "[supercov] no strong mutation driver for {language} yet: its mutants are errors"
             );
         }
+        save(run, &plan.mutant_set, saved)?;
         // A pass that stops before its end (a test worker that would not
         // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
@@ -922,73 +1318,34 @@ fn execute(
             };
             let languages = remaining.iter().map(driver_of).collect::<BTreeSet<_>>();
             // A pass with mutants left has a language of them at least.
-            languages
-                .into_iter()
-                .try_for_each(|language| -> Result<(), String> {
-                    let nonce = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_nanos());
-                    let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
-                    std::fs::create_dir_all(&work)
-                        .map_err(|e| format!("{}: {e}", work.display()))?;
-                    let plan_path = work.join("plan.json");
-                    let results = work.join("results.jsonl");
-                    let mutants = remaining
-                        .iter()
-                        .filter(|mutant| driver_of(mutant) == language)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let pass_plan = StrongPlan {
-                        mutant_set: plan.mutant_set.clone(),
-                        tests: plan.tests.clone(),
-                        mutants,
-                    };
-                    supercov_engine::fault_fs::write(
-                        &plan_path,
-                        serde_json::to_vec(&pass_plan).expect("plain data serializes"),
-                    )
-                    .map_err(|e| format!("{}: {e}", plan_path.display()))?;
-                    let pass = supercov_engine::strong_driver::StrongPass {
-                        root: root.to_owned(),
-                        command: command.clone(),
-                        run_id: format!("strong-{nonce}"),
-                        watchdog_program: std::env::current_exe()
-                            .ok()
-                            .and_then(|path| std::fs::canonicalize(path).ok()),
-                        strong: supercov_engine::strong_driver::StrongRun {
-                            plan: plan_path,
-                            results: results.clone(),
-                        },
-                    };
-                    let mut diagnostics = std::io::stderr();
-                    let progress = Progress::start(results.clone(), pass_plan.mutants.len());
-                    exit = supercov_engine::strong_driver::run_strong_pass(
-                        &language,
-                        &pass,
-                        &mut diagnostics,
-                    )?;
-                    drop(progress);
-                    command_exit = Some(exit);
-                    let text = std::fs::read_to_string(&results).unwrap_or_default();
-                    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                        let Ok(record) = serde_json::from_str::<Value>(line) else {
-                            continue;
-                        };
-                        if record["summary"] == true {
-                            passes.push(record);
-                            continue;
-                        }
-                        let Some(id) = record["id"].as_str() else {
-                            continue;
-                        };
-                        if let Ok(verdict) = serde_json::from_value::<Verdict>(record.clone()) {
-                            saved.insert(id.to_owned(), verdict);
-                        }
-                    }
-                    remaining.retain(|mutant| !saved.contains_key(&mutant.id));
-                    save(run, &plan.mutant_set, &saved)?;
-                    Ok(())
-                })?;
+            for language in languages {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                let work = supercov_engine::strong_driver::work_directory(root, &run.id, nonce);
+                supercov_engine::strong_driver::claim_work_directory(&work)
+                    .map_err(|e| format!("{}: {e}", work.display()))?;
+                let results = work.join("results.jsonl");
+                let ran = run_language(
+                    root, run, &plan, &remaining, &language, &command, &work, saved,
+                );
+                let (verdicts, passes) = read_results(&results);
+                // Success or failure, the pass keeps only its logs.
+                if !supercov_engine::strong_driver::keeps_work_directories(std::env::var_os(
+                    supercov_engine::strong_driver::KEEP,
+                )) {
+                    supercov_engine::strong_driver::finish_work_directory(&work);
+                }
+                saved.extend(verdicts);
+                executed.passes.extend(passes);
+                remaining.retain(|mutant| !saved.contains_key(&mutant.id));
+                save(run, &plan.mutant_set, saved)?;
+                exit = ran?;
+                executed.command_exit = Some(exit);
+                if interrupted(exit) {
+                    return Err(Stop::Interrupted(exit));
+                }
+            }
             if remaining.len() == before {
                 break;
             }
@@ -1006,14 +1363,99 @@ fn execute(
             });
         }
     }
-    save(run, &plan.mutant_set, &saved)?;
-    let count = |status: &str| saved.values().filter(|v| v.status == status).count();
-    Ok(json!({
+    save(run, &plan.mutant_set, saved)?;
+    Ok(executed)
+}
+
+/// One driver's share of the plan, run in `work`, its verdicts saved into
+/// the run as they come.
+#[allow(clippy::too_many_arguments)]
+fn run_language(
+    root: &Path,
+    run: &StoredRun,
+    plan: &StrongPlan,
+    remaining: &[supercov_engine::strong_plan::PlannedMutant],
+    language: &str,
+    command: &[String],
+    work: &Path,
+    saved: &std::collections::BTreeMap<String, Verdict>,
+) -> Result<i32, String> {
+    let plan_path = work.join("plan.json");
+    let results = work.join("results.jsonl");
+    let mutants = remaining
+        .iter()
+        .filter(|mutant| supercov_engine::strong_driver::driver_of(mutant, &plan.tests) == language)
+        .cloned()
+        .collect::<Vec<_>>();
+    let pass_plan = StrongPlan {
+        mutant_set: plan.mutant_set.clone(),
+        tests: plan.tests.clone(),
+        mutants,
+    };
+    supercov_engine::fault_fs::write(
+        &plan_path,
+        serde_json::to_vec(&pass_plan).expect("plain data serializes"),
+    )
+    .map_err(|e| format!("{}: {e}", plan_path.display()))?;
+    let nonce = work
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit('-').next())
+        .unwrap_or("0");
+    let pass = supercov_engine::strong_driver::StrongPass {
+        root: root.to_owned(),
+        command: command.to_owned(),
+        run_id: format!("strong-{nonce}"),
+        watchdog_program: std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok()),
+        strong: supercov_engine::strong_driver::StrongRun {
+            plan: plan_path,
+            results: results.clone(),
+        },
+    };
+    let mut diagnostics = std::io::stderr();
+    let progress = Progress::start(
+        results,
+        pass_plan.mutants.len(),
+        Saving {
+            path: results_path(run),
+            run: run.id.clone(),
+            mutant_set: plan.mutant_set.clone(),
+            before: saved.clone(),
+        },
+    );
+    let exit = supercov_engine::strong_driver::run_strong_pass(language, &pass, &mut diagnostics);
+    drop(progress);
+    exit
+}
+
+/// The answer's summary: the verdicts of the mutants asked about, not every
+/// verdict the run holds (`--diff`'s change, `--file`'s files).
+fn summary(
+    run: &StoredRun,
+    plan: &StrongPlan,
+    asked: &[(String, String)],
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+    ran: usize,
+    executed: &Executed,
+) -> Value {
+    let asked_verdicts = asked
+        .iter()
+        .filter_map(|(id, _)| Some((id.clone(), verdicts.get(id)?.clone())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let count = |status: &str| {
+        asked_verdicts
+            .values()
+            .filter(|v| v.status == status)
+            .count()
+    };
+    json!({
         "run": run.id,
         "mutantSet": plan.mutant_set,
         "summary": {
-            "mutants": saved.len(),
-            "ran": to_run,
+            "mutants": asked_verdicts.len(),
+            "ran": ran,
             "killed": count("killed"),
             "timeout": count("timeout"),
             "survived": count("survived"),
@@ -1023,14 +1465,119 @@ fn execute(
             // A mutant that does not compile (cargo-mutants' `unviable`):
             // counted apart, and left out of the score.
             "unviable": count("unviable"),
-            "mutationScore": score(&saved),
+            "mutationScore": score(&asked_verdicts),
             // Errors because no driver runs their tests, by runner.
-            "notRun": not_run(&plan, &saved),
-            "durationMs": started.elapsed().as_millis() as u64,
-            "commandExitCode": command_exit,
+            "notRun": not_run(plan, &asked_verdicts),
+            "commandExitCode": executed.command_exit,
         },
-        "passes": passes,
-    }))
+        "passes": executed.passes,
+    })
+}
+
+/// Verdicts an earlier run of this checkout's project still gives `run`'s
+/// mutants, by mutant id, and that run's id: where the run is current, the
+/// earlier one ran the same command with the same dependencies and
+/// configuration, and, for each mutant, its file is byte for byte as it was
+/// and every test that could kill it (its candidates, and every test of
+/// their files) is one `tests affected` finds no change could have reached:
+/// a test file edit reaches that file's tests, and a source edit the tests
+/// that ran the changed code. Killed, survived and timed-out verdicts are
+/// kept; an error runs again.
+fn carry_over(
+    root: &Path,
+    run: &StoredRun,
+    plan: &StrongPlan,
+    saved: &std::collections::BTreeMap<String, Verdict>,
+) -> Option<(String, std::collections::BTreeMap<String, Verdict>)> {
+    let undecided = plan
+        .mutants
+        .iter()
+        .filter(|mutant| mutant.decided.is_none() && !saved.contains_key(&mutant.id))
+        .collect::<Vec<_>>();
+    if undecided.is_empty() || crate::checkout_comparison(root, run).stale {
+        return None;
+    }
+    let inventory = discover_runs(root).ok()?;
+    let same = |earlier: &StoredRun| {
+        let (was, now) = (&earlier.metadata.integrity, &run.metadata.integrity);
+        earlier.id != run.id
+            && earlier.metadata.merged != Some(true)
+            && earlier.metadata.started_at < run.metadata.started_at
+            && earlier.metadata.command == run.metadata.command
+            && was.instrumenter_version == now.instrumenter_version
+            && was.fingerprint.dependencies == now.fingerprint.dependencies
+            && was.fingerprint.configuration == now.fingerprint.configuration
+            && results_path(earlier).is_file()
+    };
+    let earlier = inventory
+        .runs
+        .iter()
+        .filter(|earlier| same(earlier))
+        .max_by(|a, b| a.metadata.started_at.cmp(&b.metadata.started_at))?;
+    let document = std::fs::read(results_path(earlier))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())?;
+    if document.mutant_set != plan.mutant_set {
+        return None;
+    }
+    let affected = supercov_engine::source_manifest::affected_tests(root, earlier).ok()?;
+    let entries = |key: &str| {
+        affected[key]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                Some((
+                    entry["file"].as_str()?.to_owned(),
+                    entry["name"].as_str()?.to_owned(),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    // A test file holding any test a change may have reached: every test of
+    // it may run differently (its file's state is shared).
+    let reached_files = entries("affected")
+        .into_iter()
+        .chain(entries("undetermined"))
+        .map(|(file, _)| file)
+        .collect::<BTreeSet<_>>();
+    let unaffected = entries("unaffected").into_iter().collect::<BTreeSet<_>>();
+    let changed = affected["changedFiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["file"].as_str())
+        .collect::<BTreeSet<_>>();
+    let unchanged_test = |index: usize| {
+        plan.tests.get(index).is_some_and(|test| {
+            test.file.as_ref().is_some_and(|file| {
+                !reached_files.contains(file)
+                    && unaffected.contains(&(file.clone(), test.name.clone()))
+            })
+        })
+    };
+    let mut carried = std::collections::BTreeMap::new();
+    for mutant in undecided {
+        let Some(verdict) = document.mutants.get(&mutant.id) else {
+            continue;
+        };
+        if !matches!(verdict.status.as_str(), "killed" | "survived" | "timeout")
+            || changed.contains(mutant.file.as_str())
+            || mutant
+                .whole_files
+                .iter()
+                .any(|file| reached_files.contains(file))
+            || !mutant
+                .candidates
+                .iter()
+                .all(|candidate| unchanged_test(candidate.test))
+        {
+            continue;
+        }
+        carried.insert(mutant.id.clone(), verdict.clone());
+    }
+    (!carried.is_empty()).then(|| (earlier.id.clone(), carried))
 }
 
 #[cfg(test)]
@@ -1157,6 +1704,143 @@ mod tests {
         );
     }
 
+    /// The runner a command starts, named where no runner Supercov knows
+    /// reported a test: past launchers, options, variables and shells; a
+    /// package script by the command itself.
+    #[test]
+    fn a_command_names_its_runner() {
+        let named = |words: &[&str]| {
+            runner_of_command(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(named(&["npx", "-y", "tape", "test/**/*.js"]), "tape");
+        assert_eq!(named(&["FOO=1", "node_modules/.bin/tape.cmd", "x"]), "tape");
+        assert_eq!(named(&["--require=x", "env", "pnpm", "dlx", "uvu"]), "uvu");
+        assert_eq!(named(&["npm", "test"]), "npm test");
+        assert_eq!(named(&["sh", "-c", "BABEL_ENV=x npx tape t/"]), "tape");
+        assert_eq!(named(&["bash", "-c", " "]), "bash -c  ");
+        assert_eq!(named(&["node"]), "node");
+    }
+
+    fn plan_of(tests: &[(&str, bool)], weak: &[&'static str]) -> StrongPlan {
+        use supercov_engine::strong_plan::{PlannedMutant, PlannedTest};
+        StrongPlan {
+            mutant_set: "set".into(),
+            tests: tests
+                .iter()
+                .map(|(name, runnable)| PlannedTest {
+                    id: (*name).into(),
+                    file: None,
+                    name: (*name).into(),
+                    title: None,
+                    runner: "jest".into(),
+                    duration_ms: None,
+                    span: None,
+                    runnable: *runnable,
+                })
+                .collect(),
+            mutants: weak
+                .iter()
+                .map(|weak| PlannedMutant {
+                    id: (*weak).into(),
+                    file: "a.js".into(),
+                    language: "javascript".into(),
+                    index: 0,
+                    mutator: "M".into(),
+                    weak,
+                    decided: None,
+                    reason: None,
+                    candidates: Vec::new(),
+                    whole_files: Vec::new(),
+                    server_wide: None,
+                    covering: 0,
+                    statement: None,
+                    function: None,
+                    function_hit_by: Default::default(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A run with no test is refused: by how many mutants' code its command
+    /// ran and the runner that ran it, or as having run none.
+    #[test]
+    fn a_run_with_no_test_says_what_its_command_ran() {
+        let tape = ["npx".to_owned(), "tape".to_owned(), "t/**/*.js".to_owned()];
+        let plan = plan_of(&[], &["infected", "not-reached", "equivalent", "unknown"]);
+        let said = no_test_message("r1", &tape, Some(0), &plan);
+        assert_eq!(
+            said,
+            "run r1 recorded no test: its command (npx tape 't/**/*.js') ran the code of 2 mutant(s), but no runner Supercov drives reported a test there, so none can be run against one\n  2 mutant(s) not run: no strong driver for tape"
+        );
+        let plan = plan_of(&[], &["not-reached"]);
+        assert_eq!(
+            no_test_message("r1", &tape, Some(1), &plan),
+            "run r1 recorded no test: its command (npx tape 't/**/*.js') ran none, and exited 1, so there is nothing to run its 1 mutant(s) against"
+        );
+        assert!(no_test_message("r1", &tape, None, &plan).contains("ran none, so"));
+    }
+
+    /// A failed command is said with the tests that did not pass, the first
+    /// three of them; a passing one is not.
+    #[test]
+    fn a_failed_command_names_the_tests_that_did_not_pass() {
+        let plan = plan_of(&[("a", false), ("b", true)], &[]);
+        assert_eq!(failed_command("r1", Some(0), &plan), None);
+        assert_eq!(
+            failed_command("r1", Some(1), &plan).unwrap(),
+            "run r1's command exited 1: 1 of its 2 test(s) did not pass (a). A test that does not pass kills nothing, so these verdicts are the passing tests' alone, and cannot gate; fix the suite and measure it again"
+        );
+        let four = plan_of(
+            &[("a", false), ("b", false), ("c", false), ("d", false)],
+            &[],
+        );
+        assert!(
+            failed_command("r1", None, &four)
+                .unwrap()
+                .starts_with("run r1's command ended without an exit status: 4 of its 4 test(s) did not pass (a, b, c, ...)")
+        );
+        let none = plan_of(&[("a", true)], &[]);
+        assert!(
+            failed_command("r1", Some(3), &none)
+                .unwrap()
+                .contains("exited 3: no test it reported failed.")
+        );
+    }
+
+    /// The summary's first line names the mutants asked about where they
+    /// are not all the run's, and the verdicts kept from an earlier run.
+    #[test]
+    fn the_summary_names_what_was_asked_and_what_was_kept() {
+        let summary = json!({"killed": 1, "timeout": 0, "survived": 0, "noCoverage": 0,
+            "equivalent": 0, "error": 0, "unviable": 2, "ran": 1, "durationMs": 5,
+            "mutationScore": null});
+        let text = plan_text(&json!({
+            "run": "r1", "summary": summary,
+            "scope": {"diff": "main", "files": ["a.js", "b.js"], "mutants": 3, "of": 9},
+            "carried": {"from": "r0", "mutants": 4},
+        }));
+        assert!(
+            text.starts_with(
+                "Strong mutation for r1 (3 of its 9 mutants, on lines changed since main and in a.js, b.js): mutation score -\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("  unviable      2\n"), "{text}");
+        assert!(
+            text.contains("  4 verdict(s) kept from run r0: nothing they depend on changed\n"),
+            "{text}"
+        );
+        let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
+        assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");
+        assert!(!whole.contains("kept from"), "{whole}");
+    }
+
+    #[test]
+    fn a_signal_s_exit_code_is_an_interruption() {
+        assert!([129, 130, 143].into_iter().all(interrupted));
+        assert!(!interrupted(0) && !interrupted(1) && !interrupted(137));
+    }
+
     #[test]
     fn options_parse() {
         let args = [
@@ -1170,5 +1854,31 @@ mod tests {
         assert_eq!(options.diff.as_deref(), Some("main"));
         assert_eq!(options.command.unwrap(), ["npx", "vitest"]);
         assert!(parse(&["--nope".into()]).is_err());
+        let parsed =
+            |words: &[&str]| parse(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>());
+        let markdown =
+            parsed(&["--format", "markdown", "--output", "m.md", "--file", "a"]).unwrap();
+        assert!(markdown.markdown && markdown.output == Some(PathBuf::from("m.md")));
+        for (words, said) in [
+            (
+                &["--format", "html"][..],
+                "--format takes markdown, not html",
+            ),
+            (&["--format"], "--format takes markdown, not nothing"),
+            (&["--output"], "--output needs a file"),
+            (
+                &["--output", "m.md"],
+                "--output writes the --format markdown table",
+            ),
+            (&["--format", "markdown", "--json"], "two answers"),
+            (&["--format", "markdown", "--plan"], "--plan runs none"),
+            (
+                &["--format", "markdown", "--file", "a", "--file", "b"],
+                "one --file at most",
+            ),
+        ] {
+            let error = parsed(words).unwrap_err();
+            assert!(error.contains(said), "{words:?}: {error}");
+        }
     }
 }

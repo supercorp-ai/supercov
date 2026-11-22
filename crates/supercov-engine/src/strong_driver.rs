@@ -197,8 +197,15 @@ pub fn run_strong_pass(
                 watchdog_program: pass.watchdog_program.clone(),
                 strong: Some(pass.strong.clone()),
             };
-            crate::javascript_run::run_strong_javascript(&request, diagnostics)
-                .map_err(|error| error.to_string())
+            // Interrupted: the signal's exit code, as the command's would be,
+            // so the caller keeps what the pass decided and stops.
+            match crate::javascript_run::run_strong_javascript(&request, diagnostics) {
+                Err(crate::javascript_run::DirectJavascriptRunError::Interrupted {
+                    exit_code,
+                    ..
+                }) => Ok(exit_code),
+                finished => finished.map_err(|error| error.to_string()),
+            }
         }
         crate::mutant_list::RUST => crate::rust_strong::run_strong_rust(
             &crate::rust_strong::StrongRustRequest {
@@ -218,6 +225,67 @@ pub fn run_strong_pass(
 pub fn work_directory(root: &Path, run_id: &str, nonce: u128) -> PathBuf {
     root.join(".supercov/strong")
         .join(format!("{run_id}-{nonce}"))
+}
+
+/// Set to `1`: a finished pass keeps its directory whole, each job's
+/// evidence included.
+pub const KEEP: &str = "SUPERCOV_STRONG_KEEP";
+
+/// Whether the environment asks to keep finished passes' directories.
+pub fn keeps_work_directories(environment: Option<std::ffi::OsString>) -> bool {
+    environment.is_some_and(|keep| keep == "1")
+}
+
+/// The file in a pass's directory naming the process that works there.
+const OWNER_FILE: &str = "owner";
+
+/// Makes the directory a pass works in, owned by this process.
+pub fn claim_work_directory(work: &Path) -> std::io::Result<()> {
+    crate::fault_fs::create_dir_all(work)?;
+    crate::fault_fs::write(work.join(OWNER_FILE), std::process::id().to_string())
+}
+
+/// What a finished pass keeps: its logs (the command's output, a Playwright
+/// pass's further invocations'). Its plan, results and each job's evidence
+/// are gone once its verdicts are saved into the run; a pass over nanoid's
+/// node:test suite left 1.2 GB.
+/// `SUPERCOV_STRONG_KEEP=1` keeps all of it, for whoever studies a pass
+/// (the caller asks `keeps_work_directories`).
+pub fn finish_work_directory(work: &Path) {
+    let Ok(entries) = std::fs::read_dir(work) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "log") {
+            continue;
+        }
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
+/// Removes the directories of passes whose process has ended, in whatever
+/// way it ended: a pass that was killed left its whole directory. A pass of
+/// another process still running keeps its own.
+pub fn prune_work_directories(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join(".supercov/strong")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let owner = std::fs::read_to_string(entry.path().join(OWNER_FILE))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        match owner {
+            Some(pid) if pid == std::process::id() || crate::lifecycle::process_alive(pid) => {}
+            _ => {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +393,72 @@ mod tests {
             directory.join("results.jsonl.timeouts.jsonl")
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A finished pass keeps its logs alone; a later pass removes every
+    /// pass's directory whose process has ended, or that names none, and
+    /// keeps its own and a running process's.
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_s_directory_keeps_its_logs_and_goes_when_its_process_has() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-strong-work-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let work = work_directory(&root, "run_1", 7);
+        claim_work_directory(&work).unwrap();
+        std::fs::write(work.join("restart-0.log"), "said").unwrap();
+        std::fs::write(work.join("plan.json"), "{}").unwrap();
+        std::fs::create_dir_all(work.join("results.jsonl.jobs/1/evidence")).unwrap();
+        finish_work_directory(&work);
+        let mut left = std::fs::read_dir(&work)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(left, ["restart-0.log"]);
+        assert!(keeps_work_directories(Some("1".into())));
+        assert!(!keeps_work_directories(Some("0".into())) && !keeps_work_directories(None));
+        // Gone already: nothing to finish.
+        finish_work_directory(&root.join("gone"));
+        // Another process's: one that runs (this test's parent, say), one
+        // that ended, one that named none, one that named nonsense.
+        let strong = root.join(".supercov/strong");
+        let owned = |name: &str, owner: Option<String>| {
+            std::fs::create_dir_all(strong.join(name)).unwrap();
+            if let Some(owner) = owner {
+                std::fs::write(strong.join(name).join(OWNER_FILE), owner).unwrap();
+            }
+        };
+        let mut ended = std::process::Command::new("true").spawn().unwrap();
+        let ended_pid = ended.id();
+        ended.wait().unwrap();
+        owned(
+            "running",
+            Some(std::os::unix::process::parent_id().to_string()),
+        );
+        owned("ended", Some(ended_pid.to_string()));
+        owned("unowned", None);
+        // A pass of this process still at work.
+        claim_work_directory(&work_directory(&root, "run_1", 8)).unwrap();
+        owned("nonsense", Some("x".into()));
+        std::fs::write(strong.join("a-file"), "").unwrap();
+        prune_work_directories(&root);
+        let mut kept = std::fs::read_dir(&strong)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        kept.sort();
+        // The finished pass's own directory, its owner gone with the rest,
+        // is removed by the pass after it.
+        assert_eq!(kept, ["a-file", "run_1-8", "running"]);
+        // A project with no passes yet.
+        prune_work_directories(&root.join("none"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

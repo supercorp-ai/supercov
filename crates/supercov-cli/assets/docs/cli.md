@@ -536,10 +536,28 @@ line per runner (`12 mutant(s) not run: no strong driver for pytest`). See
   accepted mutant still runs, shows as accepted, and never fails the command;
   an entry whose mutant is killed or gone is listed as stale.
 - A second `mutants test` over the same run runs only what has no verdict yet.
-  A pass that stops early (a test worker that never ended) keeps its verdicts,
-  and the next pass runs the rest.
+  The pass saves each verdict as it comes: one that stops early (a test worker
+  that never ended, Ctrl-C, a killed job) keeps what it decided, and the next
+  pass runs the rest. Ctrl-C stops every process the pass started.
+- After an edit, `supercov mutants` measures the checkout again and keeps an
+  earlier run's verdict for each mutant whose file is as it was and whose
+  candidate tests, and their test files, nothing changed could reach (as
+  `tests affected` reads a change: a test file's edit reaches its tests, a
+  source's edit the tests that ran the changed code). The rest run; the
+  summary says how many verdicts were kept, and from which run.
+- `--diff` and `--file` answer about the mutants they ask for: the summary's
+  counts and score are theirs, and its first line says how many of the run's
+  mutants that is. `--format markdown` (with `--output <file>`) writes the
+  answer as a pull request's comment, as `mutants --format markdown` does.
+- A run that recorded no test is refused with exit `2`; where its command ran
+  mutants' code (a runner Supercov has no adapter for, such as tape), it says
+  how many and names the runner. A pass over a run whose command failed
+  answers, then exits `2`: a failing test kills nothing, so the verdicts are
+  the passing tests' alone and cannot gate. So does a pass in which no mutant
+  could be run. A mutant only work outside any test ran is `no-coverage`.
 - The command's own output goes to a log beside the pass's results; stdout is
-  the answer alone.
+  the answer alone. When the pass ends, its directory under `.supercov/strong`
+  keeps only those logs, and the next pass removes it.
 
 ## Fail CI below a coverage floor
 

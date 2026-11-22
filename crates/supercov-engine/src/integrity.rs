@@ -718,10 +718,77 @@ fn git_integrity(root: &Path) -> Option<GitIntegrity> {
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .map(|revision| revision.trim().to_owned()),
-        dirty: !status
-            .as_ref()
-            .is_some_and(|output| output.status.success() && output.stdout.is_empty()),
+        dirty: !status.as_ref().is_some_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .all(|line| not_a_change(root, line))
+        }),
     })
+}
+
+/// Lockfiles an install rewrites: no line of one is code a change holds.
+const LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+    "Gemfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "Cargo.lock",
+    "go.sum",
+    "composer.lock",
+];
+
+/// Directories package managers install into, where a project does not
+/// ignore them: `bundle config set path vendor/bundle`, a virtual
+/// environment, `node_modules`.
+const INSTALL_DIRECTORIES: &[&str] = &[
+    "node_modules/",
+    "bower_components/",
+    "jspm_packages/",
+    ".bundle/",
+    "vendor/bundle/",
+    ".venv/",
+    "venv/",
+    "__pypackages__/",
+    ".pnpm-store/",
+    ".yarn/",
+];
+
+/// Whether a line of `git status --porcelain=v1` is no change to what the
+/// project is made of: a lockfile an install rewrote, or a directory a
+/// package manager installed into. A run measured with only those is
+/// measured on its commit.
+fn not_a_change(root: &Path, line: &str) -> bool {
+    let Some((state, path)) = line.split_at_checked(3) else {
+        return false;
+    };
+    let path = path.trim_matches('"');
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if state != "?? " {
+        return LOCKFILES.contains(&name);
+    }
+    // Git names an untracked directory once, at its top (`vendor/`).
+    INSTALL_DIRECTORIES
+        .iter()
+        .any(|directory| path == *directory || path.ends_with(&format!("/{directory}")))
+        || (path.ends_with('/')
+            && fs::read_dir(root.join(path)).is_ok_and(|entries| {
+                let mut entries = entries.flatten().peekable();
+                entries.peek().is_some()
+                    && entries.all(|entry| {
+                        let inner = format!("{path}{}/", entry.file_name().to_string_lossy());
+                        entry.path().is_dir()
+                            && INSTALL_DIRECTORIES
+                                .iter()
+                                .any(|directory| inner.ends_with(directory))
+                    })
+            }))
 }
 
 pub fn create_run_integrity(
@@ -1024,9 +1091,39 @@ mod tests {
         let clean = git_integrity(&root).unwrap();
         assert_eq!(clean.branch.as_deref(), Some("report-test"));
         assert!(!clean.dirty);
+        // What an install leaves is no change: a lockfile it rewrote, and
+        // the directory it installed into where nothing ignores it.
+        fs::create_dir_all(root.join("vendor/bundle/ruby")).unwrap();
+        fs::write(root.join("vendor/bundle/ruby/gem.rb"), "").unwrap();
+        fs::create_dir_all(root.join("app/node_modules/x")).unwrap();
+        fs::write(root.join("app/node_modules/x/index.js"), "").unwrap();
+        fs::write(root.join("yarn.lock"), "# v1\n").unwrap();
+        git(&["add", "yarn.lock"]);
+        git(&[
+            "-c",
+            "user.name=R",
+            "-c",
+            "user.email=r@example.invalid",
+            "commit",
+            "-qm",
+            "lock",
+        ]);
+        fs::write(root.join("yarn.lock"), "# v2\n").unwrap();
+        let installed = git_integrity(&root).unwrap();
+        assert!(!installed.dirty);
+        // A directory that holds more than an install, or nothing, is a
+        // change, as is an uncommitted file.
+        fs::create_dir_all(root.join("vendor/own")).unwrap();
+        fs::write(root.join("vendor/own/lib.rb"), "").unwrap();
+        assert!(git_integrity(&root).unwrap().dirty);
+        fs::remove_dir_all(root.join("vendor/own")).unwrap();
         fs::write(root.join("local.txt"), "uncommitted").unwrap();
         let dirty = git_integrity(&root).unwrap();
         assert!(dirty.dirty);
+        assert!(!not_a_change(&root, "?"));
+        assert!(!not_a_change(&root, "?? empty/"));
+        // HEAD is the lockfile's commit now.
+        let clean = installed;
         assert_eq!(dirty.revision, clean.revision);
         git(&["checkout", "--detach"]);
         let detached = git_integrity(&root).unwrap();

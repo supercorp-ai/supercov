@@ -739,6 +739,26 @@ another.
 The pass's summary line (`driver: "jobs"`) counts its jobs, baselines,
 confirmations, overturned kills, stopped jobs and their time.
 
+A mutant runs its first file alone, as most killed mutants die there, then
+the rest in batches of 4, 16, ... side by side: a survivor needs every file,
+and one after another they were the pass's longest wait (a luxon mutant of
+module-level code has 58 test files). Within a batch a kill decides the
+mutant, then a timeout, then a file that does not finish without it. Each
+pick is the file likeliest to kill it for its cost: each file's kills over
+the mutants it ran so far in the pass, over its tests' time and a job's start
+(300 ms), as the Vitest driver orders its copies. So the pass learns as it
+goes, eight times as many mutants as workers are under way at once (enough to
+keep every worker busy while some wait on a file's baseline), and a mutant
+picks its first file when it starts. Jest and Mocha record each test's
+duration for this order and for each job's limit; before, every test cost
+the same second.
+
+The driver is a process of the command's group; each job and resident runner
+is a process group of its own, which a terminal's Ctrl-C does not reach. The
+driver stops them all when it gets `SIGINT`, `SIGTERM` or `SIGHUP`, and when
+it exits. A job's directory (its evidence, 24 MB a job on nanoid) is removed
+as soon as its outcome is read.
+
 ### Validation against StrykerJS
 
 `benchmarks/mutation/js-runners/` holds the corpus (`corpus.json`: public
@@ -815,10 +835,54 @@ Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
 tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 13.6 s against 8.1 s.
 
-## Not yet
+## After an edit: verdicts no change could move
 
-- Reuse of verdicts across commits: kept out until a shadow run shows it
-  never disagrees with a fresh run.
+`supercov mutants` measures the checkout again once it changed, and that
+run has no verdicts. It keeps those of the latest earlier run of the same
+command, dependencies and configuration (and mutant set), mutant by mutant,
+where nothing the verdict depends on changed; the rest run. `tests affected`
+(`source_manifest::affected_tests`) says, from each test's recorded
+execution, which tests a change since that run could have reached: a test
+file's edit reaches its tests, a source edit the tests that ran the changed
+code (a file no parser reads, any test that ran it), a helper the tests load
+the tests whose files load it, and a test that ran with others and recorded
+nothing of its own is undetermined wherever the change is inside what the run
+covered. A mutant keeps its verdict (killed, survived or timeout; an error
+runs again) where
+
+- its file is as it was, byte for byte (a comment appended counts as a
+  change: a mutant's id holds its lines);
+- every candidate test it has now is one the earlier run had, unaffected, and
+  so is every test of their test files (they share the file's state), and so
+  is every test of the files it runs whole.
+
+A new test that could kill it is a candidate the earlier run did not have, so
+it runs. `runs <id> mutants test` keeps nothing of another run: it tests the
+run it names.
+
+A shadow comparison on uuid 9.0.1 (Jest 28, 567 mutants run of 682 listed),
+one edit after another, each measured and passed by `supercov mutants`: a
+comment appended to `src/v4.js` kept 536 verdicts and ran 31 mutants; a
+declaration added to `src/v35.js`, which most tests load, kept 156 and ran
+411; one added to `test/unit/v1.test.js` kept 399 and ran 168. The last run's
+verdicts were then made again from nothing (all 567 run): every one of the
+682 is the same, status for status.
+
+## Saving, interrupting and cleaning up
+
+The CLI saves each verdict a driver writes into the run within a second of it
+(`strong-mutation.json`, written whole and renamed into place), so a pass
+that is interrupted (Ctrl-C, a hang-up, `SIGTERM`: exit 130, 129, 143) or
+killed keeps what it decided, and the next pass runs only the rest. An
+interrupted pass leaves its undecided mutants without a verdict, where it
+used to record each as an `error` ("the command ended before this mutant's
+verdict"): QA's capped uuid pass read 114 such errors. Each pass's directory
+under `.supercov/strong` names the process that works there; when the pass
+ends, success or failure, only its logs stay, and the next pass removes every
+directory whose process has ended. `SUPERCOV_STRONG_KEEP=1` keeps a pass's
+directory whole, every job's evidence included, for whoever studies it.
+
+## Not yet
 - Rust compiled to wasm that Vitest Browser Mode's pages load: not measured,
   so not planned. Under Node and in Playwright's pages its mutants run
   (`mutation-drivers.md`).

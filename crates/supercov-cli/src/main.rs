@@ -92,7 +92,7 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
-Test the tests with mutants (JavaScript and TypeScript):
+Test the tests with mutants (every language Supercov measures):
   supercov mutants                     which mutants the tests kill, run by run
   supercov mutants --diff main         only the mutants on changed lines
 
@@ -778,7 +778,7 @@ fn explain_failed_command(
     run_id: &str,
     exit_code: i32,
     unrun_build: &[String],
-    command: &str,
+    command: &[String],
 ) {
     let tests = discover_runs(root)
         .ok()
@@ -827,8 +827,21 @@ fn explain_failed_command(
         } else {
             "the run recorded no test"
         };
+        // A command that runs once the copy has the folders this checkout
+        // has: a build that starts by removing its output fails without it.
+        let hint = supercov_engine::javascript_run::build_first(
+            &supercov_engine::javascript_run::build_output_here(root),
+            unrun_build,
+            command,
+        );
         eprintln!(
-            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `{hint}`"
+        );
+    } else if !recorded {
+        // The command builds already, or needs no build: what it printed
+        // says why no test ran.
+        eprintln!(
+            "[supercov] the command exited {exit_code} and the run recorded no test: its own output above says why"
         );
     }
 }
@@ -2632,7 +2645,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
-    let command_text = command.join(" ");
+    let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
@@ -2653,7 +2666,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     &result.run_id,
                     result.exit_code,
                     &result.unrun_build,
-                    &command_text,
+                    &command_words,
                 );
             }
             // A server's run directory is named by its run id.
@@ -3281,6 +3294,10 @@ fn execute_coverage_query(
                 run.id
             ));
         }
+    }
+    // The strong verdicts a pass saved: the mutants listing shows each, and
+    // the summary their score.
+    if matches!(request.command.as_str(), "mutants" | "summary") {
         let saved = mutants_test_command::read_saved(run);
         if !saved.is_empty() {
             request.mutants.strong = Some(
@@ -4236,7 +4253,7 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2481).
+// Below the lines tests name by number (main.rs:2647).
 mod mutants_export;
 mod mutants_test_command;
 

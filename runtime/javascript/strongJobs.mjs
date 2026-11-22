@@ -22,8 +22,8 @@
 // tests again without the mutant. A job past 3x its baseline and 10 s is
 // stopped: a timeout, unless a test had already failed.
 import { fork, spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { availableParallelism, cpus } from "node:os";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { availableParallelism, constants, cpus } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,9 @@ import { fileURLToPath } from "node:url";
 // included, runs all its baseline's tests beside a mutant's own candidates
 // rather than confirm a kill apart (`tryFile`).
 const UNION_MS = 1_500;
+// What a job costs beyond its tests' own time, in the order a mutant's
+// files run: a start of the runner, or a resident runner's file setup.
+const JOB_START_MS = 300;
 // Vitest's node tests run here where the run also had browser tests, which
 // Vitest's own driver cannot run beside them.
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser", "vitest"]);
@@ -39,6 +42,23 @@ const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test",
 // pass's jobs as `wasm-bindgen` and `wasm-pack` where the pass switches Rust
 // compiled to wasm.
 export const WASM_OUT = "#!/usr/bin/env node\n// A strong pass over Rust compiled to wasm (strongJobs.mjs): each job that\n// starts the command builds the wasm again, and wasm-bindgen (or wasm-pack\n// build) writes its glue where every other job's tests load it. This stands\n// in for the tool on the jobs' PATH: the tool writes into a fresh directory\n// beside its output directory, and each file is then renamed into place, and\n// only where its bytes changed. A rebuild of the same wasm changes nothing,\n// and a test never reads a file half written. It notes that it ran (`used`\n// beside it), so the driver knows the wasm is built this way.\n// CommonJS, as Node loads a file without an extension.\nconst { spawnSync } = require(\"node:child_process\");\nconst { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = require(\"node:fs\");\nconst { basename, delimiter, dirname, join, resolve } = require(\"node:path\");\n\nconst here = dirname(process.argv[1]);\nconst tool = basename(process.argv[1]);\nconst real = (process.env.PATH ?? \"\")\n    .split(delimiter)\n    .filter((directory) => directory && resolve(directory) !== here)\n    .map((directory) => join(directory, tool))\n    .find((candidate) => {\n        try {\n            accessSync(candidate, constants.X_OK);\n            return true;\n        }\n        catch {\n            return false;\n        }\n    });\nif (!real) {\n    console.error(`supercov: no ${tool} on PATH`);\n    process.exit(127);\n}\nconst args = process.argv.slice(2);\nconst passThrough = () => process.exit(spawnSync(real, args, { stdio: \"inherit\" }).status ?? 1);\n\n// The output directory the tool was asked for, and where it is in `args`.\nlet output;\nlet at = -1;\nfor (let index = 0; index < args.length; index += 1) {\n    const argument = args[index];\n    if (argument === \"--out-dir\" || (tool === \"wasm-pack\" && argument === \"-d\")) {\n        output = args[index + 1];\n        at = index + 1;\n        break;\n    }\n    if (argument.startsWith(\"--out-dir=\")) {\n        output = argument.slice(\"--out-dir=\".length);\n        at = index;\n        break;\n    }\n}\nlet base = process.cwd();\nif (tool === \"wasm-pack\") {\n    if (args[0] !== \"build\")\n        passThrough();\n    // wasm-pack reads its output directory against the crate's, `pkg`\n    // where none is given.\n    const crate = args.slice(1).find((argument, index, rest) => !argument.startsWith(\"-\") && ![\"-d\", \"--out-dir\", \"-t\", \"--target\", \"--scope\", \"--mode\", \"--out-name\", \"--profile\"].includes(rest[index - 1]));\n    base = resolve(crate ?? \".\");\n    output ??= \"pkg\";\n}\nif (output === undefined)\n    passThrough();\nconst target = resolve(base, output);\nconst fresh = `${target}.supercov-${process.pid}`;\nrmSync(fresh, { recursive: true, force: true });\nconst changed = [...args];\nif (at < 0)\n    changed.push(\"--out-dir\", fresh);\nelse if (changed[at].startsWith(\"--out-dir=\"))\n    changed[at] = `--out-dir=${fresh}`;\nelse\n    changed[at] = fresh;\nconst ran = spawnSync(real, changed, { stdio: \"inherit\" });\nif (ran.status === 0) {\n    const move = (from, to) => {\n        for (const name of readdirSync(from)) {\n            const source = join(from, name);\n            const destination = join(to, name);\n            if (statSync(source).isDirectory()) {\n                mkdirSync(destination, { recursive: true });\n                move(source, destination);\n                continue;\n            }\n            const same = existsSync(destination) && readFileSync(destination).equals(readFileSync(source));\n            if (!same)\n                renameSync(source, destination);\n        }\n    };\n    mkdirSync(target, { recursive: true });\n    move(fresh, target);\n    writeFileSync(join(here, \"used\"), \"\");\n}\nrmSync(fresh, { recursive: true, force: true });\nprocess.exit(ran.status ?? 1);\n";
+
+// Every process the pass started that may still run: each job's command and
+// each resident runner, in a process group of its own. They are stopped with
+// the pass, which a terminal's Ctrl-C does not reach them through.
+const started = new Set();
+
+function track(child) {
+    started.add(child);
+    child.once("exit", () => started.delete(child));
+    return child;
+}
+
+// Stops every process the pass started.
+export function stopStarted() {
+    for (const child of started)
+        stop(child);
+}
 
 function parallelism() {
     const given = Number(process.env.SUPERCOV_STRONG_WORKERS);
@@ -207,6 +227,7 @@ function residentHosts({ script, args, root, environment, log }) {
         };
         child.stdout.on("data", keep);
         child.stderr.on("data", keep);
+        track(child);
         all.add(child);
         child.once("exit", () => all.delete(child));
         child.on("message", function started(message) {
@@ -419,15 +440,21 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             const spec = join(directory, "job.json");
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail, mutant: mutant ? `${mutant.file}#${mutant.index}` : null }));
             const results = join(directory, "results.jsonl");
-            const log = join(directory, "output.log");
             const begun = Date.now();
             const resident = residentFor(file);
+            // A job's outcome, read from its evidence; then its directory is
+            // removed, as nothing after reads it (a job's evidence ran to
+            // 24 MB on nanoid, a gigabyte a pass).
+            const read = (outcome) => {
+                const statuses = outcomes(evidence);
+                if (environment.SUPERCOV_STRONG_KEEP !== "1")
+                    rmSync(directory, { recursive: true, force: true });
+                return { ...outcome, statuses };
+            };
             // A runner's own command, started for this job alone.
             const spawnJob = () => {
                 const [program, ...args] = commandFor(command, file, root, runnerOf.get(file));
-                let output;
                 try {
-                    output = [];
                     const overrides = {
                         // What tap's runner gives each test file it starts.
                         ...(runnerOf.get(file) === "tap" ? { TAP_CHILD_ID: String(number) } : {}),
@@ -464,17 +491,11 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                                 process.env[name] = value;
                         }
                     }
-                    let size = 0;
-                    const keep = (chunk) => {
-                        // A job's output is kept for whoever reads why it failed,
-                        // up to a megabyte.
-                        if (size < 1 << 20) {
-                            output.push(chunk);
-                            size += chunk.length;
-                        }
-                    };
-                    child.stdout.on("data", keep);
-                    child.stderr.on("data", keep);
+                    track(child);
+                    // Its output is read by no one: drained, so the job never
+                    // waits on a full pipe.
+                    child.stdout.resume();
+                    child.stderr.resume();
                     let timedOut = false;
                     const timer = setTimeout(() => {
                         timedOut = true;
@@ -484,28 +505,20 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                     const finish = (code, error) => {
                         clearTimeout(timer);
                         profile.jobMs += Date.now() - begun;
-                        try {
-                            writeFileSync(log, Buffer.concat(output));
-                        }
-                        catch {
-                            // The log is for reading; a verdict does not need it.
-                        }
                         const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
-                        resolveJob({
-                            statuses: outcomes(evidence),
+                        resolveJob(read({
                             timedOut,
                             mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
                             exitCode: code,
                             error,
                             durationMs: Date.now() - begun,
-                            directory,
-                        });
+                        }));
                     };
                     child.on("error", (error) => finish(null, error));
                     child.on("close", (code) => finish(code));
                 }
                 catch (error) {
-                    resolveJob({ statuses: new Map(), timedOut: false, mutantTimedOut: false, exitCode: null, error, durationMs: 0, directory });
+                    resolveJob(read({ timedOut: false, mutantTimedOut: false, exitCode: null, error, durationMs: 0 }));
                 }
             };
             if (!resident) {
@@ -531,15 +544,13 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                     profile.stopped += 1;
                 profile.jobMs += Date.now() - begun;
                 const mutantKey = mutant ? `${mutant.file}#${mutant.index}` : undefined;
-                resolveJob({
-                    statuses: outcomes(evidence),
+                resolveJob(read({
                     timedOut,
                     mutantTimedOut: mutantKey !== undefined && readTimeouts(`${results}.timeouts.jsonl`).includes(mutantKey),
                     exitCode: error ? 1 : 0,
                     error,
                     durationMs: Date.now() - begun,
-                    directory,
-                });
+                }));
             });
         }));
     }
@@ -643,13 +654,46 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         }
     }
 
+    // Each test file's kills over the mutants it ran so far in the pass: a
+    // mutant's next file is the one likeliest to kill it for its cost, as the
+    // Vitest driver orders its copies. Most killed mutants die in their first
+    // file, and the cheapest file is often not the one that kills.
+    const killsOf = new Map();
+    const promise = (group) => {
+        const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
+        return (seen.kills + 1) / (seen.ran + 2) / (group.cost + JOB_START_MS);
+    };
     async function runMutant(mutant, groups, elsewhere) {
         const begun = Date.now();
         let ran = 0;
-        for (const group of groups) {
-            const verdict = await tryFile(mutant, group);
-            ran += verdict.tests;
-            if (verdict.status !== "alive") {
+        const left = [...groups];
+        // Its first file alone, as most killed mutants die in it; then the
+        // rest in batches of 4, 16, ... side by side, the likeliest first: a
+        // survivor needs them all, and one after another its files were the
+        // pass's longest wait (luxon: a module-level mutant's 58 test files).
+        for (let size = 1; left.length > 0; size *= 4) {
+            const batch = [];
+            while (batch.length < size && left.length > 0) {
+                // Ties go to the cheapest, as the groups are sorted by cost.
+                const at = left.reduce((best, group, index) => (promise(group) > promise(left[best]) ? index : best), 0);
+                batch.push(...left.splice(at, 1));
+            }
+            const verdicts = await Promise.all(batch.map(async (group) => {
+                const verdict = await tryFile(mutant, group);
+                const seen = killsOf.get(group.file) ?? { ran: 0, kills: 0 };
+                seen.ran += 1;
+                if (verdict.status === "killed" || verdict.status === "timeout")
+                    seen.kills += 1;
+                killsOf.set(group.file, seen);
+                return verdict;
+            }));
+            ran += verdicts.reduce((sum, verdict) => sum + verdict.tests, 0);
+            // A kill decides it, then a timeout, then a file that does not
+            // finish without it.
+            const verdict = ["killed", "timeout", "error"]
+                .map((status) => verdicts.find((one) => one.status === status))
+                .find(Boolean);
+            if (verdict) {
                 write({ id: mutant.id, status: verdict.status, ...(verdict.killedBy ? { killedBy: verdict.killedBy } : {}), tests: ran, durationMs: Date.now() - begun, ...(verdict.reason ? { reason: verdict.reason } : {}) });
                 return;
             }
@@ -715,8 +759,15 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         pending.push([mutant, groups, elsewhere]);
     }
     // Every file's baseline runs the tests of all its mutants: none starts
-    // before all are known.
-    await Promise.all(pending.map((task) => runMutant(...task)));
+    // before all are known. Eight times as many mutants as workers are under
+    // way at once, enough to keep every worker busy while some wait on a
+    // file's baseline; a mutant that starts later picks its first file from
+    // what the pass learned.
+    const queue = pending.values();
+    await Promise.all(Array.from({ length: Math.min(pending.length, 8 * workers) }, async () => {
+        for (const task of queue)
+            await runMutant(...task);
+    }));
     jestHosts.close();
     mochaHosts.close();
     esmHosts.close();
@@ -735,6 +786,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         console.error("[supercov] strongJobs.mjs: a strong pass starts it with its plan, its results and -- <command>");
         process.exit(2);
     }
+    // Ctrl-C reaches this process alone: the jobs' process groups are their
+    // own. They stop with it, and so does it.
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+        process.on(signal, () => {
+            stopStarted();
+            process.exit(128 + constants.signals[signal]);
+        });
+    }
+    process.on("exit", stopStarted);
     const plan = JSON.parse(readFileSync(planPath, "utf8"));
     process.exitCode = await drive({ command, plan, resultsPath });
 }
