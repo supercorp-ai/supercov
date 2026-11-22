@@ -103,6 +103,7 @@ mod rust_schemata;
 pub mod rust_strong;
 pub mod rust_test_context;
 pub mod rust_test_runner;
+mod rust_value_probes;
 pub mod rust_wasm;
 pub mod rust_wasm_browser;
 pub mod rust_wasm_evidence;

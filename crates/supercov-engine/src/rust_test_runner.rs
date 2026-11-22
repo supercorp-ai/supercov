@@ -1366,6 +1366,7 @@ pub(crate) fn snapshot_regions(
         .map(|decision| (decision.id.as_str(), decision))
         .collect::<BTreeMap<_, _>>();
     let mut hits = BTreeSet::new();
+    let mut values = BTreeMap::<String, BTreeSet<String>>::new();
     let mut vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
     // Records a thread wrote since its last assertion. An assertion witnesses
     // its own thread's records and no other's: a test that spawns threads
@@ -1381,6 +1382,16 @@ pub(crate) fn snapshot_regions(
             sequence += 1;
             let thread = entry.thread;
             match entry.observation {
+                // A value probe's outcome is a value the weak report reads,
+                // never a point covered.
+                RustProbeObservation::Hit { id } if id.starts_with("rs:value:") => {
+                    if let Some((site, outcome)) = id.split_once('#') {
+                        values
+                            .entry(site.to_owned())
+                            .or_default()
+                            .insert(outcome.to_owned());
+                    }
+                }
                 RustProbeObservation::Hit { id } => {
                     if !points.contains_key(id.as_str()) && !alternatives.contains(id.as_str()) {
                         return Err(RustTestRunnerError::UnknownProbe(id));
@@ -1478,6 +1489,15 @@ pub(crate) fn snapshot_regions(
             hits: hits.into_iter().collect(),
             events,
             logicals: Vec::new(),
+            comparisons: values
+                .into_iter()
+                .map(
+                    |(id, outcomes)| crate::coverage_report::ComparisonSnapshot {
+                        id,
+                        outcomes: outcomes.into_iter().collect(),
+                    },
+                )
+                .collect(),
             ..Default::default()
         },
         phases,

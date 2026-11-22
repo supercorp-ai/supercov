@@ -188,6 +188,47 @@ fn list_rust_mutants(
     }
 }
 
+/// The mutants a Rust run measured with `SUPERCOV_MUTANTS=1` lists as it
+/// ends: each measured file's, linked to the points, decisions and arm
+/// selections of `manifest` and to the value probes the run placed
+/// (`value_sites`, `rust_value_probes`).
+pub(crate) fn list_rust_run(
+    root: &std::path::Path,
+    manifest: &crate::coverage_report::CoverageManifest,
+    value_sites: impl IntoIterator<Item = String>,
+) -> MutantsFile {
+    let mut recorded = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for point in &manifest.points {
+        recorded
+            .entry(point.file.clone())
+            .or_default()
+            .insert(point.id.clone());
+    }
+    for decision in &manifest.decisions {
+        recorded
+            .entry(decision.file.clone())
+            .or_default()
+            .insert(decision.id.clone());
+    }
+    for branch in &manifest.branches {
+        recorded.entry(branch.file.clone()).or_default().extend(
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.clone()),
+        );
+    }
+    // A site is named by its file's digest only: every file is offered them.
+    let sites = value_sites
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for ids in recorded.values_mut() {
+        ids.extend(sites.iter().cloned());
+    }
+    recorded.retain(|file, _| file.ends_with(".rs"));
+    list_rust_mutants(root, &recorded).mutants
+}
+
 pub(crate) struct ListedMutants {
     pub(crate) mutants: MutantsFile,
     pub(crate) changed: Vec<String>,

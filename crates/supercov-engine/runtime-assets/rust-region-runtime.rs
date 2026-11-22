@@ -1073,4 +1073,208 @@ mod __SUPERCOV_MODULE__ {
             settle_cfgs(base);
         }
     }
+
+    // ------------------------------------------------------------- values
+    //
+    // Weak mutation's value probes (`SUPERCOV_MUTANTS=1`): what a comparison's
+    // operands were to each other, whether an arithmetic operator's mutants
+    // give its value, what a function returned. Each outcome is a hit of its
+    // own id. An operand is read where its type is a built-in number, `char`
+    // or `bool`, by the type's name; anything else records `unknown`. No
+    // probe has a trait bound, so it compiles wherever its operands borrow.
+
+    #[derive(std::clone::Clone, std::marker::Copy, std::cmp::PartialEq)]
+    pub enum Num {
+        /// An integer of `bits` bits, signed or not.
+        Int { value: i128, wide: u128, signed: bool, bits: u32 },
+        Float { value: f64, single: bool },
+        /// An integer or float literal: the other operand's type.
+        LitInt(i128),
+        LitFloat(f64),
+        None,
+    }
+
+    /// The value behind `v`, where its type is a built-in number, `char` or
+    /// `bool`.
+    pub fn num<T: ?Sized>(v: &T) -> Num {
+        let name = std::any::type_name::<T>();
+        let at = v as *const T;
+        macro_rules! read {
+            ($t:ty) => {
+                unsafe { at.cast::<$t>().read_unaligned() }
+            };
+        }
+        let int = |value: i128, signed: bool, bits: u32| Num::Int { value, wide: value as u128, signed, bits };
+        match name {
+            "i8" => int(read!(i8) as i128, true, 8),
+            "i16" => int(read!(i16) as i128, true, 16),
+            "i32" => int(read!(i32) as i128, true, 32),
+            "i64" => int(read!(i64) as i128, true, 64),
+            "i128" => int(read!(i128), true, 128),
+            "isize" => int(read!(isize) as i128, true, isize::BITS),
+            "u8" | "bool" => int(read!(u8) as i128, false, 8),
+            "u16" => int(read!(u16) as i128, false, 16),
+            "u32" | "char" => int(read!(u32) as i128, false, 32),
+            "u64" => int(read!(u64) as i128, false, 64),
+            "usize" => int(read!(usize) as i128, false, usize::BITS),
+            "u128" => {
+                let wide = read!(u128);
+                Num::Int { value: wide as i128, wide, signed: false, bits: 128 }
+            }
+            "f32" => Num::Float { value: read!(f32) as f64, single: true },
+            "f64" => Num::Float { value: read!(f64), single: false },
+            _ => Num::None,
+        }
+    }
+
+    /// Both operands in one type, a literal taking the other's.
+    fn pair(left: Num, right: Num) -> Option<(Num, Num)> {
+        let adopt = |literal: Num, typed: Num| match (literal, typed) {
+            (Num::LitInt(value), Num::Int { signed, bits, .. }) => {
+                Some(Num::Int { value, wide: value as u128, signed, bits })
+            }
+            (Num::LitInt(value), Num::Float { single, .. }) => Some(Num::Float { value: value as f64, single }),
+            (Num::LitFloat(value), Num::Float { single, .. }) => Some(Num::Float { value, single }),
+            (Num::Int { .. } | Num::Float { .. }, _) => Some(literal),
+            _ => None,
+        };
+        Some((adopt(left, right)?, adopt(right, left)?))
+    }
+
+    /// A comparison's operands: `ids` are its `lt`, `eq`, `gt`, `unordered`
+    /// and `unknown` outcomes.
+    pub fn compare(left: Num, right: Num, ids: &[u32; 5]) {
+        let outcome = match pair(left, right) {
+            Some((Num::Int { value: a, wide: x, signed, bits }, Num::Int { value: b, wide: y, .. })) => {
+                let order = if bits == 128 && !signed { x.cmp(&y) } else { a.cmp(&b) };
+                order as i8 as i32 + 1
+            }
+            Some((Num::Float { value: a, .. }, Num::Float { value: b, .. })) => match a.partial_cmp(&b) {
+                Some(order) => order as i8 as i32 + 1,
+                None => 3,
+            },
+            _ => 4,
+        };
+        hit(ids[outcome as usize]);
+    }
+
+    /// What an integer operator gives, `None` where it panics (overflow,
+    /// division by zero, a shift past the width), as in a test build.
+    fn int_op(op: u8, a: i128, b: i128, x: u128, y: u128, signed: bool, bits: u32) -> Option<u128> {
+        let fits = |value: i128| {
+            if signed {
+                bits == 128 || (value >= -(1i128 << (bits - 1)) && value < (1i128 << (bits - 1)))
+            } else {
+                value >= 0 && (bits >= 127 || value < (1i128 << bits))
+            }
+        };
+        let mask = |value: u128| if bits == 128 { value } else { value & ((1u128 << bits) - 1) };
+        if bits == 128 && !signed {
+            return match op {
+                b'+' => x.checked_add(y),
+                b'-' => x.checked_sub(y),
+                b'*' => x.checked_mul(y),
+                b'/' => x.checked_div(y),
+                b'%' => x.checked_rem(y),
+                b'&' => Some(x & y),
+                b'|' => Some(x | y),
+                b'^' => Some(x ^ y),
+                b'<' => (y < 128).then(|| x << y),
+                b'>' => (y < 128).then(|| x >> y),
+                _ => None,
+            };
+        }
+        let shift = |b: i128| (b >= 0 && b < bits as i128).then_some(b as u32);
+        let value = match op {
+            b'+' => a.checked_add(b).filter(|v| fits(*v))?,
+            b'-' => a.checked_sub(b).filter(|v| fits(*v))?,
+            b'*' => a.checked_mul(b).filter(|v| fits(*v))?,
+            b'/' => a.checked_div(b).filter(|v| fits(*v))?,
+            b'%' => a.checked_rem(b)?,
+            b'&' => a & b,
+            b'|' => a | b,
+            b'^' => a ^ b,
+            b'<' => return Some(mask((x as u128) << shift(b)?)),
+            b'>' => {
+                let by = shift(b)?;
+                if signed { a >> by } else { (mask(x) >> by) as i128 }
+            }
+            _ => return None,
+        };
+        Some(mask(value as u128))
+    }
+
+    fn float_op(op: u8, a: f64, b: f64, single: bool) -> Option<u64> {
+        let value = match op {
+            b'+' => a + b,
+            b'-' => a - b,
+            b'*' => a * b,
+            b'/' => a / b,
+            b'%' => a % b,
+            _ => return None,
+        };
+        Some(if single { (value as f32).to_bits() as u64 } else { value.to_bits() })
+    }
+
+    /// An operator `op` and each of its mutants' `(operator, same, differs)`
+    /// ids: whether the mutant's value is the original's here. `unknown` is
+    /// each mutant's id for operands no probe reads.
+    pub fn arithmetic(left: Num, right: Num, op: u8, mutants: &[(u8, u32, u32, u32)]) {
+        let pair = pair(left, right);
+        for &(mutant, same, differs, unknown) in mutants {
+            let equal = match pair {
+                Some((Num::Int { value: a, wide: x, signed, bits }, Num::Int { value: b, wide: y, .. })) => {
+                    int_op(op, a, b, x, y, signed, bits) == int_op(mutant, a, b, x, y, signed, bits)
+                }
+                Some((Num::Float { value: a, single }, Num::Float { value: b, .. })) => {
+                    float_op(op, a, b, single) == float_op(mutant, a, b, single)
+                }
+                _ => {
+                    hit(unknown);
+                    continue;
+                }
+            };
+            hit(if equal { same } else { differs });
+        }
+    }
+
+    /// `-x`'s operand: whether it is zero, where deleting the `-` changes
+    /// nothing. `ids`: zero, nonzero, unknown.
+    pub fn negated(operand: Num, ids: &[u32; 3]) {
+        let outcome = match operand {
+            Num::Int { value, wide, .. } => usize::from(value != 0 || wide != 0),
+            // `-0.0` is not `0.0` to every operation: always counted as differing.
+            Num::Float { .. } => 1,
+            _ => 2,
+        };
+        hit(ids[outcome]);
+    }
+
+    /// What a function returning a built-in number or `bool` returned:
+    /// `ids` are `0`, `1`, `-1`, any other value, and `unknown`.
+    pub fn returned<T>(value: T, ids: &[u32; 5]) -> T {
+        let outcome = match num(&value) {
+            Num::Int { value: v, wide, signed, bits } => {
+                if v == 0 { 0 } else if v == 1 { 1 } else if signed && v == -1 { 2 } else { let _ = (wide, bits); 3 }
+            }
+            Num::Float { value: v, .. } => {
+                if v == 0.0 && v.is_sign_positive() { 0 } else if v == 1.0 { 1 } else if v == -1.0 { 2 } else { 3 }
+            }
+            _ => 4,
+        };
+        hit(ids[outcome]);
+        value
+    }
+
+    /// Dropped as a probed function ends: where it ends by a panic, records
+    /// that it returned nothing.
+    pub struct Unwound(pub u32);
+
+    impl std::ops::Drop for Unwound {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                hit(self.0);
+            }
+        }
+    }
 }

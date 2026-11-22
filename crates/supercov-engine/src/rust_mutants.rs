@@ -199,8 +199,14 @@ pub(crate) fn list(
                 is_static: false,
                 unplaceable: None,
             };
+            // The value probe at the mutated code, where the run placed one.
+            let probed = |range: TextRange, kind: &str| {
+                let site = value_site(file, range, kind);
+                recorded.contains(&site).then_some(site)
+            };
             match &mutant.site {
                 Site::Body { .. } => {
+                    candidate.probe = mutant.function.and_then(|range| probed(range, "return"));
                     // A body is reached when its function runs: the
                     // function's own point, never one around it.
                     candidate.function = mutant.function.and_then(|range| {
@@ -219,6 +225,16 @@ pub(crate) fn list(
                     });
                     candidate.statement = innermost(&statements, *expression);
                     candidate.function = innermost(&functions, *expression);
+                    let operator = &source[mutant.range];
+                    if mutant.genre == "UnaryOperator" {
+                        if operator == "-" {
+                            candidate.probe = probed(*expression, "negate");
+                        }
+                    } else if matches!(operator, "<" | "<=" | ">" | ">=") {
+                        candidate.compare = probed(*expression, "compare");
+                    } else if !matches!(operator, "==" | "!=" | "&&" | "||") {
+                        candidate.probe = probed(*expression, &mutant.replacement);
+                    }
                 }
                 Site::Arm { arm, .. } => {
                     let selected =
@@ -508,11 +524,24 @@ impl Walker<'_> {
     }
 }
 
+/// The id of a value probe's site (`rust_value_probes`): the mutated
+/// expression or function and what is probed of it (`compare`, `negate`,
+/// `return`, or an arithmetic mutant's replacement).
+pub(crate) fn value_site(file: &str, range: TextRange, kind: &str) -> String {
+    crate::rust_instrumenter::stable_id(file, "value", range, kind)
+}
+
+/// The runtime's code for an operator replacement: its first character, or
+/// `<` and `>` for the shifts.
+pub(crate) fn arithmetic_code(replacement: &str) -> char {
+    replacement.chars().next().unwrap_or(' ')
+}
+
 /// A call cargo-mutants skips whole by default.
 const SKIPPED_CALL: &str = "with_capacity";
 
 /// cargo-mutants' replacements of a binary operator.
-fn binary_replacements(operator: BinaryOp) -> &'static [&'static str] {
+pub(crate) fn binary_replacements(operator: BinaryOp) -> &'static [&'static str] {
     use ra_ap_syntax::ast::Ordering::{Greater, Less};
     match operator {
         BinaryOp::CmpOp(CmpOp::Eq { negated: false }) => &["!="],

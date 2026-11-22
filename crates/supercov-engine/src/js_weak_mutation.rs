@@ -254,6 +254,13 @@ fn decide(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
                 "the code ran, and `!x` differs from `x` wherever it is evaluated",
             )
         }
+        "UnaryOperator"
+            if mutant.replacement == "removed"
+                && mutant.original.starts_with('-')
+                && mutant.probe.is_some() =>
+        {
+            rust_valued(mutant, records)
+        }
         "UnaryOperator" if mutant.replacement == "removed" && mutant.original.starts_with('-') => {
             verdict_of(
                 Status::Unknown,
@@ -281,6 +288,9 @@ const RUST_FN_VALUE: &str = "FnValue";
 
 /// A cargo-mutants mutant the run reached (`rust_mutants`).
 fn rust_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    if mutant.probe.is_some() || mutant.compare.is_some() {
+        return rust_valued(mutant, records);
+    }
     let replacement = mutant.replacement.as_str();
     match mutant.mutator.as_str() {
         RUST_FN_VALUE if replacement == "()" => verdict_of(
@@ -357,6 +367,125 @@ fn rust_operator(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Re
             "the code ran, and no probe recorded whether the field's value differs from the base's",
         ),
     }
+}
+
+/// A cargo-mutants mutant read through its value probe (`rust_value_probes`).
+/// A probe records an outcome at every evaluation, `unknown` where it cannot
+/// read the operands, so its silence is an expression that never ran.
+fn rust_valued(mutant: &CandidateMutant, records: &Records<'_>) -> (Status, Reason) {
+    let replacement = mutant.replacement.as_str();
+    if let Some(site) = &mutant.compare {
+        let operator = mutant
+            .operator
+            .as_ref()
+            .map_or("", |operator| operator.text.as_str());
+        let Some(relations) = records.comparisons(site) else {
+            return verdict_of(
+                Status::NotReached,
+                "comparison-not-evaluated",
+                "the comparison never ran",
+            );
+        };
+        let value = |operator: &str, relation: &str| match relation {
+            "unordered" => Some(operator == "!="),
+            _ if matches!(operator, "==" | "!=") => Some((relation == "eq") == (operator == "==")),
+            _ => relational_value(operator, relation),
+        };
+        let mut unknown = false;
+        for relation in relations {
+            match (value(operator, relation), value(replacement, relation)) {
+                (Some(original), Some(mutated)) if original != mutated => {
+                    return verdict_of(
+                        INFECTED,
+                        "comparison-differs",
+                        format!(
+                            "the operands were {relation}, where `{replacement}` gives the other value"
+                        ),
+                    );
+                }
+                (Some(_), Some(_)) => {}
+                _ => unknown = true,
+            }
+        }
+        if unknown {
+            return verdict_of(
+                Status::Unknown,
+                "non-primitive-operands",
+                "operands the probe could not order",
+            );
+        }
+        return verdict_of(
+            Status::NotInfected,
+            "comparison-same",
+            format!("`{operator}` and `{replacement}` gave the same value at every evaluation"),
+        );
+    }
+    let Some(site) = &mutant.probe else {
+        return verdict_of(Status::Unknown, "no-probe", "no probe at the expression");
+    };
+    if mutant.mutator == RUST_FN_VALUE {
+        // The body replaced also skips what it does: a return value that
+        // matches proves nothing, one that differs infects.
+        let class = match replacement {
+            "true" | "1" | "1.0" => "1",
+            "false" | "0" | "0.0" => "0",
+            "-1" | "-1.0" => "-1",
+            _ => "",
+        };
+        let returned = records.comparisons(site);
+        if !class.is_empty()
+            && let Some(outcomes) = returned
+            && outcomes
+                .iter()
+                .any(|outcome| outcome != class && outcome != "unknown")
+        {
+            return verdict_of(
+                INFECTED,
+                "returned-other",
+                format!("the function returned other than {replacement} (or ended by a panic)"),
+            );
+        }
+        return verdict_of(
+            Status::Unknown,
+            "returned-same",
+            format!(
+                "the function ran, and returned no value other than {replacement}: what it does besides may still differ"
+            ),
+        );
+    }
+    let Some(outcomes) = records.comparisons(site) else {
+        return verdict_of(
+            Status::NotReached,
+            "not-evaluated",
+            "the expression never ran",
+        );
+    };
+    let differing = ["differs", "nonzero"];
+    if outcomes
+        .iter()
+        .any(|outcome| differing.contains(&outcome.as_str()))
+    {
+        return verdict_of(
+            INFECTED,
+            "replacement-differs",
+            "the mutant's value differed from the original's",
+        );
+    }
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome.as_str(), "same" | "zero"))
+    {
+        return verdict_of(
+            Status::NotInfected,
+            "replacement-same",
+            "the mutant's value was the original's at every evaluation",
+        );
+    }
+    verdict_of(
+        Status::Unknown,
+        "non-primitive-operands",
+        "operands the probe could not read",
+    )
 }
 
 /// Whether the mutated code ran: its statement, and its function where the

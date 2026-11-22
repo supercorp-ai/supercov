@@ -1457,6 +1457,15 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
     Err(newest_errors.unwrap_or_default())
 }
 
+/// Whether files are instrumented with weak mutation's value probes
+/// (`rust_value_probes`), for a run measured with `SUPERCOV_MUTANTS=1`.
+static VALUE_PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the value probes on or off for what this process instruments.
+pub fn set_value_probes(on: bool) {
+    VALUE_PROBES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The file as written, parsed with the newest edition it parses under: no
 /// macro is read as code. `None` where no edition parses it.
 pub(crate) fn parse_source(source: &str) -> Option<(SourceFile, Edition)> {
@@ -3215,6 +3224,29 @@ fn numbered_file(
             .and_then(|value| value.as_str())
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
+
+    if VALUE_PROBES.load(std::sync::atomic::Ordering::Relaxed) && !test_file {
+        let skip = |node: &ra_ap_syntax::SyntaxNode| {
+            let range = node.text_range();
+            in_test_code(&tests, range)
+                || in_test_code(&compiled_out, range)
+                || cannot_carry_probe(node)
+        };
+        let mut ordinal = |id: &str| hit_ordinal(id);
+        for edit in crate::rust_value_probes::place(file, source, runtime_path, &skip, &mut ordinal)
+        {
+            match edit {
+                crate::rust_value_probes::ValueEdit::Wrap {
+                    range,
+                    prefix,
+                    suffix,
+                } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
+                crate::rust_value_probes::ValueEdit::At { offset, text } => {
+                    push_direct(&mut insertions, offset, text);
+                }
+            }
+        }
+    }
 
     // Test faults stand in for insertions that overlap and for a transform
     // that no longer parses, which a correct instrumenter never makes.

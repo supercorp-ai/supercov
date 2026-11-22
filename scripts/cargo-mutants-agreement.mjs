@@ -15,6 +15,11 @@
 // - viability: one of them calls it unviable and the other does not;
 // - only one of them has it.
 //
+// With `--weak FILE` (the run's `mutants --format jsonl`), it also checks
+// the weak verdicts: a mutant cargo-mutants catches that the run calls
+// not-infected or not-reached is a weak soundness violation, and the
+// statuses are counted.
+//
 // The exit code is 1 where there is a soundness violation.
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -76,7 +81,22 @@ for (const [id, summary] of reference) {
 }
 for (const id of Object.keys(supercov)) if (!reference.has(id)) counts.onlySupercov.push(id);
 
+const weakFile = option("--weak");
+const weak = { statuses: {}, violations: [] };
+if (weakFile) {
+  for (const line of readFileSync(weakFile, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    const mutant = JSON.parse(line);
+    weak.statuses[mutant.status] = (weak.statuses[mutant.status] ?? 0) + 1;
+    const summary = reference.get(mutant.id);
+    if (caught(summary) && (mutant.status === "not-infected" || mutant.status === "not-reached")) {
+      weak.violations.push({ id: mutant.id, cargoMutants: summary, weak: mutant.status, reason: mutant.weak?.reason ?? null });
+    }
+  }
+}
+
 const report = {
+  weak,
   run,
   matched: counts.matched,
   agree: counts.agree,
@@ -94,7 +114,12 @@ if (args.includes("--json")) {
   console.log(`viability disagreements: ${viability.length}`);
   for (const v of viability) console.log(`  ${v.id}: cargo-mutants ${v.cargoMutants}, Supercov ${v.supercov}${v.reason ? ` (${v.reason})` : ""}`);
   console.log(`only cargo-mutants: ${counts.onlyCargoMutants.length}; only Supercov: ${counts.onlySupercov.length}`);
+  if (weakFile) {
+    console.log(`weak statuses: ${JSON.stringify(weak.statuses)}`);
+    console.log(`weak soundness violations: ${weak.violations.length}`);
+    for (const v of weak.violations) console.log(`  ${v.id}: cargo-mutants ${v.cargoMutants}, weak ${v.weak} (${v.reason})`);
+  }
   for (const id of counts.onlyCargoMutants.slice(0, 20)) console.log(`  - ${id}`);
   for (const id of counts.onlySupercov.slice(0, 20)) console.log(`  + ${id}`);
 }
-process.exitCode = violations.length > 0 ? 1 : 0;
+process.exitCode = violations.length + weak.violations.length > 0 ? 1 : 0;

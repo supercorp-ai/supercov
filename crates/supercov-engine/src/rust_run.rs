@@ -338,11 +338,20 @@ fn run_direct_rust_timed(
             &FrontendIntegrityInputs::embedded_rust(),
         )
         .map_err(|error| error.to_string())?;
-        let build_cache_key = rust_build_cache_key(
+        // `SUPERCOV_MUTANTS=1` places weak mutation's value probes, and
+        // lists the run's mutants with them: another instrumentation, with a
+        // build cache of its own.
+        let mutants = std::env::var("SUPERCOV_MUTANTS")
+            .is_ok_and(|value| matches!(value.trim(), "1" | "true"));
+        crate::rust_instrumenter::set_value_probes(mutants);
+        let mut build_cache_key = rust_build_cache_key(
             &integrity,
             &integrity_inputs.execution_configuration,
             &request.command,
         );
+        if mutants {
+            build_cache_key.push_str("-mutants");
+        }
 
         let workspace_started = Instant::now();
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
@@ -519,8 +528,25 @@ fn run_direct_rust_timed(
             .join(".supercov/work")
             .join(&request.run_id)
             .join("evidence.raw.gz");
+        let mut entries = run.archive_entries();
+        if mutants {
+            let listed = crate::mutant_list::list_rust_run(
+                &root,
+                &run.request.manifest,
+                project
+                    .probes
+                    .hits
+                    .iter()
+                    .filter_map(|id| id.strip_prefix("rs:value:").and(id.split_once('#')))
+                    .map(|(site, _)| site.to_owned()),
+            );
+            entries.push(crate::evidence_archive::EvidenceArchiveEntry {
+                path: "mutants.json".into(),
+                contents: serde_json::to_vec(&listed).expect("plain data serializes"),
+            });
+        }
         let raw = write_archive(
-            crate::source_capture::append(run.archive_entries(), &source_inputs),
+            crate::source_capture::append(entries, &source_inputs),
             &archive_path,
         )
         .map_err(|error| error.to_string())?;
