@@ -74,11 +74,11 @@
       "repo": "https://github.com/vercel/ms",
       "commit": "4ff48cec099f0514c3e9bbca18706c9c21122bfb",
       "install": [
-        "npx",
-        "-y",
-        "pnpm@10.33.0",
+        "npm",
         "install",
-        "--frozen-lockfile"
+        "--no-audit",
+        "--no-fund",
+        "--ignore-scripts"
       ],
       "test": [
         "npx",
@@ -98,7 +98,8 @@
           }
         },
         "coverageAnalysis": "perTest"
-      }
+      },
+      "note": "Installed with npm: StrykerJS's Jest runner needs jest-environment-node where pnpm's layout does not hoist it"
     },
     {
       "name": "cron-parser",
