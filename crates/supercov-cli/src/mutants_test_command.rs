@@ -276,10 +276,10 @@ pub fn command(args: &[String]) -> ExitCode {
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
-        refuse_without_a_driver(&run.id, &plan)?;
         let mut data = execute(&root, run, plan, saved, &options)?;
         let verdicts = read_saved(run);
         data["gate"] = gate(&root, &asked, &verdicts, &options)?;
+        data["survivors"] = survivors(run, &asked, &verdicts);
         Ok(data)
     })();
     match result {
@@ -288,6 +288,10 @@ pub fn command(args: &[String]) -> ExitCode {
                 println!("{}", serde_json::to_string(&data).expect("JSON"));
             } else {
                 print!("{}", plan_text(&data));
+                print!(
+                    "{}",
+                    survivors_text(data["run"].as_str().unwrap_or("latest"), &data["survivors"])
+                );
                 print!("{}", gate_text(&data["gate"]));
             }
             if data["gate"]["failed"].as_bool() == Some(true) {
@@ -305,34 +309,6 @@ pub fn command(args: &[String]) -> ExitCode {
             }
         }
     }
-}
-
-/// A pass with mutants to run needs a test it can run: one of a runner a
-/// strong driver drives. Without one every mutant would end without a
-/// verdict, and the pass would read as a score of nothing killed.
-fn refuse_without_a_driver(run: &str, plan: &StrongPlan) -> Result<(), String> {
-    use supercov_engine::strong_driver::STRONG_RUNNERS;
-    let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
-    let drivable = plan
-        .tests
-        .iter()
-        .any(|test| STRONG_RUNNERS.contains(&test.runner.as_str()));
-    if !runs_any || drivable {
-        return Ok(());
-    }
-    let runners = plan
-        .tests
-        .iter()
-        .map(|test| test.runner.as_str())
-        .filter(|runner| *runner != "background")
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "The strong pass runs tests under {}, and run {run}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {run} mutants` lists them with what the run's own tests tell of each.",
-        STRONG_RUNNERS.join(", "),
-    ))
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
@@ -448,6 +424,16 @@ fn plan_text(data: &Value) -> String {
         let score = summary["mutationScore"]
             .as_f64()
             .map_or("-".to_owned(), |score| format!("{:.1}%", score * 100.0));
+        // Mutants that did not compile, and those no driver could run.
+        let mut extra = match summary["unviable"].as_u64() {
+            Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
+            _ => String::new(),
+        };
+        for (runner, count) in summary["notRun"].as_object().into_iter().flatten() {
+            extra.push_str(&format!(
+                "  {count} mutant(s) not run: no strong driver for {runner}\n"
+            ));
+        }
         return format!(
             "Strong mutation for {}: mutation score {score}\n  killed        {}\n  timeout       {}\n  survived      {}\n  no coverage   {}\n  equivalent    {}\n  error         {}\n{}  ran {} mutant(s) in {} ms\n",
             data["run"].as_str().unwrap_or(""),
@@ -457,10 +443,7 @@ fn plan_text(data: &Value) -> String {
             summary["noCoverage"],
             summary["equivalent"],
             summary["error"],
-            match summary["unviable"].as_u64() {
-                Some(unviable) if unviable > 0 => format!("  unviable      {unviable}\n"),
-                _ => String::new(),
-            },
+            extra,
             summary["ran"],
             summary["durationMs"],
         );
@@ -616,6 +599,136 @@ pub(crate) fn read_saved(run: &StoredRun) -> std::collections::BTreeMap<String, 
 
 /// The mutation score StrykerJS reports: killed and timed out over all
 /// that are not equivalent or errors.
+/// How many surviving mutants the pass summary names.
+const SURVIVORS_SHOWN: usize = 10;
+
+/// The asked mutants the tests let survive, as the weak listing shows them
+/// (`file:line`, the change), the first `SURVIVORS_SHOWN`, and how many in
+/// all. Empty where the run's index cannot be read.
+fn survivors(
+    run: &StoredRun,
+    asked: &[(String, String)],
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+) -> Value {
+    let survived = asked
+        .iter()
+        .filter(|(id, _)| {
+            verdicts
+                .get(id)
+                .is_some_and(|verdict| verdict.status == "survived")
+        })
+        .map(|(id, _)| id.as_str())
+        .collect::<BTreeSet<_>>();
+    let shown = (|| {
+        let container = crate::open_query_index_for(run, None).ok()?;
+        let index = supercov_engine::coverage_index::CoverageIndex::new(&container).ok()?;
+        let options = supercov_engine::mutants_query::MutantsOptions {
+            strong_statuses: vec!["survived".into()],
+            strong: Some(
+                verdicts
+                    .iter()
+                    .map(|(id, verdict)| {
+                        (
+                            id.clone(),
+                            serde_json::to_value(verdict).expect("plain data"),
+                        )
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let (data, _) = supercov_engine::mutants_query::coverage_mutants_query(
+            &index,
+            supercov_engine::mutants_query::CoverageMutantsQueryOptions {
+                run: &run.id,
+                file: None,
+                line: None,
+                options: &options,
+                offset: 0,
+                limit: usize::MAX,
+            },
+        )
+        .ok()?;
+        Some(
+            data.mutants
+                .iter()
+                .filter(|mutant| survived.contains(mutant.id.as_str()))
+                .take(SURVIVORS_SHOWN)
+                .map(|mutant| {
+                    json!({
+                        "id": mutant.id,
+                        "place": format!("{}:{}", mutant.file, mutant.span.start[0]),
+                        "mutator": mutant.mutator,
+                        "change": crate::human_query::mutant_change(mutant),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    })()
+    .unwrap_or_default();
+    json!({"total": survived.len(), "shown": shown})
+}
+
+/// The pass summary's last lines: the survivors, capped.
+fn survivors_text(run: &str, survivors: &Value) -> String {
+    let shown = survivors["shown"].as_array().cloned().unwrap_or_default();
+    if shown.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("Survived:\n");
+    for mutant in &shown {
+        text.push_str(&format!(
+            "  {}  {}  {}\n",
+            mutant["place"].as_str().unwrap_or(""),
+            mutant["mutator"].as_str().unwrap_or(""),
+            mutant["change"].as_str().unwrap_or("")
+        ));
+    }
+    let total = survivors["total"].as_u64().unwrap_or(0) as usize;
+    if total > shown.len() {
+        text.push_str(&format!(
+            "  and {} more: supercov runs {run} mutants --status survived\n",
+            total - shown.len()
+        ));
+    }
+    text
+}
+
+/// The mutants a pass could not run because no driver runs their tests, by
+/// the runners they ran under: an `error` none of whose candidates' runners
+/// its driver runs.
+fn not_run(
+    plan: &StrongPlan,
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut not_run = std::collections::BTreeMap::new();
+    for mutant in &plan.mutants {
+        if verdicts
+            .get(&mutant.id)
+            .is_none_or(|verdict| verdict.status != "error")
+        {
+            continue;
+        }
+        let driver = supercov_engine::strong_driver::driver_of(mutant, &plan.tests);
+        let runners = mutant
+            .candidates
+            .iter()
+            .filter_map(|candidate| plan.tests.get(candidate.test))
+            .map(|test| test.runner.as_str())
+            .collect::<BTreeSet<_>>();
+        if runners.is_empty()
+            || runners
+                .iter()
+                .any(|runner| supercov_engine::strong_driver::drives(driver, runner))
+        {
+            continue;
+        }
+        let runners = runners.into_iter().collect::<Vec<_>>().join(", ");
+        *not_run.entry(runners).or_insert(0) += 1;
+    }
+    not_run
+}
+
 fn score(verdicts: &std::collections::BTreeMap<String, Verdict>) -> Option<f64> {
     let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
     let detected = count("killed") + count("timeout");
@@ -911,6 +1024,8 @@ fn execute(
             // counted apart, and left out of the score.
             "unviable": count("unviable"),
             "mutationScore": score(&saved),
+            // Errors because no driver runs their tests, by runner.
+            "notRun": not_run(&plan, &saved),
             "durationMs": started.elapsed().as_millis() as u64,
             "commandExitCode": command_exit,
         },
@@ -950,60 +1065,96 @@ mod tests {
         assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
     }
 
-    fn planned_test(runner: &str) -> supercov_engine::strong_plan::PlannedTest {
-        supercov_engine::strong_plan::PlannedTest {
-            id: format!("t/{runner}"),
-            file: None,
-            name: runner.into(),
-            title: None,
-            runner: runner.into(),
-            duration_ms: None,
-            span: None,
-            runnable: true,
-        }
-    }
-
-    fn planned_mutant(
-        decided: Option<supercov_engine::strong_plan::Decided>,
-    ) -> supercov_engine::strong_plan::PlannedMutant {
-        supercov_engine::strong_plan::PlannedMutant {
-            id: "src/a.py:1:1-1:2:Op:+".into(),
-            file: "src/a.py".into(),
-            language: "python".into(),
+    /// Mutants in `error` because no driver runs their tests are counted by
+    /// runner, said in one line each, and left out of the score as every
+    /// error is.
+    #[test]
+    fn mutants_no_driver_runs_are_said_and_left_out_of_the_score() {
+        use supercov_engine::strong_plan::{
+            Candidate, CandidateReason, PlannedMutant, PlannedTest,
+        };
+        let tests = ["jest", "pytest", "vitest-browser"]
+            .map(|runner| PlannedTest {
+                id: runner.into(),
+                file: None,
+                name: runner.into(),
+                title: None,
+                runner: runner.into(),
+                duration_ms: None,
+                span: None,
+                runnable: true,
+            })
+            .to_vec();
+        let mutant = |id: &str, language: &str, candidates: &[usize]| PlannedMutant {
+            id: id.into(),
+            file: "a".into(),
+            language: language.into(),
             index: 0,
-            mutator: "Op".into(),
+            mutator: "M".into(),
             weak: "unknown",
-            decided,
+            decided: None,
             reason: None,
-            candidates: Vec::new(),
+            candidates: candidates
+                .iter()
+                .map(|test| Candidate {
+                    test: *test,
+                    reason: CandidateReason::Unknown,
+                })
+                .collect(),
             whole_files: Vec::new(),
             server_wide: None,
             covering: 0,
             statement: None,
             function: None,
             function_hit_by: Default::default(),
-        }
-    }
-
-    /// A pass with mutants to run refuses a run none of whose tests a
-    /// driver runs, naming the runners its tests ran under.
-    #[test]
-    fn a_pass_with_no_test_a_driver_runs_is_refused() {
-        let plan = |runners: &[&str], decided| StrongPlan {
-            mutant_set: "set".into(),
-            tests: runners.iter().map(|runner| planned_test(runner)).collect(),
-            mutants: vec![planned_mutant(decided)],
         };
-        let refused =
-            refuse_without_a_driver("r1", &plan(&["pytest", "background"], None)).unwrap_err();
-        assert!(
-            refused.contains("run r1's tests ran under pytest: it cannot run their mutants. `supercov runs r1 mutants`"),
-            "{refused}"
+        let plan = StrongPlan {
+            mutant_set: "set".into(),
+            tests,
+            mutants: vec![
+                mutant("py-1", "python", &[1]),
+                mutant("py-2", "python", &[1]),
+                mutant("wasm", "rust", &[2]),
+                // An error of a mutant a driver runs, one with no test, and
+                // a kill: none is a mutant no driver runs.
+                mutant("js-error", "javascript", &[0]),
+                mutant("no-test", "python", &[]),
+                mutant("killed", "javascript", &[0]),
+            ],
+        };
+        let verdict = |status: &str| Verdict {
+            status: status.into(),
+            killed_by: None,
+            tests: 0,
+            duration_ms: 0,
+            reason: None,
+        };
+        let verdicts = ["py-1", "py-2", "wasm", "js-error", "no-test"]
+            .map(|id| (id.to_owned(), verdict("error")))
+            .into_iter()
+            .chain([("killed".to_owned(), verdict("killed"))])
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let counted = not_run(&plan, &verdicts);
+        assert_eq!(
+            counted,
+            std::collections::BTreeMap::from([
+                ("pytest".to_owned(), 2),
+                ("vitest-browser".to_owned(), 1)
+            ])
         );
-        // A test a driver runs, or nothing left to run: no refusal.
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest", "jest"], None)).is_ok());
-        let decided = Some(supercov_engine::strong_plan::Decided::Survived);
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest"], decided)).is_ok());
+        // The score is the kill's alone.
+        assert_eq!(score(&verdicts), Some(1.0));
+        let text = plan_text(&json!({
+            "run": "r1",
+            "summary": {"killed": 1, "timeout": 0, "survived": 0, "noCoverage": 0, "equivalent": 0,
+                "error": 5, "unviable": 0, "ran": 6, "durationMs": 1, "mutationScore": 1.0,
+                "notRun": counted},
+        }));
+        assert!(
+            text.contains("  2 mutant(s) not run: no strong driver for pytest\n")
+                && text.contains("  1 mutant(s) not run: no strong driver for vitest-browser\n"),
+            "{text}"
+        );
     }
 
     #[test]

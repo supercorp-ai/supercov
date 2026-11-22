@@ -726,7 +726,7 @@ starting the runner for each job:
   `--require` loads) while a job runs. On deep-eql (426 mutants) and
   pathval (123) every verdict is that of a process per job
   (`SUPERCOV_STRONG_MOCHA_ESM=process`); deep-eql's pass takes 5.9 s
-  against 7.2 s on SoroCI's 16 CPUs, where jobs side by side hide most of a
+  against 7.2 s on a 16-CPU Linux machine, where jobs side by side hide most of a
   process's start, and 9 s against 27 s on a laptop.
 
 The adapters write each job's evidence into the job's own directory, read
@@ -747,7 +747,7 @@ projects pinned to a commit) and `run.mjs`, which runs StrykerJS 10.1.1 with
 command runner for node:test, AVA, Bun and Browser Mode, which has no runner of
 its own), then Supercov, and joins every mutant's verdicts.
 
-Measured on SoroCI (2026-11-22), one project per 16-CPU machine (c8a/m8a.4xlarge), both
+Measured on Linux (2026-11-22), one project per 16-CPU machine (c8a/m8a.4xlarge), both
 tools with 15 workers. Times in seconds; Supercov's are its measured run
 (with the mutants' values) and its strong pass. "Joined" counts the mutants
 both list, Regex mutants included.

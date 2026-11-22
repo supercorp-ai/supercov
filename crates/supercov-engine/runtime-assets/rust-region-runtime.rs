@@ -1146,12 +1146,16 @@ mod __SUPERCOV_MODULE__ {
         Some((adopt(left, right)?, adopt(right, left)?))
     }
 
+    /// Whether a probe site can still learn something: its probe reads its
+    /// operands only then.
+    #[inline(always)]
+    pub fn open(state: &AtomicU32) -> bool {
+        state.load(Ordering::Relaxed) != DECIDED
+    }
+
     /// A comparison's operands: `ids` are its `lt`, `eq`, `gt`, `unordered`
-    /// and `unknown` outcomes.
-    pub fn compare(left: Num, right: Num, ids: &[u32; 5], state: &AtomicU32) {
-        if state.load(Ordering::Relaxed) == DECIDED {
-            return;
-        }
+    /// and `unknown` outcomes. `strict` for `<` and `>`.
+    pub fn compare(left: Num, right: Num, ids: &[u32; 5], strict: bool, state: &AtomicU32) {
         let outcome = match pair(left, right) {
             Some((Num::Int { value: a, wide: x, signed, bits }, Num::Int { value: b, wide: y, .. })) => {
                 let order = if bits == 128 && !signed { x.cmp(&y) } else { a.cmp(&b) };
@@ -1164,9 +1168,14 @@ mod __SUPERCOV_MODULE__ {
             _ => 4,
         };
         hit(ids[outcome as usize]);
-        // Every replacement of a comparison differs somewhere once its
-        // operands have been less, equal and greater: nothing more to learn.
-        settle(state, 1 << outcome, |seen| seen & 0b111 == 0b111 || seen & 0b10000 != 0);
+        // Each replacement has differed once, and nothing more can be
+        // learned: `<` to `<=` differs only where the operands are equal,
+        // `<` to `==` or `>` wherever they are ordered and not equal or
+        // where they are equal; `<=` to `>` wherever they are ordered.
+        settle(state, 1 << outcome, |seen| {
+            seen & 0b10000 != 0
+                || if strict { seen & 0b010 != 0 && seen & 0b101 != 0 } else { seen & 0b111 != 0 }
+        });
     }
 
     /// A probe site's state, which each site keeps in a `static` of its own.
@@ -1252,9 +1261,6 @@ mod __SUPERCOV_MODULE__ {
         mutants: &[(u8, u32, u32, u32)],
         state: &AtomicU32,
     ) {
-        if state.load(Ordering::Relaxed) == DECIDED {
-            return;
-        }
         let pair = pair(left, right);
         let mut infected = 0u32;
         for (at, &(mutant, same, differs, unknown)) in mutants.iter().enumerate() {
@@ -1284,9 +1290,6 @@ mod __SUPERCOV_MODULE__ {
     /// `-x`'s operand: whether it is zero, where deleting the `-` changes
     /// nothing. `ids`: zero, nonzero, unknown.
     pub fn negated(operand: Num, ids: &[u32; 3], state: &AtomicU32) {
-        if state.load(Ordering::Relaxed) == DECIDED {
-            return;
-        }
         let outcome = match operand {
             Num::Int { value, wide, .. } => usize::from(value != 0 || wide != 0),
             // `-0.0` is not `0.0` to every operation: always counted as differing.
@@ -1300,7 +1303,7 @@ mod __SUPERCOV_MODULE__ {
     /// What a function returning a built-in number or `bool` returned:
     /// `ids` are `0`, `1`, `-1`, any other value, and `unknown`.
     pub fn returned<T>(value: T, ids: &[u32; 5], state: &AtomicU32) -> T {
-        if state.load(Ordering::Relaxed) == DECIDED {
+        if !open(state) {
             return value;
         }
         let outcome = match num(&value) {

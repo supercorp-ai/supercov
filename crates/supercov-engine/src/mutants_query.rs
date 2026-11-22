@@ -28,6 +28,10 @@ pub struct MutantsOptions {
     /// `--status`: only mutants with one of these.
     #[serde(default)]
     pub statuses: Vec<MutantStatus>,
+    /// `--status` with strong verdicts (`survived`, `killed`, ...): only
+    /// mutants a strong pass gave one of these.
+    #[serde(default)]
+    pub strong_statuses: Vec<String>,
     /// `--mutator`: only this StrykerJS mutator's mutants.
     #[serde(default)]
     pub mutator: Option<String>,
@@ -234,8 +238,13 @@ pub struct MutantsSummary {
     pub weak_score: Option<f64>,
     /// `infected / (infected + not-infected)`: over reached code.
     pub weak_score_reached: Option<f64>,
-    /// Reserved for strong mutation; never estimated from weak results.
+    /// The strong verdicts of these mutants, StrykerJS's score over them;
+    /// never estimated from weak results.
     pub mutation_score: Option<f64>,
+    /// How many of these mutants a strong pass gave each verdict, where one
+    /// ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strong: Option<BTreeMap<String, usize>>,
 }
 
 impl MutantsSummary {
@@ -251,6 +260,7 @@ impl MutantsSummary {
             weak_score: score(status.infected + status.not_infected + status.not_reached),
             weak_score_reached: score(status.infected + status.not_infected),
             mutation_score: None,
+            strong: None,
             status,
         }
     }
@@ -830,10 +840,30 @@ pub fn coverage_mutants_query(
         statuses: gate.clone(),
         mutants: gate.iter().map(|status| counts.of(*status)).sum(),
     });
+    let strong_of = |mutant: &IndexedMutant| {
+        options
+            .options
+            .strong
+            .as_ref()
+            .and_then(|strong| strong.get(&mutant.id()))
+            .and_then(|verdict| verdict["status"].as_str().map(str::to_owned))
+    };
+    let strong_counts = options.options.strong.as_ref().map(|_| {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for status in asked.iter().filter_map(&strong_of) {
+            *counts.entry(status).or_default() += 1;
+        }
+        counts
+    });
     let wanted = &options.options.statuses;
+    let wanted_strong = &options.options.strong_statuses;
     let mut listed = asked
         .iter()
         .filter(|mutant| wanted.is_empty() || wanted.contains(&mutant.status))
+        .filter(|mutant| {
+            wanted_strong.is_empty()
+                || strong_of(mutant).is_some_and(|status| wanted_strong.contains(&status))
+        })
         .collect::<Vec<_>>();
     // A change's mutants, what its tests leave alive first: a stable sort
     // keeps them by file and position within each status.
@@ -904,6 +934,7 @@ pub fn coverage_mutants_query(
             line,
             summary: MutantsSummary {
                 mutation_score: strong_score,
+                strong: strong_counts.filter(|counts| !counts.is_empty()),
                 ..MutantsSummary::of(counts, untestable)
             },
             note,

@@ -21,6 +21,14 @@ on:
         description: "Measure macOS as well as Linux"
         type: boolean
         default: false
+      tests:
+        description: "Space-separated test-name filters: measure only the tests whose names contain one, in one slice, to see whether new tests cover the lines they were written for. Empty measures every test and holds the 100% floor."
+        type: string
+        default: ""
+      files:
+        description: "Space-separated path prefixes: the step summary counts the gaps in these files. Most useful with tests."
+        type: string
+        default: ""
   pull_request:
     types: [labeled, opened, reopened, synchronize, ready_for_review]
 
@@ -104,7 +112,8 @@ jobs:
         # Slice 0 is every test but the gates and half the CLI's; slice 9
         # is that half, which ran last and longest in slice 0; slices 1..8
         # share the gates by their time.
-        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        # A targeted measurement (`tests`) is one slice of the named tests.
+        slice: ${{ fromJSON(inputs.tests != '' && '[0]' || '[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]') }}
     steps:
       # The instrumented workspace, its build and the gates' toolchains do not
       # fit a Linux runner's free space as it comes.
@@ -224,6 +233,8 @@ jobs:
           path: ${{ runner.temp }}/self
       - name: Choose this slice's tests
         id: tests
+        env:
+          TARGET_TESTS: ${{ inputs.tests }}
         run: |
           # What this platform cannot run: the clang oracle's golden file
           # comes from Apple's clang; macOS runners have no Docker.
@@ -287,6 +298,12 @@ jobs:
             }' .github/gate-seconds.tsv .github/test-seconds.tsv "$lists/excluded" "$lists/gates" > "$lists/picked"
           # A slice dealt nothing runs nothing: no name at all would be every test.
           [ -s "$lists/picked" ] || echo "no_test_was_dealt_to_this_slice" > "$lists/picked"
+          # A targeted measurement runs the named tests alone, matched as
+          # libtest matches a filter: by substring.
+          if [ -n "$TARGET_TESTS" ]; then
+            echo "command=cargo test --workspace -- --include-ignored $TARGET_TESTS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # The whole workspace builds in every slice, so every run counts the
           # same files; only the tests named run, or all but those skipped.
           echo "command=cargo test --workspace -- --include-ignored --exact $(tr '\n' ' ' < "$lists/picked")" >> "$GITHUB_OUTPUT"
@@ -374,6 +391,8 @@ jobs:
           pattern: run-${{ matrix.os }}-*
           path: ${{ runner.temp }}/runs
       - name: Merge the slices
+        env:
+          TARGET_FILES: ${{ inputs.files }}
         run: |
           supercov="$RUNNER_TEMP/self/supercov"
           chmod +x "$supercov"
@@ -384,7 +403,12 @@ jobs:
             echo "$(basename "$slice"): $(tail -1 "$slice/measure.log")"
           done
           ids=$(ls .supercov/runs)
-          "$supercov" merge $ids 2>&1 | tee "$out/merge.log"
+          if [ "$(echo "$ids" | wc -w)" -eq 1 ]; then
+            # One slice (a targeted measurement) is its own whole run.
+            echo "merged run $ids" | tee "$out/merge.log"
+          else
+            "$supercov" merge $ids 2>&1 | tee "$out/merge.log"
+          fi
           merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
           if [ -z "$merged" ]; then echo "the slices did not merge"; exit 1; fi
           echo "$merged" > "$out/merged-id"
@@ -392,6 +416,19 @@ jobs:
           for metric in mcdc lines branches; do
             "$supercov" runs "$merged" gaps --format jsonl --metric "$metric" --limit 0 --output "$out/$metric-gaps.jsonl"
           done
+          # The gaps left in the files a targeted measurement was for.
+          if [ -n "$TARGET_FILES" ]; then
+            {
+              echo "### Gaps in ${TARGET_FILES}"
+              echo '```'
+              for metric in lines branches mcdc; do
+                for prefix in $TARGET_FILES; do
+                  jq -r --arg p "$prefix" 'select(.file | startswith($p)) | .file' "$out/$metric-gaps.jsonl"
+                done | sort | uniq -c | sed "s/^/$metric /"
+              done
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           {
             echo "### ${{ matrix.os }}"
             echo '```'
@@ -411,7 +448,10 @@ jobs:
       # The gaps are in the artifact above, one file per metric. `check`
       # compares counts, so 99.995% fails, and it answers 2 rather than pass
       # when a slice's tests failed or the run no longer matches the commit.
+      # A targeted measurement ran only some tests: it shows what they cover,
+      # not what the whole suite leaves, so it holds no floor.
       - name: Hold Supercov to 100% coverage
+        if: inputs.tests == ''
         run: |
           "$RUNNER_TEMP/self/supercov" runs "$(cat "$RUNNER_TEMP/out/merged-id")" check \
             --min-lines 100 --min-branches 100 --min-mcdc 100

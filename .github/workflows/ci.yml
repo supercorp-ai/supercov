@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated jobs to run (check, bun-bootstrap, launch-arguments, lint, engine-integrations, release-gates, clang-mcdc-oracle, kotlin-grammar, rust-worker, rust-wasm-js, rust-wasm). Empty runs them all."
+        default: ""
+        type: string
   # The gate every change is expected to pass, on the change itself. It ran
   # only when someone remembered to ask for it, which meant a pull request's
   # green tick said the React jobs had passed and nothing
@@ -13,14 +18,16 @@ permissions:
   # The stop-on-failure step cancels this commit's runs.
   actions: write
 
-# A push to a pull request replaces the run of the commit before it. A run started by hand is left
-# to finish.
+# A newer push to a pull request, or a newer run started by hand on the same
+# branch for the same jobs, replaces the one before: an iteration that asked
+# again no longer waits behind its own stale run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.ref }}-${{ inputs.only }}
+  cancel-in-progress: true
 
 jobs:
   check:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',check,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -77,6 +84,7 @@ jobs:
   # Bun ignores the Node preload, so verify source bootstrapping with the
   # reported version and an older Bun release on both host platforms.
   bun-bootstrap:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',bun-bootstrap,') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -109,6 +117,7 @@ jobs:
   # and PowerShell each drop a `--` on the way (#209); real suites are
   # measured through them end to end.
   launch-arguments:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',launch-arguments,') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -147,6 +156,7 @@ jobs:
 
   # `cargo fmt` and clippy, once: each Node's check job ran them again.
   lint:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',lint,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -174,6 +184,7 @@ jobs:
   # (scripts/engine-integrations-group.mjs): one after another they took
   # twelve minutes, the longest job of a run.
   engine-integrations:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',engine-integrations,') }}
     name: engine-integrations (${{ matrix.group }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -239,6 +250,7 @@ jobs:
   # machine, where the timing gates (the watchdog's timeout exit) and the
   # fixtures on fixed ports failed for reasons of their own.
   release-gates:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',release-gates,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -293,6 +305,7 @@ jobs:
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
   clang-mcdc-oracle:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',clang-mcdc-oracle,') }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -311,6 +324,7 @@ jobs:
   # generates, and real projects' files parse with it, but for the ones
   # `scripts/kotlin-corpus-failures.txt` names.
   kotlin-grammar:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',kotlin-grammar,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -328,6 +342,7 @@ jobs:
 
   # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
   rust-worker:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-worker,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -372,6 +387,7 @@ jobs:
   # Rust compiled to wasm that JavaScript tests load: node:test through the
   # nodejs glue, Playwright from a web page.
   rust-wasm-js:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm-js,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -409,6 +425,7 @@ jobs:
   # Rust tests compiled to wasm, run where Cargo runs them: Node through
   # wasm-bindgen-test-runner, WASI through wasmtime.
   rust-wasm:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm,') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
