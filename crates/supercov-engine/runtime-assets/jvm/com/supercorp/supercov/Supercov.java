@@ -863,7 +863,7 @@ public final class Supercov {
   }
 
   public static int rZ(int file, int index, int value) {
-    return on(file, index) ? (int) 0 : value;
+    return on(file, index) ? 0 : value;
   }
 
   public static long rZ(int file, int index, long value) {
@@ -1020,7 +1020,7 @@ public final class Supercov {
   }
 
   public static boolean wlt(int slot, double a, double b) {
-    value(slot, relation((double) a, (double) b));
+    value(slot, relation(a, b));
     return a < b;
   }
 
@@ -1040,7 +1040,7 @@ public final class Supercov {
   }
 
   public static boolean wle(int slot, double a, double b) {
-    value(slot, relation((double) a, (double) b));
+    value(slot, relation(a, b));
     return a <= b;
   }
 
@@ -1060,7 +1060,7 @@ public final class Supercov {
   }
 
   public static boolean wgt(int slot, double a, double b) {
-    value(slot, relation((double) a, (double) b));
+    value(slot, relation(a, b));
     return a > b;
   }
 
@@ -1080,7 +1080,7 @@ public final class Supercov {
   }
 
   public static boolean wge(int slot, double a, double b) {
-    value(slot, relation((double) a, (double) b));
+    value(slot, relation(a, b));
     return a >= b;
   }
 

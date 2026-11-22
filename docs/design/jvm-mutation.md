@@ -72,7 +72,13 @@ own; the 23 others are code kotlinc writes that has no source of its own:
   past the file's end.
 
 `supercov runs <id> mutants pit <mutations.xml>` reports the same split for
-a project, PIT-only mutants by these categories.
+a project, PIT-only mutants by these categories. It pairs a mutant with
+PIT's by file, mutator and what the mutant does, then by line: the same
+line, then the lines javac gives an operator on a continuation line, then
+the statement's lines. kotlinc puts every jump of a multi-line condition on
+its last line; where PIT has more of a kind on a line than Supercov does,
+those are paired in code order (PIT's instruction index, Supercov's source
+position), not by line.
 
 ## Schemata
 
@@ -140,7 +146,10 @@ between test executions (`SupercovStrongPass.java`).
   static a previous mutant changed, does not carry over: on typetools a
   type cache filled without the mutant hid seven mutants PIT kills. The
   runtime's switches are set in that loader's copy and in the JVM's own, for
-  code a packaged jar holds.
+  code a packaged jar holds. The loader keeps the build's assertion setting
+  (Surefire enables assertions on its own loader, not with `-ea`), and a
+  minion JVM gets `-ea` where the build had them: typetools' tests check
+  with `assert`.
 - **Baselines and confirmations.** A test runs once without a mutant before
   any mutant runs against it; one that fails then is no candidate. A kill is
   confirmed by running the killing test again with no mutant: a mutant that

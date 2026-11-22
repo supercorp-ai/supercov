@@ -19294,7 +19294,7 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
     small_maven_project(&project);
     project.write(
         "src/main/java/w/W.java",
-        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static boolean small(int n) {\n        return n < 10;\n    }\n\n    public static String named(String s) {\n        return System.getProperty(\"w\") + s;\n    }\n}\n",
+        "package w;\n\npublic class W {\n    public static int twice(int n) {\n        return n * 2;\n    }\n\n    public static boolean small(int n) {\n        return n < 10;\n    }\n\n    public static String named(String s) {\n        return System.getProperty(\"w\") + System.getenv(\"w\");\n    }\n}\n",
     );
     project.write(
         "src/test/java/w/WTest.java",
@@ -19348,13 +19348,13 @@ fn java_mutants_are_listed_weighed_and_run_in_the_build_s_test_jvm() {
     // A `+` of a call whose type the source does not show was taken for an
     // addition: javac refuses its switch, and the mutant is unviable.
     assert_eq!(
-        status(&format!("{file}:13:16-13:44:Math:-")).as_deref(),
+        status(&format!("{file}:13:16-13:60:Math:-")).as_deref(),
         Some("unviable"),
         "{tested}"
     );
     // No test calls named(): its return is not covered.
     assert_eq!(
-        status(&format!("{file}:13:16-13:44:EmptyObjectReturnVals:\"\"")).as_deref(),
+        status(&format!("{file}:13:16-13:60:EmptyObjectReturnVals:\"\"")).as_deref(),
         Some("no-coverage"),
         "{tested}"
     );
