@@ -56,17 +56,13 @@ pub(crate) fn placeable(root: &SyntaxNode, mutant: &RustMutant) -> Option<&'stat
     };
     let node = match root.covering_element(at) {
         ra_ap_syntax::NodeOrToken::Node(node) => node,
-        ra_ap_syntax::NodeOrToken::Token(token) => token.parent()?,
+        ra_ap_syntax::NodeOrToken::Token(token) => token.parent().expect("a token is in a node"),
     };
     if let Site::Body { opaque: true, .. } = mutant.site {
         return Some("opaque-return");
     }
-    if crate::rust_instrumenter::cannot_carry_probe(&node)
-        || node
-            .ancestors()
-            .take_while(|ancestor| !ast::Fn::can_cast(ancestor.kind()))
-            .any(|ancestor| ast::Variant::can_cast(ancestor.kind()))
-    {
+    // An enum's discriminant is a `ConstArg`, which this counts.
+    if crate::rust_instrumenter::cannot_carry_probe(&node) {
         return Some("const-context");
     }
     if let Site::Operator { .. } = mutant.site
@@ -192,6 +188,8 @@ pub(crate) fn switch(
 }
 
 /// Writes `source[range]` with every site from `*next` on that starts in it.
+/// Sites come in the order of their starts, outer before inner, so the next
+/// never starts before `range`: only where it ends says whether it is in it.
 fn emit(
     source: &str,
     runtime: &str,
@@ -205,8 +203,8 @@ fn emit(
         let start = usize::from(site.range.start());
         let end = usize::from(site.range.end());
         let inside = match site.kind {
-            Kind::Insert { .. } => start >= range.start && start < range.end,
-            Kind::Wrap { .. } => start >= range.start && end <= range.end,
+            Kind::Insert { .. } => start < range.end,
+            Kind::Wrap { .. } => end <= range.end,
         };
         if !inside {
             break;

@@ -195,6 +195,7 @@ pub fn run_strong_pass(
                 command: pass.command.clone(),
                 plan: pass.strong.plan.clone(),
                 results: pass.strong.results.clone(),
+                workers: crate::rust_strong::workers(),
             },
             diagnostics,
         ),
