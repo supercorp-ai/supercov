@@ -168,11 +168,15 @@ between test executions (`SupercovStrongPass.java`).
   from one JVM to the next, and from one discovery to the next, unique id
   included: such a test is found by its name with every `@hash` left out,
   and run by its class with a discovery filter on that name. Two tests of a
-  class that read alike without their hashes are not found (`error`). The
-  An engine that registers its tests only as it runs them (Kotest's
-  specs) has none in the discovered plan: such a test runs with its whole
-  class, and its outcome is the one of the test of its name the class
-  registered. The TestNG driver
+  class that read alike without their hashes are not found (`error`). An
+  engine that registers its tests only as it runs them (Kotest's specs)
+  has none in the discovered plan: such a test runs with its class, and its
+  outcome is the one of the test of its name the class registered. Its
+  class runs with Kotest's own filter, `kotest.filter.tests`, naming the
+  test and each container above it (`context`, `context -- test`, each
+  character but a letter, digit or space matching any one); where its
+  baseline does not run the test that way, or fails, the test runs with
+  its whole spec from then on. The TestNG driver
   runs the class and method (a data provider's invocations together); the
   JUnit 4 driver of Ant's `<junit>` runs `JUnitCore` on the method. A
   candidate the driver cannot find leaves its mutant `error`, never
@@ -194,8 +198,15 @@ between test executions (`SupercovStrongPass.java`).
   kotlinpoet a mutant in a Kotlin expression body (no statement point of
   its own, so every test is a candidate) was killed only by its 812th
   candidate when they ran in name order: about 50 s each.
-- **Baselines and confirmations.** A test runs once without a mutant before
-  any mutant runs against it; one that fails then is no candidate. A kill is
+- **Baselines and confirmations.** A test runs twice without a mutant before
+  any mutant runs against it; one that fails then is no candidate. The
+  second run finds a test that fails what runs after it: Ant's
+  `FileUtilsTest#testCreateNewFile` makes a file `dummy` it deletes only as
+  the JVM exits, and asserts first that there is none. Run with a mutant
+  after its baseline it fails whatever the mutant does, and the
+  confirmation failed with it, stopping each JVM it ran in (118 Ant mutants
+  without a verdict). A mutant whose candidates include such a test and
+  that none of the others kills survives with that reason. A kill is
   confirmed by running the killing test again with no mutant: a mutant that
   left the JVM so that the test fails without it (a static cache filled
   with a mutated value) gets no verdict there, and the JVM stops taking
@@ -205,9 +216,15 @@ between test executions (`SupercovStrongPass.java`).
   A mutant past it gets no verdict yet: it is listed, its test's thread is
   left running (one such thread a JVM, or the JVM stops taking mutants),
   and once every other mutant has a verdict the build starts again for the
-  listed ones alone, each with × 3 and 10 s, past which it is a `timeout`. The switch counts the active mutant's
-  evaluations and throws `MutantTimeoutError` past 1,000,000
-  (`SUPERCOV_MUTANT_HIT_LIMIT`), a `timeout`. A test past its time leaves a
+  listed ones alone, each with × 3 and 10 s, past which it is a `timeout`.
+  The switch counts the active mutant's evaluations and throws
+  `MutantTimeoutError` past 1,000,000 (`SUPERCOV_MUTANT_HIT_LIMIT`) once
+  the test is past its time; in the first round that lists the mutant for
+  the second, as a test past its time is (java-diff-utils'
+  `MeyersDiffWithLinearSpace.java:135` passed it in a performance test
+  and was a false `timeout`), and in the second it is a `timeout`. A round
+  that only listed mutants for the second is progress: the engine starts
+  the build again. A test past its time leaves a
   thread that will not stop: the verdict is written and the JVM takes no
   more mutants. The engine starts the build again for what is left, up to
   twelve starts in all.
@@ -215,7 +232,34 @@ between test executions (`SupercovStrongPass.java`).
   processors, at most eight) starts that many JVMs in all, the test JVM's own command again with the
   driver as entry; each claims a mutant before running it, so none runs
   twice. Several modules each run their own tests' share; a mutant whose
-  candidates span modules is decided from each module's part.
+  candidates span modules is decided from each module's part. Each JVM the
+  pass starts works in a directory of its own, beside the pass's files:
+  the test JVM's working directory made again, its directories made afresh
+  and each file in them a link to the original (past 50,000 entries a
+  directory is linked whole), with `user.dir` and `java.io.tmpdir` its
+  own. A test reads the project's files by their relative paths as before,
+  and the files it makes or deletes are its JVM's: Ant's
+  `LazyFileOutputStreamTest` asserts a `test.txt` exists, which another
+  JVM's test made and deleted meanwhile, and `LazyFileOutputStream.java:128`
+  was a false `survived`. A JVM's own stderr goes to `jvm-N.log` there, the
+  directories are removed once it ends, and where links cannot be made
+  (Windows without the right) the JVMs share the directory and say so.
+- **A test class's own work.** Code a test class runs for all its tests,
+  outside each (`@BeforeAll`, `@AfterAll`, a `@MethodSource`, a static
+  initializer, JUnit 4's `@BeforeClass` and `@ClassRule`, a Kotest spec's
+  body), is recorded in the measured run as the class's setup: the JUnit
+  Platform listener opens it when a container with a class source starts
+  and closes it when it finishes, Ant's formatter around each suite. The
+  plan credits a setup to every test of its file, as the JavaScript core
+  credits a test file's setup evidence (`strong-mutation.md`): each runs
+  after it, and runs it again in the pass, where the driver runs a test
+  with its class. java-diff-utils' `factory()` returns, reached only from
+  a `@MethodSource` and a `@BeforeAll`, were the two violations left there
+  (survived, and no coverage). TestNG reports no class boundary to a
+  listener: what runs between two classes' tests is credited to both, and
+  what runs before the first test (`@BeforeSuite`, the first class's
+  `@BeforeClass`) and outside every test is a setup that names no class,
+  credited to every test of the run.
 
 ## Weak mutation: value probes
 

@@ -74,6 +74,8 @@ public final class SupercovStrongPass {
     public Object handle;
     Boolean baseline;
     long baselineMillis;
+    /** Whether it failed when run a second time with no mutant. */
+    boolean unrepeatable;
 
     Test(int index, String className, String name, long measuredMillis, String module) {
       this.index = index;
@@ -477,6 +479,7 @@ public final class SupercovStrongPass {
     long started = System.nanoTime();
     ClassLoader mutated = fresh();
     int ran = 0;
+    String unrepeatable = null;
     for (Test test : candidates) {
       if (test.baseline == null) {
         long before = System.nanoTime();
@@ -488,8 +491,23 @@ public final class SupercovStrongPass {
           return false;
         }
         test.baseline = !baseline.failed;
+        if (test.baseline) {
+          // Once more: a test that leaves what fails it the next time (a
+          // file it makes and never deletes) cannot tell a mutant from its
+          // own leftovers. It is no candidate, and says so.
+          Outcome again = execute(test, false, -1, -1);
+          if (again.failed || again.timedOut) {
+            test.baseline = false;
+            test.unrepeatable = true;
+            System.err.println(
+                "supercov: " + test.name + " fails when run a second time: " + again.reason);
+          }
+        }
       }
       if (!test.baseline) {
+        if (test.unrepeatable && unrepeatable == null) {
+          unrepeatable = test.name;
+        }
         continue;
       }
       ran++;
@@ -539,7 +557,11 @@ public final class SupercovStrongPass {
               + (missing.size() > 1 ? " (and " + (missing.size() - 1) + " more)" : ""));
       return true;
     }
-    write(mutant, "survived", null, ran, started, ran == 0 ? "no-passing-candidate" : null);
+    String reason = ran == 0 ? "no-passing-candidate" : null;
+    if (unrepeatable != null) {
+      reason = "its candidate " + unrepeatable + " fails when run a second time, so it was not run";
+    }
+    write(mutant, "survived", null, ran, started, reason);
     return true;
   }
 
