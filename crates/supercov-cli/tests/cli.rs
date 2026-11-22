@@ -22400,6 +22400,18 @@ fn surviving_mutants_are_named_in_every_view() {
         .succeeds();
     assert!(only.contains("sum >= 50 → sum > 50"), "{only}");
     assert!(!only.contains("trim() → name"), "{only}");
+    // The table of files says how to list them, and a line's view gives
+    // each mutant's verdict.
+    let table = project.supercov(&["runs", "latest", "mutants"]).succeeds();
+    assert!(
+        table.contains("list the mutants the tests let survive: ")
+            && table.contains(" --status survived"),
+        "{table}"
+    );
+    let line = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js:2"])
+        .succeeds();
+    assert!(line.contains("  strong: survived"), "{line}");
     let markdown = project
         .supercov(&["runs", "latest", "mutants", "--format", "markdown"])
         .succeeds();
