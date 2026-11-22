@@ -23125,6 +23125,77 @@ fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
     assert_eq!(ahead, fresh);
 }
 
+/// A copy that runs none, or only some, of the tests it was to run proves
+/// nothing: here `labels` exists in the measured run only, so the copies of
+/// `label`'s mutants run no test. They are errors that say so, never
+/// survivors, with the stages and without.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_runs_none_of_its_tests_makes_its_mutant_an_error() {
+    let project = vitest_mutants_project("strong-ran-none");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  if (!process.env.SUPERCOV_STRONG) it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("labels in the measured run only");
+    for stages in ["", "1"] {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_STAGES", stages)],
+            )
+            .json();
+        assert!(
+            reply["summary"]["error"].as_u64().unwrap_or(0) > 0,
+            "{reply}"
+        );
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutants = listed["data"]["mutants"].as_array().unwrap();
+        let of_label = mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("src/cart.js:9:")
+            })
+            .collect::<Vec<_>>();
+        assert!(!of_label.is_empty(), "{listed}");
+        for mutant in of_label {
+            if mutant["strong"].is_null() {
+                continue;
+            }
+            assert_ne!(mutant["strong"]["status"], "survived", "{mutant}");
+            if mutant["strong"]["status"] == "error" {
+                assert!(
+                    mutant["strong"]["reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("ran none of the tests it was to run"),
+                    "{mutant}"
+                );
+            }
+        }
+        assert!(
+            mutants
+                .iter()
+                .any(|mutant| mutant["strong"]["status"] == "killed"),
+            "{listed}"
+        );
+    }
+}
+
 /// A test file that does not finish without a mutant (here it throws while
 /// it loads, in the strong pass only) cannot test the mutants it alone
 /// covers: they are errors, not survivors.

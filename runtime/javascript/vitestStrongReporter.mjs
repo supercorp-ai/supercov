@@ -1320,6 +1320,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             else
                 kill({ unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
         }
+        else {
+            const short = ranNone(claim, outcome, { order: baselineOrder.get(group.file) }, group.file);
+            if (short)
+                finish(job, { status: "error", reason: short });
+        }
     };
     // What a confirmation's copy says: the tests that fail without the
     // mutant, and whether the file finished.
@@ -1365,6 +1370,21 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     // mutant's files run one after another, likeliest killer first, and its
     // chain stops at its first kill: parallelism comes from many mutants at
     // once. When nothing is left, the run is cancelled.
+    // A copy that ended with no test failing proves the mutant survives its
+    // file only where it ran every test it was to run: one that ran fewer
+    // (its tests' ids matched none of the file's, say) says nothing, and its
+    // mutant is an error, never a survivor. `baselineOrder` is what the file
+    // ran whole, for a copy of the whole file.
+    function ranNone(claim, outcome, baselineEntry, file) {
+        const ran = new Set(outcome.tests.map((test) => test.test));
+        const expected = claim.wholeFile ? baselineEntry?.order ?? [] : claim.tests;
+        const missing = expected.filter((id) => !ran.has(id));
+        if (!missing.length && (ran.size || !claim.wholeFile))
+            return undefined;
+        if (!ran.size)
+            return `its copy of ${file} ran none of the tests it was to run`;
+        return `its copy of ${file} ran ${expected.length - missing.length} of the ${expected.length} tests it was to run`;
+    }
     async function runContinuous() {
         // Each file's baselines: `union` (its mutants' candidates together)
         // and `whole`, as mutants need them.
@@ -1719,6 +1739,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
             else if (!outcome.done)
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
+            else if (ranNone(claim, outcome, entry, group.file))
+                finishC(job, { status: "error", reason: ranNone(claim, outcome, entry, group.file) });
             else
                 conclude(job);
         };
