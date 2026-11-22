@@ -6923,7 +6923,12 @@ mod tests {
         assert_eq!(earlier, current);
         assert_eq!(earlier.id.as_deref(), Some("d1"));
         // Written back, it takes the current shape.
-        assert!(serde_json::to_value(&earlier).unwrap().get("meta").is_none());
+        assert!(
+            serde_json::to_value(&earlier)
+                .unwrap()
+                .get("meta")
+                .is_none()
+        );
 
         let both = serde_json::from_value::<ServerRecord>(
             json!({ "type": "decision", "id": "d1", "meta": meta, "vector": vector }),
@@ -6934,7 +6939,10 @@ mod tests {
             json!({ "type": "decision", "id": "d1", "label": "x" }),
         )
         .unwrap_err();
-        assert!(unknown.to_string().contains("unknown field `label`"), "{unknown}");
+        assert!(
+            unknown.to_string().contains("unknown field `label`"),
+            "{unknown}"
+        );
         // A point record names no decision at all.
         let point: ServerRecord =
             serde_json::from_value(json!({ "type": "point", "id": "p1" })).unwrap();
@@ -6942,7 +6950,10 @@ mod tests {
 
         let snapshot = |value| serde_json::from_value::<DecisionSnapshot>(value);
         let current = snapshot(json!({ "id": "d1", "vectors": [vector] })).unwrap();
-        assert_eq!(snapshot(json!({ "meta": meta, "vectors": [vector] })).unwrap(), current);
+        assert_eq!(
+            snapshot(json!({ "meta": meta, "vectors": [vector] })).unwrap(),
+            current
+        );
         assert_eq!(
             serde_json::to_value(&current).unwrap(),
             json!({ "id": "d1", "vectors": [vector] })
@@ -6950,8 +6961,14 @@ mod tests {
         let both = snapshot(json!({ "id": "d1", "meta": meta, "vectors": [] })).unwrap_err();
         assert!(both.to_string().contains("both `id` and `meta`"), "{both}");
         let neither = snapshot(json!({ "vectors": [] })).unwrap_err();
-        assert!(neither.to_string().contains("missing field `id`"), "{neither}");
+        assert!(
+            neither.to_string().contains("missing field `id`"),
+            "{neither}"
+        );
         let unknown = snapshot(json!({ "id": "d1", "vectors": [], "x": 1 })).unwrap_err();
-        assert!(unknown.to_string().contains("unknown field `x`"), "{unknown}");
+        assert!(
+            unknown.to_string().contains("unknown field `x`"),
+            "{unknown}"
+        );
     }
 }
