@@ -49,7 +49,9 @@ if [ "$integration" = rspec ]; then
   printf 'gem "rspec"\n' >> Gemfile
 else
   mkdir -p "$work/shim"
-  printf 'require "mutant/minitest/coverage"\nMinitest::Test.cover("%s")\n' "$subjects" > "$work/shim/every_test.rb"
+  # The integration first: it turns `Minitest.autorun` off before a test
+  # file's `require "minitest/autorun"` would run the suite in every fork.
+  printf 'require "mutant"\nrequire "mutant/integration/minitest"\nMinitest::Test.cover("%s")\n' "$subjects" > "$work/shim/every_test.rb"
   requires=("$work/shim/every_test.rb" "${requires[@]}")
 fi
 bundle config set --local path "$work/bundle" >/dev/null

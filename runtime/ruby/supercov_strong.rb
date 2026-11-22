@@ -195,6 +195,7 @@ module Supercov
           return
         end
         @failing = baseline[:failed].to_h { |id| [id, true] }
+        warn("[supercov] strong baseline: #{baseline[:sequence].size} test(s), failing without a mutant: #{baseline[:failed].join(', ')}") if ENV["SUPERCOV_STRONG_DEBUG"]
         @durations = baseline[:durations]
         queue = @plan["mutants"].select do |mutant|
           next true if Strong.compiled?(mutant["file"])
@@ -396,11 +397,6 @@ module Supercov
         end
       end
 
-      def initialize
-        @examples = {}
-        ::RSpec.world.all_examples.each { |example| @examples[example.id.sub(%r{\A\./}, "")] = example }
-      end
-
       def tests = @examples
 
       def whole(ids)
@@ -408,8 +404,19 @@ module Supercov
         @examples.select { |_, example| files.include?(example.metadata[:rerun_file_path]) }.keys
       end
 
-      # Runs the examples `ids` names, each group's hooks around them, as
-      # RSpec runs a filtered suite. Called once per forked process.
+      # What a failure outside any example (a `before(:suite)` hook that
+      # raised) is reported as.
+      OUTSIDE = "(outside examples)"
+
+      def initialize(runner)
+        @runner = runner
+        @examples = {}
+        ::RSpec.world.all_examples.each { |example| @examples[example.id.sub(%r{\A\./}, "")] = example }
+      end
+
+      # Runs the examples `ids` names through RSpec's own `run_specs`, its
+      # reporter, formatters and suite hooks as the suite runs them, with
+      # output thrown away. Called once per forked process.
       def run(ids, all)
         selected = ids.to_h { |id| [@examples.fetch(id), true] }
         world = ::RSpec.world
@@ -425,28 +432,15 @@ module Supercov
         end
         configuration = ::RSpec.configuration
         configuration.fail_fast = all ? false : 1
-        reporter = ::RSpec::Core::Reporter.new(configuration)
         listener = Listener.new
-        reporter.register_listener(listener, :example_finished)
-        # The suite's own `before(:suite)` and `after(:suite)` hooks run
-        # around the examples, in this process, as RSpec runs them: code
-        # they call runs with the mutant on.
-        run_groups = lambda do
-          world.example_groups.each do |group|
-            next if group.descendant_filtered_examples.empty?
-
-            group.run(reporter)
-            break if world.wants_to_quit
-          end
-        end
-        if configuration.respond_to?(:with_suite_hooks)
-          configuration.with_suite_hooks(&run_groups)
-        else
-          run_groups.call
-        end
+        configuration.reporter.register_listener(listener, :example_finished)
+        $stdout.reopen(File::NULL)
+        $stderr.reopen(File::NULL) unless ENV["SUPERCOV_STRONG_DEBUG"]
+        status = @runner.run_specs(world.ordered_example_groups)
         by_id = @examples.invert
         sequence = listener.finished.map { |example| by_id.fetch(example) }
         failed = listener.finished.select { |example| example.execution_result.status == :failed }.map { |example| by_id.fetch(example) }
+        failed << OUTSIDE if failed.empty? && status.is_a?(Integer) && status != 0
         durations = listener.finished.to_h { |example| [by_id.fetch(example), example.execution_result.run_time.to_f] }
         { failed: failed, sequence: sequence, durations: durations }
       end
@@ -490,23 +484,24 @@ module Supercov
 
     module RSpecHook
       def run_specs(example_groups)
-        return super if Strong.ran || Strong.plan.nil?
+        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
 
         Strong.ran = true
-        Pass.new(RSpecRunner.new).run
+        Pass.new(RSpecRunner.new(self)).run
         0
       end
     end
 
     module MinitestHook
       def run(args = [])
-        return super if Strong.ran || Strong.plan.nil?
+        return super if Strong.ran || Strong.plan.nil? || ENV["SUPERCOV_STRONG_SWITCHES_ONLY"]
 
         Strong.ran = true
         # What `Minitest.run` sets before it runs anything.
         options = respond_to?(:process_args) ? process_args(args) : {}
         self.seed ||= options[:seed] || (Random.new_seed % 0xFFFF)
         srand(seed)
+        init_plugins(options) if respond_to?(:init_plugins)
         Pass.new(MinitestRunner.new).run
         true
       end
