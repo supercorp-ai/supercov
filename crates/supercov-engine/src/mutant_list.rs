@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 /// The language of a file a list does not name a language for.
 pub const JAVASCRIPT: &str = "javascript";
+/// Rust's name in a mutant list.
+pub const RUST: &str = "rust";
 
 /// The version of `mutants.json`. It leaves out what a reader works out
 /// again: a mutant's `id`, from its file, span, mutator and descriptor, and
@@ -98,12 +100,6 @@ impl MutantsFile {
     /// with different sets did not enumerate the same mutants, and `Err` says
     /// which.
     pub fn merge(mut self, other: MutantsFile) -> Result<MutantsFile, String> {
-        if other.mutant_set.is_none() {
-            return Ok(self);
-        }
-        if self.mutant_set.is_none() {
-            return Ok(other);
-        }
         let mut sets = self.sets();
         for (language, set) in other.sets() {
             match sets.get(&language) {
@@ -130,7 +126,9 @@ impl MutantsFile {
         self.tests_without_values.extend(other.tests_without_values);
         self.tests_without_values.sort();
         self.tests_without_values.dedup();
-        self.mutant_set = Some(sets.values().cloned().collect::<Vec<_>>().join(", "));
+        // Two unlisted lists list nothing.
+        self.mutant_set =
+            (!sets.is_empty()).then(|| sets.values().cloned().collect::<Vec<_>>().join(", "));
         // A list of JavaScript alone names no sets, as it always did.
         self.mutant_sets = if sets.keys().all(|language| language == JAVASCRIPT) {
             BTreeMap::new()
@@ -144,11 +142,11 @@ impl MutantsFile {
 /// The language a source file is listed under, by its extension: what
 /// routes a file measured without its mutants to its language's enumerator.
 pub fn language_of_path(path: &str) -> Option<&'static str> {
-    let extension = std::path::Path::new(path).extension()?.to_str()?;
-    Some(match extension {
+    let extension = std::path::Path::new(path).extension()?.to_string_lossy();
+    Some(match &*extension {
         "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => JAVASCRIPT,
         "py" => "python",
-        "rs" => "rust",
+        "rs" => RUST,
         "rb" => "ruby",
         "go" => "go",
         "java" | "kt" | "kts" | "scala" | "groovy" => "jvm",
@@ -158,6 +156,87 @@ pub fn language_of_path(path: &str) -> Option<&'static str> {
 
 /// A run's mutants listed from its sources after the run, and the files
 /// changed since, whose mutants could not be listed.
+/// cargo-mutants' mutants of each Rust file a run measured
+/// (`rust_mutants::list`).
+fn list_rust_mutants(
+    root: &std::path::Path,
+    recorded: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> ListedMutants {
+    let files = recorded.iter().collect::<Vec<_>>();
+    let listed = crate::threads::parallel_map(&files, |(file, points)| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        crate::rust_mutants::list(file, &source, points).or_else(|| {
+            // A crate in a directory of the project (Rust compiled to wasm
+            // that JavaScript tests load) names its points by its files'
+            // paths in its Cargo workspace.
+            file.match_indices('/').find_map(|(at, _)| {
+                root.join(&file[..at])
+                    .join("Cargo.toml")
+                    .is_file()
+                    .then(|| crate::rust_mutants::list(&file[at + 1..], &source, points))
+                    .flatten()
+            })
+        })
+    });
+    let mut mutants = BTreeMap::new();
+    let mut changed = Vec::new();
+    for ((file, _), listed) in files.into_iter().zip(listed) {
+        let file = file.clone();
+        match listed {
+            Some(list) if list.is_empty() => {}
+            Some(list) => {
+                mutants.insert(file, list);
+            }
+            None => changed.push(file),
+        }
+    }
+    ListedMutants {
+        mutants: MutantsFile::listed(RUST, crate::rust_mutants::MUTANT_SET, mutants),
+        changed,
+    }
+}
+
+/// The mutants a Rust run measured with `SUPERCOV_MUTANTS=1` lists as it
+/// ends: each measured file's, linked to the points, decisions and arm
+/// selections of `manifest` and to the value probes the run placed
+/// (`value_sites`, `rust_value_probes`).
+pub(crate) fn list_rust_run(
+    root: &std::path::Path,
+    manifest: &crate::coverage_report::CoverageManifest,
+    value_sites: impl IntoIterator<Item = String>,
+) -> MutantsFile {
+    let mut recorded = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for point in &manifest.points {
+        recorded
+            .entry(point.file.clone())
+            .or_default()
+            .insert(point.id.clone());
+    }
+    for decision in &manifest.decisions {
+        recorded
+            .entry(decision.file.clone())
+            .or_default()
+            .insert(decision.id.clone());
+    }
+    for branch in &manifest.branches {
+        recorded.entry(branch.file.clone()).or_default().extend(
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.clone()),
+        );
+    }
+    // A site is named by its file's digest only: every file is offered them.
+    let sites = value_sites
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for ids in recorded.values_mut() {
+        ids.extend(sites.iter().cloned());
+    }
+    recorded.retain(|file, _| file.ends_with(".rs"));
+    list_rust_mutants(root, &recorded).mutants
+}
+
 pub(crate) struct ListedMutants {
     pub(crate) mutants: MutantsFile,
     pub(crate) changed: Vec<String>,
@@ -188,6 +267,9 @@ pub(crate) fn list_from_sources(
     for (language, files) in by_language {
         let one = match language {
             JAVASCRIPT => crate::js_mutant_links::list_mutants(root, &files),
+            RUST => list_rust_mutants(root, &files),
+            crate::go_mutants::GO => crate::go_mutants::list_mutants(root, &files),
+            crate::python_mutants::PYTHON => crate::python_mutants::list_mutants(root, &files),
             _ => continue,
         };
         listed.changed.extend(one.changed);
@@ -468,6 +550,31 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn a_go_file_s_mutants_are_listed_from_its_source_after_the_run() {
+        let root = std::env::temp_dir().join(format!("supercov-list-go-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "package p\n\nfunc f(a int) int { return a + 1 }\n";
+        std::fs::write(root.join("a.go"), source).unwrap();
+        let points = crate::go_instrumenter::build_go_obligations("a.go", source, &mut 0, &mut 0)
+            .unwrap()
+            .manifest
+            .points
+            .into_iter()
+            .map(|point| point.id)
+            .collect();
+        // A language that lists nothing after a run, and a file of none.
+        let recorded = BTreeMap::from([
+            ("a.go".to_owned(), points),
+            ("b.cob".to_owned(), Default::default()),
+            ("notes.txt".to_owned(), Default::default()),
+        ]);
+        let listed = list_from_sources(&root, &recorded);
+        assert_eq!(listed.mutants.files.keys().collect::<Vec<_>>(), ["a.go"]);
+        assert!(listed.changed.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn one(language: &str, set: &str, file: &str) -> MutantsFile {
         MutantsFile::listed(
             language,
@@ -549,11 +656,97 @@ mod tests {
             merged
         );
         assert_eq!(
+            MutantsFile::unlisted()
+                .merge(MutantsFile::unlisted())
+                .unwrap(),
+            MutantsFile::unlisted()
+        );
+        assert_eq!(
             merged
                 .merge(one("python", "mutmut@4", "src/b.py"))
                 .unwrap_err(),
             "its python mutants are those of mutmut@4, and the other's those of mutmut@3"
         );
+    }
+
+    /// Files measured without their mutants go to their language's
+    /// enumerator; a language without one, or a file of none, lists
+    /// nothing.
+    #[test]
+    fn files_measured_without_their_mutants_are_listed_by_their_language() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-mutant-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.js"), "export const a = (x) => x > 1;\n").unwrap();
+        std::fs::write(root.join("src/a.py"), "a = 1 > 2\n").unwrap();
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn a(x: u32) -> bool {\n    x > 1\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.txt"), "a\n").unwrap();
+        std::fs::write(root.join("src/empty.rs"), "// nothing to mutate\n").unwrap();
+        std::fs::write(root.join("src/a.cob"), "DISPLAY 'A'.\n").unwrap();
+        let recorded = [
+            "src/a.js",
+            "src/a.py",
+            "src/a.rs",
+            "src/a.cob",
+            "src/empty.rs",
+            "src/gone.rs",
+            "notes.txt",
+        ]
+        .into_iter()
+        .map(|file| (file.to_owned(), std::collections::BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+        // The JavaScript and Python files went to their enumerators, which
+        // say neither is the file the run measured (no point of it was
+        // recorded); a file of a language with no enumerator, and the text
+        // file, to none.
+        let listed = list_from_sources(&root, &recorded);
+        // A Rust file that is gone changed; one with no mutant lists none.
+        assert_eq!(listed.changed, ["src/a.js", "src/a.py", "src/gone.rs"]);
+        // cargo-mutants' mutants of the Rust file, under its set.
+        assert_eq!(
+            listed.mutants.files.keys().collect::<Vec<_>>(),
+            ["src/a.rs"]
+        );
+        assert_eq!(listed.mutants.language_of("src/a.rs"), RUST);
+        // A crate in a directory of its own, its points named by its
+        // files' paths there.
+        std::fs::create_dir_all(root.join("web/rust/src")).unwrap();
+        std::fs::write(root.join("web/rust/Cargo.toml"), "[package]\n").unwrap();
+        let source = "pub fn a(x: u32) -> bool {\n    x > 1\n}\n";
+        std::fs::write(root.join("web/rust/src/lib.rs"), source).unwrap();
+        let points = crate::rust_instrumenter::build_rust_manifest("src/lib.rs", source)
+            .unwrap()
+            .points
+            .into_iter()
+            .map(|point| point.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let nested = list_from_sources(
+            &root,
+            &BTreeMap::from([("web/rust/src/lib.rs".to_owned(), points.clone())]),
+        );
+        assert!(nested.changed.is_empty());
+        assert!(!nested.mutants.files["web/rust/src/lib.rs"].is_empty());
+        // Points of another file are a changed file, wherever it is.
+        let mut other = points;
+        other.insert("rs:statement:elsewhere".into());
+        let changed = list_from_sources(
+            &root,
+            &BTreeMap::from([("web/rust/src/lib.rs".to_owned(), other)]),
+        );
+        assert_eq!(changed.changed, ["web/rust/src/lib.rs"]);
+        let nothing = list_from_sources(&root, &BTreeMap::new());
+        assert_eq!(nothing.mutants, MutantsFile::unlisted());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

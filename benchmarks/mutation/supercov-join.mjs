@@ -207,6 +207,15 @@ export function strykerDescriptor(mutator, original, replacement) {
       const m = after.match(/^(#?[A-Za-z_$][\w$]*)/);
       return m ? `.${m[1]}` : undefined;
     }
+    case 'Regex': {
+      // The mutated pattern: a literal's, without its slashes and flags, or
+      // the string `new RegExp` is given.
+      const literal = text.match(/^\/(.*)\/[a-z]*$/s);
+      if (literal) return literal[1];
+      if (text.startsWith('"')) return JSON.parse(text);
+      if (text.startsWith("'")) return JSON.parse(`"${text.slice(1, -1).replace(/\\'/g, "'").replace(/(^|[^\\])((?:\\\\)*)"/g, '$1$2\\"')}"`);
+      return undefined;
+    }
     case 'ArrowFunction':
       return text.replace(/\s+/g, '') === '()=>undefined' ? 'undefined' : undefined;
     case 'BlockStatement':

@@ -76,8 +76,10 @@ const mappings = [
     "runnerEvidence.mjs",
     "runtime.mjs",
     "snapshots.mjs",
+    "strongJestHost.mjs",
     "strongJob.mjs",
     "strongJobs.mjs",
+    "strongMochaHost.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
@@ -98,10 +100,19 @@ const mappings = [
     "supercov_unittest.py",
     "supercov_probes.py",
     "supercov_instrument.py",
+    "supercov_strong.py",
+    "supercov_strong_pytest.py",
   ]),
   // Nested rather than flat: a Go package is a directory and a JVM class is
   // its package path, so the layout is part of what makes these compile.
-  ...runtimeFiles("go", ["supercov/supercov.go", "supercov/values.go"]),
+  ...runtimeFiles("go", [
+    "supercov/supercov.go",
+    "supercov/values.go",
+    "supercov/strong.go",
+    "supercov/mutants.go",
+    "mutants/main.go",
+    "mutants/go.mod",
+  ]),
   ...runtimeFiles("jvm", [
     "com/supercorp/supercov/Supercov.java",
     "com/supercorp/supercov/SupercovListener.java",

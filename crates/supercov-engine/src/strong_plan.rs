@@ -313,6 +313,16 @@ fn passed(raw: &RawTestResult) -> bool {
     raw.status.as_deref() == Some("passed") && !raw.flaky
 }
 
+/// A Python test the measured run skipped: it still runs in a strong pass,
+/// as mutmut runs it, since a mutant can turn a skip into a failure (a
+/// subtest skipped before an assertion that fails). Its baseline in the pass
+/// says whether it passes without the mutant.
+fn skipped_python(raw: &RawTestResult) -> bool {
+    raw.status.as_deref() == Some("skipped")
+        && !raw.flaky
+        && crate::python_strong::RUNNERS.contains(&raw.provenance.runner.as_str())
+}
+
 fn exact(raw: &RawTestResult) -> bool {
     raw.attribution == ATTRIBUTION_EXACT || raw.attribution == ATTRIBUTION_BY_TIME
 }
@@ -379,16 +389,20 @@ fn could_infect(
     mutant: &CandidateMutant,
     seen: &Observations,
     whole: &Observations,
+    language: &str,
 ) -> Option<CandidateReason> {
     // A method's body is reached when its function runs, though the
     // statement around the function (the export of the object it is on)
     // ran once, when the module loaded, in whichever test loaded it first.
     // Where this test ran the function and the run ran the statement, the
-    // statement counts as run here: it only ever adds a candidate.
+    // statement counts as run here: it only ever adds a candidate. Only a
+    // JavaScript mutant's statement can hold its function: a Python
+    // mutant's is always inside it (`python_mutants`).
     let widened;
     let seen = match (&mutant.statement, &mutant.function) {
         (Some(statement), Some(function))
-            if seen.hits.contains(function)
+            if language == crate::mutant_list::JAVASCRIPT
+                && seen.hits.contains(function)
                 && !seen.hits.contains(statement)
                 && whole.hits.contains(statement) =>
         {
@@ -516,7 +530,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         if raw.status.as_deref() == Some("unknown") && !raw.flaky {
             // Its evidence alone: the outcome is another record's.
         } else {
-            runnable[index] &= passed(raw);
+            runnable[index] &= passed(raw) || skipped_python(raw);
             stated[index] = true;
         }
         // An attempt has two records under Playwright, the reporter's (its
@@ -682,14 +696,14 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                             // test's, which was taken above.
                             Some(CandidateReason::Unknown)
                         } else {
-                            could_infect(mutant, own, &whole)
+                            could_infect(mutant, own, &whole, &planned.language)
                         };
                         let Some(why) = why else { continue };
                         if planned.server_wide.is_none() {
                             planned.server_wide = server_wide(raw, mutant);
                         }
-                        match role_of(raw) {
-                            "test" => {
+                        match (role_of(raw), &raw.test_file) {
+                            ("test", _) => {
                                 let id = raw.test_id.clone().unwrap_or_else(|| raw.test.clone());
                                 take(test_index[&id], why);
                                 // Module-level code a test ran (a module it
@@ -706,12 +720,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                 }
                             }
                             // A file's module setup: every test of the file.
-                            "setup" if raw.test_file.is_some() => {
-                                if let Some(file) = &raw.test_file {
-                                    whole_files.insert(file.clone());
-                                    for &test in by_file.get(file).into_iter().flatten() {
-                                        take(test, CandidateReason::ModuleLoad);
-                                    }
+                            ("setup", Some(file)) => {
+                                whole_files.insert(file.clone());
+                                for &test in by_file.get(file).into_iter().flatten() {
+                                    take(test, CandidateReason::ModuleLoad);
                                 }
                             }
                             // Work no test was credited with, a module setup
@@ -886,6 +898,13 @@ mod tests {
         failed.status = Some("failed".into());
         let mut flaky = record("c", "test", Some("t/c.test.js"), &[]);
         flaky.flaky = true;
+        // A record of evidence alone says nothing of the outcome, but for a
+        // flaky attempt's.
+        let mut evidence = record("d", "test", None, &[]);
+        evidence.status = Some("unknown".into());
+        let mut flaky_evidence = record("e", "test", None, &[]);
+        flaky_evidence.status = Some("unknown".into());
+        flaky_evidence.flaky = true;
         let raw_results = [
             spanned([10, 20]),
             spanned([15, 40]),
@@ -893,6 +912,8 @@ mod tests {
             failed,
             flaky,
             record("d", "test", None, &[]),
+            evidence,
+            flaky_evidence,
         ];
         let plan = plan(&raw_results, listed(Vec::new(), &[])).unwrap();
         let tests = plan
@@ -915,9 +936,48 @@ mod tests {
                 ("b", Some("t/b.test.js"), false, None, None),
                 ("c", Some("t/c.test.js"), false, None, None),
                 ("d", None, true, None, None),
+                ("e", None, false, None, None),
             ]
         );
         assert!(plan.mutants.is_empty());
+        // A skipped test runs where it is Python's (mutmut runs it), and not
+        // under another runner.
+        let skipped = |id: &str, runner: &str| {
+            let mut raw = record(id, "test", None, &[]);
+            raw.status = Some("skipped".into());
+            raw.provenance.runner = runner.into();
+            raw
+        };
+        // A failed Python test, and a flaky skipped one, do not.
+        let mut failed = skipped("f", "pytest");
+        failed.status = Some("failed".into());
+        let mut flaky = skipped("k", "pytest");
+        flaky.flaky = true;
+        let skips = super::plan(
+            &[
+                skipped("p", "pytest"),
+                skipped("u", "unittest"),
+                skipped("v", "vitest"),
+                failed,
+                flaky,
+            ],
+            listed(Vec::new(), &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            skips
+                .tests
+                .iter()
+                .map(|test| (test.id.as_str(), test.runnable))
+                .collect::<Vec<_>>(),
+            [
+                ("p", true),
+                ("u", true),
+                ("v", false),
+                ("f", false),
+                ("k", false)
+            ]
+        );
     }
 
     /// Each mutant's candidates are the tests whose own evidence, with what
@@ -1176,13 +1236,23 @@ mod tests {
         };
         assert!(!may_reach(&method, &hits(&["s"])));
         assert_eq!(
-            could_infect(&method, &hits(&["s"]), &hits(&["s", "f"])),
+            could_infect(&method, &hits(&["s"]), &hits(&["s", "f"]), "javascript"),
             None
         );
-        assert_eq!(could_infect(&method, &hits(&["f"]), &hits(&["f"])), None);
         assert_eq!(
-            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"])),
+            could_infect(&method, &hits(&["f"]), &hits(&["f"]), "javascript"),
+            None
+        );
+        assert_eq!(
+            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"]), "javascript"),
             Some(CandidateReason::Infected)
+        );
+        // A Python mutant's statement is inside its function: a test that
+        // called the function without running the statement did not reach
+        // it.
+        assert_eq!(
+            could_infect(&method, &hits(&["f"]), &hits(&["s", "f"]), "python"),
+            None
         );
     }
 

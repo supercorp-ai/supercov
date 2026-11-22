@@ -98,6 +98,9 @@ let limitReached = false;
 let limitReported = false;
 // The clock as it was when this file loaded: a test file may fake Date.
 const realNow = Date.now.bind(Date);
+// How often the copy's mutant has been evaluated so far: a failure before its
+// first evaluation is the program's without the mutant, not the mutant's.
+const hitsNow = () => assignment?.mutant ? runtime.mutantHitCount?.() : undefined;
 const report = (record) => {
     if (assignment)
         appendFileSync(assignment.out, `${JSON.stringify(record)}\n`);
@@ -112,7 +115,7 @@ function outsideTests(error) {
         return;
     const timeout = runtime.isMutantTimeout?.(error) ||
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`);
-    report({ outside: true, timeout, message: `${error?.message ?? error}`.slice(0, 300) });
+    report({ outside: true, timeout, message: `${error?.message ?? error}`.slice(0, 300), hits: hitsNow() });
 }
 if (assignment) {
     process.on("uncaughtException", outsideTests);
@@ -178,8 +181,11 @@ afterEach((context) => {
     const timeout = limitNow || errors.some((error) => runtime.isMutantTimeout?.(error) ||
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`) ||
         /Test timed out in \d+ms/.test(`${error?.message}`));
-    report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout, ms: result?.duration });
-    if ((failed || limitNow) && assignment.mutant)
+    report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout, ms: result?.duration, hits: hitsNow() });
+    // A test that fails without the mutant too (its file's baseline says)
+    // decides nothing: the copy goes on past it.
+    const failsWithout = !limitNow && assignment.continueAfter?.includes(`vitest:${context.task.id}`);
+    if ((failed || limitNow) && assignment.mutant && !failsWithout)
         killed = true;
 });
 
@@ -220,7 +226,9 @@ afterAll(async () => {
                 message: `the mutant was evaluated ${evaluations} times in ${LEFT_RUNNING_WINDOW_MS} ms after the tests ended`,
             });
     }
-    report({ done: true, at: realNow() });
+    // A worker process whose channel to Vitest closed (the mutant
+    // disconnected it) cannot tell Vitest its file ended: it did not.
+    report({ done: true, at: realNow(), channelLost: Boolean(process.send) && !process.connected && isMainThread });
     if (assignment.mutant)
         runtime.clearActiveMutant();
 });

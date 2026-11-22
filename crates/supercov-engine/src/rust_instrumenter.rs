@@ -368,15 +368,22 @@ fn constant_bodies(node: &ast::Expr, name: &ast::NameRef) -> impl Iterator<Item 
     })
 }
 
-/// A `const` or `static` item's name and value. A file is instrumented only
-/// where it parses, and there each has a name.
+/// A `const` or `static` item a bare name can refer to: its name and
+/// value. `const _` has no name, and an associated one (in an `impl` or a
+/// `trait`) is reached only through a path. A `static` of a file that parses
+/// is named.
 fn match_constant(item: ra_ap_syntax::SyntaxNode) -> Option<(ast::Name, Option<ast::Expr>)> {
-    const NAMED: &str = "a constant of a file that parses is named";
+    if item
+        .parent()
+        .is_some_and(|parent| parent.kind() == SyntaxKind::ASSOC_ITEM_LIST)
+    {
+        return None;
+    }
     if let Some(constant) = ast::Const::cast(item.clone()) {
-        return Some((constant.name().expect(NAMED), constant.body()));
+        return Some((constant.name()?, constant.body()));
     }
     let item = ast::Static::cast(item)?;
-    Some((item.name().expect(NAMED), item.body()))
+    Some((item.name().expect("a static is named"), item.body()))
 }
 
 /// [`never_empty`], following a constant's name when `constants` is set: a
@@ -476,7 +483,7 @@ fn never_empty_naming(iterable: &ast::Expr, constants: bool) -> bool {
 }
 
 /// Report whether a probe placed at this node could not run correctly.
-fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
+pub(crate) fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
     in_const_context(node) || in_global_allocator(node)
 }
 
@@ -513,6 +520,23 @@ fn push_wrapper(
 
 /// Spaces in place of `bytes`, their line breaks kept so every line stays
 /// where it was.
+/// The scope a returned value's wrapper of `range` needs to go around every
+/// wrapper inside it that starts or ends where it does. A wrapper's pair of
+/// insertions is pushed together, its start then its end; and the returned
+/// value is placed last, so no wrapper placed before it goes around it.
+fn outer_scope(insertions: &[Insertion], range: TextRange) -> usize {
+    let (start, end) = range_offsets(range);
+    insertions
+        .windows(2)
+        .filter(|pair| pair[0].kind == InsertionKind::Start)
+        .filter(|pair| {
+            let (from, to) = (pair[0].offset, pair[1].offset);
+            from >= start && to <= end && (from == start || to == end)
+        })
+        .map(|pair| pair[0].scope_len.saturating_add(1))
+        .fold(1, usize::max)
+}
+
 fn blank(bytes: &mut [u8]) {
     bytes
         .iter_mut()
@@ -719,7 +743,7 @@ impl<'a> SourceLocations<'a> {
     }
 }
 
-fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
+pub(crate) fn stable_id(file: &str, kind: &str, range: TextRange, suffix: &str) -> String {
     let start = usize::from(range.start()).to_string();
     let end = usize::from(range.end()).to_string();
     let encoded = crate::stable_ids::digest(&[file, kind, &start, &end, suffix]);
@@ -1455,6 +1479,21 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
         });
     }
     Err(newest_errors.unwrap_or_default())
+}
+
+/// Whether files are instrumented with weak mutation's value probes
+/// (`rust_value_probes`), for a run measured with `SUPERCOV_MUTANTS=1`.
+static VALUE_PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the value probes on or off for what this process instruments.
+pub fn set_value_probes(on: bool) {
+    VALUE_PROBES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The file as written, parsed with the newest edition it parses under: no
+/// macro is read as code. `None` where no edition parses it.
+pub(crate) fn parse_source(source: &str) -> Option<(SourceFile, Edition)> {
+    parse_any_edition(source).ok()
 }
 
 fn expression_view(source: &str, edition: Edition) -> ExpressionView {
@@ -3209,6 +3248,62 @@ fn numbered_file(
             .and_then(|value| value.as_str())
             .cmp(&right.get("id").and_then(|value| value.as_str()))
     });
+
+    if VALUE_PROBES.load(std::sync::atomic::Ordering::Relaxed) && !test_file {
+        let skip = |node: &ra_ap_syntax::SyntaxNode| {
+            let range = node.text_range();
+            in_test_code(&tests, range)
+                || in_test_code(&compiled_out, range)
+                || cannot_carry_probe(node)
+        };
+        let mut ordinal = |id: &str| hit_ordinal(id);
+        let mut edits =
+            crate::rust_value_probes::place(file, source, runtime_path, &skip, &mut ordinal);
+        // A returned value goes around what is placed inside it, its own
+        // operators' probes among them: placed last, it sees them all.
+        edits.sort_by_key(|edit| {
+            matches!(
+                edit,
+                crate::rust_value_probes::ValueEdit::Wrap { outer: true, .. }
+            )
+        });
+        edits.into_iter().for_each(|edit| match edit {
+            // An operator's probe goes inside every wrapper of its
+            // range, a returned value's around all of them.
+            crate::rust_value_probes::ValueEdit::Wrap {
+                range,
+                prefix,
+                suffix,
+                outer: false,
+            } => push_wrapper(&mut insertions, range, range, usize::MAX, prefix, suffix),
+            crate::rust_value_probes::ValueEdit::Wrap {
+                range,
+                prefix,
+                suffix,
+                outer: true,
+            } => {
+                let scope_len = outer_scope(&insertions, range);
+                let (start, end) = range_offsets(range);
+                insertions.push(Insertion {
+                    offset: start,
+                    kind: InsertionKind::Start,
+                    scope_len,
+                    rank: 0,
+                    text: prefix,
+                });
+                insertions.push(Insertion {
+                    offset: end,
+                    kind: InsertionKind::End,
+                    scope_len,
+                    rank: 0,
+                    text: suffix,
+                });
+            }
+            crate::rust_value_probes::ValueEdit::At { offset, text } => {
+                push_direct(&mut insertions, offset, text);
+            }
+        });
+    }
 
     // Test faults stand in for insertions that overlap and for a transform
     // that no longer parses, which a correct instrumenter never makes.
@@ -5032,7 +5127,8 @@ fn main() {
     /// A loop that cannot be empty -- over a non-empty array literal, or a
     /// range between integer literals that holds a value, through the
     /// adapters that keep every item -- has only its entry to observe; one
-    /// that may be empty keeps both outcomes.
+    /// that may be empty keeps both outcomes. A bare name is a constant of
+    /// the file's own, never `const _` or one in an `impl` or a `trait`.
     #[test]
     fn a_loop_that_cannot_be_empty_records_only_its_entry() {
         for (iterable, never_empty) in [
@@ -5089,7 +5185,7 @@ fn main() {
             ("repeat_n(1, n)", false),
         ] {
             let source = format!(
-                "const KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
+                "const _: () = ();\nstruct S;\nimpl S {{ const COUNT: usize = 0; const KINDS: &'static [&'static str] = &[]; }}\ntrait T {{ const COUNT: usize; const ORDER: [u8; 0] = []; }}\nconst KINDS: &[&str] = &[\"a\", \"b\"];\nstatic ORDER: [u8; 2] = [1, 2];\nstatic EMPTY: [u8; 0] = [];\nconst COUNT: usize = 3;\nconst NO_COUNT: usize = 0;\nconst SUM: usize = 1 + 2;\nconst NONE: &[u8] = &[];\nconst COPY: [u8; 3] = [0; 3];\nconst ALIAS: &[&str] = KINDS;\nconst RANGE: std::ops::Range<usize> = 0..COUNT;\nfn f(values: &[i32], n: usize, text: &str) {{ for _ in {iterable} {{}} }}"
             );
             let transformed =
                 instrument_rust_source("src/lib.rs", &source, "crate::__supercov_runtime_v1")
@@ -5114,6 +5210,38 @@ fn main() {
             // The adapter is given an ordinal for each outcome it may report.
             assert!(transformed.code.contains("::for_loop(("), "{iterable}");
         }
+    }
+
+    /// `bytes` 1.9.0 asserts at compile time with `const _: () = ..;` and
+    /// keeps constants in its impls: a file with both and a loop over a
+    /// range bounded by a constant of its own is instrumented, the bound read
+    /// from that constant, and runs as written.
+    #[test]
+    fn unnamed_and_associated_constants_are_instrumented_and_run_as_written() {
+        let source = "const _: () = assert!(LIMIT > 0);\nconst LIMIT: usize = 3;\nstruct Buffer;\nimpl Buffer {\n    const LIMIT: usize = 0;\n    fn empty() -> usize {\n        Self::LIMIT\n    }\n}\nfn main() {\n    let mut seen = 0;\n    for _ in 0..LIMIT {\n        seen += 1;\n    }\n    println!(\"{seen} {}\", Buffer::empty());\n}\n";
+        let transformed =
+            instrument_rust_source("src/lib.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // `0..LIMIT` is the file's own `LIMIT`, 3, not the impl's 0.
+        let loop_branch = transformed
+            .manifest
+            .branches
+            .iter()
+            .find(|branch| branch.kind == "for-loop")
+            .unwrap();
+        let labels = loop_branch
+            .alternatives
+            .iter()
+            .map(|alternative| alternative.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["entered"]);
+        let original = compile_and_run(source, "original-constants");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-constants",
+        );
+        assert_eq!(String::from_utf8_lossy(&original.stdout), "3 0\n");
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
     }
 
     #[test]

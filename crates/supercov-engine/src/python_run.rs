@@ -59,7 +59,7 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
-fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
+fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 8] {
     [
         (
             "sitecustomize.py",
@@ -85,11 +85,19 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 6] {
             "supercov_instrument.py",
             include_bytes!("../runtime-assets/python/supercov_instrument.py"),
         ),
+        (
+            "supercov_strong.py",
+            include_bytes!("../runtime-assets/python/supercov_strong.py"),
+        ),
+        (
+            "supercov_strong_pytest.py",
+            include_bytes!("../runtime-assets/python/supercov_strong_pytest.py"),
+        ),
     ]
 }
 
 #[track_caller]
-fn write_runtime(directory: &Path) -> Result<(), String> {
+pub(crate) fn write_runtime(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     // The runtime has its files.
     embedded_runtime_files()
@@ -330,6 +338,38 @@ fn archive_python_run(
     })
 }
 
+/// Every planned file's mutants with their value probes, which go into the
+/// file's plan: the list a run measured with `SUPERCOV_MUTANTS=1` archives.
+fn list_probed_mutants(
+    root: &Path,
+    plan: &mut crate::python_instrumenter::PythonProbePlan,
+) -> crate::mutant_list::MutantsFile {
+    let files = plan.files.keys().cloned().collect::<Vec<_>>();
+    let probed = crate::threads::parallel_map(&files, |file| {
+        let source = std::fs::read_to_string(root.join(file)).ok()?;
+        crate::python_mutants::probed(file, &source).ok()
+    });
+    let mut listed = BTreeMap::new();
+    // A file that cannot be read or parsed lists no mutants and gets no
+    // probes; its own coverage probes report what is wrong with it.
+    let read = plan
+        .files
+        .iter_mut()
+        .zip(probed)
+        .filter_map(|((file, file_plan), probed)| probed.map(|probed| (file, file_plan, probed)));
+    for (file, file_plan, (mutants, probes)) in read {
+        file_plan.mutant_probes = probes;
+        if !mutants.is_empty() {
+            listed.insert(file.clone(), mutants);
+        }
+    }
+    crate::mutant_list::MutantsFile::listed(
+        crate::python_mutants::PYTHON,
+        crate::python_mutants::MUTANT_SET,
+        listed,
+    )
+}
+
 pub fn run_direct_python(
     request: &DirectPythonRunRequest,
     diagnostics: &mut dyn Write,
@@ -396,10 +436,16 @@ fn run_direct_python_in(
         let plan_path = python_directory.join("plan.json");
         write_runtime(&runtime_directory)?;
         fs::create_dir_all(&evidence_directory).map_err(|error| error.to_string())?;
-        let plan = crate::python_instrumenter::PythonProbePlan {
+        let mut plan = crate::python_instrumenter::PythonProbePlan {
             assertion_sites: assertion_sites(&source_inputs.files),
             ..project.plan.clone()
         };
+        // With `SUPERCOV_MUTANTS=1` the run lists its mutants as it measures,
+        // and places the value probes that decide their infection.
+        let mutants = ambient
+            .get("SUPERCOV_MUTANTS")
+            .is_some_and(|value| matches!(value.trim(), "1" | "true"))
+            .then(|| list_probed_mutants(&root, &mut plan));
         fs::write(
             &plan_path,
             serde_json::to_vec(&plan).expect("plain data serializes"),
@@ -440,16 +486,8 @@ fn run_direct_python_in(
                 },
             },
         };
-        let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
-        let execution = execute_plan(&plan, options, diagnostics, |_, _| Ok(()))
-            .map_err(|error| error.to_string())?;
+        let execution = run_supervised(&plan, diagnostics, "no run was published")?;
         let test_command_ms = elapsed_ms(test_started);
-        if let Some(signal) = execution.interrupted_signal {
-            return Err(format!(
-                "the test command was interrupted by {}; no run was published",
-                signal.name()
-            ));
-        }
 
         let publication_started = Instant::now();
         let verbose = ambient
@@ -494,6 +532,7 @@ fn run_direct_python_in(
         };
         validate_frontend_report_request(&run.declaration, &run.request)
             .map_err(|error| error.to_string())?;
+        run.mutants = mutants;
         let joined_ms = elapsed_ms(publication_started);
         let archive_path = work_directory.join("evidence.raw.gz");
         run.request.integrity = serde_json::to_value(&integrity).ok();
@@ -860,6 +899,26 @@ impl PythonServer {
 
 fn metadata_id_hint(run_id: &str) -> String {
     format!("{run_id}-python")
+}
+
+/// Runs a Python command's plan under supervision: its result, or why it
+/// has none. A command a signal interrupted is an error that says so, and
+/// `then`, what that left undone.
+pub(crate) fn run_supervised(
+    plan: &ExecutionPlan,
+    diagnostics: &mut dyn std::io::Write,
+    then: &str,
+) -> Result<crate::orchestration::ExecutionResult, String> {
+    let options = SupervisionOptions::from_environment().map_err(|error| error.to_string())?;
+    let execution = execute_plan(plan, options, diagnostics, |_, _| Ok(()))
+        .map_err(|error| error.to_string())?;
+    if let Some(signal) = execution.interrupted_signal {
+        return Err(format!(
+            "the test command was interrupted by {}; {then}",
+            signal.name()
+        ));
+    }
+    Ok(execution)
 }
 
 #[cfg(test)]
@@ -1278,5 +1337,42 @@ mod tests {
             (false, false)
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// The files a run lists its mutants from: each planned file's, with
+    /// its probes in its plan; one that cannot be read or parsed has none.
+    #[test]
+    fn a_run_lists_each_readable_planned_file_s_mutants() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-probed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.py"), "def f(a, b):\n    return a < b\n").unwrap();
+        std::fs::write(root.join("b.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("c.py"), "def (:\n").unwrap();
+        let mut plan = crate::python_instrumenter::PythonProbePlan {
+            version: 1,
+            root: root.display().to_string(),
+            files: ["a.py", "b.py", "c.py", "gone.py"]
+                .into_iter()
+                .map(|file| (file.to_owned(), Default::default()))
+                .collect(),
+            assertion_sites: BTreeMap::new(),
+        };
+        let listed = list_probed_mutants(&root, &mut plan);
+        assert_eq!(listed.files.keys().collect::<Vec<_>>(), ["a.py"]);
+        assert!(!plan.files["a.py"].mutant_probes.is_empty());
+        assert!(plan.files["c.py"].mutant_probes.is_empty());
+        let mut empty = crate::python_instrumenter::PythonProbePlan {
+            files: BTreeMap::new(),
+            ..plan
+        };
+        assert!(list_probed_mutants(&root, &mut empty).files.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

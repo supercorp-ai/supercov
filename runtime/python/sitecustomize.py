@@ -13,7 +13,12 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 try:
-    if os.environ.get("SUPERCOV_PYTHON_PLAN"):
+    if os.environ.get("SUPERCOV_PYTHON_SCHEMATA"):
+        # A strong pass: mutants behind switches, and no coverage.
+        import supercov_strong
+
+        supercov_strong.install()
+    elif os.environ.get("SUPERCOV_PYTHON_PLAN"):
         import supercov_runtime
 
         supercov_runtime.install()

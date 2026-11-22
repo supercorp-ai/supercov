@@ -1,6 +1,6 @@
 # Mutation benchmark 2026-11-21
 
-CI runs: 4767710917481845, 6327964608487668 (the Supercov cold rows, binary key `0f34df1d56509c31`, the strong pass in stages); every other row, the ground truth included, is the 2026-11-20 run, whose per-job results are in `../2026-11-20/jobs`.
+The Supercov cold rows are from the binary of key `0f34df1d56509c31` (the strong pass in stages); every other row, the ground truth included, is the 2026-11-20 run, whose per-job results are in `../2026-11-20/jobs`.
 
 StrykerJS 10.1.1, mizchi/mutator 0.5.0, Node 24. Statuses: K Killed, T Timeout, S Survived, NC NoCoverage, RE RuntimeError, CE CompileError, I Ignored, P Pending. Score = (K+T) / (K+T+S+NC). Sharded runs: wall and CPU seconds are summed over the shards.
 

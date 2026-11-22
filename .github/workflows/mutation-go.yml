@@ -1,0 +1,107 @@
+name: Go mutation validation
+
+# Gremlins 0.6.0, with every test per mutant, against `supercov mutants` on
+# public Go modules, each tool in a job of its own on the same runner type,
+# then every mutant's verdicts joined, each disagreement applied by hand
+# and the suite run as written. See docs/design/go-mutation.md.
+
+on:
+  push:
+    branches: [release/mutation-go]
+    paths:
+      - .github/workflows/mutation-go.yml
+      - benchmarks/mutation-go/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p supercov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov-bin
+          path: target/release/supercov
+
+  run:
+    needs: build
+    name: ${{ matrix.project }} ${{ matrix.tool }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [go-humanize, btree, golang-lru, uuid, cast]
+        tool: [gremlins, supercov, probes]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/download-artifact@v4
+        if: matrix.tool != 'gremlins'
+        with:
+          name: supercov-bin
+          path: ${{ runner.temp }}/bin
+      - name: Module
+        run: bash benchmarks/mutation-go/corpus.sh clone ${{ matrix.project }} "$RUNNER_TEMP/module"
+      - name: Run
+        run: bash benchmarks/mutation-go/corpus.sh ${{ matrix.tool }} "$RUNNER_TEMP/module" "$RUNNER_TEMP/out" "$RUNNER_TEMP/bin/supercov"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ matrix.project }}-${{ matrix.tool }}
+          path: ${{ runner.temp }}/out
+
+  compare:
+    needs: run
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/results
+      - name: Join
+        run: |
+          for project in go-humanize btree golang-lru uuid cast; do
+            bash benchmarks/mutation-go/corpus.sh clone $project "$RUNNER_TEMP/m/$project"
+            mkdir -p "$RUNNER_TEMP/m/$project/.supercov"
+            cp -R "$RUNNER_TEMP/results/$project-supercov/runs" "$RUNNER_TEMP/m/$project/.supercov/" || true
+            echo "== $project"
+            cat "$RUNNER_TEMP/results/$project-gremlins/time.txt" "$RUNNER_TEMP/results/$project-supercov/time.txt" || true
+            node benchmarks/mutation-go/gremlins-compare.mjs "$RUNNER_TEMP/m/$project" "$RUNNER_TEMP/results/$project-gremlins/report.json" | tee "$RUNNER_TEMP/compare-$project.txt" || true
+            node benchmarks/mutation-go/gremlins-compare.mjs "$RUNNER_TEMP/m/$project" "$RUNNER_TEMP/results/$project-gremlins/report.json" --json > "$RUNNER_TEMP/compare-$project.json" || true
+            node benchmarks/mutation-go/by-hand.mjs "$RUNNER_TEMP/m/$project" "$RUNNER_TEMP/compare-$project.json" 10 | tee "$RUNNER_TEMP/compare-$project-by-hand.jsonl" || true
+          done
+      - name: Flakes of the suites as written, four at a time
+        run: |
+          for project in go-humanize btree golang-lru uuid cast; do
+            for round in $(seq 1 8); do
+              for worker in 1 2 3 4; do
+                (cd "$RUNNER_TEMP/m/$project" && go test -count=1 ./... 2>&1 | grep -E -- "--- FAIL" ) &
+              done
+              wait
+            done > "$RUNNER_TEMP/compare-$project-flakes.txt" || true
+            echo "$project: $(sort "$RUNNER_TEMP/compare-$project-flakes.txt" | uniq -c | sed 's/ (.*//' | tr '\n' ';') of 32 runs"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comparison
+          path: ${{ runner.temp }}/compare-*

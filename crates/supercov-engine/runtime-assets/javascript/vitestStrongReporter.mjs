@@ -39,6 +39,9 @@ const CANCEL_FORCE_AFTER_MS = 3_000;
 const CANCEL_GRACE_MS = 15_000;
 // The pass summary keeps this many stages' figures.
 const PROFILED_STAGES = 50;
+// How often the continuous pass looks at its copies (a free slot waits on
+// their ends).
+const CONTINUOUS_LOOK_MS = 50;
 // How much each of a mutant's batches of later files grows over the one before.
 const BATCH_GROWTH = Math.max(1, Number(process.env["SUPERCOV_STRONG_BATCH_GROWTH"]) || 4);
 
@@ -134,6 +137,7 @@ function readOutcome(out) {
         else if (record.done) {
             outcome.done = true;
             outcome.doneAt = record.at;
+            outcome.channelLost = Boolean(record.channelLost);
         }
         else if (record.test)
             outcome.tests.push(record);
@@ -142,6 +146,9 @@ function readOutcome(out) {
     }
     return outcome;
 }
+
+// What a write to a worker process that has ended fails with.
+const CLOSED_CHANNEL = new Set(["ERR_IPC_CHANNEL_CLOSED", "EPIPE", "ERR_IPC_DISCONNECTED"]);
 
 // Whether a process is still running (signal 0 sends nothing).
 function alive(pid) {
@@ -172,6 +179,11 @@ let askStats = async () => undefined;
 // and whether any copy got its assignment this way.
 let claimRun;
 let mainClaims = false;
+// The continuous pass learns each test file's project and environment from
+// Vitest's "start" to its worker.
+let observeRun;
+// Whether Supercov's spawner forks Vitest's workers.
+let spawnerInstalled = false;
 
 // Vitest's workers forked by a small process of their own instead of
 // Vitest's: forking copies the parent's memory map, and Vitest's process
@@ -186,6 +198,7 @@ let mainClaims = false;
 function forkThroughSpawner(ahead) {
     if (process.env["SUPERCOV_STRONG_DIRECT_FORK"] === "1")
         return;
+    spawnerInstalled = true;
     const original = childProcess.fork;
     const standIns = new Map();
     // One spawner: every message to and from a worker goes through it, and
@@ -283,7 +296,9 @@ function forkThroughSpawner(ahead) {
                 this.emit("spawn");
             }
             else if (record.error) {
-                this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
+                // A write to a worker that is ending: its exit says the rest.
+                if (!CLOSED_CHANNEL.has(record.error.code))
+                    this.emit("error", Object.assign(new Error(record.error.message), { code: record.error.code }));
             }
             else if (record.exit) {
                 this.exited(...record.exit);
@@ -305,12 +320,21 @@ function forkThroughSpawner(ahead) {
                         this.relay(run);
                     return;
                 }
+                if (message?.__vitest_worker_response__ && message.type === "testfileFinished")
+                    this.between = true;
                 this.emit("message", message);
             }
         }
         exited(code, signal) {
             if (this.ended)
                 return;
+            // Between its file's end and Vitest's "stop" (a worker the pass
+            // stopped once its mutant was decided), Vitest has nothing that
+            // takes a worker's exit and fails: the exit waits for the "stop".
+            if (this.between && !this.stopping) {
+                this.exitAfterStop = [code, signal];
+                return;
+            }
             this.ended = true;
             [this.exitCode, this.signalCode] = [code, signal];
             this.connected = false;
@@ -326,11 +350,46 @@ function forkThroughSpawner(ahead) {
         relay(message) {
             this.spawner.process?.send({ id: this.id, send: true, message });
         }
+        // Vitest's "run", once the stage said what this copy takes: nothing
+        // (it ends here, with no process), or its assignment, and in the
+        // continuous pass possibly another test file than the slot's.
+        run(message, claimed) {
+            if (this.ended || this.nothingToRun)
+                return;
+            if (claimed?.nothingToRun) {
+                this.nothingToRun = true;
+                process.nextTick(() => this.emit("message", response("testfileFinished")));
+                return;
+            }
+            if (claimed) {
+                const provided = message.context.providedContext ?? {};
+                const [file] = message.context.files;
+                const files = claimed.filepath
+                    ? [{ filepath: claimed.filepath, fileTags: file.fileTags }]
+                    : message.context.files;
+                message = {
+                    ...message,
+                    context: {
+                        ...message.context,
+                        files,
+                        providedContext: { ...provided, supercovStrong: { ...provided.supercovStrong, claim: claimed.index } },
+                    },
+                };
+            }
+            this.attach();
+            this.relay(this.start);
+            this.pendingRun = message;
+        }
         send(message, ...rest) {
             const callback = rest.find((value) => typeof value === "function");
+            // A worker that ended, or is ending: its exit says the rest, and
+            // an error here would only tell Vitest the channel closed.
             if (!this.connected || !this.spawner.process) {
-                const error = Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" });
-                process.nextTick(() => callback ? callback(error) : this.emit("error", error));
+                // Vitest waits for a stopped worker's answer to its "stop".
+                if (message?.__vitest_worker_request__ && message.type === "stop")
+                    process.nextTick(() => this.emit("message", response("stopped")));
+                if (callback)
+                    process.nextTick(callback, Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" }));
                 return false;
             }
             if (callback)
@@ -344,9 +403,26 @@ function forkThroughSpawner(ahead) {
                 this.spawner.process.send({ environment, modulePath: this.modulePath });
             }
             if (this.attached) {
+                if (request === "stop") {
+                    this.stopping = true;
+                    if (this.exitAfterStop) {
+                        const [code, signal] = this.exitAfterStop;
+                        process.nextTick(() => {
+                            this.emit("message", response("stopped"));
+                            this.exited(code, signal);
+                        });
+                        return true;
+                    }
+                }
+                else if (request === "run" || request === "collect")
+                    this.between = false;
                 this.relay(message);
                 return true;
             }
+            // Stopped while it waited for work (a cancelled run): it ends
+            // with no process.
+            if (this.waitingRun && request === "stop")
+                this.nothingToRun = true;
             if (this.nothingToRun) {
                 if (request === "stop")
                     process.nextTick(() => this.emit("message", response("stopped")));
@@ -359,27 +435,24 @@ function forkThroughSpawner(ahead) {
             }
             const files = request === "run" ? message.context?.files : undefined;
             if (this.start && files?.length === 1) {
-                const claimed = claimRun?.(files[0].filepath ?? files[0]);
-                if (claimed?.nothingToRun) {
-                    this.nothingToRun = true;
-                    process.nextTick(() => this.emit("message", response("testfileFinished")));
-                    return true;
+                const filepath = files[0].filepath ?? files[0];
+                observeRun?.(filepath, this.start);
+                const claimed = claimRun?.(filepath, this.start, () => !this.ended && !this.nothingToRun);
+                if (typeof claimed?.then === "function") {
+                    this.waitingRun = true;
+                    claimed.then((value) => {
+                        this.waitingRun = false;
+                        this.run(message, value);
+                    });
                 }
-                if (claimed) {
-                    const provided = message.context.providedContext ?? {};
-                    message = {
-                        ...message,
-                        context: {
-                            ...message.context,
-                            providedContext: { ...provided, supercovStrong: { ...provided.supercovStrong, claim: claimed.index } },
-                        },
-                    };
-                }
-                this.attach();
-                this.relay(this.start);
-                this.pendingRun = message;
+                else
+                    this.run(message, claimed);
                 return true;
             }
+            // Vitest's calls to a worker (its cancel) before the worker has a
+            // process: nothing to tell.
+            if (!request)
+                return true;
             // Anything else: the process now, and what Vitest sent it so far.
             this.attach();
             if (this.start)
@@ -388,6 +461,15 @@ function forkThroughSpawner(ahead) {
             return true;
         }
         kill(signal = "SIGTERM") {
+            // Its exit was held for Vitest's "stop", which a forced stop (a
+            // cancelled run) skips: the exit comes now.
+            if (this.exitAfterStop && !this.ended) {
+                const [code, held] = this.exitAfterStop;
+                this.exitAfterStop = undefined;
+                this.stopping = true;
+                process.nextTick(() => this.exited(code, held));
+                return true;
+            }
             if (this.exitCode !== null || this.signalCode !== null || this.ended)
                 return false;
             this.killed = true;
@@ -619,6 +701,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
     }
     const placed = (mutant) => {
+        // A Rust mutant (Rust compiled to wasm) by its index, as the pass's build placed it.
+        if (mutant.language === "rust")
+            return { index: mutant.index };
         const found = indexes.get(mutant.id);
         if (!found)
             return { error: "the copy lists no such mutant: the source changed since the run" };
@@ -647,7 +732,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             if (!byFile.has(test.file))
                 byFile.set(test.file, { file: test.file, tests: [], cost: 0, whole: false });
             const group = byFile.get(test.file);
-            group.tests.push(test.id);
+            // A Rust wasm run names a test by its file too (`<file>::vitest:<id>`).
+            group.tests.push(test.id.startsWith(`${test.file}::`) ? test.id.slice(test.file.length + 2) : test.id);
             group.cost += test.durationMs ?? 1_000;
         }
         for (const file of mutant.wholeFiles ?? []) {
@@ -678,7 +764,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
     let running;
     // Where the pass's time goes: each stage's wall time against the copies'
     // own (claim to end) and when its last copy started.
-    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
+    const profile = { stages: [], spawnedWorkers: 0, wallMs: 0, copies: 0, mutantCopies: 0, checkCopies: 0, skippedCopies: 0, killedCopies: 0, settledCopies: 0, baselineCopies: 0, besideCopies: 0, unevaluatedReruns: 0, filesByStatus: {}, hungCopies: 0, deferredCopies: 0, cancelledStages: 0, testsRun: 0, copyMs: 0, startMs: 0 };
     // Runs one stage. `early(at, outcome)` is offered each copy's outcome as
     // soon as the copy ends, and says whether it took it; a stage's copies
     // are otherwise judged when its run has ended. `limitOf(assignment)` is
@@ -1280,6 +1366,11 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             else
                 kill({ unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
         }
+        else {
+            const short = ranNone(claim, outcome, { order: baselineOrder.get(group.file) }, group.file);
+            if (short)
+                finish(job, { status: "error", reason: short });
+        }
     };
     // What a confirmation's copy says: the tests that fail without the
     // mutant, and whether the file finished.
@@ -1311,6 +1402,618 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             return undefined;
         return (baselineMs * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2;
     };
+    // The continuous pass (where Supercov's spawner forks Vitest's workers,
+    // Vitest 4 and later, files isolated): no stages. Each file's baselines
+    // run first, once per shape a mutant needs (its candidates' union, or
+    // the file whole), in a run of their own. Then one Vitest run lists more
+    // worker slots than the pass can use; a slot takes its work only when
+    // Vitest tells its worker the test file (the stand-in waits for it), and
+    // the work it takes is whatever is ready: a baseline a mutant now needs,
+    // a confirmation, or the next file of a mutant whose copy before has
+    // ended with every test passing, the mutant with the most work left
+    // first. The worker is then told to run that work's test file, in place
+    // of the slot's (a file of the same project and environment). A
+    // mutant's files run one after another, likeliest killer first, and its
+    // chain stops at its first kill: parallelism comes from many mutants at
+    // once. When nothing is left, the run is cancelled.
+    // A copy that ended with no test failing proves the mutant survives its
+    // file only where it ran every test it was to run: one that ran fewer
+    // (its tests' ids matched none of the file's, say) says nothing, and its
+    // mutant is an error, never a survivor. `baselineOrder` is what the file
+    // ran whole, for a copy of the whole file.
+    function ranNone(claim, outcome, baselineEntry, file) {
+        const ran = new Set(outcome.tests.map((test) => test.test));
+        const expected = claim.wholeFile ? baselineEntry?.order ?? [] : claim.tests;
+        const missing = expected.filter((id) => !ran.has(id));
+        if (!missing.length && (ran.size || !claim.wholeFile))
+            return undefined;
+        if (!ran.size)
+            return `its copy of ${file} ran none of the tests it was to run`;
+        return `its copy of ${file} ran ${expected.length - missing.length} of the ${expected.length} tests it was to run`;
+    }
+    async function runContinuous() {
+        // Each file's baselines: `union` (its mutants' candidates together)
+        // and `whole`, as mutants need them.
+        const base = new Map();
+        const baseOf = (file) => {
+            if (!base.has(file))
+                base.set(file, { union: { tests: new Set(), state: "unneeded" }, whole: { state: "unneeded" } });
+            return base.get(file);
+        };
+        const need = (file, shape) => {
+            const entry = baseOf(file)[shape];
+            if (entry.state === "unneeded")
+                entry.state = "waiting";
+        };
+        // A candidate that fails beside only its file's other candidates leans
+        // on a test before it: the file's copies run it whole from then on.
+        const forceWhole = new Set();
+        // A file's whole baseline runs before the copies of the whole file.
+        // (Run only once such a copy failed, it made tRPC's pass a third
+        // slower: a whole file's tests that fail without a mutant then cost a
+        // copy, a baseline and the copy again, one after another.)
+        for (const job of pending) {
+            for (const group of job.files) {
+                if (group.whole)
+                    need(group.file, "whole");
+                else {
+                    need(group.file, "union");
+                    group.tests.forEach((id) => baseOf(group.file).union.tests.add(id));
+                }
+            }
+        }
+        const shapeOf = (group) => group.whole || forceWhole.has(group.file) ? "whole" : "union";
+        const baselineReady = (group) => baseOf(group.file)[shapeOf(group)].state === "known";
+        const unusable = (group) => {
+            const entry = baseOf(group.file)[shapeOf(group)];
+            return entry.state === "known" && !entry.done;
+        };
+        const recordShape = (file, shape, outcome) => {
+            const entry = baseOf(file)[shape];
+            if (!outcome.claimed && ++entry.tries < 3) {
+                entry.state = "waiting";
+                return;
+            }
+            if (shape === "union" && (!outcome.done || outcome.tests.some((test) => test.failed))) {
+                // Recorded, and the file's copies run whole from now on.
+                entry.state = "known";
+                entry.done = false;
+                forceWhole.add(file);
+                need(file, "whole");
+                return;
+            }
+            entry.state = "known";
+            entry.done = outcome.done;
+            entry.order = outcome.tests.map((test) => test.test);
+            entry.failed = new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test));
+            entry.outside = outcome.outside.length > 0;
+            if (outcome.done) {
+                entry.copyMs = outcome.doneAt - outcome.claimedAt;
+                let testsMs = 0;
+                for (const test of outcome.tests) {
+                    baselineTestMs.set(test.test, test.ms ?? 0);
+                    testsMs += test.ms ?? 0;
+                }
+                if (shape === "union" || !fileOverheadMs.has(file))
+                    fileOverheadMs.set(file, Math.max(0, entry.copyMs - testsMs));
+                if (shape === "union" || !baselineCopyMs.has(file))
+                    baselineCopyMs.set(file, entry.copyMs);
+            }
+        };
+        const baselineItem = (file, shape) => {
+            const entry = baseOf(file)[shape];
+            entry.state = "running";
+            entry.tries ??= 0;
+            const ids = shape === "union" ? [...entry.tests] : testsOf.get(file) ?? [];
+            const estimate = ids.reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
+            return { baseline: { file, shape }, file, estimate, rank: -1, claim: { mutant: null, tests: shape === "union" ? ids : [], wholeFile: shape === "whole", testTimeout: BASELINE_TEST_TIMEOUT_MS } };
+        };
+        // A file's project and environment, learned from the "start" Vitest
+        // sends its worker: work for a file runs only in a slot of the same.
+        const classOf = new Map();
+        const slotOf = new Map();
+        const classKeyOf = (start) => JSON.stringify([start?.context?.config?.name ?? "", start?.context?.environment ?? null, start?.context?.pool ?? ""]);
+        observeRun = (filepath, start) => {
+            const file = toRelative(root, String(filepath));
+            const key = classKeyOf(start);
+            if (!classOf.has(file))
+                classOf.set(file, key);
+            if (!slotOf.has(key))
+                slotOf.set(key, file);
+        };
+
+        // The baselines run in the same run as the mutants, first: each in a
+        // slot of its own test file at the head of the run (Vitest's "start"
+        // for it says the file's project and environment), and a mutant's
+        // file runs once the file's baseline is known.
+        // The run.
+        const directory = `${stagesDirectory}/${stageNumber++}`;
+        mkdirSync(directory, { recursive: true });
+        provide(vitest, { root, stage: directory });
+        const fileKeyOf = new Map();
+        const nextIndex = new Map();
+        // Every mutant's files, in the order it would take them; the most
+        // work left first (long chains do not end the pass).
+        // A copy of the whole file costs what its tests took in the measured
+        // run (its whole baseline may never run).
+        const estimateC = (group) => shapeOf(group) === "whole"
+            ? overheadOf(group.file) + (testsOf.get(group.file) ?? []).reduce((sum, id) => sum + testMsOf(id), 0)
+            : estimateOf(group);
+        const scoreC = (group) => ((fileKills.get(group.file) ?? 0) + 1) / ((fileRuns.get(group.file) ?? 0) + 2) / (estimateC(group) + startCost());
+        const remainingOf = (job) => job.chain.reduce((sum, group) => sum + estimateC(group) + startCost(), 0);
+        // A mutant's copies running, and its kills waiting on a confirmation.
+        for (const job of pending) {
+            job.chain = [...job.files];
+            job.open = 0;
+            job.confirmingKills = 0;
+        }
+        const idle = (job) => !job.done && !job.open && !job.confirmingKills;
+        const order = [...pending].sort((a, b) => remainingOf(b) - remainingOf(a));
+        const rankOf = new Map(order.map((job, rank) => [job, rank]));
+        const checks = [];
+        const waiters = [];
+        const runningCopies = new Map();
+        let over = false;
+        let testTimeoutMs = BASELINE_TEST_TIMEOUT_MS;
+        const hookMs = hookTimeoutOf(vitest);
+        // A file whose own slot has not started yet has no known class: only
+        // its own slots run its work.
+        const classOfFile = (file) => classOf.get(file) ?? `file:${file}`;
+        // A mutant's next file: the likeliest killer of those whose baseline
+        // is known (where a baseline is still running, the mutant waits).
+        const nextOf = (job) => {
+            let best;
+            for (const group of job.chain) {
+                if (!baselineReady(group) || unusable(group))
+                    continue;
+                if (!best || scoreC(group) > scoreC(best))
+                    best = group;
+            }
+            return best;
+        };
+        const finishC = (job, verdict) => {
+            if (job.done)
+                return;
+            // How many files each verdict took, for the pass summary.
+            const counts = (profile.filesByStatus[verdict.status] ??= { mutants: 0, files: 0 });
+            counts.mutants += 1;
+            counts.files += job.copies ?? 0;
+            finish(job, verdict);
+        };
+        // A mutant with nothing left to run is decided.
+        const conclude = (job) => {
+            if (!idle(job))
+                return;
+            job.chain = job.chain.filter((group) => {
+                if (!unusable(group))
+                    return true;
+                job.unrun = group.file;
+                return false;
+            });
+            if (job.chain.length)
+                return;
+            if (job.unrun)
+                finishC(job, { status: "error", reason: `${job.unrun} does not finish without a mutant, so it could not test this one` });
+            else
+                finishC(job, { status: "survived" });
+        };
+        const claimOf = (job, group) => {
+            const whole = shapeOf(group) === "whole";
+            const failedBefore = baseOf(group.file)[shapeOf(group)].failed ?? new Set();
+            const chosen = whole ? [] : group.tests.filter((id) => !failedBefore.has(id));
+            const timed = whole ? testsOf.get(group.file) ?? [] : chosen;
+            const budget = Math.max(...timed.map((id) => Math.max(durationOf.get(id) ?? 1_000, baselineTestMs.get(id) ?? 0)), 1_000);
+            const testTimeout = Math.ceil((budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2);
+            // A whole copy goes on past a test that fails without the mutant
+            // too, as its file's whole baseline did.
+            const continueAfter = whole ? [...failedBefore] : undefined;
+            return { mutant: { file: job.mutant.file, index: job.mutant.index }, tests: chosen, wholeFile: whole, continueAfter, unknownBaseline: false, hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000), testTimeout };
+        };
+        // The work a slot of class `cls` takes now, if any.
+        const take = (cls, slotFile) => {
+            const own = base.get(slotFile);
+            for (const shape of ["union", "whole"]) {
+                if (own?.[shape].state === "waiting")
+                    return baselineItem(slotFile, shape);
+            }
+            for (const [file, entry] of base) {
+                for (const shape of ["union", "whole"]) {
+                    if (entry[shape].state === "waiting" && classOf.get(file) === cls)
+                        return baselineItem(file, shape);
+                }
+            }
+            for (const check of checks) {
+                if (!check.result && !check.running && classOfFile(check.file) === cls) {
+                    check.running = true;
+                    const budget = Math.max(...check.claim.tests.map((id) => durationOf.get(id) ?? 1_000), 1_000);
+                    return { check, file: check.file, claim: { ...check.claim, testTimeout: Math.ceil(budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) } };
+                }
+            }
+            const start = (job, group) => {
+                job.chain.splice(job.chain.indexOf(group), 1);
+                job.open += 1;
+                job.copies = (job.copies ?? 0) + 1;
+                if (!job.started)
+                    job.started = Date.now();
+                return { job, group, file: group.file, claim: claimOf(job, group) };
+            };
+            for (const job of order) {
+                if (!idle(job))
+                    continue;
+                const group = nextOf(job);
+                if (group && classOfFile(group.file) === cls)
+                    return start(job, group);
+            }
+            // No mutant is waiting for its next file: rather than leave the
+            // worker idle, a mutant whose copy is still running takes its
+            // next file beside it (the most work left first). Its verdict
+            // is the same either way; a copy its mutant's kill makes moot is
+            // stopped.
+            for (const job of order) {
+                if (job.done || job.confirmingKills || !job.open)
+                    continue;
+                const group = nextOf(job);
+                if (group && classOfFile(group.file) === cls) {
+                    profile.besideCopies += 1;
+                    return start(job, group);
+                }
+            }
+            return undefined;
+        };
+        const readyElsewhere = (cls) => {
+            for (const [file, entry] of base)
+                if ((entry.union.state === "waiting" || entry.whole.state === "waiting") && classOfFile(file) !== cls)
+                    return true;
+            if (checks.some((check) => !check.result && !check.running && classOfFile(check.file) !== cls))
+                return true;
+            return order.some((job) => idle(job) && nextOf(job) && classOfFile(nextOf(job).file) !== cls);
+        };
+        const assign = (item) => {
+            const key = fileKeyOf.get(item.file) ?? keyOf(item.file);
+            fileKeyOf.set(item.file, key);
+            const index = nextIndex.get(key) ?? 0;
+            nextIndex.set(key, index + 1);
+            if (!index)
+                mkdirSync(`${directory}/${key}`, { recursive: true });
+            writeFileSync(`${directory}/${key}/${index}.json`, JSON.stringify(item.claim));
+            testTimeoutMs = Math.max(testTimeoutMs, item.claim.testTimeout);
+            if (item.job)
+                profile.mutantCopies += 1;
+            else if (item.check)
+                profile.checkCopies += 1;
+            else
+                profile.baselineCopies += 1;
+            runningCopies.set(`${key}/${index}`, { item, out: `${directory}/${key}/${index}.out`, records: -1, lastReport: Date.now() });
+            return { index, filepath: `${root}/${item.file}` };
+        };
+        const dispatch = () => {
+            for (let at = 0; at < waiters.length;) {
+                const waiter = waiters[at];
+                // A slot Vitest stopped meanwhile takes nothing.
+                if (waiter.waiting && !waiter.waiting()) {
+                    waiters.splice(at, 1);
+                    waiter.resolve({ nothingToRun: true });
+                    continue;
+                }
+                const item = over ? undefined : take(waiter.cls, waiter.slotFile);
+                if (item) {
+                    waiters.splice(at, 1);
+                    waiter.resolve(assign(item));
+                    continue;
+                }
+                // Nothing of its class to run: it lets the slot go where
+                // other work is ready, or nothing runs that could make some.
+                if (over || runningCopies.size === 0 || readyElsewhere(waiter.cls)) {
+                    waiters.splice(at, 1);
+                    waiter.resolve({ nothingToRun: true });
+                    continue;
+                }
+                at += 1;
+            }
+        };
+        claimRun = (filepath, start, waiting) => {
+            if (over)
+                return { nothingToRun: true };
+            return new Promise((resolve) => {
+                waiters.push({ cls: classKeyOf(start), slotFile: toRelative(root, String(filepath)), resolve, waiting });
+                dispatch();
+            });
+        };
+        // What a copy's end says.
+        const kill = (job, group, claim, outcome, evidence, verdict) => {
+            fileKills.set(group.file, (fileKills.get(group.file) ?? 0) + 1);
+            const shape = claim.wholeFile ? "whole" : "union";
+            const entry = baseOf(group.file)[shape];
+            let sure;
+            if (claim.wholeFile)
+                sure = entry.state === "known" && entry.done;
+            else if (evidence.test) {
+                const at = entry.order?.indexOf(evidence.test) ?? -1;
+                sure = at >= 0 && entry.order.slice(0, at).every((id) => claim.tests.includes(id));
+            }
+            else
+                sure = entry.order?.length === claim.tests.length && entry.order.every((id) => claim.tests.includes(id));
+            if (sure) {
+                finishC(job, verdict);
+                return;
+            }
+            // The copy left out tests its file's baseline ran before the
+            // failure: they run again with no mutant, up to the failing one.
+            // A copy of the whole file left out none: its file's whole
+            // baseline, run once for every such kill, says whether the test
+            // fails without the mutant too.
+            const ran = outcome.tests.map((test) => test.test);
+            const chosen = claim.wholeFile ? [] : evidence.test ? ran.slice(0, ran.indexOf(evidence.test) + 1) : claim.tests;
+            const key = confirmationKey(group.file, chosen, claim.wholeFile);
+            let check = checks.find((candidate) => candidate.key === key);
+            if (!check) {
+                check = { key, file: group.file, claim: { mutant: null, tests: chosen, wholeFile: claim.wholeFile }, tries: 0, result: undefined, baseline: claim.wholeFile };
+                checks.push(check);
+                confirmations.set(key, check);
+            }
+            job.confirmingKills += 1;
+            const waiting = { job, group, evidence, verdict, whole: claim.wholeFile };
+            // Confirmed already, for another mutant's kill.
+            if (check.result)
+                settleKill(check.result, waiting);
+            else
+                (check.jobs ??= []).push(waiting);
+        };
+        const judgeC = ({ job, group, claim }, outcome) => {
+            job.open -= 1;
+            if (job.done)
+                return;
+            if (!outcome.claimed) {
+                job.chain.unshift(group);
+                return;
+            }
+            // The file's copies run whole since: this copy says nothing.
+            if (!claim.wholeFile && forceWhole.has(group.file)) {
+                job.chain.unshift(group);
+                return;
+            }
+            job.ran += outcome.tests.length;
+            fileRuns.set(group.file, (fileRuns.get(group.file) ?? 0) + 1);
+            const entry = baseOf(group.file)[claim.wholeFile ? "whole" : "union"];
+            const failed = outcome.tests.find((test) => test.failed && !entry.failed?.has(test.test));
+            const outside = entry.outside ? undefined : outcome.outside[0];
+            // Up to the mutant's first evaluation a copy runs exactly as its
+            // file does without it: a test that failed before then (its
+            // switch never taken in this process) failed for another reason,
+            // such as a test that depends on timing. The copy runs again,
+            // once; a failure that repeats counts (the mutant may have run in
+            // a process the copy started).
+            const unevaluated = (evidence) => evidence?.hits === 0;
+            if (!group.rerunUnevaluated && (unevaluated(failed) || (!failed && unevaluated(outside)))) {
+                group.rerunUnevaluated = true;
+                profile.unevaluatedReruns += 1;
+                job.ran -= outcome.tests.length;
+                job.chain.unshift(group);
+                conclude(job);
+                return;
+            }
+            if (failed)
+                kill(job, group, claim, outcome, { test: failed.test }, { status: failed.timeout ? "timeout" : "killed", killedBy: failed.test });
+            else if (outside)
+                kill(job, group, claim, outcome, { outside: true }, outside.timeout
+                    ? { status: "timeout", reason: "outside any test: the mutant's evaluations passed its limit" }
+                    : { status: "killed", killedBy: group.file, reason: `an error outside any test: ${outside.message}` });
+            else if (outcome.hung)
+                kill(job, group, claim, outcome, { unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
+            else if (!outcome.done)
+                kill(job, group, claim, outcome, { unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
+            else if (ranNone(claim, outcome, entry, group.file))
+                finishC(job, { status: "error", reason: ranNone(claim, outcome, entry, group.file) });
+            else
+                conclude(job);
+        };
+        // A kill once the tests up to it have run with no mutant: it stands
+        // unless they fail that way too, which a test the copy left out
+        // caused; the mutant then runs the file whole.
+        const settleKill = (result, { job, group, evidence, verdict, whole }) => {
+            job.confirmingKills -= 1;
+            if (job.done)
+                return;
+            // The whole file does not finish without the mutant: it cannot
+            // test it.
+            if (whole && !result.done) {
+                job.unrun = group.file;
+                return;
+            }
+            const alsoWithout = evidence.test ? result.failed.has(evidence.test)
+                : evidence.outside ? result.outside
+                    : !result.done;
+            if (!alsoWithout) {
+                finishC(job, verdict);
+                return;
+            }
+            overturned += 1;
+            // A copy of the whole file runs again, past what fails without
+            // the mutant; a copy of some tests runs the file whole, once its
+            // whole baseline is known.
+            if (!whole)
+                need(group.file, "whole");
+            job.chain.unshift(whole ? group : { file: group.file, tests: [], cost: group.cost, whole: true });
+        };
+        const recordCheck = (check, outcome) => {
+            check.running = false;
+            check.tries += 1;
+            if (!outcome.claimed && check.tries < 3)
+                return;
+            check.result = {
+                failed: new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test)),
+                outside: outcome.outside.length > 0,
+                done: outcome.done || !outcome.claimed,
+            };
+            // A run of the whole file with no mutant is its whole baseline.
+            if (check.baseline && outcome.claimed)
+                recordShape(check.file, "whole", outcome);
+            for (const waiting of check.jobs ?? [])
+                settleKill(check.result, waiting);
+            check.jobs = [];
+        };
+        const ended = (entry, outcome) => {
+            const { item } = entry;
+            if (outcome.claimedAt !== undefined) {
+                profile.copies += 1;
+                profile.testsRun += outcome.tests.length;
+                profile.startMs += startOf(outcome);
+                if (outcome.doneAt)
+                    profile.copyMs += outcome.doneAt - outcome.claimedAt;
+                if (outcome.hung)
+                    profile.hungCopies += 1;
+            }
+            if (item.baseline)
+                recordShape(item.baseline.file, item.baseline.shape, outcome);
+            else if (item.check)
+                recordCheck(item.check, outcome);
+            else
+                judgeC(item, outcome);
+            if (item.job)
+                conclude(item.job);
+        };
+        // The copies going, looked at often: a free slot waits on them.
+        const limitFor = (item) => {
+            const entry = item.job ? baseOf(item.file)[item.claim.wholeFile ? "whole" : "union"] : undefined;
+            // A whole copy before its file's whole baseline: the file as the
+            // measured run ran it.
+            const copyMs = entry?.copyMs ?? (item.job && item.claim.wholeFile
+                ? overheadOf(item.file) + (testsOf.get(item.file) ?? []).reduce((sum, id) => sum + testMsOf(id), 0)
+                : undefined);
+            if (!copyMs)
+                return undefined;
+            return (copyMs * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2 + Math.max(item.claim.testTimeout, hookMs);
+        };
+        const look = () => {
+            const now = Date.now();
+            for (const [name, entry] of [...runningCopies]) {
+                let outcome = readOutcome(entry.out);
+                const gone = !outcome.done && outcome.pid && outcome.pid !== process.pid && !alive(outcome.pid);
+                if (gone)
+                    outcome = readOutcome(entry.out);
+                if (outcome.records !== entry.records) {
+                    entry.records = outcome.records;
+                    entry.lastReport = now;
+                }
+                // A copy whose worker lost its channel to Vitest (a mutant that
+                // disconnects it) did not finish its file, whatever it wrote:
+                // Vitest never hears the file end.
+                let end = outcome.done || gone ? outcome : undefined;
+                if (end && outcome.channelLost)
+                    end = { ...outcome, done: false };
+                // Its mutant was decided by another copy meanwhile.
+                if (!end && entry.item.job?.done && outcome.pid && ownWorker(outcome.pid)) {
+                    try {
+                        process.kill(outcome.pid, "SIGKILL");
+                    }
+                    catch {
+                        // It ended meanwhile.
+                    }
+                    end = { ...outcome, done: true, doneAt: now };
+                }
+                // Decided by a failed test (its baseline known): stopped now.
+                if (!end && entry.item.job && outcome.tests.some((test) => test.failed && !baseOf(entry.item.file)[entry.item.claim.wholeFile ? "whole" : "union"].failed?.has(test.test)) && ownWorker(outcome.pid)) {
+                    try {
+                        process.kill(outcome.pid, "SIGKILL");
+                    }
+                    catch {
+                        // It ended meanwhile.
+                    }
+                    end = { ...outcome, done: true, doneAt: now };
+                    profile.settledCopies += 1;
+                }
+                const limit = limitFor(entry.item);
+                if (!end && outcome.claimedAt !== undefined && limit !== undefined && now - outcome.claimedAt > limit && ownWorker(outcome.pid)) {
+                    try {
+                        process.kill(outcome.pid, "SIGKILL");
+                    }
+                    catch {
+                        // It ended meanwhile.
+                    }
+                    end = { ...outcome, hung: true };
+                    profile.killedCopies += 1;
+                }
+                if (end) {
+                    runningCopies.delete(name);
+                    ended(entry, end);
+                }
+            }
+            for (const job of pending)
+                conclude(job);
+            if (!over && pending.every((job) => job.done) && checks.every((check) => check.result) && runningCopies.size === 0)
+                over = true;
+            dispatch();
+        };
+        // Slots: each file's own first (its baseline, the longest first),
+        // then enough for every copy the pass could run, the files in turn.
+        const files = [...base.keys()].filter((file) => specOf.has(file));
+        const firstEstimate = (file) => (testsOf.get(file) ?? []).reduce((sum, id) => sum + (durationOf.get(id) ?? 1_000), 0);
+        files.sort((x, y) => firstEstimate(y) - firstEstimate(x));
+        const bound = pending.reduce((sum, job) => sum + job.files.length * 3 + 4, 0) + files.length * 2 + workers;
+        const slots = files.map((file) => specOf.get(file));
+        for (let at = 0; slots.length < bound && files.length; at++)
+            slots.push(specOf.get(files[at % files.length]));
+        setTestTimeout(vitest, Math.max(testTimeoutMs, ...pending.flatMap((job) => job.files.map((group) => claimOf(job, group).testTimeout))));
+        // A slot a waiting copy gives up uses one, so a run can run out of
+        // slots before the pass is over: another run of the same slots goes
+        // on where it stopped, for as long as runs make progress.
+        for (let runs = 0; !over && slots.length; runs++) {
+            const decidedBefore = pending.filter((job) => job.done).length;
+            const runStarted = Date.now();
+            let settledRun;
+            const ran = runFiles(slots, false).then((result) => {
+                settledRun = { result };
+            }, (error) => {
+                settledRun = { error };
+            });
+            let cancelled = false;
+            while (!settledRun) {
+                await Promise.race([ran, pause(CONTINUOUS_LOOK_MS)]);
+                look();
+                if (over && !cancelled) {
+                    cancelled = true;
+                    dispatch();
+                    try {
+                        vitest.cancelCurrentRun?.("supercov: the strong pass is over")?.catch?.(() => { });
+                    }
+                    catch {
+                        // Nothing to cancel.
+                    }
+                }
+            }
+            look();
+            if (settledRun.result)
+                last = settledRun.result;
+            profile.wallMs += Date.now() - runStarted;
+            profile.continuousRuns = runs + 1;
+            if (!over && runs > 0 && pending.filter((job) => job.done).length === decidedBefore)
+                break;
+        }
+        claimRun = undefined;
+        observeRun = undefined;
+        // Whatever the run left undecided (its slots ran out): an error,
+        // which the next `mutants test` runs again.
+        for (const job of pending) {
+            if (job.done)
+                continue;
+            // What it was waiting for, for the pass summary.
+            if ((profile.left ??= []).length < 20)
+                profile.left.push({
+                    id: job.mutant.id,
+                    open: job.open,
+                    confirming: job.confirmingKills,
+                    chain: job.chain.map((group) => ({ file: group.file, shape: shapeOf(group), baseline: baseOf(group.file)[shapeOf(group)].state, class: classOf.has(group.file) })),
+                    checks: checks.filter((check) => check.jobs?.some((waiting) => waiting.job === job)).map((check) => ({ file: check.file, running: check.running, tries: check.tries })),
+                });
+            finishC(job, { status: "error", reason: "the pass ended before its files ran" });
+        }
+    }
+    const continuous = spawnerInstalled && !oneAtATime && Number(String(vitest.version ?? "0").split(".")[0]) >= 4 &&
+        process.env["SUPERCOV_STRONG_STAGES"] !== "1";
+    if (continuous) {
+        await runContinuous();
+        pending.length = 0;
+    }
     while (pending.length && !stalled) {
         // A file whose baseline did not finish runs no mutant: a mutant it
         // was to test cannot be called a survivor.

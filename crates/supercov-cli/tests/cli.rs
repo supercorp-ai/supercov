@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1221")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1232")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1221"),
+        seen.contains("test fault at fs (javascript_run.rs:1232"),
         "{seen}"
     );
 }
@@ -15988,7 +15988,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.create_dir_all@6",
             "fs.create_dir_all@14",
             "fs.write@2",
-            "fs.write@8",
+            "fs.write@10 => python_run.rs:449",
             "fs.rename@2",
             "fs.rename@9",
             "fs.open@7",
@@ -16006,7 +16006,7 @@ fn a_python_run_whose_own_step_fails_says_so() {
             "fs.read@10",
             "fs.read@6 => source_capture.rs:54",
             "fs.read_dir entry#1 => python_project.rs:125",
-            "fs.read_dir entry#2 => python_evidence.rs:359",
+            "fs.read_dir entry#2 => python_evidence.rs:374",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -16057,7 +16057,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             // a crash.
             "fs.canonicalize#main.rs:2624 => main.rs:2624",
             // The runtime the copy's sources load, read back to inline.
-            "fs.read_to_string#javascript_frontend.rs:2053 => javascript_frontend.rs:2053",
+            "fs.read_to_string#javascript_frontend.rs:2055 => javascript_frontend.rs:2055",
         ],
     );
 }
@@ -16153,11 +16153,11 @@ fn a_rust_run_whose_own_step_fails_says_so() {
             // The copy's own path, resolved to read its module tree.
             "fs.canonicalize#rust_project.rs:320 => rust_project.rs:320",
             "spawn#rust_test_runner.rs:947 => rust_test_runner.rs:947",
-            "spawn#rust_test_runner.rs:1549 => rust_test_runner.rs:1549",
-            "spawn#rust_test_runner.rs:1549@2 => rust_test_runner.rs:1549",
+            "spawn#rust_test_runner.rs:1570 => rust_test_runner.rs:1570",
+            "spawn#rust_test_runner.rs:1570@2 => rust_test_runner.rs:1570",
             "spawn#rust_test_runner.rs:1268 => rust_test_runner.rs:1268",
-            "spawn#child_signal_guard.rs:235 => child_signal_guard.rs:235",
-            "spawn#child_signal_guard.rs:235@2 => child_signal_guard.rs:235",
+            "spawn#child_signal_guard.rs:255 => child_signal_guard.rs:255",
+            "spawn#child_signal_guard.rs:255@2 => child_signal_guard.rs:255",
             "spawn",
             // The store of copies made.
             "fs.create_dir_all#workspace.rs:445 => workspace.rs:445",
@@ -16194,7 +16194,7 @@ fn a_rust_run_whose_own_step_fails_says_so() {
                 "spawn#rust_cargo_configuration.rs:620@3 => rust_cargo_configuration.rs:620",
                 "spawn#rust_owned_nextest.rs:190 => rust_owned_nextest.rs:190",
                 "spawn#rust_owned_nextest.rs:203 => rust_owned_nextest.rs:203",
-                "spawn#child_signal_guard.rs:308 => child_signal_guard.rs:308",
+                "spawn#child_signal_guard.rs:328 => child_signal_guard.rs:328",
                 "__nextest-runner/spawn@1",
                 // An attempt's own start, the listing having passed.
                 "__nextest-runner/spawn#rust_owned_nextest.rs:604",
@@ -16465,13 +16465,13 @@ fn a_python_run_that_cannot_keep_its_work_says_so() {
         "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
     ];
     for entry in [
-        "fs.create_dir_all@6 => python_run.rs:530",
-        "fs.read_dir@6 => python_run.rs:104",
-        "fs.read_dir@7 => python_run.rs:104",
-        "fs.file_type@9 => python_run.rs:107",
-        "fs.create_dir_all@7 => python_run.rs:111",
-        "fs.copy@1 => python_run.rs:114",
-        "fs.read_dir entry#3 => python_run.rs:104",
+        "fs.create_dir_all@6 => python_run.rs:569",
+        "fs.read_dir@6 => python_run.rs:112",
+        "fs.read_dir@7 => python_run.rs:112",
+        "fs.file_type@9 => python_run.rs:115",
+        "fs.create_dir_all@7 => python_run.rs:119",
+        "fs.copy@1 => python_run.rs:122",
+        "fs.read_dir entry#3 => python_run.rs:112",
     ] {
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty("python-keep-work");
@@ -16541,11 +16541,11 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read_dir@9",
             "fs.read_dir@13",
             "fs.create_dir_all@15",
-            "fs.create_dir_all@22",
+            "fs.create_dir_all@24",
             // The project's Go listed again as the run prepares it.
-            "fs.read_dir#go_project.rs:139@2 => go_project.rs:139",
+            "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
-            "fs.write#go_run.rs:513 => go_run.rs:513",
+            "fs.write#go_run.rs:527 => go_run.rs:527",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -17622,17 +17622,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1364",
         "fs.create_dir_all#javascript_run.rs:752",
-        "fs.write#javascript_run.rs:1086",
+        "fs.write#javascript_run.rs:1097",
         "fs.canonicalize#process_supervision.rs:1796",
-        "fs.create_dir_all#javascript_run.rs:1169",
-        "fs.create_dir_all#javascript_run.rs:1359",
+        "fs.create_dir_all#javascript_run.rs:1180",
+        "fs.create_dir_all#javascript_run.rs:1370",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1634",
-        "fs.create_dir_all#javascript_run.rs:1636",
+        "fs.create_dir_all#javascript_run.rs:1648",
+        "fs.create_dir_all#javascript_run.rs:1650",
         "fs.create_dir_all#lifecycle.rs:1055",
-        "fs.create_dir_all#javascript_run.rs:1736",
-        "fs.create_dir_all#javascript_run.rs:1738",
+        "fs.create_dir_all#javascript_run.rs:1750",
+        "fs.create_dir_all#javascript_run.rs:1752",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -17798,19 +17798,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@42", "runtime.d.mts"),
-        ("fs.rename@43", "playwright.mjs"),
-        ("fs.rename@45", "playwright.config.mjs"),
-        ("fs.rename@46", "vitest.config.mjs"),
-        ("fs.rename@49", "vitestCommands.mjs"),
+        ("fs.rename@44", "runtime.d.mts"),
+        ("fs.rename@45", "playwright.mjs"),
+        ("fs.rename@47", "playwright.config.mjs"),
+        ("fs.rename@48", "vitest.config.mjs"),
+        ("fs.rename@51", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@51", "test/cart.test.js"),
-        ("fs.rename@52", "authored-sources.json"),
-        ("fs.rename@53", "statement-exclusions.json"),
-        ("fs.rename@54", "mutants.json"),
-        ("fs.rename@55", "manifest.json"),
-        ("fs.rename@56", "instrumentation-complete"),
-        ("fs.rename@57", "injected fault at fs"),
+        ("fs.rename@53", "test/cart.test.js"),
+        ("fs.rename@54", "authored-sources.json"),
+        ("fs.rename@55", "statement-exclusions.json"),
+        ("fs.rename@56", "mutants.json"),
+        ("fs.rename@57", "manifest.json"),
+        ("fs.rename@58", "instrumentation-complete"),
+        ("fs.rename@59", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18020,14 +18020,13 @@ fn line_and_test_queries_refuse_what_they_cannot_read() {
 #[test]
 fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
     for (fault, place) in [
-        ("fs.create_dir_all#python_run.rs:671", "python_run.rs:671"),
-        ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
+        ("fs.create_dir_all#python_run.rs:710", "python_run.rs:710"),
+        ("fs.create_dir_all#python_run.rs:711", "python_run.rs:711"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
-        ("fs.create_dir_all#go_run.rs:305", "go_run.rs:305"),
-        ("fs.create_dir_all#go_run.rs:309", "go_run.rs:309"),
-        ("fs.create_dir_all#go_run.rs:361", "go_run.rs:361"),
-        ("fs.create_dir_all#go_run.rs:400", "go_run.rs:400"),
+        ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
+        ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
+        ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18055,14 +18054,14 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
         return;
     }
     for (fault, place) in [
-        ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+        ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
         (
             "fs.canonicalize#source_capture.rs:25@2",
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1063", "go_run.rs:1063"),
-        ("fs.create_dir_all#go_run.rs:1073", "go_run.rs:1073"),
+        ("fs.write#go_run.rs:1232", "go_run.rs:1232"),
+        ("fs.create_dir_all#go_run.rs:1242", "go_run.rs:1242"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18130,12 +18129,12 @@ fn a_browser_suite_whose_java_server_cannot_be_prepared_says_so() {
 fn a_cached_frontend_that_cannot_be_read_ends_the_run() {
     for (fault, place) in [
         (
-            "fs.read#javascript_frontend.rs:361",
-            "javascript_frontend.rs:361",
+            "fs.read#javascript_frontend.rs:363",
+            "javascript_frontend.rs:363",
         ),
         (
-            "fs.read#javascript_frontend.rs:373",
-            "javascript_frontend.rs:373",
+            "fs.read#javascript_frontend.rs:375",
+            "javascript_frontend.rs:375",
         ),
         ("fs.symlink_metadata#workspace.rs:1284", "workspace.rs:1284"),
     ] {
@@ -18165,12 +18164,12 @@ fn a_test_file_whose_assertions_cannot_be_read_runs_unattributed() {
         &["--", "node", "--test"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.read_to_string#javascript_frontend.rs:1835@2",
+            "fs.read_to_string#javascript_frontend.rs:1837@2",
         )],
     );
     let stderr = ran.stderr();
     assert_eq!(ran.code(), 0, "{stderr}");
-    assert!(fired_at(&stderr, "javascript_frontend.rs:1835"), "{stderr}");
+    assert!(fired_at(&stderr, "javascript_frontend.rs:1837"), "{stderr}");
     assert!(!stderr.contains("attributed 3"), "{stderr}");
 }
 
@@ -18211,8 +18210,8 @@ fn a_browser_suite_whose_python_server_cannot_read_its_project_says_so() {
             "server/app.py",
         ),
         (
-            "fs.write#python_run.rs:678@1",
-            "python_run.rs:678",
+            "fs.write#python_run.rs:717@1",
+            "python_run.rs:717",
             "plan.json",
         ),
     ] {
@@ -19355,7 +19354,7 @@ fn a_python_run_reads_past_what_it_cannot_parse_and_refuses_roots_naming_nothing
         std::fs::remove_file(project.root.join("linked")).unwrap();
     }
     for (fault, place) in [
-        ("fs.canonicalize#python_run.rs:205", "python_run.rs:205"),
+        ("fs.canonicalize#python_run.rs:213", "python_run.rs:213"),
         ("fs.read_dir#python_project.rs:125", "python_project.rs:125"),
     ] {
         let read = project.supercov_with(&["runs", "latest"], &[("SUPERCOV_TEST_FAULT", fault)]);
@@ -19419,8 +19418,8 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:609", "go_run.rs:609"),
-                ("fs.read_dir#go_project.rs:139", "go_project.rs:139"),
+                ("fs.canonicalize#go_run.rs:746", "go_run.rs:746"),
+                ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
         );
@@ -20311,7 +20310,7 @@ fn tests_affected_that_cannot_read_the_project_is_refused_or_reads_less() {
 fn a_javascript_run_whose_wasm_library_cannot_be_prepared_says_so() {
     for (fault, place) in [
         ("spawn#rust_project.rs:182", "rust_project.rs:182"),
-        ("fs.create_dir_all#rust_wasm.rs:179", "rust_wasm.rs:179"),
+        ("fs.create_dir_all#rust_wasm.rs:185", "rust_wasm.rs:185"),
     ] {
         let project = Project::cart("wasm-library-unprepared");
         project.write(".gitignore", "out/\nnode_modules/\ntarget/\n");
@@ -21352,9 +21351,11 @@ fn mutants_say_how_far_the_tests_got_toward_killing_each() {
         .supercov(&["runs", "latest", "mutants", "--status", "not-infected"])
         .succeeds();
     contains_all(&listed, &["src/cart.js:2:7", "showing 1-1 of 1"]);
-    project
+    // A strong verdict picks the mutants a strong pass gave it: none ran.
+    let killed = project
         .supercov(&["runs", "latest", "mutants", "--status", "killed"])
-        .exits(2);
+        .succeeds();
+    assert!(killed.contains("No mutants match."), "{killed}");
 
     // Only the tests a title picks: the boundary they never cross.
     let narrowed = project
@@ -22047,6 +22048,66 @@ fn assert_cart_verdicts(project: &Project, command: &[&str], runner: &str) {
     }
 }
 
+/// What a strong pass let survive is named in every view, not only counted:
+/// the pass's summary ends with the survivors, the text listing shows each
+/// mutant's strong verdict beside its weak status and `--status survived`
+/// picks the survivors, and the markdown for a pull request lists them under
+/// the mutation score.
+#[cfg(unix)]
+#[test]
+fn surviving_mutants_are_named_in_every_view() {
+    let project = job_runner_project(
+        "strong-survivors-named",
+        "module",
+        &[(
+            "test/cart.test.js",
+            "import assert from \"node:assert/strict\";\nimport { it } from \"node:test\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => assert.equal(shipping(80), 0));\nit(\"charges small orders\", () => assert.equal(shipping(10), 5));\nit(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n",
+        )],
+    );
+    project
+        .supercov_with(&["--", "node", "--test"], &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let pass = project
+        .supercov(&["runs", "latest", "mutants", "test"])
+        .succeeds();
+    // `sum >= 50` to `sum > 50` changes neither 80 nor 10.
+    let survivors = pass.split("Survived:\n").nth(1).unwrap_or_default();
+    assert!(
+        survivors.contains("src/cart.js:2  EqualityOperator  sum >= 50 → sum > 50"),
+        "{pass}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "src/cart.js"])
+        .succeeds();
+    assert!(listed.contains("  Strong       score "), "{listed}");
+    let line = listed
+        .lines()
+        .find(|line| line.contains("sum >= 50 → sum > 50"))
+        .unwrap_or_default();
+    assert!(line.contains("survived"), "{listed}");
+    let killed = listed
+        .lines()
+        .find(|line| line.contains("trim() → name"))
+        .unwrap_or_default();
+    assert!(killed.contains("killed"), "{listed}");
+    let only = project
+        .supercov(&["runs", "latest", "mutants", "--status", "survived"])
+        .succeeds();
+    assert!(only.contains("sum >= 50 → sum > 50"), "{only}");
+    assert!(!only.contains("trim() → name"), "{only}");
+    let markdown = project
+        .supercov(&["runs", "latest", "mutants", "--format", "markdown"])
+        .succeeds();
+    assert!(markdown.contains("mutation score **"), "{markdown}");
+    assert!(
+        markdown
+            .lines()
+            .any(|line| line.contains("sum >= 50 → sum > 50") && line.contains("survived (weak: ")),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("trim() → name"), "{markdown}");
+}
+
 /// `mutants test` under node:test, Mocha, Jest and AVA: each job starts the
 /// run's command for one test file with the mutant on and only its tests. A
 /// node:test file that asserts at its top level, with no test() in it, is a
@@ -22082,6 +22143,8 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&node, &["node", "--test"], "node:test");
+    // A suite of ES modules runs each job in a fresh thread of a resident
+    // Mocha.
     let mocha = job_runner_project(
         "strong-jobs-mocha",
         "module",
@@ -22097,6 +22160,23 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&mocha, &["npx", "mocha", "--check-leaks"], "mocha");
+    // A CommonJS suite runs in resident Mochas, its modules loaded afresh for
+    // each job.
+    let commonjs = job_runner_project(
+        "strong-jobs-mocha-commonjs",
+        "commonjs",
+        &[
+            (
+                "test/cart.test.js",
+                "const assert = require(\"node:assert/strict\");\nconst { shipping, label } = require(\"../src/cart.js\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => assert.equal(shipping(80), 0));\n  it(\"charges small orders\", () => assert.equal(shipping(10), 5));\n  it(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n});\n",
+            ),
+            (
+                "test/count.test.js",
+                "const assert = require(\"node:assert/strict\");\nconst { countdown } = require(\"../src/cart.js\");\nit(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&commonjs, &["npx", "mocha", "--check-leaks"], "mocha");
     let jest = job_runner_project(
         "strong-jobs-jest",
         "commonjs",
@@ -22127,6 +22207,96 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&ava, &["npx", "ava"], "ava");
+}
+
+/// `mutants test` on a Python project under unittest: the run lists mutmut's
+/// mutants and records their values (`SUPERCOV_MUTANTS=1`), and the strong
+/// pass forks each mutant's tests after collection: a default's mutant, a
+/// loop the mutant makes endless, code no test runs, a boundary no test
+/// meets, and code a test module's import runs, which a fresh interpreter
+/// runs with the mutant on.
+#[cfg(unix)]
+#[test]
+fn mutants_test_runs_python_mutants_under_unittest() {
+    let project = Project::empty("strong-python-unittest");
+    project.write(".gitignore", ".supercov\n__pycache__\n");
+    project.write("shop/__init__.py", "");
+    project.write(
+        "shop/cart.py",
+        "def shipping(total, express=False):\n    if total >= 50:\n        return 0\n    fee = 5\n    if express:\n        fee += 10\n    return fee\n\n\ndef label(name):\n    return name.strip().upper()\n\n\ndef countdown(n):\n    while n > 0:\n        n -= 1\n    return n\n\n\ndef refund(total):\n    return total * 0.9 if total > 100 else total\n\n\ndef rate():\n    return 3\n",
+    );
+    project.write("tests/__init__.py", "");
+    project.write(
+        "tests/test_cart.py",
+        "import unittest\nfrom shop.cart import shipping, label, countdown, rate\n\nRATE = rate()\n\n\nclass Cart(unittest.TestCase):\n    def test_free(self):\n        self.assertEqual(shipping(80), 0)\n\n    def test_paid(self):\n        self.assertEqual(shipping(10), 5)\n\n    def test_label(self):\n        self.assertEqual(label(' a '), 'A')\n\n    def test_countdown(self):\n        self.assertEqual(countdown(3), 0)\n\n    def test_rate(self):\n        self.assertEqual(RATE, 3)\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("cart");
+    let command = [
+        "--", "python3", "-m", "unittest", "discover", "-s", "tests", "-t", ".",
+    ];
+    // `SUPERCOV_MUTANTS=0` is a plain run: no value probe, no list.
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "0")])
+        .succeeds();
+    let plain = project.latest();
+    assert!(
+        !project
+            .root
+            .join(format!(".supercov/runs/{plain}/mutants-listed.json"))
+            .exists()
+    );
+    project
+        .supercov_with(&command, &[("SUPERCOV_MUTANTS", "1")])
+        .succeeds();
+    let weak = project
+        .supercov(&["runs", "latest", "mutants", "shop/cart.py:2", "--json"])
+        .json();
+    let boundary = weak["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "shop/cart.py:2:14-2:19:EqualityOperator:>")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(boundary["status"], "not-infected", "{weak}");
+    // A command timeout that is no number stops the pass before it runs, and
+    // leaves no verdict.
+    let refused = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[("SUPERCOV_COMMAND_TIMEOUT_MS", "soon")],
+    );
+    let said = refused.stderr();
+    assert_ne!(refused.code(), 0, "{said}");
+    assert!(said.contains("SUPERCOV_COMMAND_TIMEOUT_MS"), "{said}");
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[("SUPERCOV_STRONG_WORKERS", "2")],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}\n{said}");
+    assert_eq!(reply["passes"][0]["runner"], "unittest", "{reply}");
+    let statuses = strong_statuses(&project);
+    for (id, status) in [
+        // `express=True`: the default a call that names no `express` gets.
+        ("shop/cart.py:1:29-1:34:BooleanLiteral:True", "killed"),
+        ("shop/cart.py:2:14-2:19:EqualityOperator:>", "survived"),
+        ("shop/cart.py:6:9-6:18:AugmentedAssignment:=", "no-coverage"),
+        ("shop/cart.py:2:17-2:19:NumberLiteral:51", "survived"),
+        ("shop/cart.py:11:12-11:32:MethodExpression:lower", "killed"),
+        ("shop/cart.py:16:9-16:15:AssignmentOperator:+=", "timeout"),
+        ("shop/cart.py:21:12-21:49:IfExpression:true", "no-coverage"),
+        // Called while the test module loads: run with the mutant on from
+        // the interpreter's start.
+        ("shop/cart.py:25:12-25:13:NumberLiteral:4", "killed"),
+    ] {
+        assert_eq!(
+            statuses.get(id).map(String::as_str),
+            Some(status),
+            "{id}: {statuses:?}\n{said}"
+        );
+    }
 }
 
 /// `mutants test` under bun:test: Bun's runner loads every test file it is
@@ -22266,6 +22436,137 @@ fn mutants_test_runs_vitest_browser_mode_mutants_one_job_at_a_time() {
         "{plan}"
     );
     assert_cart_verdicts(&browser, &["npx", "vitest", "run"], "vitest-browser");
+    // A run of node tests and browser tests: its node tests run as jobs
+    // beside the browser's.
+    let mixed = job_runner_project(
+        "strong-jobs-vitest-mixed",
+        "module",
+        &[
+            (
+                "vitest.config.js",
+                "import { defineConfig } from \"vitest/config\";\nimport { playwright } from \"@vitest/browser-playwright\";\nexport default defineConfig({ test: { projects: [\n  { test: { name: \"node\", include: [\"test/cart.test.js\"] } },\n  { test: { name: \"browser\", include: [\"test/count.test.js\"], browser: { enabled: true, provider: playwright(), headless: true, instances: [{ browser: \"chromium\" }] } } },\n] } });\n",
+            ),
+            (
+                "test/cart.test.js",
+                "import { expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\nit(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\nit(\"charges small orders\", () => expect(shipping(10)).toBe(5));\nit(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n",
+            ),
+            (
+                "test/count.test.js",
+                "import { expect, it } from \"vitest\";\nimport { countdown } from \"../src/cart.js\";\nit(\"counts down\", () => expect(countdown(3)).toBe(0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&mixed, &["npx", "vitest", "run"], "vitest node and browser");
+}
+
+/// Rust compiled to wasm that node:test loads: the Rust run beside the
+/// JavaScript one lists the crate's mutants, and `mutants test` runs them
+/// under the JavaScript tests, the copy's crate built with them switched in
+/// and each wasm instance handed the active mutant. Needs wasm-bindgen and
+/// the wasm32 target; a job that installed them sets
+/// `SUPERCOV_REQUIRE_RUST_WASM=1`.
+#[cfg(unix)]
+#[test]
+fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
+    let tools = std::process::Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+        && std::process::Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("wasm32-unknown-unknown")
+            });
+    if !tools {
+        assert!(
+            std::env::var("SUPERCOV_REQUIRE_RUST_WASM").as_deref() != Ok("1"),
+            "wasm-bindgen or the wasm32 target is missing where the job installed them"
+        );
+        eprintln!("skipping: needs wasm-bindgen and the wasm32-unknown-unknown target");
+        return;
+    }
+    let project = Project::empty("wasm-node-mutants");
+    project.write(
+        "rust/Cargo.toml",
+        "[workspace]\n\n[package]\nname = \"grades\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwasm-bindgen = \"=0.2.129\"\n",
+    );
+    project.write(
+        "rust/src/lib.rs",
+        "use wasm_bindgen::prelude::*;\n\n#[wasm_bindgen]\npub fn grade(score: u32, curved: bool) -> String {\n    if score >= 90 || (curved && score >= 85) {\n        \"A\".into()\n    } else if score >= 50 {\n        \"pass\".into()\n    } else {\n        \"fail\".into()\n    }\n}\n",
+    );
+    project.write(
+        "build.sh",
+        "set -e\ncd rust\ncargo build -q --target wasm32-unknown-unknown --release\nwasm-bindgen --target nodejs --out-dir ../pkg target/wasm32-unknown-unknown/release/grades.wasm\n",
+    );
+    project.write(
+        "package.json",
+        r#"{ "name": "grades", "private": true, "scripts": { "test": "sh build.sh && node --test" } }"#,
+    );
+    project.write(
+        "test/grades.test.mjs",
+        "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { createRequire } from \"node:module\";\nconst { grade } = createRequire(import.meta.url)(\"../pkg/grades.js\");\n\ntest(\"a curved score is an A\", () => {\n  assert.equal(grade(87, true), \"A\");\n});\n\ntest(\"a low score fails\", () => {\n  assert.equal(grade(10, false), \"fail\");\n});\n",
+    );
+    project.write(".gitignore", "pkg\nrust/target\n.supercov\n");
+    let locked = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "-q"])
+        .current_dir(project.root.join("rust"))
+        .status()
+        .unwrap();
+    assert!(locked.success());
+    project.git(&["init", "-q"]);
+    project.commit("grades");
+    project.supercov(&["--", "npm", "test"]).succeeds();
+    let runs = project.supercov(&["runs", "--json"]).json();
+    let rust = runs["data"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|run| run["id"].as_str())
+        .find(|id| {
+            project
+                .supercov(&["runs", id, "decision", "rust/src/lib.rs:5"])
+                .code()
+                == 0
+        })
+        .expect("a Rust run beside the JavaScript one")
+        .to_owned();
+    let reply = project
+        .supercov(&["runs", &rust, "mutants", "test", "--json"])
+        .json();
+    // `&&` to `||` in `(curved && score >= 85)` changes neither test's
+    // outcome; every other mutant fails one.
+    assert_eq!(reply["summary"]["killed"], 6, "{reply}");
+    assert_eq!(reply["summary"]["survived"], 1, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    // A pass that cannot switch the crate's mutants in ends, saying why.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../supercov-engine/src/rust_strong.rs"),
+    )
+    .unwrap();
+    let line = source
+        .lines()
+        .position(|line| line.contains("crate::fault_fs::read(plan_path)"))
+        .unwrap()
+        + 1;
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&rust)
+            .join("strong-mutation.json"),
+    )
+    .unwrap();
+    let failed = project.supercov_with(
+        &["runs", &rust, "mutants", "test"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            &format!("fs.read#rust_strong.rs:{line}"),
+        )],
+    );
+    assert_ne!(failed.code(), 0, "{}", failed.stderr());
+    assert!(failed.stderr().contains("plan.json"), "{}", failed.stderr());
 }
 
 /// Two inline snapshots in one file, and a test that fakes the clock: the
@@ -22725,6 +23026,54 @@ fn a_test_that_fails_without_its_predecessor_kills_no_mutant() {
     assert_eq!(never["strong"]["status"], "killed", "{never}");
 }
 
+/// The same, where no mutant of module-level code has the file run whole
+/// already: a kill a test left out caused is overturned, and the mutant runs
+/// the file whole once its whole baseline, run for it, is known.
+#[cfg(unix)]
+#[test]
+fn an_overturned_kill_runs_its_file_whole_after_its_whole_baseline() {
+    let project = vitest_mutants_project("strong-overturn-whole");
+    project.write(
+        "src/items.js",
+        "const state = {};\nexport function register(item) {\n  if (item) (state.items ??= []).push(item);\n}\nexport function count() {\n  const items = state.items ?? [];\n  return items.length > 0 ? items.length : 0;\n}\n",
+    );
+    project.write(
+        "test/items.test.js",
+        "import { expect, it } from \"vitest\";\nimport { count, register } from \"../src/items.js\";\nit(\"registers\", () => register(\"a\"));\nit(\"counts what was registered\", () => expect(count()).toBe(1));\n",
+    );
+    project.commit("items");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(
+        reply["passes"][0]["overturned"].as_u64().unwrap_or(0) > 0,
+        "{reply}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/items.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let equal = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/items.js:7:") && id.contains(":EqualityOperator:")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(equal["strong"]["status"], "survived", "{equal}");
+}
+
 /// A mutant that makes work a test left running loop forever (a timer that
 /// fires after the test passed): its evaluations pass the limit outside any
 /// test, and the mutant is a timeout, not a survivor.
@@ -22944,9 +23293,11 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
             .all(|mutant| mutant["strong"]["status"] != "survived"),
         "{listed}"
     );
-    assert_eq!(
-        passes[0]["profile"]["mutantCopies"],
-        ran + killed,
+    // One more copy for each kill a confirmation overturned (the mutant
+    // runs its file whole).
+    assert!(
+        passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
+            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
@@ -23121,6 +23472,129 @@ fn a_copy_in_a_worker_started_ahead_gets_the_verdict_a_fresh_worker_gives() {
     assert!(ahead.values().any(|status| status == "\"killed\""));
     assert!(ahead.values().any(|status| status == "\"survived\""));
     assert_eq!(ahead, fresh);
+}
+
+/// A mutant that makes a worker drop its channel to Vitest (here it
+/// disconnects): Vitest cannot hear the file finish, so it did not, and the
+/// mutant is killed whatever the copy wrote. Nothing reports a closed
+/// channel as an error of the run, and the pass runs once.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_drops_its_channel_fails_its_file_and_the_pass_runs_once() {
+    let project = vitest_mutants_project("strong-channel-closed");
+    project.write(
+        "src/bye.js",
+        "export function bye(flag) {\n  if (flag) process.disconnect?.();\n  return 1;\n}\n",
+    );
+    project.write(
+        "test/bye.test.js",
+        "import { expect, it } from \"vitest\";\nimport { bye } from \"../src/bye.js\";\nit(\"stays\", () => expect(bye(false)).toBe(1));\n",
+    );
+    project.commit("bye");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let ran = project.supercov(&["runs", "latest", "mutants", "test", "--json"]);
+    let said = ran.stderr();
+    let reply = ran.json();
+    assert!(!said.contains("Channel closed"), "{said}");
+    assert!(!said.contains("Unhandled"), "{said}");
+    assert_eq!(reply["passes"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(
+        said.matches("strong pass: switches in").count(),
+        1,
+        "{said}"
+    );
+    let listed = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "src/bye.js",
+            "--json",
+            "--limit",
+            "0",
+        ])
+        .json();
+    let disconnects = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| {
+            let id = mutant["id"].as_str().unwrap_or_default();
+            id.starts_with("src/bye.js:2:") && id.ends_with(":ConditionalExpression:true")
+        })
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(disconnects["strong"]["status"], "killed", "{disconnects}");
+}
+
+/// A copy that runs none, or only some, of the tests it was to run proves
+/// nothing: here `labels` exists in the measured run only, so the copies of
+/// `label`'s mutants run no test. They are errors that say so, never
+/// survivors, with the stages and without.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_runs_none_of_its_tests_makes_its_mutant_an_error() {
+    let project = vitest_mutants_project("strong-ran-none");
+    project.write(
+        "test/cart.test.js",
+        "import { describe, expect, it } from \"vitest\";\nimport { shipping, label } from \"../src/cart.js\";\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => expect(shipping(80)).toBe(0));\n  it(\"charges small orders\", () => expect(shipping(10)).toBe(5));\n  if (!process.env.SUPERCOV_STRONG) it(\"labels\", () => expect(label(\" a \")).toBe(\"A\"));\n});\n",
+    );
+    project.commit("labels in the measured run only");
+    for stages in ["", "1"] {
+        project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+        let reply = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--json"],
+                &[("SUPERCOV_STRONG_STAGES", stages)],
+            )
+            .json();
+        assert!(
+            reply["summary"]["error"].as_u64().unwrap_or(0) > 0,
+            "{reply}"
+        );
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/cart.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutants = listed["data"]["mutants"].as_array().unwrap();
+        let of_label = mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("src/cart.js:9:")
+            })
+            .collect::<Vec<_>>();
+        assert!(!of_label.is_empty(), "{listed}");
+        for mutant in of_label {
+            if mutant["strong"].is_null() {
+                continue;
+            }
+            assert_ne!(mutant["strong"]["status"], "survived", "{mutant}");
+            if mutant["strong"]["status"] == "error" {
+                assert!(
+                    mutant["strong"]["reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("ran none of the tests it was to run"),
+                    "{mutant}"
+                );
+            }
+        }
+        assert!(
+            mutants
+                .iter()
+                .any(|mutant| mutant["strong"]["status"] == "killed"),
+            "{listed}"
+        );
+    }
 }
 
 /// A test file that does not finish without a mutant (here it throws while
@@ -23626,12 +24100,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:826",
+            "fs.write#mutants_test_command.rs:946",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:826"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:946"),
         "{}",
         unwritten.stderr()
     );
@@ -24070,13 +24544,13 @@ fn every_mutants_view_shows_what_the_run_says_of_them() {
         &["report", "--no-open", "--output", "report.html"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "coverage-index-read#mutants_query.rs:672",
+            "coverage-index-read#mutants_query.rs:682",
         )],
     );
     let said = format!("{}{}", unread.stdout(), unread.stderr());
     assert_ne!(unread.code(), 0, "{said}");
     assert!(said.contains("could not read mutants for run "), "{said}");
-    assert!(fired_at(&said, "mutants_query.rs:672"), "{said}");
+    assert!(fired_at(&said, "mutants_query.rs:682"), "{said}");
 
     // The table of files.
     contains_all(
@@ -24527,8 +25001,8 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
         "{broken}"
     );
     for fault in [
-        "fs.read_dir#public_query.rs:925",
-        "fs.read_dir entry#public_query.rs:925",
+        "fs.read_dir#public_query.rs:943",
+        "fs.read_dir entry#public_query.rs:943",
     ] {
         let unlisted = project
             .supercov_with(
@@ -24541,8 +25015,263 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
         assert!(
-            fired_at(&unlisted, "public_query.rs:925"),
+            fired_at(&unlisted, "public_query.rs:943"),
             "{fault}: {unlisted}"
         );
     }
+}
+
+/// Go's strong pass: every Gremlins mutant of a module, run in test
+/// binaries built once, each mutant against the tests that ran its code.
+/// A mutant that does not compile is `unviable`; a constant Go needs as a
+/// constant is built alone; a loop made endless is a `timeout`; code no
+/// test runs is `no-coverage`.
+#[cfg(unix)]
+#[test]
+fn go_mutants_are_killed_kept_or_found_not_to_compile() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong");
+    // A module older than Go 1.21: each file with a value probe is built
+    // as 1.21.
+    project.write("go.mod", "module example.com/calc\n\ngo 1.20\n");
+    project.write(
+        "calc.go",
+        "package calc\n\nconst Limit = 2 + 3\n\nfunc Clamp(n int) int {\n\tif n > Limit {\n\t\treturn Limit\n\t}\n\treturn n\n}\n\nfunc Sum(n int) int {\n\ttotal := 0\n\tfor i := 0; i < n; i++ {\n\t\ttotal += i\n\t}\n\treturn total\n}\n\nfunc Join(a, b string) string { return a + b }\n\nfunc Half(n int) int { return n / 2 }\n\nfunc Unused(n int) int { return n - 1 }\n",
+    );
+    project.write(
+        "calc_test.go",
+        "package calc\n\nimport \"testing\"\n\nfunc TestClamp(t *testing.T) {\n\tif Clamp(5) != 5 || Clamp(6) != 5 || Clamp(1) != 1 {\n\t\tt.Fatal(\"clamp\")\n\t}\n}\n\nfunc TestSum(t *testing.T) {\n\tif Sum(4) != 6 {\n\t\tt.Fatal(\"sum\")\n\t}\n}\n\nfunc TestJoinAndHalf(t *testing.T) {\n\tif Join(\"a\", \"b\") != \"ab\" || Half(0) != 0 {\n\t\tt.Fatal(\"join\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["mutants", "--json", "--", go, "test", "./..."],
+            &[("SUPERCOV_MUTANT_HIT_LIMIT", "100000")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let status = |id: &str| {
+        listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {listed}"))["strong"]["status"]
+            .clone()
+    };
+    assert_eq!(listed["data"]["mutantSet"], "gremlins@0.6.0", "{listed}");
+    // Built alone: a constant declaration has no place for a switch.
+    assert_eq!(status("calc.go:3:17-3:18:ArithmeticOperator:-"), "killed");
+    // At 5, `n > 5` and `n >= 5` both return 5: no test can tell them.
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:>="), "survived");
+    assert_eq!(status("calc.go:6:7-6:8:EqualityOperator:<="), "killed");
+    // `i--` never ends the loop.
+    assert_eq!(status("calc.go:14:22-14:24:UpdateOperator:--"), "timeout");
+    // Strings have no `-`.
+    assert_eq!(
+        status("calc.go:20:42-20:43:ArithmeticOperator:-"),
+        "unviable"
+    );
+    // `0 * 2` is `0 / 2`: no test tells them apart.
+    assert_eq!(
+        status("calc.go:22:33-22:34:ArithmeticOperator:*"),
+        "survived"
+    );
+    assert_eq!(
+        status("calc.go:24:35-24:36:ArithmeticOperator:+"),
+        "no-coverage"
+    );
+}
+
+/// A Go suite behind `make test`: the strong pass builds its test binaries
+/// with the flags the Makefile gives `go test`, as the measured run recorded
+/// them. Without the tag, the file behind it would not be built at all, and
+/// its mutant could not be killed.
+#[cfg(unix)]
+#[test]
+fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-make");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    let directory = std::path::Path::new(go)
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    project.write(
+        "Makefile",
+        &format!("test:\n\tPATH=\"$$PATH:{directory}\" go test -tags tagged ./...\n"),
+    );
+    project
+        .supercov(&["mutants", "--json", "--", "make", "test"])
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"] == "double.go:5:35-5:36:ArithmeticOperator:/")
+        .unwrap_or_else(|| panic!("{listed}"))
+        .clone();
+    assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
+
+/// A file the command builds only with a tag (`go test -tags tagged`) gets
+/// value probes as any other: the type checker is asked with the tag.
+#[test]
+fn a_go_file_behind_a_build_tag_gets_value_probes() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-probes-tagged");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["--", go, "test", "-tags", "tagged", "./..."],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = &listed["data"]["mutants"][0];
+    assert_eq!(
+        mutant["id"], "double.go:5:35-5:36:ArithmeticOperator:/",
+        "{listed}"
+    );
+    // `3 * 2` and `3 / 2` differ, and the probe saw it.
+    assert_eq!(mutant["status"], "infected", "{listed}");
+}
+
+/// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
+/// terminal sends it, stops every test binary the pass started and what
+/// they started, though each runs in a process group of its own.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_go_pass_leaves_no_process_running() {
+    use std::os::unix::process::CommandExt;
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-interrupted");
+    project.write("go.mod", "module example.com/slow\n\ngo 1.22\n");
+    project.write(
+        "slow.go",
+        "package slow\n\nfunc Big(n int) bool { return n > 9 }\n",
+    );
+    // In the strong pass (its binaries are given an active mutant), the
+    // test starts a process and waits: its pid and its own go to the marker.
+    project.write(
+        "slow_test.go",
+        "package slow\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestBig(t *testing.T) {\n\tif !Big(10) {\n\t\tt.Fatal(\"big\")\n\t}\n\tif os.Getenv(\"SUPERCOV_ACTIVE_MUTANT\") == \"\" {\n\t\treturn\n\t}\n\tsleeper := exec.Command(\"sleep\", \"120\")\n\tif err := sleeper.Start(); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tmarker := os.Getenv(\"SUPERCOV_TEST_MARKER\")\n\tos.WriteFile(marker+\".tmp\", []byte(fmt.Sprintf(\"%d %d\", os.Getpid(), sleeper.Process.Pid)), 0o644)\n\tos.Rename(marker+\".tmp\", marker)\n\ttime.Sleep(120 * time.Second)\n}\n",
+    );
+    let marker = project.root.with_extension("marker");
+    let _ = std::fs::remove_file(&marker);
+    let mut supercov = project
+        .supercov_command(&["mutants", "--", go, "test", "./..."])
+        .env("SUPERCOV_TEST_MARKER", &marker)
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(240),
+            "the strong pass never started its tests"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let pids = std::fs::read_to_string(&marker)
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    // SAFETY: a signal to the process group this test started.
+    unsafe { libc::kill(-(supercov.id() as i32), libc::SIGINT) };
+    supercov.wait().unwrap();
+    let running = |pid: i32| {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    };
+    let gone = (0..50).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        !pids.iter().any(|pid| running(*pid))
+    });
+    let _ = std::fs::remove_file(&marker);
+    for pid in &pids {
+        if running(*pid) {
+            // SAFETY: cleaning up a process this test's run left.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+    assert!(gone, "{pids:?} outlived the interrupted pass");
+}
+
+/// A mutant `go vet` rejects fails `go test` before any test runs, as one
+/// that does not compile does: the strong pass calls it unviable, with
+/// vet's finding.
+#[cfg(unix)]
+#[test]
+fn a_go_mutant_vet_rejects_is_unviable() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-strong-vet");
+    project.write("go.mod", "module example.com/vet\n\ngo 1.22\n");
+    project.write(
+        "odd.go",
+        "package vet\n\nfunc Middle(x int) bool { return x != 1 && x != 2 }\n\nfunc Big(x int) bool { return x > 9 }\n",
+    );
+    project.write(
+        "odd_test.go",
+        "package vet\n\nimport \"testing\"\n\nfunc TestMiddle(t *testing.T) {\n\tif !Middle(3) || Middle(1) || !Big(10) {\n\t\tt.Fatal(\"middle\")\n\t}\n}\n",
+    );
+    let text = project
+        .supercov(&["mutants", "--", go, "test", "./..."])
+        .succeeds();
+    assert!(text.contains("  unviable      1\n"), "{text}");
+    let saved = std::fs::read_dir(project.root.join(".supercov/runs"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read(entry.unwrap().path().join("strong-mutation.json")).ok())
+        .next()
+        .expect("verdicts saved");
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    let verdict = &saved["mutants"]["odd.go:3:41-3:43:LogicalOperator:||"];
+    assert_eq!(verdict["status"], "unviable", "{saved}");
+    assert!(
+        verdict["reason"]
+            .as_str()
+            .unwrap()
+            .ends_with("odd.go:3:34: suspect or: x != 1 || x != 2"),
+        "{verdict}"
+    );
 }

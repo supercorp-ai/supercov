@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each JavaScript mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files; --group dir for coverage by directory\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 what is source and what is not, by directory; --files lists every file\n  minimize              smallest test set for a coverage target\n  tests affected        tests the changes since the run could have reached\n  tests without-evidence  tests that made assertions and recorded no coverage\n  assertions            how much executed code the tests assert; see runs <run-id> assertions --help\n  mutants               how far the tests got toward killing each JavaScript or Python mutant; see runs <run-id> mutants --help\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --tag <tag>                    only tests with this tag (@e2e, a pytest marker, a JUnit @Tag); repeat for any of several; \'!api\' leaves those out\n  --title <text>                 only tests whose name contains this\n  --test-file <path>             only tests in this file or directory\n  --offset <n>\n  --limit <n>                    entries per page (default 20; 0 for all); a page names the --limit that shows all\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .replace("  minimize              ", "  source <path>         matching current source with line numbers\n  minimize              "),
         );
     };
@@ -86,17 +86,18 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
 
 const MUTANTS_HELP: &str = "Usage: supercov runs <run-id> mutants [<file>[:<line>]] [--status <s1,s2>] [--mutator <name>] [--stryker <report|dir>...] [--stryker-root <dir>] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>] [--fail-on <s1,s2>] [--offset <n>] [--limit <n>] [--json | --format jsonl|markdown [--output <file>]]
 
-Weak mutation: for each mutant StrykerJS would make, whether a test ran the
-mutated code (reach) and whether its value differed there (infection), read
-from the run without running anything. A JavaScript or TypeScript run lists
-its mutants from its sources the first time they are asked for.
+Weak mutation: for each mutant StrykerJS (JavaScript, TypeScript) or mutmut
+(Python) would make, whether a test ran the mutated code (reach) and whether
+its value differed there (infection), read from the run without running
+anything. A run lists its mutants from its sources the first time they are
+asked for.
 
 Without a file, a table of files by how many mutants no test infects, then
 by how many no test reaches; with a file, its mutants by line; with
 file:line, that line's mutants and why.
 
 Options:
-  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent
+  --status <s1,s2>          only mutants with these statuses: not-reached, not-infected, infected, unknown, equivalent, or strong verdicts: survived, killed, timeout, no-coverage, error, unviable
   --mutator <name>          only this StrykerJS mutator's mutants (EqualityOperator, ConditionalExpression, ...)
   --stryker <report|dir>... join StrykerJS's results by mutant id: mutation.json reports, and directories
                             of them (every .json file inside, recursively); a file to query goes before it
@@ -207,6 +208,8 @@ struct QueryOptions {
     sort: DecisionSort,
     /// `mutants --status`, `--mutator`, `--stryker`, `--stryker-root`.
     statuses: Vec<supercov_engine::coverage_index::MutantStatus>,
+    /// `mutants --status` with strong verdicts.
+    strong_statuses: Vec<String>,
     mutator: Option<String>,
     stryker: Vec<String>,
     stryker_root: Option<String>,
@@ -239,6 +242,7 @@ impl Default for QueryOptions {
             gained: false,
             sort: DecisionSort::Location,
             statuses: Vec::new(),
+            strong_statuses: Vec::new(),
             mutator: None,
             stryker: Vec::new(),
             stryker_root: None,
@@ -494,19 +498,32 @@ fn parse_options(
                             .filter(|name| !name.is_empty())
                         {
                             let name = name.to_lowercase();
+                            let strong = matches!(
+                                name.as_str(),
+                                "killed"
+                                    | "survived"
+                                    | "timeout"
+                                    | "no-coverage"
+                                    | "error"
+                                    | "unviable"
+                            );
+                            // A strong verdict, which `mutants test` saved into the run.
+                            if strong && flag == "--status" {
+                                if !options.strong_statuses.contains(&name) {
+                                    options.strong_statuses.push(name);
+                                }
+                                continue;
+                            }
                             let Some(status) =
                                 supercov_engine::coverage_index::MutantStatus::parse(&name)
                             else {
-                                let message = if matches!(
-                                    name.as_str(),
-                                    "killed" | "survived" | "timeout"
-                                ) {
+                                let message = if strong {
                                     format!(
-                                        "{flag} {name} is reserved for strong mutation, which has not run; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is a strong verdict: gate on it with supercov runs <run-id> mutants test --fail-on {name}; here use not-reached, not-infected, infected, unknown or equivalent"
                                     )
                                 } else {
                                     format!(
-                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent"
+                                        "{flag} {name} is not a status; use not-reached, not-infected, infected, unknown or equivalent, or a strong verdict: killed, survived, timeout, no-coverage, error or unviable"
                                     )
                                 };
                                 return Err(PublicQueryError::invalid(
@@ -721,6 +738,7 @@ pub(crate) fn coverage_request(
                 }
             }
             request.mutants.statuses = options.statuses.clone();
+            request.mutants.strong_statuses = options.strong_statuses.clone();
             request.mutants.mutator = options.mutator.clone();
             request.mutants.diff_base = options.diff_base.clone();
             // A change's mutants for a reader: what its tests leave alive.
@@ -1218,14 +1236,27 @@ mod tests {
         assert_eq!((file.file.as_deref(), file.line), (Some("src/a.ts"), None));
         let run = request(&["run-1", "mutants"]);
         assert_eq!((run.file, run.line), (None, None));
+        // A strong verdict picks mutants by what a strong pass said, beside
+        // the weak statuses.
+        let strong = request(&[
+            "run-1",
+            "mutants",
+            "--status",
+            "survived,not-infected,Survived",
+        ]);
+        assert_eq!(strong.mutants.strong_statuses, ["survived"]);
+        assert_eq!(
+            strong.mutants.statuses,
+            [supercov_engine::coverage_index::MutantStatus::NotInfected]
+        );
         for (arguments, message) in [
             (
                 &["run-1", "mutants", "--status", "nope"][..],
                 "is not a status",
             ),
             (
-                &["run-1", "mutants", "--status", "survived"],
-                "reserved for strong mutation",
+                &["run-1", "mutants", "--fail-on", "survived"],
+                "is a strong verdict: gate on it with supercov runs <run-id> mutants test --fail-on survived",
             ),
             (
                 &["run-1", "gaps", "--status", "infected"],

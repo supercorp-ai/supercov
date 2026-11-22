@@ -237,6 +237,18 @@ npx supercov -- cargo nextest run --workspace
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
 
+### Mutation testing
+
+`supercov runs latest mutants` lists cargo-mutants' mutants (27.1.0) of the
+files a Rust run measured, with what the run's tests tell of each, and
+`supercov runs latest mutants test` runs them against the tests that reach
+them, for `cargo test` (libtest and doctests) and `cargo nextest run`: every
+mutant of a pass in one build, each test by its exact name in its own
+process. A mutant that does not compile is `unviable`, as cargo-mutants
+reports it. Tests built for wasm run against mutants in Node, under WASI
+and in Chrome; tests run in Firefox, Safari or Edge, which are not measured,
+have their mutants recorded as `error`. See `docs/design/rust-mutation.md`.
+
 ### Rust compiled to wasm in JavaScript tests
 
 A crate wasm-bindgen exposes to JavaScript (a `cdylib` that depends on
@@ -258,6 +270,12 @@ in each page, and reads what the module ran at every test's end, so each test
 is credited exactly with its own lines and decisions. The crate's coverage is
 a Rust run beside the JavaScript run. What the copy built (`target/`, and the
 generated `pkg/` with its instrumented wasm) stays in the copy.
+
+`supercov runs <rust run> mutants test` runs the crate's mutants under the
+tests that load it, in Node (node:test, Vitest, Jest and the other job
+runners) and in Playwright's pages: the command builds the wasm from the
+crate with the mutants switched in, and each wasm instance is handed the
+mutant to run.
 
 ### A Rust Worker under browser tests
 
@@ -674,6 +692,14 @@ npx supercov -- go test ./...
 npx supercov -- go test -run TestParser ./internal/...
 npx supercov -- go test ./core/... ./app/...
 ```
+
+### Mutation testing in Go
+
+`npx supercov mutants -- go test ./...` lists Gremlins 0.6.0's mutants of
+every Go source the run measures and runs each against the tests that ran
+its code, in test binaries built once (`go test -c`), one process per
+mutant and package, tests picked by exact name. A mutant that does not
+compile is reported `unviable` rather than run.
 
 ### A Go server under browser tests
 

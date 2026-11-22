@@ -256,3 +256,107 @@ values only take tests away.
 | runtime switch | `runtime/javascript/runtime.mjs` (`strongSlot`, `setActiveMutant`) |
 | drivers | Vitest (`vitestStrong*.mjs`), Playwright (`playwrightStrong*.mjs`), and the other runners (see `strong-mutation.md`) |
 | value probes | `js_instrumenter.rs` (comparison and infection probes) |
+
+## Go
+
+| Contract | Go |
+| --- | --- |
+| enumerator | `go_mutants.rs` (Gremlins 0.6.0's tokens and order; `docs/design/go-mutation.md`) |
+| schemata | `go_instrumenter.rs` (`strong_rewrite`), with `runtime/go/mutants` (go/types) saying which mutants compile |
+| runtime switch | `runtime/go/supercov/strong.go` (`StrongSlot`, `SUPERCOV_ACTIVE_MUTANT`) |
+| driver | `go_strong.rs`: each package's test binary built once, the package run whole per mutant |
+| value probes | `go_instrumenter.rs` (comparison probes), `runtime/go/supercov/mutants.go` |
+
+Rust implements the contract with cargo-mutants 27.1.0 as its reference:
+`docs/design/rust-mutation.md`.
+
+## Rust compiled to wasm under a JavaScript host
+
+A Rust crate's mutants can only be told apart by the tests that load its
+wasm: a Vitest or Playwright suite over `wasm-pack build` output, or
+`wasm-bindgen-test-runner` in Node or Chrome. A wasm module reads no
+environment, so a crate switched for a strong pass (`rust_schemata`) exports,
+per crate (`<key>` is the crate's):
+
+| Export | Meaning |
+| --- | --- |
+| `__supercov_strong_buffer_<key>() -> u32` | where in the module's memory to write the active mutant's file (UTF-8, at most 4096 bytes) |
+| `__supercov_strong_activate_<key>(length: u32, index: u64)` | switches mutant `index` of the file just written on; the hit limit is off |
+
+A host that knows the active mutant (`<file>#<index>`) calls, for every
+instance it sees created, each `_activate_` export after writing the file
+into the matching `_buffer_` (`rust-wasm-node.mjs` and the Chrome proxy's
+page script do so for Rust's own runners). It must do so before any test
+code of the instance runs: right after `WebAssembly.Instance` or
+`instantiate` returns.
+
+For Rust wasm loaded by JavaScript tests, the JavaScript strong pass owns
+the run: the mutants are listed by the Rust run beside it, and its candidate
+tests are JavaScript tests.
+
+1. Dispatch: a Rust mutant all of whose candidates ran under a JavaScript
+   runner goes to the JavaScript driver (`strong_driver::driver_of`); one
+   with a Rust test among its candidates stays Rust's.
+2. Build: in a strong pass, each Cargo workspace of the copy that holds a
+   wasm crate gets the plan's Rust mutants behind switches
+   (`rust_strong::switch_wasm_workspace`, through
+   `rust_project::prepare_rust_strong_project`) instead of probes, before
+   the command's own build runs. Which mutants compile is found first in a
+   scratch copy with `cargo build --lib --target wasm32-unknown-unknown`, as
+   the Rust driver finds it: one whose own code does not type-check is
+   `unviable`; one a switch cannot hold, or whose switch breaks the build,
+   is `error` (the command builds the wasm once). Those are taken out of the
+   plan the JavaScript driver runs.
+3. Activation: the test processes get `SUPERCOV_WASM_STRONG`, a JSON list of
+   the workspaces' directories in the project (`""` at its root). The
+   runtime remembers every wasm instance (`globalThis.__supercovWasm`) and
+   hands each the active mutant, its file relative to its workspace, as it
+   is created and whenever `setActiveMutant` switches another on; a mutant
+   of no workspace (a JavaScript one) switches every crate's off. The Rust
+   runtime's active file can change in one instance, as a Vitest worker
+   keeps its modules from one mutant to the next.
+
+In a Playwright page the context's init script gives the page the same list
+(`globalThis.__SUPERCOV_WASM_STRONG__`), and the attempt's own init script
+switches its mutant on before the page's scripts run, so each wasm instance
+the page makes runs the attempt's mutant. A Rust wasm run names its tests by
+their file too (`<file>::<id>`); the Vitest and Playwright drivers read the
+id after it.
+
+A job that starts the command (node:test, AVA, tap, bun:test) builds the
+wasm again, writing it where every other job's tests load it: two such jobs
+side by side made a test file break off as it loaded the half-written glue,
+a kill that was none (gl-matrix-wasm: one to seven of 249 mutants a pass, a
+different few each time). So such jobs find `wasm-bindgen` and `wasm-pack`
+first on their `PATH` as a wrapper (`strongWasmOut.cjs`): the tool writes
+into a fresh directory beside its output directory, and each file is renamed
+into place only where its bytes changed. A rebuild of the same wasm changes
+nothing in place, and a test never reads a file half written. Jobs start one
+at a time until a wrapper has run; a build that writes its wasm some other
+way keeps them so. Jest and Mocha's resident runners, Vitest and Playwright
+start the command once.
+
+Validated on gl-matrix-wasm (its `src/vector2.rs`, 300 mutants, under its
+own vec2 specs run by node:test; `benchmarks/mutation/wasm-js`) against
+cargo-mutants 27.1.0, whose `cargo test` runs the same command: every one of
+the 300 agrees (164 killed, 78 survived, 51 no-coverage against missed, 7
+unviable). On 16-CPU Linux machines (c8a/m8a.4xlarge) Supercov's strong pass
+takes 29 s (106 s with its jobs one at a time), cargo-mutants 655 s over its
+shards; the verdicts are the same over two passes.
+
+A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
+time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
+measures yet, so none of its mutants are planned; and a mutant a switch
+cannot hold is not built on its own.
+
+## Python
+
+| Contract | Python |
+| --- | --- |
+| enumerator | `python_mutants.rs` (mutmut 3.8.1's operators), parity goldens in `tests/fixtures/mutmut-parity` |
+| schemata | `python_strong.rs` writes each switched function's mutants' edits; `runtime/python/supercov_strong.py` switches the function to mutmut's copy of it |
+| runtime switch | `supercov_strong.py` (`strong_slot`, `activate`), `SUPERCOV_ACTIVE_MUTANT` from a process's start |
+| driver | `supercov_strong.py`: pytest's `pytest_runtestloop`, unittest's `TestProgram.runTests`; a fork per mutant after collection |
+| value probes | `supercov_instrument.py` (`_MutantProbes`) and `supercov_runtime.py`, from the plan's `mutantProbes` |
+
+See `python-mutants.md`.

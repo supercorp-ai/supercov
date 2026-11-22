@@ -1,7 +1,7 @@
 {
 "mutantSet": "stryker-js@10.1.1",
 "file": "strings.tsx",
-"skipped": {"Regex":0,"ignored":0},
+"skipped": {"ignored":0},
 "mutants": [
   {"file":"strings.tsx","mutator":"StringLiteral","start":[7,18],"end":[7,31],"replacement":"empty","text":"\"\""},
   {"file":"strings.tsx","mutator":"StringLiteral","start":[8,15],"end":[8,25],"replacement":"empty","text":"\"\""},

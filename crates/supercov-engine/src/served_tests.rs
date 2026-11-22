@@ -149,7 +149,9 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
     #[serde(rename_all = "camelCase")]
     struct Attempt {
         test_id: String,
-        scope: Scope,
+        /// None for an outcome's record alone (Jest's reporter).
+        #[serde(default)]
+        scope: Option<Scope>,
         test: String,
         test_file: String,
         title: String,
@@ -173,6 +175,9 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
         ended_at_ms: Option<i64>,
     }
     let mut served = BTreeMap::new();
+    // How each attempt ended, where a record of the outcome alone says it
+    // (Jest writes a test's evidence, then its reporter the outcome).
+    let mut outcomes = BTreeMap::new();
     let Ok(entries) = crate::fault_fs::read_dir(evidence_directory) else {
         return Vec::new();
     };
@@ -195,7 +200,11 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
             .filter_map(|line| serde_json::from_str::<Attempt>(line).ok())
             .filter(|attempt| attempt.role.as_deref().is_none_or(|role| role == "test"))
         {
-            let worker = format!("playwright:{}", attempt.scope.worker_id);
+            let Some(scope) = attempt.scope else {
+                outcomes.insert((attempt.test_id, attempt.retry), attempt.status);
+                continue;
+            };
+            let worker = format!("playwright:{}", scope.worker_id);
             // The whole attempt where the fixture recorded it: a test runs
             // between its actions too, and a span of its actions alone is a
             // few milliseconds a sweep of the server's clock can miss.
@@ -224,8 +233,15 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
                     expected_status: attempt.expected_status.unwrap_or_else(|| "passed".into()),
                     provenance: attempt.provenance,
                     window: start.zip(end),
-                    attempt_id: attempt.scope.attempt_id,
+                    attempt_id: scope.attempt_id,
                 });
+        }
+    }
+    for test in served.values_mut() {
+        if test.status == "unknown"
+            && let Some(status) = outcomes.get(&(test.test_id.clone(), test.retry))
+        {
+            test.status = status.clone();
         }
     }
     served.into_values().collect()
@@ -283,6 +299,73 @@ mod tests {
     }
 
     use super::*;
+
+    /// A test's evidence record says nothing of how it ended (Jest writes it
+    /// before its reporter writes the outcome, in a record of its own with
+    /// no scope): the outcome's record does. A status the evidence knew is
+    /// kept, and an outcome alone is no attempt.
+    #[test]
+    fn an_attempt_s_status_comes_from_the_record_that_knows_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-served-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let record = |id: &str, status: &str, scoped: bool| {
+            let mut line = serde_json::json!({
+                "testId": id, "test": id, "testFile": "a.test.js",
+                "title": id, "retry": 0, "status": status,
+                "provenance": {"runner": "jest", "kind": "unit", "source": "explicit"},
+            });
+            if scoped {
+                line["scope"] = serde_json::json!({"workerId": "w0"});
+            }
+            line.to_string()
+        };
+        // The outcome in a journal of its own, read before or after the
+        // evidence's.
+        std::fs::write(
+            directory.join("jest-0.mcdc.jsonl"),
+            [
+                record("evidence first", "unknown", true),
+                record("outcome first", "unknown", true),
+                record("never ended", "unknown", true),
+                record("stated", "failed", true),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        for (journal, id) in [
+            ("jest-1", "evidence first"),
+            ("jest-status-0", "outcome first"),
+        ] {
+            std::fs::write(
+                directory.join(format!("{journal}.mcdc.jsonl")),
+                record(id, "passed", false),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            directory.join("jest-status-1.mcdc.jsonl"),
+            record("stated", "passed", false),
+        )
+        .unwrap();
+        let statuses = read_attempts(&directory)
+            .into_iter()
+            .map(|test| (test.test_id, test.status))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(statuses["evidence first"], "passed");
+        assert_eq!(statuses["outcome first"], "passed");
+        assert_eq!(statuses["never ended"], "unknown");
+        // A status the evidence knew is kept.
+        assert_eq!(statuses["stated"], "failed");
+        assert_eq!(statuses.len(), 4);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     // A request to a server the suite runs itself is the test's whose phase
     // began last before it in that process: by record, which a millisecond

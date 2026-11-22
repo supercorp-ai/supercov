@@ -1,7 +1,5 @@
 # Mutation benchmark 2026-11-20
 
-CI runs: 7918046463203622, 6816238857423170, 8402334254856692, 6506939654971330, 7095666567225085, 7210302856247792, 8297132922154682, 6783811573326500, 4574534097087808, 8528048117638039, 6898820936997587, 4982353503892003.
-
 StrykerJS 10.1.1, mizchi/mutator 0.5.0, Node 24. Statuses: K Killed, T Timeout, S Survived, NC NoCoverage, RE RuntimeError, CE CompileError, I Ignored, P Pending. Score = (K+T) / (K+T+S+NC). Sharded runs: wall and CPU seconds are summed over the shards.
 
 ## Cold full runs
