@@ -571,9 +571,22 @@ runner allows:
 | Mocha | `Mocha#files` filtered before loading | tests removed from their suites (a suite left empty runs no hook) | `Runner#abort` |
 | node:test | a child of another file ends before it loads | registered as skipped | `t.skip()` |
 | AVA | (each worker loads its file) | `runTest` not run | later tests not run |
-| tap | a child of another file ends before it loads | top-level subtests `skip` | later subtests `skip` |
+| tap | the file run by itself | top-level subtests `skip` | later subtests `skip` |
 | bun:test | the file named on the command line | registered through `test.skip` | later tests return |
 | Vitest Browser Mode | the file as a CLI filter | `context.skip()` | `context.skip()` |
+
+tap and node:test count a test file as a test of its own: assertions at its
+top level, outside any subtest, pass or fail it, and StrykerJS's tap runner
+kills a mutant on them. So the adapters record a file's top level as a test,
+`(top level)`, where it asserts there (tap) or has no `test()` (node:test),
+with what ran there; in a file with subtests it is the file's module setup
+(tap) or counts for the run (node:test). Before, what such a file ran was in
+no test's evidence, and a mutant only its top-level assertions caught was
+never run against it (ini: 14 mutants StrykerJS killed through `win32.js`
+and `proto.js`). A tap job runs its JavaScript file by itself, `node <file>`,
+as tap's runner and StrykerJS's do: tap's command keeps its working files in
+the project, and two of them side by side broke each other's (`External ID
+used by multiple processes`).
 
 A subtest runs with its parent. A job's outcomes are the adapter's ordinary
 evidence records, in the job's own evidence directory: nothing new is
