@@ -264,8 +264,10 @@ fn vet_rejections(
         .iter()
         .filter(|mutant| {
             let listed = &files[&mutant.file];
-            !pass.flags.vet_off
-                && crate::go_mutants::vet_candidate(&listed.source, listed.tokens[mutant.index].0)
+            !pass.flags.vet_off && {
+                let (token, _, replacement) = listed.tokens[mutant.index];
+                crate::go_mutants::vet_candidate(&listed.source, token, replacement)
+            }
         })
         .copied()
         .collect::<Vec<_>>();
@@ -345,6 +347,7 @@ pub(crate) fn site_facts(
     root: &Path,
     project: &Path,
     files: &[String],
+    tags: &str,
 ) -> Option<HashMap<String, HashMap<usize, SiteFacts>>> {
     let mut sources = Vec::new();
     let mut asked = Vec::new();
@@ -367,7 +370,7 @@ pub(crate) fn site_facts(
     if asked.is_empty() {
         return Some(HashMap::new());
     }
-    let key = facts_key(root, &sources);
+    let key = facts_key(root, &sources, tags);
     // In the project's own `.supercov`, which the next run keeps: `root` is
     // the run's workspace, made afresh.
     let cache = project.join(".supercov/cache/go-facts.json");
@@ -387,6 +390,7 @@ pub(crate) fn site_facts(
         "dir": root,
         "patterns": patterns,
         "factsOnly": true,
+        "tags": tags,
         "mutants": asked.iter().map(|(file, offset, replacement)| json!({
             "file": file, "offset": offset, "new": replacement,
         })).collect::<Vec<_>>(),
@@ -430,12 +434,12 @@ struct CachedFacts {
 /// What the type checker's facts depend on: the helper, the environment
 /// that picks the build, the module's requirements and every source of the
 /// run. A newer Go toolchain with the same sources keeps them.
-fn facts_key(root: &Path, sources: &[(String, String)]) -> String {
+fn facts_key(root: &Path, sources: &[(String, String)], tags: &str) -> String {
     let environment = ["GOFLAGS", "GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT"]
         .map(|name| std::env::var(name).unwrap_or_default());
     let requirements = ["go.mod", "go.sum", "go.work"]
         .map(|name| fs::read_to_string(root.join(name)).unwrap_or_default());
-    let mut parts = vec![HELPER_SOURCE, HELPER_MODULE];
+    let mut parts = vec![HELPER_SOURCE, HELPER_MODULE, tags];
     parts.extend(environment.iter().map(String::as_str));
     parts.extend(requirements.iter().map(String::as_str));
     sources.iter().for_each(|(file, source)| {
@@ -1162,8 +1166,10 @@ fn run_mutants(
     mutants: &[&PlanMutant],
     diagnostics: &mut dyn Write,
 ) -> Result<(), String> {
+    let mut phases = Phases::start();
     let (files, runnable) = read_files(pass, mutants)?;
     let checked = check(pass, &files, diagnostics)?;
+    phases.mark("check");
     // A mutant that does not compile, or that `go vet` (which `go test`
     // runs) refuses, is unviable: `go test` fails it before any test runs.
     let (compiled, unviable): (Vec<_>, Vec<_>) = runnable.into_iter().partition(|mutant| {
@@ -1196,6 +1202,7 @@ fn run_mutants(
         );
     });
     pass.profile.lock().expect("profile").unviable = unviable.len() + rejected.len();
+    phases.mark("vet");
 
     // The copy, with the runtime in each module, and the switches.
     let _ = writeln!(
@@ -1207,6 +1214,7 @@ fn run_mutants(
     }
     copy_project(pass.request.root, &pass.workspace)?;
     let runtimes = runtimes(&pass.workspace)?;
+    phases.mark("copy");
     let mut switched = BTreeMap::<String, Vec<StrongMutant>>::new();
     live.iter().for_each(|mutant| {
         let (token, mutator, replacement) = files[&mutant.file].tokens[mutant.index];
@@ -1225,6 +1233,7 @@ fn run_mutants(
     } else {
         render(pass, &files, &switched, &checked, &runtimes)?
     };
+    phases.mark("render");
     let solo = rendered
         .iter()
         .flat_map(|(file, strong)| {
@@ -1269,6 +1278,7 @@ fn run_mutants(
     packages
         .iter_mut()
         .for_each(|(directory, package)| package.links = links.remove(directory));
+    phases.mark("binaries");
     let _ = writeln!(
         diagnostics,
         "[supercov] built {} test binaries ({} cannot run their mutants)",
@@ -1286,22 +1296,49 @@ fn run_mutants(
             Some(reason) => run_solo(pass, plan, mutant, &files, &packages, reason, first),
             None => run_mutant(pass, plan, mutant, &packages, None, first),
         };
-    let retries = on_workers(pass.request.workers, live, |mutant| {
-        let verdict = run(mutant, true);
+    // A mutant past its first limit runs again at once, with the full one,
+    // on the same worker: a round of retries after the rest would last a
+    // full limit after every other mutant had run.
+    on_workers(pass.request.workers, live, |mutant| {
+        let mut verdict = run(mutant, true);
         if verdict.status == RETRY {
-            return Some(mutant);
+            pass.profile.lock().expect("profile").retries += 1;
+            verdict = run(mutant, false);
         }
         pass.record(&mutant.id, &verdict);
-        None
-    })
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    pass.profile.lock().expect("profile").retries = retries.len();
-    on_workers(pass.request.workers, retries, |mutant| {
-        pass.record(&mutant.id, &run(mutant, false));
     });
+    phases.mark("runs");
+    let _ = writeln!(diagnostics, "[supercov] Go pass timings {}", phases.text());
     Ok(())
+}
+
+/// How long each phase of a pass took, in the order they ran.
+struct Phases {
+    since: Instant,
+    marks: Vec<(&'static str, Duration)>,
+}
+
+impl Phases {
+    fn start() -> Self {
+        Self {
+            since: Instant::now(),
+            marks: Vec::new(),
+        }
+    }
+
+    /// Ends the phase called `name`, and starts the next.
+    fn mark(&mut self, name: &'static str) {
+        self.marks.push((name, self.since.elapsed()));
+        self.since = Instant::now();
+    }
+
+    fn text(&self) -> String {
+        self.marks
+            .iter()
+            .map(|(name, took)| format!("{name}={}ms", took.as_millis()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 fn summary(pass: &Pass, started: Instant) -> Value {
@@ -1409,10 +1446,12 @@ fn build_package(pass: &Pass, directory: &str, overlay: Option<&Path>) -> Packag
 }
 
 /// How long a mutant's run of a package may take: three times its
-/// baseline and ten seconds, twice what Gremlins' own coefficient gives a
-/// package's whole run.
+/// baseline, as Gremlins' own coefficient gives a package's whole run, and
+/// three seconds. Only a mutant past its first limit is given it: on the
+/// validation modules every one of them hangs, and holds its worker this
+/// long.
 fn limit_for(package: &Package) -> Duration {
-    Duration::from_millis(package.baseline_ms.saturating_mul(3) + 10_000)
+    Duration::from_millis(package.baseline_ms.saturating_mul(3) + 3_000)
 }
 
 /// A mutant's first attempt at a package: one and a half times its baseline
@@ -1971,27 +2010,27 @@ mod tests {
         // A file that is gone or does not parse asks nothing.
         let root = with_helper("asked", "/bin/cat");
         std::fs::write(root.join("bad.go"), "package p\n\nfunc (").unwrap();
-        let facts = site_facts(&root, &root, &["gone.go".into(), "bad.go".into()]).unwrap();
+        let facts = site_facts(&root, &root, &["gone.go".into(), "bad.go".into()], "").unwrap();
         assert!(facts.is_empty());
         // No file, or a file with no mutant, asks nothing.
         std::fs::write(root.join("empty.go"), "package p\n").unwrap();
-        assert!(site_facts(&root, &root, &[]).unwrap().is_empty());
+        assert!(site_facts(&root, &root, &[], "").unwrap().is_empty());
         assert!(
-            site_facts(&root, &root, &["empty.go".into()])
+            site_facts(&root, &root, &["empty.go".into()], "")
                 .unwrap()
                 .is_empty()
         );
         // Comparisons alone ask nothing: their probes need no type.
         std::fs::write(root.join("c.go"), "package p\n\nvar x = 1 < 2\n").unwrap();
         assert!(
-            site_facts(&root, &root, &["c.go".into()])
+            site_facts(&root, &root, &["c.go".into()], "")
                 .unwrap()
                 .is_empty()
         );
         // An answer that is not one.
         let source = "package p\n\nvar x = 1 + 2\n";
         std::fs::write(root.join("a.go"), source).unwrap();
-        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()], ""), None);
         // What the last run of the same sources was told, it is told again;
         // what a run of other sources was, it is not.
         let facts = HashMap::from([(
@@ -2016,13 +2055,13 @@ mod tests {
             )
             .unwrap();
         };
-        cache(facts_key(&root, &[("a.go".into(), source.into())]));
+        cache(facts_key(&root, &[("a.go".into(), source.into())], ""));
         assert_eq!(
-            site_facts(&root, &root, &["a.go".into()]),
+            site_facts(&root, &root, &["a.go".into()], ""),
             Some(facts.clone())
         );
         cache("another".into());
-        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()], ""), None);
         let _ = std::fs::remove_dir_all(&root);
         // No helper: its cache cannot be made, `.supercov` being a file.
         let root =
@@ -2030,7 +2069,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(".supercov"), "").unwrap();
         std::fs::write(root.join("a.go"), source).unwrap();
-        assert_eq!(site_facts(&root, &root, &["a.go".into()]), None);
+        assert_eq!(site_facts(&root, &root, &["a.go".into()], ""), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -374,39 +374,133 @@ fn shifts(node: Node, source: &str) -> bool {
             .any(|child| shifts(child, source))
 }
 
-/// Whether a mutant of the token at `token` can change what `go vet`
-/// reports among the checks `go test` runs. Of them (atomic, bools,
-/// buildtag, directive, errorsas, ifaceassert, nilfunc, printf, stdversion,
-/// stringintconv, tests), only two read what a token mutation changes:
-/// `bools`, of the operands of a chain of `&&` or `||` (`x != a || x != b`),
-/// and `atomic`, of an assignment of an `atomic.Add` call to its own
-/// operand (`x += atomic.AddInt64(&x, 1)` to `x = ...`). The rest read
-/// types, formats and names a mutation leaves as they were. `source`
-/// parses: it is the file a mutant was listed from.
-pub fn vet_candidate(source: &str, token: (usize, usize)) -> bool {
-    let tree = parse(source).expect("a listed file parses");
+/// Whether the mutant replacing the token at `token` with `replacement` may
+/// give `go vet` something to report among the checks `go test` runs. Of
+/// them (atomic, bools, buildtag, directive, errorsas, ifaceassert,
+/// nilfunc, printf, stdversion, stringintconv, tests), only two read what a
+/// token mutation changes: `atomic`, of an assignment of an `atomic.Add`
+/// call to its own operand (`x += atomic.AddInt64(&x, 1)` to `x = ...`), and
+/// `bools`, of a chain of `&&` or `||` with an operand twice (`a < b || a <
+/// b`) or one name compared with two constants (`x != 1 || x != 2`). The
+/// mutant's own expression is read as it would be, and only one that may
+/// show either is vetted: vet itself decides. `source` parses: it is the
+/// file a mutant was listed from.
+pub fn vet_candidate(source: &str, token: (usize, usize), replacement: &str) -> bool {
+    let mutated = format!("{}{replacement}{}", &source[..token.0], &source[token.1..]);
+    let tree = parse(&mutated).expect("a token swapped for another parses");
     let node = tree
         .root_node()
-        .descendant_for_byte_range(token.0, token.1)
+        .descendant_for_byte_range(token.0, token.0 + replacement.len())
         .expect("a listed token is in its file");
-    // Up through the expressions around the token: the first that is not
-    // a parenthesis or a negation says.
-    std::iter::successors(node.parent(), Node::parent)
-        .find(|ancestor| {
-            let through = match ancestor.kind() {
-                "parenthesized_expression" | "unary_expression" => true,
-                "binary_expression" => {
-                    !operator_of(*ancestor, source).is_some_and(|op| matches!(op, "&&" | "||"))
+    let around = std::iter::successors(Some(node), Node::parent)
+        .skip(1)
+        .take_while(|ancestor| {
+            matches!(
+                ancestor.kind(),
+                "parenthesized_expression" | "unary_expression" | "binary_expression"
+            )
+        })
+        .collect::<Vec<_>>();
+    let holder = std::iter::successors(Some(node), Node::parent).nth(around.len() + 1);
+    let atomic = holder.is_some_and(|holder| {
+        holder.kind() == "assignment_statement" && mutated[holder.byte_range()].contains("atomic.")
+    });
+    atomic
+        || around
+            .last()
+            .is_some_and(|outer| bools_may_report(*outer, &mutated))
+}
+
+/// Whether a chain of `&&` or `||` in `node` has an operand twice, or one
+/// expression compared, by `!=` in a `||` chain or `==` in an `&&` one, with
+/// two that may be constants: what vet's `bools` reports, read wider.
+fn bools_may_report(node: Node, source: &str) -> bool {
+    let logical = operator_of(node, source).filter(|op| matches!(*op, "&&" | "||"));
+    let here = logical.is_some_and(|op| {
+        let mut operands = Vec::new();
+        chain_operands(node, op, source, &mut operands);
+        let texts = operands
+            .iter()
+            .map(|operand| plain(&source[operand.byte_range()]))
+            .collect::<Vec<_>>();
+        let twice = texts
+            .iter()
+            .enumerate()
+            .any(|(at, text)| texts[..at].contains(text));
+        let compared = if op == "||" { "!=" } else { "==" };
+        let mut named = Vec::new();
+        for operand in &operands {
+            if operator_of(*operand, source) != Some(compared) {
+                continue;
+            }
+            let (left, right) = (field(*operand, "left"), field(*operand, "right"));
+            // Either side may be the constant.
+            for (name, constant) in [(left, right), (right, left)] {
+                if may_be_constant(constant) {
+                    named.push(plain(&source[name.byte_range()]));
                 }
-                _ => false,
-            };
-            !through
-        })
-        .is_some_and(|ancestor| match ancestor.kind() {
-            "binary_expression" => true,
-            "assignment_statement" => source[ancestor.byte_range()].contains("atomic."),
-            _ => false,
-        })
+            }
+        }
+        let compared_twice = named
+            .iter()
+            .enumerate()
+            .any(|(at, name)| named[..at].contains(name));
+        twice || compared_twice
+    });
+    here || node
+        .named_children(&mut node.walk())
+        .any(|child| bools_may_report(child, source))
+}
+
+/// The operands of the chain of `op` at `node`, through parentheses.
+fn chain_operands<'t>(node: Node<'t>, op: &str, source: &str, operands: &mut Vec<Node<'t>>) {
+    let inner = unparen(node);
+    if operator_of(inner, source) == Some(op) {
+        chain_operands(field(inner, "left"), op, source, operands);
+        chain_operands(field(inner, "right"), op, source, operands);
+    } else {
+        operands.push(inner);
+    }
+}
+
+fn unparen(node: Node) -> Node {
+    if node.kind() == "parenthesized_expression" {
+        unparen(
+            node.named_child(0)
+                .expect("a parenthesis holds an expression"),
+        )
+    } else {
+        node
+    }
+}
+
+/// An expression's text without its spaces.
+fn plain(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// Whether an expression may be a constant: a literal, a name, a qualified
+/// name, or an operation of those.
+fn may_be_constant(node: Node) -> bool {
+    match node.kind() {
+        "int_literal"
+        | "float_literal"
+        | "imaginary_literal"
+        | "rune_literal"
+        | "interpreted_string_literal"
+        | "raw_string_literal"
+        | "identifier"
+        | "true"
+        | "false"
+        | "iota" => true,
+        "selector_expression"
+        | "parenthesized_expression"
+        | "unary_expression"
+        | "binary_expression" => node
+            .named_children(&mut node.walk())
+            .all(|child| child.kind() == "field_identifier" || may_be_constant(child)),
+        _ => false,
+    }
 }
 
 /// The site a comparison probe at `operator` records under.
@@ -922,19 +1016,26 @@ mod tests {
     }
 
     #[test]
-    fn only_a_logical_chain_or_an_atomic_assignment_is_vetted() {
-        let source = "package p\n\nimport \"sync/atomic\"\n\nfunc f(x int, n *int64) bool {\n\ty := x + 1\n\ty += int(atomic.AddInt64(n, 1))\n\ty -= 1\n\treturn !(x != 1) && (x != y+1)\n}\n";
-        let token = |after: &str, operator: &str| {
+    fn only_what_vet_may_report_is_vetted() {
+        let source = "package p\n\nimport \"sync/atomic\"\n\nfunc f(x, a, b int, n *int64) bool {\n\ty := x + 1\n\ty += int(atomic.AddInt64(n, 1))\n\ty -= 1\n\t_ = x != 1 && (x != 2)\n\t_ = a < b || a <= b\n\t_ = !(a < b) || y > 0\n\t_ = x != p.A && 1 != x\n\treturn x == f2() && x == y\n}\n";
+        let vetted = |after: &str, operator: &str, replacement: &str| {
             let start = source.find(after).unwrap();
             let at = start + source[start..].find(operator).unwrap();
-            (at, at + operator.len())
+            vet_candidate(source, (at, at + operator.len()), replacement)
         };
-        assert!(vet_candidate(source, token("!(x != 1)", "!=")));
-        assert!(vet_candidate(source, token("(x != y+1)", "+")));
-        assert!(vet_candidate(source, token(") && (", "&&")));
-        assert!(vet_candidate(source, token("y += int", "+=")));
-        assert!(!vet_candidate(source, token("y -= 1", "-=")));
-        assert!(!vet_candidate(source, token("x + 1", "+")));
+        // One name and two constants, or an operand twice.
+        assert!(vetted("x != 1 &&", "&&", "||"));
+        assert!(vetted("a <= b", "<=", "<"));
+        assert!(vetted("x != p.A", "&&", "||"));
+        // Neither.
+        assert!(!vetted("x != 1 &&", "!=", "=="));
+        assert!(!vetted("!(a < b)", "<", "<="));
+        assert!(!vetted("x == f2()", "&&", "||"));
+        assert!(!vetted("x == f2()", "==", "!="));
+        // An atomic call assigned to its own operand.
+        assert!(vetted("y += int", "+=", "="));
+        assert!(!vetted("y -= 1", "-=", "="));
+        assert!(!vetted("x + 1", "+", "-"));
     }
 
     #[test]

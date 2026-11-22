@@ -16545,7 +16545,7 @@ fn a_go_run_whose_own_step_fails_says_so() {
             // The project's Go listed again as the run prepares it.
             "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
-            "fs.write#go_run.rs:525 => go_run.rs:525",
+            "fs.write#go_run.rs:527 => go_run.rs:527",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -18024,9 +18024,9 @@ fn a_browser_suite_whose_servers_cannot_be_prepared_says_so() {
         ("fs.create_dir_all#python_run.rs:672", "python_run.rs:672"),
         ("fs.create_dir_all#ruby_run.rs:508", "ruby_run.rs:508"),
         ("fs.create_dir_all#ruby_run.rs:509", "ruby_run.rs:509"),
-        ("fs.create_dir_all#go_run.rs:323", "go_run.rs:323"),
-        ("fs.create_dir_all#go_run.rs:373", "go_run.rs:373"),
-        ("fs.create_dir_all#go_run.rs:412", "go_run.rs:412"),
+        ("fs.create_dir_all#go_run.rs:324", "go_run.rs:324"),
+        ("fs.create_dir_all#go_run.rs:374", "go_run.rs:374"),
+        ("fs.create_dir_all#go_run.rs:413", "go_run.rs:413"),
     ] {
         let project = Project::cart("browser-servers");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -18060,8 +18060,8 @@ fn a_browser_suite_whose_go_server_cannot_be_prepared_says_so() {
             "source_capture.rs:25",
         ),
         ("fs.open#integrity.rs:427@4", "integrity.rs:427"),
-        ("fs.write#go_run.rs:1216", "go_run.rs:1216"),
-        ("fs.create_dir_all#go_run.rs:1226", "go_run.rs:1226"),
+        ("fs.write#go_run.rs:1232", "go_run.rs:1232"),
+        ("fs.create_dir_all#go_run.rs:1242", "go_run.rs:1242"),
     ] {
         let project = Project::cart("browser-go");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -19418,7 +19418,7 @@ fn a_run_whose_inputs_cannot_be_recomputed_reads_stale() {
         stale_when(
             &project,
             &[
-                ("fs.canonicalize#go_run.rs:732", "go_run.rs:732"),
+                ("fs.canonicalize#go_run.rs:746", "go_run.rs:746"),
                 ("fs.read_dir#go_project.rs:142", "go_project.rs:142"),
                 ("fs.open#integrity.rs:427", "integrity.rs:427"),
             ],
@@ -24777,6 +24777,42 @@ fn go_mutants_of_a_wrapped_command_are_built_with_its_flags() {
         .unwrap_or_else(|| panic!("{listed}"))
         .clone();
     assert_eq!(mutant["strong"]["status"], "killed", "{mutant}");
+}
+
+/// A file the command builds only with a tag (`go test -tags tagged`) gets
+/// value probes as any other: the type checker is asked with the tag.
+#[test]
+fn a_go_file_behind_a_build_tag_gets_value_probes() {
+    let Some(go) = go() else {
+        eprintln!("skipping: no Go toolchain found");
+        return;
+    };
+    let project = Project::empty("go-probes-tagged");
+    project.write("go.mod", "module example.com/tagged\n\ngo 1.22\n");
+    project.write(
+        "double.go",
+        "//go:build tagged\n\npackage tagged\n\nfunc Double(n int) int { return n * 2 }\n",
+    );
+    project.write(
+        "double_test.go",
+        "//go:build tagged\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(3) != 6 {\n\t\tt.Fatal(\"double\")\n\t}\n}\n",
+    );
+    project
+        .supercov_with(
+            &["--", go, "test", "-tags", "tagged", "./..."],
+            &[("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutant = &listed["data"]["mutants"][0];
+    assert_eq!(
+        mutant["id"], "double.go:5:35-5:36:ArithmeticOperator:/",
+        "{listed}"
+    );
+    // `3 * 2` and `3 / 2` differ, and the probe saw it.
+    assert_eq!(mutant["status"], "infected", "{listed}");
 }
 
 /// Ctrl-C during a Go strong pass, sent to Supercov's process group as a
