@@ -24211,7 +24211,10 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
             "fake-strong.mjs",
         ])
         .json();
-    assert_eq!(reply["summary"]["error"], errors + 1, "{reply}");
+    // The summary counts extra.js's mutants alone, the ones asked about:
+    // tax.js's errors above are not among them.
+    assert_eq!(reply["summary"]["error"], 1, "{reply}");
+    assert!(errors > 0);
     assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
     assert!(reply["summary"]["equivalent"].as_u64() > Some(0), "{reply}");
     assert_eq!(reply["passes"][0]["driver"], "fake", "{reply}");
