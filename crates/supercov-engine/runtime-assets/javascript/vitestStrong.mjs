@@ -182,7 +182,10 @@ afterEach((context) => {
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`) ||
         /Test timed out in \d+ms/.test(`${error?.message}`));
     report({ test: `vitest:${context.task.id}`, failed: failed || limitNow, timeout, ms: result?.duration, hits: hitsNow() });
-    if ((failed || limitNow) && assignment.mutant)
+    // A test that fails without the mutant too (its file's baseline says)
+    // decides nothing: the copy goes on past it.
+    const failsWithout = !limitNow && assignment.continueAfter?.includes(`vitest:${context.task.id}`);
+    if ((failed || limitNow) && assignment.mutant && !failsWithout)
         killed = true;
 });
 

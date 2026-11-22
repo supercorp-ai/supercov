@@ -1402,10 +1402,14 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // A candidate that fails beside only its file's other candidates leans
         // on a test before it: the file's copies run it whole from then on.
         const forceWhole = new Set();
+        // A whole file's baseline runs only once a copy of the whole file
+        // fails (it then decides that kill): a mutant of module-level code
+        // takes every file that loads the module, and most such copies pass
+        // or fail on a test that passes without the mutant either way.
         for (const job of pending) {
             for (const group of job.files) {
                 if (group.whole)
-                    need(group.file, "whole");
+                    baseOf(group.file);
                 else {
                     need(group.file, "union");
                     group.tests.forEach((id) => baseOf(group.file).union.tests.add(id));
@@ -1413,7 +1417,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
         }
         const shapeOf = (group) => group.whole || forceWhole.has(group.file) ? "whole" : "union";
-        const baselineReady = (group) => baseOf(group.file)[shapeOf(group)].state === "known";
+        const baselineReady = (group) => shapeOf(group) === "whole" || baseOf(group.file).union.state === "known";
         const unusable = (group) => {
             const entry = baseOf(group.file)[shapeOf(group)];
             return entry.state === "known" && !entry.done;
@@ -1548,7 +1552,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             const timed = whole ? testsOf.get(group.file) ?? [] : chosen;
             const budget = Math.max(...timed.map((id) => Math.max(durationOf.get(id) ?? 1_000, baselineTestMs.get(id) ?? 0)), 1_000);
             const testTimeout = Math.ceil((budget * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2);
-            return { mutant: { file: job.mutant.file, index: job.mutant.index }, tests: chosen, wholeFile: whole, unknownBaseline: false, hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000), testTimeout };
+            // A whole copy goes on past a test that fails without the mutant
+            // too, as its file's whole baseline did.
+            const continueAfter = whole ? [...failedBefore] : undefined;
+            return { mutant: { file: job.mutant.file, index: job.mutant.index }, tests: chosen, wholeFile: whole, continueAfter, unknownBaseline: false, hitLimit: Math.max(HIT_LIMIT_FLOOR, 1_000_000), testTimeout };
         };
         // The work a slot of class `cls` takes now, if any.
         const take = (cls, slotFile) => {
@@ -1680,21 +1687,25 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
             // The copy left out tests its file's baseline ran before the
             // failure: they run again with no mutant, up to the failing one.
+            // A copy of the whole file left out none: its file's whole
+            // baseline, run once for every such kill, says whether the test
+            // fails without the mutant too.
             const ran = outcome.tests.map((test) => test.test);
-            const chosen = evidence.test ? ran.slice(0, ran.indexOf(evidence.test) + 1) : claim.tests;
-            const key = confirmationKey(group.file, chosen, false);
+            const chosen = claim.wholeFile ? [] : evidence.test ? ran.slice(0, ran.indexOf(evidence.test) + 1) : claim.tests;
+            const key = confirmationKey(group.file, chosen, claim.wholeFile);
             let check = checks.find((candidate) => candidate.key === key);
             if (!check) {
-                check = { key, file: group.file, claim: { mutant: null, tests: chosen, wholeFile: false }, tries: 0, result: undefined };
+                check = { key, file: group.file, claim: { mutant: null, tests: chosen, wholeFile: claim.wholeFile }, tries: 0, result: undefined, baseline: claim.wholeFile };
                 checks.push(check);
                 confirmations.set(key, check);
             }
             job.confirmingKills += 1;
+            const waiting = { job, group, evidence, verdict, whole: claim.wholeFile };
             // Confirmed already, for another mutant's kill.
             if (check.result)
-                settleKill(check.result, { job, group, evidence, verdict });
+                settleKill(check.result, waiting);
             else
-                (check.jobs ??= []).push({ job, group, evidence, verdict });
+                (check.jobs ??= []).push(waiting);
         };
         const judgeC = ({ job, group, claim }, outcome) => {
             job.open -= 1;
@@ -1739,18 +1750,24 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
             else if (!outcome.done)
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
-            else if (ranNone(claim, outcome, entry, group.file))
-                finishC(job, { status: "error", reason: ranNone(claim, outcome, entry, group.file) });
+            else if (ranNone(claim, outcome, { order: entry.order ?? testsOf.get(group.file) }, group.file))
+                finishC(job, { status: "error", reason: ranNone(claim, outcome, { order: entry.order ?? testsOf.get(group.file) }, group.file) });
             else
                 conclude(job);
         };
         // A kill once the tests up to it have run with no mutant: it stands
         // unless they fail that way too, which a test the copy left out
         // caused; the mutant then runs the file whole.
-        const settleKill = (result, { job, group, evidence, verdict }) => {
+        const settleKill = (result, { job, group, evidence, verdict, whole }) => {
             job.confirmingKills -= 1;
             if (job.done)
                 return;
+            // The whole file does not finish without the mutant: it cannot
+            // test it.
+            if (whole && !result.done) {
+                job.unrun = group.file;
+                return;
+            }
             const alsoWithout = evidence.test ? result.failed.has(evidence.test)
                 : evidence.outside ? result.outside
                     : !result.done;
@@ -1759,8 +1776,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 return;
             }
             overturned += 1;
-            need(group.file, "whole");
-            job.chain.unshift({ file: group.file, tests: [], cost: group.cost, whole: true });
+            // A copy of the whole file runs again, past what fails without
+            // the mutant; a copy of some tests runs the file whole.
+            job.chain.unshift(whole ? group : { file: group.file, tests: [], cost: group.cost, whole: true });
         };
         const recordCheck = (check, outcome) => {
             check.running = false;
@@ -1772,6 +1790,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 outside: outcome.outside.length > 0,
                 done: outcome.done || !outcome.claimed,
             };
+            // A run of the whole file with no mutant is its whole baseline.
+            if (check.baseline && outcome.claimed)
+                recordShape(check.file, "whole", outcome);
             for (const waiting of check.jobs ?? [])
                 settleKill(check.result, waiting);
             check.jobs = [];
@@ -1799,9 +1820,14 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         // The copies going, looked at often: a free slot waits on them.
         const limitFor = (item) => {
             const entry = item.job ? baseOf(item.file)[item.claim.wholeFile ? "whole" : "union"] : undefined;
-            if (!entry?.copyMs)
+            // A whole copy before its file's whole baseline: the file as the
+            // measured run ran it.
+            const copyMs = entry?.copyMs ?? (item.job && item.claim.wholeFile
+                ? overheadOf(item.file) + (testsOf.get(item.file) ?? []).reduce((sum, id) => sum + testMsOf(id), 0)
+                : undefined);
+            if (!copyMs)
                 return undefined;
-            return (entry.copyMs * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2 + Math.max(item.claim.testTimeout, hookMs);
+            return (copyMs * TIMEOUT_FACTOR + TIMEOUT_CONSTANT_MS) * 2 + Math.max(item.claim.testTimeout, hookMs);
         };
         const look = () => {
             const now = Date.now();
