@@ -402,6 +402,10 @@ fn frontend_artifact_paths(
             .iter()
             .map(|(name, _)| format!(".supercov/node_modules/{name}")),
     );
+    // The browser runtime the modules Next.js bundles import, written where
+    // there are any: a run restored from the cache without it failed on
+    // every such module ("Cannot find module .../browser-runtime.mjs").
+    artifacts.push(format!(".supercov/node_modules/{SHARED_BROWSER_RUNTIME}"));
     // Scope entries outside the instrumented set may still be rewritten (assertion attribution,
     // capability imports), so they are cached like instrumented sources. Both populations feed
     // the cache key through the source digest -- nothing cached here escapes the fingerprint.
@@ -2299,9 +2303,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:471",
-            "javascript-source-path#javascript_frontend.rs:1881",
-            "javascript-source-path#javascript_frontend.rs:1810",
+            "javascript-source-path#javascript_frontend.rs:475",
+            "javascript-source-path#javascript_frontend.rs:1885",
+            "javascript-source-path#javascript_frontend.rs:1814",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2412,8 +2416,8 @@ mod tests {
         // published.
         for fault in [
             "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:515",
-            "javascript-source-path#javascript_frontend.rs:471",
+            "fs.read_to_string#javascript_frontend.rs:519",
+            "javascript-source-path#javascript_frontend.rs:475",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),
@@ -3930,6 +3934,16 @@ mod tests {
             assert!(!shared(file), "{file}");
         }
         assert!(rewritten_files(&workspace).contains(&"app/checked.mjs".to_owned()));
+        // A run restored from the cache gets the shared runtime back with
+        // the modules that import it.
+        let runtime = workspace
+            .join(".supercov/node_modules")
+            .join(SHARED_BROWSER_RUNTIME);
+        let written = fs::read(&runtime).unwrap();
+        fs::remove_file(&runtime).unwrap();
+        let cache = read_javascript_frontend_cache(&workspace, "cache").unwrap();
+        load_cached_javascript_frontend(&workspace, &cache).unwrap();
+        assert_eq!(fs::read(&runtime).unwrap(), written);
         let _ = fs::remove_dir_all(source_root);
         let _ = fs::remove_dir_all(workspace);
         // The shared runtime failing to be written stops the preparation,
