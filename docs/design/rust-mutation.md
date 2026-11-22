@@ -89,7 +89,18 @@ snapshot turns into a comparison record, never a covered point:
   than the replacement's infects. One that matches proves nothing: the
   replacement also skips everything the body does, so it stays `unknown`.
 
-The runtime reads an operand by its type's name (`std::any::type_name`):
+Each probe site keeps a state of its own (a `static` the site declares,
+of the runtime's `State` type, so it names no path that only some editions
+have). Once more evaluations cannot change the weak verdict of any of the
+site's mutants in this process (a comparison whose operands were less, equal
+and greater; an operator each of whose mutants differed once; a negated
+non-zero; a function that returned two different values; any operand the
+probe cannot read), the probe returns at once there. A test runs in a
+process of its own, so the state is that test's.
+
+The runtime reads an operand by its type's name (`std::any::type_name`),
+and skips without comparing names any type named in more than five
+characters:
 a built-in integer, float, `bool` or `char`; anything else records
 `unknown`. No probe has a trait bound, so it compiles wherever the operands
 can be borrowed. An operator's probe evaluates its operands a second time,

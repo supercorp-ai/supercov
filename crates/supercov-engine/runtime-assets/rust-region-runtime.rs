@@ -1169,6 +1169,9 @@ mod __SUPERCOV_MODULE__ {
         settle(state, 1 << outcome, |seen| seen & 0b111 == 0b111 || seen & 0b10000 != 0);
     }
 
+    /// A probe site's state, which each site keeps in a `static` of its own.
+    pub type State = AtomicU32;
+
     /// What a probe site's state holds once more evaluations cannot change
     /// the weak verdict of any of its mutants in this process.
     const DECIDED: u32 = u32::MAX;

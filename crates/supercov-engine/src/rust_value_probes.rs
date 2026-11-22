@@ -37,7 +37,9 @@ use crate::rust_mutants::{arithmetic_code, binary_replacements, value_site};
 /// A probe site's own state (`settle` in the runtime): once more
 /// evaluations cannot change its mutants' verdicts in this process, the
 /// probe does nothing there.
-const STATE: &str = "{ static STATE: ::core::sync::atomic::AtomicU32 = ::core::sync::atomic::AtomicU32::new(0); &STATE }";
+/// `{runtime}` is the runtime's path: no path from the crate's root to
+/// `core` works in every edition.
+const STATE: &str = "{ static STATE: {runtime}::State = {runtime}::State::new(0); &STATE }";
 
 /// Code a probe adds around a range, or at an offset.
 pub(crate) enum ValueEdit {
@@ -67,6 +69,7 @@ pub(crate) fn place(
     let Some((tree, _)) = crate::rust_instrumenter::parse_source(source) else {
         return Vec::new();
     };
+    let state = STATE.replace("{runtime}", runtime);
     let mut edits = Vec::new();
     let mut ids = |site: &str, outcomes: &[&str]| {
         outcomes
@@ -96,7 +99,7 @@ pub(crate) fn place(
                     edits.push(ValueEdit::Wrap {
                         range,
                         prefix: format!(
-                            "({runtime}::compare({left}, {right}, &[{}], {STATE}), ",
+                            "({runtime}::compare({left}, {right}, &[{}], {state}), ",
                             outcomes.join(", ")
                         ),
                         suffix: ").1".into(),
@@ -121,7 +124,7 @@ pub(crate) fn place(
                     edits.push(ValueEdit::Wrap {
                         range,
                         prefix: format!(
-                            "({runtime}::arithmetic({left}, {right}, b'{}', &[{}], {STATE}), ",
+                            "({runtime}::arithmetic({left}, {right}, b'{}', &[{}], {state}), ",
                             op_code(op),
                             mutants.join(", ")
                         ),
@@ -144,7 +147,7 @@ pub(crate) fn place(
             edits.push(ValueEdit::Wrap {
                 range,
                 prefix: format!(
-                    "({runtime}::negated({read}, &[{}], {STATE}), ",
+                    "({runtime}::negated({read}, &[{}], {state}), ",
                     outcomes.join(", ")
                 ),
                 suffix: ").1".into(),
@@ -287,9 +290,10 @@ fn returns(
     let Some(list) = body.stmt_list() else {
         return Vec::new();
     };
+    let state = STATE.replace("{runtime}", runtime);
     let site = value_site(file, function.syntax().text_range(), "return");
     let outcomes = ids(&site, &["0", "1", "-1", "other", "unknown", "unwound"]);
-    let table = format!("&[{}], {STATE}", outcomes[..5].join(", "));
+    let table = format!("&[{}], {state}", outcomes[..5].join(", "));
     let mut edits = Vec::new();
     let entry = list
         .syntax()
