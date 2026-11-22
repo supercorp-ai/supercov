@@ -706,7 +706,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                 }
                             }
                             // A file's module setup: every test of the file.
-                            "setup" => {
+                            "setup" if raw.test_file.is_some() => {
                                 if let Some(file) = &raw.test_file {
                                     whole_files.insert(file.clone());
                                     for &test in by_file.get(file).into_iter().flatten() {
@@ -714,8 +714,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                                     }
                                 }
                             }
-                            // Work no test was credited with: any test of the
-                            // run may have caused it.
+                            // Work no test was credited with, a module setup
+                            // that names no test file among it (Mocha loads
+                            // every test file before the first test): any test
+                            // of the run may have caused it.
                             _ => {
                                 for test in 0..tests.len() {
                                     take(test, CandidateReason::Unattributed);
@@ -921,7 +923,7 @@ mod tests {
     /// Each mutant's candidates are the tests whose own evidence, with what
     /// their file's modules did as they loaded, may infect it: module-level
     /// code takes every test of the file it ran in, a setup no file owns
-    /// takes none, and a mutant no passing test may infect survives.
+    /// takes every test, and a mutant no passing test may infect survives.
     #[test]
     fn a_mutant_s_candidates_are_the_tests_whose_own_evidence_may_infect_it() {
         let mut load = record("load", "setup", Some("t/a.test.js"), &["s-load"]);
@@ -1031,16 +1033,25 @@ mod tests {
         assert_eq!(module.whole_files, ["t/a.test.js"]);
         assert_eq!(module.covering, 1);
 
-        for survivor in ["loose", "nobody"] {
-            let survived = planned(&plan, survivor);
-            assert_eq!(
-                (survived.decided, survived.reason.as_deref()),
-                (Some(Decided::Survived), Some("no-passing-candidate")),
-                "{survivor}"
-            );
-            assert!(survived.candidates.is_empty(), "{survivor}");
-        }
-        assert!(planned(&plan, "loose").whole_files.is_empty());
+        let survived = planned(&plan, "nobody");
+        assert_eq!(
+            (survived.decided, survived.reason.as_deref()),
+            (Some(Decided::Survived), Some("no-passing-candidate"))
+        );
+        assert!(survived.candidates.is_empty());
+        // A setup that names no file (Mocha loads every test file before
+        // its first test): every test of the run.
+        let loose = planned(&plan, "loose");
+        assert_eq!(loose.decided, None);
+        assert!(
+            loose
+                .candidates
+                .iter()
+                .all(|candidate| candidate.reason == CandidateReason::Unattributed)
+                && loose.candidates.len() == plan.tests.iter().filter(|test| test.runnable).count(),
+            "{loose:?}"
+        );
+        assert!(loose.whole_files.is_empty());
         assert_eq!(planned(&plan, "nobody").whole_files, ["t/nobody.test.js"]);
 
         // A test measured without the probes ran the comparison and

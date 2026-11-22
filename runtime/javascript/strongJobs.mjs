@@ -22,11 +22,14 @@
 // tests again without the mutant. A job past 3x its baseline and 10 s is
 // stopped: a timeout, unless a test had already failed.
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Tests that took at most this long together run beside a mutant's own
+// candidates rather than be confirmed apart (strongJobs's `tryFile`).
+const UNION_MS = 1_000;
 const RUNNERS = new Set(["jest", "mocha", "node:test", "ava", "tap", "bun:test", "vitest-browser"]);
 
 function parallelism() {
@@ -120,11 +123,26 @@ export function outcomes(directory) {
 // The command for one job: Bun's runner takes the file as an argument, as it
 // loads every test file into one process; the other runners' adapters keep
 // their runner from loading another file.
-export function commandFor(command, file) {
+export function commandFor(command, file, root = process.cwd()) {
     const [program, first] = command;
     if (program && /^bun(?:\.exe)?$/.test(basename(program)) && first === "test")
         return [...command, `./${file}`];
-    return command;
+    return withoutNpx(command, root);
+}
+
+// `npx <tool> ...` where the project has the tool: the tool itself. npx
+// costs a start of npm's CLI before each job's, a third of a small suite's
+// job.
+export function withoutNpx(command, root) {
+    const [program, ...rest] = command;
+    if (!program || !/^npx(?:\.cmd)?$/.test(basename(program)) || process.platform === "win32")
+        return command;
+    const at = rest.findIndex((word) => !/^(?:-y|--yes|--no-install|--offline)$/.test(word));
+    const tool = rest[at];
+    if (at < 0 || !tool || tool.startsWith("-") || tool.includes("@") || tool.includes("/"))
+        return command;
+    const binary = join(root, "node_modules", ".bin", tool);
+    return existsSync(binary) ? [binary, ...rest.slice(at + 1)] : command;
 }
 
 function readTimeouts(path) {
@@ -198,7 +216,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
         entries.forEach((entry, index) => indexes.set(idOf(file, entry), { index, entry }));
 
     const run = slots(workers);
-    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0 };
+    const profile = { jobs: 0, baselines: 0, confirmations: 0, overturned: 0, stopped: 0, jobMs: 0 };
     let jobNumber = 0;
 
     // One start of the command: `tests` of `file` (null: all of them), with
@@ -214,7 +232,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             writeFileSync(spec, JSON.stringify({ files: { [file]: chosen === null ? null : [...chosen] }, known, bail }));
             const results = join(directory, "results.jsonl");
             const log = join(directory, "output.log");
-            const [program, ...args] = commandFor(command, file);
+            const [program, ...args] = commandFor(command, file, root);
             const begun = Date.now();
             let output;
             try {
@@ -271,6 +289,7 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
                 }, limitMs);
                 const finish = (code, error) => {
                     clearTimeout(timer);
+                    profile.jobMs += Date.now() - begun;
                     try {
                         writeFileSync(log, Buffer.concat(output));
                     }
@@ -357,7 +376,11 @@ export async function drive({ command, plan, resultsPath, root = process.cwd(), 
             return { status: "error", reason: `${group.file} does not finish without a mutant, so it could not test this one`, tests: 0 };
         let whole = group.whole || baseline.chosen === null;
         for (;;) {
-            const chosen = whole ? null : new Set(group.tests);
+            // Where the baseline's tests take little time beside a start of
+            // the command, the job runs them all: a kill is then judged by a
+            // baseline that ran the same tests, and needs no confirmation.
+            const cheap = !whole && baseline.chosen && cost(group.file, baseline.chosen) <= UNION_MS;
+            const chosen = whole ? null : new Set(cheap ? baseline.chosen : group.tests);
             const excluded = whole ? (testId) => !baseline.passing.has(testId) : () => false;
             const limitMs = 3 * baseline.durationMs + 10_000;
             const result = await job({ mutant, file: group.file, tests: chosen, bail: true, limitMs });

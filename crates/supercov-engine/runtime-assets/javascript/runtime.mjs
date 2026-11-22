@@ -154,6 +154,15 @@ var builtinSetHas = Set.prototype.has;
 var builtinWeakMapGet = WeakMap.prototype.get;
 var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
+// The runtime's own globals are not the suite's: kept out of a listing of
+// the global object, as Mocha's --check-leaks takes one before and after each
+// test and failed every first test with "global leak(s) detected".
+function setRuntimeGlobal(name, value) {
+  if (Object.prototype.hasOwnProperty.call(runtimeGlobal, name))
+    runtimeGlobal[name] = value;
+  else
+    Object.defineProperty(runtimeGlobal, name, { value, writable: true, configurable: true, enumerable: false });
+}
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
@@ -523,7 +532,7 @@ function resetCoverage(testId2) {
   if (!state.probeV2Clock.fast)
     state.probeV2Clock.e = NaN;
   if (testId2)
-    runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId2;
+    setRuntimeGlobal("__SUPERCOV_MCDC_TEST_ID__", testId2);
   if (isBrowser) {
     try {
       localStorage.removeItem(storageKey);
@@ -1412,7 +1421,7 @@ function currentRequestContext() {
 function activateCoverageScope(scope) {
   switchWasmOwner(scope);
   if (scope)
-    runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
+    setRuntimeGlobal("__SUPERCOV_ACTIVE_SCOPE__", scope);
   else
     delete runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
   activateProbeV2Context(scope ? { scope } : {});
