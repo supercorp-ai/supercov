@@ -22388,6 +22388,34 @@ fn rust_compiled_to_wasm_under_node_tests_runs_its_mutants() {
     assert_eq!(reply["summary"]["killed"], 6, "{reply}");
     assert_eq!(reply["summary"]["survived"], 1, "{reply}");
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    // A pass that cannot switch the crate's mutants in ends, saying why.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../supercov-engine/src/rust_strong.rs"),
+    )
+    .unwrap();
+    let line = source
+        .lines()
+        .position(|line| line.contains("crate::fault_fs::read(plan_path)"))
+        .unwrap()
+        + 1;
+    std::fs::remove_file(
+        project
+            .root
+            .join(".supercov/runs")
+            .join(&rust)
+            .join("strong-mutation.json"),
+    )
+    .unwrap();
+    let failed = project.supercov_with(
+        &["runs", &rust, "mutants", "test"],
+        &[(
+            "SUPERCOV_TEST_FAULT",
+            &format!("fs.read#rust_strong.rs:{line}"),
+        )],
+    );
+    assert_ne!(failed.code(), 0, "{}", failed.stderr());
+    assert!(failed.stderr().contains("plan.json"), "{}", failed.stderr());
 }
 
 /// Two inline snapshots in one file, and a test that fakes the clock: the

@@ -276,7 +276,6 @@ pub fn command(args: &[String]) -> ExitCode {
         if options.plan {
             return Ok(plan_json(run, &plan));
         }
-        refuse_without_a_driver(&run.id, &plan)?;
         let mut data = execute(&root, run, plan, saved, &options)?;
         let verdicts = read_saved(run);
         data["gate"] = gate(&root, &asked, &verdicts, &options)?;
@@ -305,34 +304,6 @@ pub fn command(args: &[String]) -> ExitCode {
             }
         }
     }
-}
-
-/// A pass with mutants to run needs a test it can run: one of a runner a
-/// strong driver drives. Without one every mutant would end without a
-/// verdict, and the pass would read as a score of nothing killed.
-fn refuse_without_a_driver(run: &str, plan: &StrongPlan) -> Result<(), String> {
-    use supercov_engine::strong_driver::STRONG_RUNNERS;
-    let runs_any = plan.mutants.iter().any(|mutant| mutant.decided.is_none());
-    let drivable = plan
-        .tests
-        .iter()
-        .any(|test| STRONG_RUNNERS.contains(&test.runner.as_str()));
-    if !runs_any || drivable {
-        return Ok(());
-    }
-    let runners = plan
-        .tests
-        .iter()
-        .map(|test| test.runner.as_str())
-        .filter(|runner| *runner != "background")
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "The strong pass runs tests under {}, and run {run}'s tests ran under {runners}: it cannot run their mutants. `supercov runs {run} mutants` lists them with what the run's own tests tell of each.",
-        STRONG_RUNNERS.join(", "),
-    ))
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
@@ -948,62 +919,6 @@ mod tests {
         assert_eq!(span_lines("src/a.ts"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:Mutator"), (0, u32::MAX));
         assert_eq!(span_lines("src/a.ts:3:9-x:Mutator"), (0, u32::MAX));
-    }
-
-    fn planned_test(runner: &str) -> supercov_engine::strong_plan::PlannedTest {
-        supercov_engine::strong_plan::PlannedTest {
-            id: format!("t/{runner}"),
-            file: None,
-            name: runner.into(),
-            title: None,
-            runner: runner.into(),
-            duration_ms: None,
-            span: None,
-            runnable: true,
-        }
-    }
-
-    fn planned_mutant(
-        decided: Option<supercov_engine::strong_plan::Decided>,
-    ) -> supercov_engine::strong_plan::PlannedMutant {
-        supercov_engine::strong_plan::PlannedMutant {
-            id: "src/a.py:1:1-1:2:Op:+".into(),
-            file: "src/a.py".into(),
-            language: "python".into(),
-            index: 0,
-            mutator: "Op".into(),
-            weak: "unknown",
-            decided,
-            reason: None,
-            candidates: Vec::new(),
-            whole_files: Vec::new(),
-            server_wide: None,
-            covering: 0,
-            statement: None,
-            function: None,
-            function_hit_by: Default::default(),
-        }
-    }
-
-    /// A pass with mutants to run refuses a run none of whose tests a
-    /// driver runs, naming the runners its tests ran under.
-    #[test]
-    fn a_pass_with_no_test_a_driver_runs_is_refused() {
-        let plan = |runners: &[&str], decided| StrongPlan {
-            mutant_set: "set".into(),
-            tests: runners.iter().map(|runner| planned_test(runner)).collect(),
-            mutants: vec![planned_mutant(decided)],
-        };
-        let refused =
-            refuse_without_a_driver("r1", &plan(&["pytest", "background"], None)).unwrap_err();
-        assert!(
-            refused.contains("run r1's tests ran under pytest: it cannot run their mutants. `supercov runs r1 mutants`"),
-            "{refused}"
-        );
-        // A test a driver runs, or nothing left to run: no refusal.
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest", "jest"], None)).is_ok());
-        let decided = Some(supercov_engine::strong_plan::Decided::Survived);
-        assert!(refuse_without_a_driver("r1", &plan(&["pytest"], decided)).is_ok());
     }
 
     #[test]
