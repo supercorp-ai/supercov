@@ -1,5 +1,9 @@
 //! Strong mutation's plan (`docs/design/strong-mutation.md`): which of a
-//! run's mutants need running, and against which of its tests.
+//! run's mutants need running, and against which of its tests. It reads
+//! only what every language records -- each test's hits, and the values its
+//! probes saw where the language records them -- and the run's mutant list
+//! (`mutant_list`), so one plan serves every language's driver
+//! (`docs/design/mutation-drivers.md`).
 //!
 //! A test can kill a mutant only if the mutant's value differed somewhere in
 //! that test's own execution: until then, the test runs exactly as it ran
@@ -21,8 +25,8 @@ use serde::Serialize;
 use crate::coverage_report::{
     ATTRIBUTION_BY_TIME, ATTRIBUTION_EXACT, ArchiveReportRequest, RawTestResult, ReportError,
 };
-use crate::js_mutant_links::{CandidateMutant, MutantsFile};
 use crate::js_weak_mutation::{Observations, Status, observations, verdict};
+use crate::mutant_list::{CandidateMutant, MutantsFile};
 
 /// A test the plan may run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,6 +113,8 @@ pub enum Decided {
 pub struct PlannedMutant {
     pub id: String,
     pub file: String,
+    /// Its file's language: which driver runs it.
+    pub language: String,
     /// Its position in its file's list: the index its switch carries.
     pub index: usize,
     pub mutator: String,
@@ -200,7 +206,7 @@ pub fn list_run_mutants(
 pub fn run_recorded_mutant_values(archive_path: &std::path::Path) -> bool {
     let listed_after = archive_path.with_file_name(crate::coverage_report::LISTED_MUTANTS_FILE);
     if let Ok(bytes) = std::fs::read(&listed_after)
-        && let Ok(listed) = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&bytes)
+        && let Ok(listed) = serde_json::from_slice::<MutantsFile>(&bytes)
     {
         // An empty list there marks a run that had its own.
         return listed.mutant_set.is_none();
@@ -210,7 +216,7 @@ pub fn run_recorded_mutant_values(archive_path: &std::path::Path) -> bool {
         archive_path,
         |path| path == "mutants.json",
         |entry| {
-            listed = serde_json::from_slice::<crate::js_mutant_links::MutantsFile>(&entry.contents)
+            listed = serde_json::from_slice::<MutantsFile>(&entry.contents)
                 .is_ok_and(|mutants| mutants.mutant_set.is_some());
             Ok(())
         },
@@ -231,23 +237,21 @@ fn beside(request: &ArchiveReportRequest) -> std::path::PathBuf {
 fn listed_or_list(
     request: &ArchiveReportRequest,
     root: &std::path::Path,
-    listed: Option<crate::js_mutant_links::MutantsFile>,
+    listed: Option<MutantsFile>,
     points: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-) -> Result<(Option<crate::js_mutant_links::MutantsFile>, Vec<String>), ReportError> {
+) -> Result<(Option<MutantsFile>, Vec<String>), ReportError> {
     let path = beside(request);
     let (kept, written, changed) = match listed {
         Some(own) if own.mutant_set.is_some() => {
-            let none = crate::js_mutant_links::MutantsFile {
+            let none = MutantsFile {
                 schema_version: own.schema_version,
-                mutant_set: None,
-                files: std::collections::BTreeMap::new(),
-                tests_without_values: Vec::new(),
+                ..MutantsFile::unlisted()
             };
             (Some(own), none, Vec::new())
         }
         _ if points.is_empty() => return Ok((None, Vec::new())),
         _ => {
-            let fresh = crate::js_mutant_links::list_mutants(root, points);
+            let fresh = crate::mutant_list::list_from_sources(root, points);
             (Some(fresh.mutants.clone()), fresh.mutants, fresh.changed)
         }
     };
@@ -543,6 +547,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     mutant.id.clone()
                 },
                 file: file.clone(),
+                language: listed.language_of(file).to_owned(),
                 index,
                 mutator: mutant.mutator.clone(),
                 weak: weak_name(status),
@@ -765,6 +770,8 @@ mod tests {
         MutantsFile {
             schema_version: 1,
             mutant_set: Some("set".into()),
+            mutant_sets: Default::default(),
+            languages: Default::default(),
             files: if mutants.is_empty() {
                 BTreeMap::new()
             } else {

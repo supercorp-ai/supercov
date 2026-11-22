@@ -284,7 +284,7 @@ fn merged_mutants(
     archives: &[Vec<EvidenceArchiveEntry>],
     base: usize,
 ) -> Result<Option<Vec<u8>>, String> {
-    use crate::js_mutant_links::MutantsFile;
+    use crate::mutant_list::MutantsFile;
     const NAME: &str = "mutants.json";
     let mut listed = Vec::new();
     let mut unlisted = Vec::new();
@@ -314,7 +314,6 @@ fn merged_mutants(
         // measured with them off says.
         return Ok(first_file);
     };
-    let mutant_set = first.1.mutant_set.clone();
     // Each file's bytes as a run recorded them, where it did.
     let hashes = archives
         .iter()
@@ -335,15 +334,30 @@ fn merged_mutants(
     }
     let mut files = BTreeMap::<String, (usize, Vec<_>)>::new();
     let mut without_values = BTreeSet::new();
+    // Each language's mutant set, from the first run that listed it: a run
+    // that listed the same language with another set did not enumerate the
+    // same mutants.
+    let mut sets = BTreeMap::<String, (usize, String)>::new();
+    let mut languages = BTreeMap::<String, String>::new();
     for (index, file) in std::iter::once(first).chain(others) {
-        if file.mutant_set != mutant_set {
-            return Err(format!(
-                "Cannot merge coverage run {}: it listed the mutants of {}, and run {} those of {}",
-                inputs[*index].id,
-                file.mutant_set.as_deref().unwrap_or_default(),
-                inputs[first.0].id,
-                mutant_set.as_deref().unwrap_or_default(),
-            ));
+        for (language, set) in file.sets() {
+            match sets.get(&language) {
+                Some((kept, kept_set)) if *kept_set != set => {
+                    return Err(format!(
+                        "Cannot merge coverage run {}: it listed the mutants of {set}, and run {} those of {kept_set}",
+                        inputs[*index].id, inputs[*kept].id,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    sets.insert(language, (*index, set));
+                }
+            }
+        }
+        for (path, language) in &file.languages {
+            languages
+                .entry(path.clone())
+                .or_insert_with(|| language.clone());
         }
         without_values.extend(file.tests_without_values.iter().cloned());
         for (path, mutants) in &file.files {
@@ -382,15 +396,23 @@ fn merged_mutants(
     for index in unlisted {
         without_values.extend(measured_tests(&archives[index]).into_keys());
     }
-    let merged = MutantsFile {
-        schema_version: crate::js_mutant_links::MUTANTS_SCHEMA_VERSION,
-        mutant_set,
-        files: files
-            .into_iter()
-            .map(|(path, (_, mutants))| (path, mutants))
-            .collect(),
-        tests_without_values: without_values.into_iter().collect(),
-    };
+    let mut merged = MutantsFile::unlisted();
+    for (language, (_, set)) in sets {
+        let files = files
+            .iter()
+            .filter(|(path, _)| {
+                languages
+                    .get(*path)
+                    .map_or(crate::mutant_list::JAVASCRIPT, String::as_str)
+                    == language
+            })
+            .map(|(path, (_, mutants))| (path.clone(), mutants.clone()))
+            .collect::<BTreeMap<_, _>>();
+        merged = merged
+            .merge(MutantsFile::listed(&language, &set, files))
+            .expect("each language is merged once");
+    }
+    merged.tests_without_values = without_values.into_iter().collect();
     Ok(Some(
         serde_json::to_vec(&merged).expect("plain data serializes"),
     ))
@@ -2219,6 +2241,43 @@ mod tests {
             "Cannot merge coverage run run-b: it listed the mutants of stryker-js@9.0.0, and run run-a those of stryker-js@10.1.1"
         );
         assert!(!root.join(".supercov/runs/merged").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that listed another language's mutants merges with one that
+    /// listed JavaScript's: each file keeps its language and each language
+    /// its set.
+    #[test]
+    fn runs_that_listed_different_languages_merge_each_with_its_set() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        let python = serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": "mutmut@3",
+            "mutantSets": {"python": "mutmut@3"},
+            "languages": {"src/app.py": "python"},
+            "files": {"src/app.py": [{
+                "mutator": "BooleanLiteral", "replacement": "False",
+                "start": [1, 1], "end": [1, 5], "original": "True"
+            }]}
+        });
+        rewrite_entry(
+            &root,
+            "run-b",
+            "mutants.json",
+            Some(serde_json::to_vec(&python).unwrap()),
+        );
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (_, merged) = merged_mutants_file(&root);
+        assert_eq!(merged.language_of("src/app.py"), "python");
+        assert_eq!(merged.language_of("src/app.js"), "javascript");
+        assert_eq!(
+            merged.mutant_set.as_deref(),
+            Some("stryker-js@10.1.1, mutmut@3")
+        );
+        assert_eq!(merged.files.len(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
