@@ -658,6 +658,10 @@ pub fn pit_only_category(mutant: &PitMutant, source: Option<&str>) -> &'static s
     if kotlin && line.trim_start().starts_with("for ") {
         return "a Kotlin for loop's counter";
     }
+    // `IntArray(n) { 1 }` is a loop filling the array, inlined.
+    if kotlin && line.contains("Array(") && line.contains('{') {
+        return "a Kotlin array constructor's loop";
+    }
     let code = line.trim_start();
     if kotlin
         && ((line.contains("->") && !line.contains('{'))
@@ -965,6 +969,11 @@ mod tests {
         );
         assert_eq!(category(6), "a `when` branch's comparison with its subject");
         assert_eq!(category(9), "other");
+        let filled = "val widths = IntArray(n) { 1 }\n";
+        assert_eq!(
+            pit_only_category(&mutant(1, "ConditionalsBoundary"), Some(filled)),
+            "a Kotlin array constructor's loop"
+        );
         assert_eq!(
             pit_only_category(&mutant(2, "VoidMethodCall"), Some(source)),
             "other"
