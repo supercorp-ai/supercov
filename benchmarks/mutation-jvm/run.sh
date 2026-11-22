@@ -285,7 +285,12 @@ PY
     {
       echo "== $HANDCHECK"
       echo "== alone: $HANDCHECK_TEST"
-      if [ "$build" = maven ]; then
+      if [ "$build" = ant ]; then
+        # Ant's <junit> reports failures without failing the build: its
+        # summary says.
+        # shellcheck disable=SC2086
+        ant -noinput $flags -Djunit.includes="$HANDCHECK_TEST" "$(field antTarget)" 2>&1 | tee /dev/stderr | grep -q "Tests FAILED" && echo "FAILED alone" || echo "PASSED alone"
+      elif [ "$build" = maven ]; then
         # shellcheck disable=SC2086
         mvn -B -q $flags -Dtest="$HANDCHECK_TEST" -Dsurefire.failIfNoSpecifiedTests=false test && echo "PASSED alone" || echo "FAILED alone"
       else
@@ -296,7 +301,11 @@ PY
       fi
       echo "== whole suite"
       # shellcheck disable=SC2086
-      $(tests_command) && echo "PASSED whole" || echo "FAILED whole"
+      if [ "$build" = ant ]; then
+        $(tests_command) 2>&1 | tee /dev/stderr | grep -q "Tests FAILED" && echo "FAILED whole" || echo "PASSED whole"
+      else
+        $(tests_command) && echo "PASSED whole" || echo "FAILED whole"
+      fi
     } > "$results/handcheck-$(echo "$HANDCHECK" | tr '/:' '__').log" 2>&1
     ;;
   *)
