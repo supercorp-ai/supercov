@@ -3958,21 +3958,21 @@ impl Enumerator<'_> {
                     .find(|child| child.kind() == "variable_declaration")
                     .and_then(|variable| named_children(variable).next())
                     .map(|name| text(name, self.source).to_owned());
-                if let Some(name) = name {
+                if let Some(name) = &name {
                     let var = Var {
-                        ty,
+                        ty: ty.clone(),
                         local: false,
                         constant,
                     };
                     match self.classes.last_mut() {
                         Some(class) => {
-                            class.fields.insert(name, var);
+                            class.fields.insert(name.clone(), var);
                         }
                         None => {
                             if self.scopes.is_empty() {
                                 self.scopes.push(HashMap::new());
                             }
-                            self.declare(&name, var);
+                            self.declare(name, var);
                         }
                     }
                 }
@@ -3993,7 +3993,12 @@ impl Enumerator<'_> {
                         "modifiers" | "variable_declaration" | "type_constraints" => {}
                         "getter" | "setter" => {
                             self.methods.pop();
-                            self.kotlin_accessor(child);
+                            self.kotlin_accessor(
+                                child,
+                                name.as_deref().unwrap_or_default(),
+                                &ty,
+                                nullable_property(node, self.source),
+                            );
                             self.methods.push(Method {
                                 name: "<init>".to_owned(),
                                 returns: None,
@@ -4168,18 +4173,56 @@ impl Enumerator<'_> {
             .map_or(Ty::Unknown, |value| self.kotlin_type_of(value))
     }
 
-    fn kotlin_accessor(&mut self, accessor: Node) {
+    /// A property's `get()` or `set(value)`: the getter returns the
+    /// property's type, as the method kotlinc writes for it does.
+    fn kotlin_accessor(&mut self, accessor: Node, property: &str, ty: &Ty, nullable: bool) {
         let getter = accessor.kind() == "getter";
-        let returns = if getter { None } else { Some(Ty::Void) };
+        // The JVM name kotlinc gives it: `getName`, `setName`, and `isOpen`
+        // for a property named `isOpen`.
+        let capitalized = property
+            .chars()
+            .next()
+            .map(|first| {
+                first
+                    .to_uppercase()
+                    .chain(property.chars().skip(1))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let jvm_name = if getter && property.starts_with("is") && property.len() > 2 {
+            property.to_owned()
+        } else if getter {
+            format!("get{capitalized}")
+        } else if property.starts_with("is") && property.len() > 2 {
+            format!("set{}", &property[2..])
+        } else {
+            format!("set{capitalized}")
+        };
+        let returns = if !getter {
+            Some(Ty::Void)
+        } else if *ty == Ty::Unknown {
+            None
+        } else {
+            Some(ty.clone())
+        };
         self.methods.push(Method {
-            name: if getter { "get" } else { "set" }.to_owned(),
+            name: jvm_name,
             returns,
-            not_null: true,
+            not_null: !nullable,
             static_init: self.suppressed_context(),
             functional_field: false,
             written_returns: None,
         });
         self.scopes.push(HashMap::new());
+        // `get() = value`: the value is what it returns.
+        if getter
+            && let Some(body) =
+                named_children(accessor).find(|child| child.kind() == "function_body")
+            && text(body, self.source).trim_start().starts_with('=')
+            && let Some(value) = named_children(body).next()
+        {
+            self.kotlin_return(value, value);
+        }
         self.kotlin_children(accessor, Context::Statement);
         self.scopes.pop();
         self.methods.pop();
@@ -4665,6 +4708,25 @@ impl Enumerator<'_> {
                 if context == Context::Condition {
                     self.negate(node);
                 }
+                self.kotlin_children(node, Context::Value);
+            }
+            // `x in names` branched on is a `contains` call's jump; `x in
+            // a..b` is two comparisons the source does not write.
+            "in_expression"
+                if context == Context::Condition
+                    && named_children(node).last().is_some_and(|range| {
+                        range.kind() != "range_expression"
+                            && !matches!(
+                                range
+                                    .child_by_field_name("operator")
+                                    .map(|operator| text(operator, self.source)),
+                                Some("until" | "downTo" | "..<")
+                            )
+                            && !text(range, self.source).contains(" until ")
+                            && !text(range, self.source).contains(" downTo ")
+                    }) =>
+            {
+                self.negate(node);
                 self.kotlin_children(node, Context::Value);
             }
             "call_expression" => {
@@ -5553,6 +5615,14 @@ fn kotlin_collection_inline(name: &str) -> bool {
             | "sumBy"
             | "count_"
     )
+}
+
+/// Whether a property declares a nullable type (`val name: String?`).
+fn nullable_property(property: Node, source: &str) -> bool {
+    named_children(property)
+        .find(|child| child.kind() == "variable_declaration")
+        .and_then(|variable| named_children(variable).find(|child| child.kind().ends_with("type")))
+        .is_some_and(|ty| text(ty, source).trim_end().ends_with('?'))
 }
 
 fn kotlin_declared_nullable(node: Node, source: &str) -> bool {

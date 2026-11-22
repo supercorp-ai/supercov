@@ -1061,6 +1061,53 @@ mod tests {
         );
     }
 
+    /// Kotlin constructs PIT mutates as kotlinc compiles them: an explicit
+    /// getter returns its property's type (`getArea`, `getEmpty`), an enum
+    /// entry's body is a class of its own, `x in names` branched on is a
+    /// call's jump, and a private function only a companion's or object's
+    /// initialization calls is not mutated.
+    #[test]
+    fn kotlin_accessors_enum_bodies_and_initializers() {
+        let file = "tour/Tour.kt";
+        let source = "package tour\n\nenum class Op(val sign: String) {\n    PLUS(\"+\") {\n        override fun apply(a: Int, b: Int) = a + b\n    },\n    MINUS(\"-\") {\n        override fun apply(a: Int, b: Int) = a - b\n    };\n\n    abstract fun apply(a: Int, b: Int): Int\n}\n\nclass Box(private var size: Int) {\n    var area: Int\n        get() = size * size\n        set(value) {\n            size = value / 2\n        }\n\n    val empty: Boolean\n        get() {\n            return size == 0\n        }\n\n    companion object {\n        private val DEFAULT = build(3)\n\n        private fun build(n: Int): Int = n * 2\n\n        fun make(): Box = Box(DEFAULT + 1)\n    }\n}\n\nobject Registry {\n    private val names = load()\n\n    private fun load(): List<String> = listOf(\"a\") + \"b\"\n\n    fun has(name: String): Boolean = name in names && !name.isEmpty()\n}\n";
+        let index = ProjectIndex::of([(file, source)]);
+        let ids = file_mutants(file, source, &index)
+            .unwrap()
+            .mutants
+            .iter()
+            .map(|mutant| mutant_id(file, mutant))
+            .collect::<Vec<_>>();
+        for expected in [
+            ":5:46-5:51:PrimitiveReturns:0",
+            ":8:46-8:51:Math:+",
+            ":16:17-16:28:PrimitiveReturns:0",
+            ":18:20-18:29:Math:*",
+            ":23:20-23:29:BooleanTrueReturnVals:true",
+            ":40:38-40:51:NegateConditionals:negated",
+        ] {
+            assert!(
+                ids.contains(&format!("{file}{expected}")),
+                "{expected}: {ids:#?}"
+            );
+        }
+        // `build(3)` and `load()` run only as the statics are set up.
+        assert!(
+            !ids.iter()
+                .any(|id| id.contains("Tour.kt:29:") || id.contains("Tour.kt:38:")),
+            "{ids:#?}"
+        );
+        let mutant = |method: &str| {
+            let listed = file_mutants(file, source, &index).unwrap().mutants;
+            listed
+                .into_iter()
+                .filter(|mutant| mutant.method == method)
+                .count()
+        };
+        assert_eq!(mutant("getArea"), 2);
+        assert_eq!(mutant("setArea"), 1);
+        assert_eq!(mutant("getEmpty"), 2);
+    }
+
     #[test]
     fn java_mutants_pit_made_on_public_projects() {
         let file = "fixture/Reach.java";
