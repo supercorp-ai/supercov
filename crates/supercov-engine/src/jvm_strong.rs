@@ -911,6 +911,68 @@ mod tests {
         assert_eq!(negated(3).len(), 1, "{ids:#?}");
     }
 
+    /// A run's Java and Kotlin files listed again: those whose points are
+    /// the run's give their mutants (none for a file with none), and one
+    /// that changed since, or cannot be read, is named as changed.
+    #[test]
+    fn a_run_s_files_are_listed_again_or_named_as_changed() {
+        let root = std::env::temp_dir().join(format!("supercov-jvm-list-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let write = |file: &str, source: &str| std::fs::write(root.join(file), source).unwrap();
+        write(
+            "src/A.java",
+            "class A {\n  int f(int n) {\n    return n * 2;\n  }\n}\n",
+        );
+        write("src/B.java", "class B {\n}\n");
+        write(
+            "src/C.java",
+            "class C {\n  int g() {\n    return 1 + 2;\n  }\n}\n",
+        );
+        let index = ProjectIndex::of([("src/A.java", "class A {}"), ("src/B.java", "class B {}")]);
+        let points = |file: &str| {
+            let source = std::fs::read_to_string(root.join(file)).unwrap();
+            file_mutants(file, &source, &index).unwrap().points
+        };
+        let recorded = BTreeMap::from([
+            ("src/A.java".to_owned(), points("src/A.java")),
+            ("src/B.java".to_owned(), points("src/B.java")),
+            (
+                "src/C.java".to_owned(),
+                BTreeSet::from(["stale".to_owned()]),
+            ),
+            ("src/Gone.java".to_owned(), BTreeSet::new()),
+            ("src/notes.txt".to_owned(), BTreeSet::new()),
+        ]);
+        let (mutants, changed) = list_mutants(&root, &recorded);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(mutants.keys().collect::<Vec<_>>(), ["src/A.java"]);
+        assert_eq!(changed, ["src/C.java", "src/Gone.java"]);
+    }
+
+    /// PIT's XML report, read as `mutants pit` reads it: a mutant's file by
+    /// its class's package, its status, its killing tests, the key its
+    /// description gives, escapes undone.
+    #[test]
+    fn pit_s_report_is_read_mutant_by_mutant() {
+        let report = "<?xml version=\"1.0\"?>\n<mutations>\n<mutation detected='true' status='KILLED'><sourceFile>W.java</sourceFile><mutatedClass>a.b.W</mutatedClass><mutatedMethod>f</mutatedMethod><lineNumber>7</lineNumber><mutator>org.pitest.mutationtest.engine.gregor.mutators.MathMutator</mutator><index>3</index><killingTests>a.T.one()|a.T.two()</killingTests><description>Replaced integer addition with subtraction</description></mutation>\n<mutation detected=\"false\" status=\"NO_COVERAGE\"><sourceFile>Top.kt</sourceFile><mutatedClass>TopKt</mutatedClass><mutatedMethod>g</mutatedMethod><lineNumber>x</lineNumber><mutator>VoidMethodCallMutator</mutator><description>removed call to a/B::run &amp;&lt;&gt;&quot;&apos;</description></mutation>\n<mutation status='SURVIVED'><mutator>org.pitest.mutationtest.engine.gregor.mutators.returns.NullReturnValsMutator</mutator><description>replaced return value with null for a/W::name</description></mutation>\n</mutations>\n";
+        let pit = parse_pit_report(report);
+        assert_eq!(pit.len(), 3);
+        assert_eq!(pit[0].file, "a/b/W.java");
+        assert_eq!((pit[0].line, pit[0].index), (7, 3));
+        assert_eq!(pit[0].mutator, "Math");
+        assert_eq!(pit[0].key, "+>-");
+        assert_eq!(pit[0].killing_tests, ["a.T.one()", "a.T.two()"]);
+        assert!(pit[0].detected());
+        assert_eq!(pit[1].file, "Top.kt");
+        assert_eq!(pit[1].line, 0);
+        assert_eq!(pit[1].status, "NO_COVERAGE");
+        assert!(!pit[1].detected());
+        assert_eq!(pit[1].description, "removed call to a/B::run &<>\"'");
+        assert_eq!(pit[2].mutator, "NullReturnVals");
+        assert_eq!(pit[2].file, "");
+        assert!(pit[2].killing_tests.is_empty());
+    }
+
     #[test]
     fn pit_only_kotlin_mutants_are_put_down_to_what_the_compiler_wrote() {
         let mutant = |line: u32, mutator: &str| PitMutant {
@@ -943,6 +1005,35 @@ mod tests {
         assert_eq!(
             pit_only_category(&mutant(2, "VoidMethodCall"), Some(source)),
             "other"
+        );
+        let compiled = "class B(val name: String) {\n    fun f(a: String?) = a?.length\n    fun g() {\n        for (i in 0 until 3) {}\n    }\n}\n";
+        let mut getter = mutant(1, "EmptyObjectReturnVals");
+        getter.method = "getName".into();
+        assert_eq!(
+            pit_only_category(&getter, Some(compiled)),
+            "a Kotlin property's generated getter"
+        );
+        let mut checked = mutant(2, "VoidMethodCall");
+        checked.description = "removed call to kotlin/jvm/internal/Intrinsics::checkNotNull".into();
+        assert_eq!(
+            pit_only_category(&checked, Some(compiled)),
+            "a Kotlin null check the compiler wrote"
+        );
+        assert_eq!(
+            pit_only_category(&mutant(2, "NegateConditionals"), Some(compiled)),
+            "a Kotlin null-safe operator"
+        );
+        assert_eq!(
+            pit_only_category(&mutant(4, "Increments"), Some(compiled)),
+            "a Kotlin for loop's counter"
+        );
+        assert_eq!(
+            pit_only_category(&mutant(40, "Math"), Some(compiled)),
+            "inlined code (a line past the file's end)"
+        );
+        assert_eq!(
+            pit_only_category(&mutant(1, "Math"), None),
+            "inlined code (a line past the file's end)"
         );
     }
 
