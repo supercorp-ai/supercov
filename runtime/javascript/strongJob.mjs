@@ -65,10 +65,14 @@ function read() {
     };
 }
 
-/** This process's job, or null outside a strong pass's job. */
+/** The process's job, or null outside a strong pass's job. */
 export function strongJob() {
-    // One job per process, whichever copy of this module asks.
-    if (!(jobKey in globalThis))
-        Object.defineProperty(globalThis, jobKey, { value: read(), configurable: true });
-    return globalThis[jobKey];
+    // One job per process at a time, whichever copy of this module asks: a
+    // resident runner (strongMochaHost.mjs) names the next job's file in
+    // SUPERCOV_STRONG_JOB, and the job is read again.
+    const path = typeof process !== "undefined" ? process.env?.SUPERCOV_STRONG_JOB : undefined;
+    const cached = globalThis[jobKey];
+    if (cached === undefined || cached.path !== path)
+        Object.defineProperty(globalThis, jobKey, { value: { path, job: read() }, configurable: true, writable: true });
+    return globalThis[jobKey].job;
 }

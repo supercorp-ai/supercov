@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { commandFor, drive, outcomes, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
+import { commandFor, drive, jestArguments, mochaArguments, outcomes, packageIsCommonJs, withoutNpx } from "../../runtime/javascript/strongJobs.mjs";
 
 const runner = resolve(import.meta.dirname, "fixtures/strong-jobs-runner.mjs");
 
@@ -174,6 +174,26 @@ test("a job's command names its file where the runner takes one, and runs a proj
         }
         for (const command of [["npx", "jest"], ["npx", "mocha@10"], ["npx", "@scope/tool"], ["npx", "--package", "x"], ["npx"], ["node", "mocha"], ["npx", "-y"]])
             assert.deepEqual(withoutNpx(command, root), command);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("a command that starts Jest or Mocha itself names its arguments to them", () => {
+    assert.deepEqual(jestArguments(["/p/node_modules/.bin/jest", "--env", "node"]), ["--env", "node"]);
+    assert.deepEqual(jestArguments(["node", "node_modules/jest-cli/bin/jest.js", "-c", "x.js"]), ["-c", "x.js"]);
+    assert.equal(jestArguments(["npm", "test"]), undefined);
+    assert.deepEqual(mochaArguments(["/p/node_modules/.bin/mocha", "--check-leaks"]), ["--check-leaks"]);
+    assert.deepEqual(mochaArguments(["node", "node_modules/mocha/bin/_mocha"]), []);
+    assert.equal(mochaArguments(["npm", "test"]), undefined);
+    const root = mkdtempSync(join(tmpdir(), "supercov-package-"));
+    try {
+        assert.equal(packageIsCommonJs(root), true);
+        writeFileSync(join(root, "package.json"), '{"type":"module"}');
+        assert.equal(packageIsCommonJs(root), false);
+        writeFileSync(join(root, "package.json"), '{"type":"commonjs"}');
+        assert.equal(packageIsCommonJs(root), true);
     }
     finally {
         rmSync(root, { recursive: true, force: true });

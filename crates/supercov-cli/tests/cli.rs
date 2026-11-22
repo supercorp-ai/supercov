@@ -17796,19 +17796,19 @@ fn a_stored_query_that_cannot_read_its_runs_is_refused() {
 #[test]
 fn a_javascript_run_that_cannot_write_its_copy_says_so() {
     for (fault, file) in [
-        ("fs.rename@43", "runtime.d.mts"),
-        ("fs.rename@44", "playwright.mjs"),
-        ("fs.rename@46", "playwright.config.mjs"),
-        ("fs.rename@47", "vitest.config.mjs"),
-        ("fs.rename@50", "vitestCommands.mjs"),
+        ("fs.rename@44", "runtime.d.mts"),
+        ("fs.rename@45", "playwright.mjs"),
+        ("fs.rename@47", "playwright.config.mjs"),
+        ("fs.rename@48", "vitest.config.mjs"),
+        ("fs.rename@51", "vitestCommands.mjs"),
         ("fs.create_dir_all@12", ".authored/test"),
-        ("fs.rename@52", "test/cart.test.js"),
-        ("fs.rename@53", "authored-sources.json"),
-        ("fs.rename@54", "statement-exclusions.json"),
-        ("fs.rename@55", "mutants.json"),
-        ("fs.rename@56", "manifest.json"),
-        ("fs.rename@57", "instrumentation-complete"),
-        ("fs.rename@58", "injected fault at fs"),
+        ("fs.rename@53", "test/cart.test.js"),
+        ("fs.rename@54", "authored-sources.json"),
+        ("fs.rename@55", "statement-exclusions.json"),
+        ("fs.rename@56", "mutants.json"),
+        ("fs.rename@57", "manifest.json"),
+        ("fs.rename@58", "instrumentation-complete"),
+        ("fs.rename@59", "injected fault at fs"),
     ] {
         let project = Project::cart("js-copy-writes");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -22095,6 +22095,23 @@ fn mutants_test_runs_node_test_mocha_jest_and_ava_mutants_one_job_at_a_time() {
         ],
     );
     assert_cart_verdicts(&mocha, &["npx", "mocha", "--check-leaks"], "mocha");
+    // A CommonJS suite runs in resident Mochas, its modules loaded afresh for
+    // each job.
+    let commonjs = job_runner_project(
+        "strong-jobs-mocha-commonjs",
+        "commonjs",
+        &[
+            (
+                "test/cart.test.js",
+                "const assert = require(\"node:assert/strict\");\nconst { shipping, label } = require(\"../src/cart.js\");\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", () => assert.equal(shipping(80), 0));\n  it(\"charges small orders\", () => assert.equal(shipping(10), 5));\n  it(\"labels\", () => assert.equal(label(\" a \"), \"A\"));\n});\n",
+            ),
+            (
+                "test/count.test.js",
+                "const assert = require(\"node:assert/strict\");\nconst { countdown } = require(\"../src/cart.js\");\nit(\"counts down\", () => assert.equal(countdown(3), 0));\n",
+            ),
+        ],
+    );
+    assert_cart_verdicts(&commonjs, &["npx", "mocha", "--check-leaks"], "mocha");
     let jest = job_runner_project(
         "strong-jobs-jest",
         "commonjs",

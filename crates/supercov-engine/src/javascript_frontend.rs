@@ -73,6 +73,7 @@ const RUNTIME_FILES: &[(&str, &[u8])] = runtime_files![
     "strongJestHost.mjs",
     "strongJob.mjs",
     "strongJobs.mjs",
+    "strongMochaHost.mjs",
     "tap.mjs",
     "transport.mjs",
     "vitest.mjs",
