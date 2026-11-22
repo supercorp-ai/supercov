@@ -959,12 +959,6 @@ fn catalog_versions(catalog: &str) -> String {
     out
 }
 
-/// Whether a Maven build, through its own pom or a parent's, runs Apache RAT.
-fn checks_license_headers(workspace: &Path) -> bool {
-    fs::read_to_string(workspace.join("pom.xml"))
-        .is_ok_and(|pom| maven_effective(workspace, &pom).contains("apache-rat"))
-}
-
 /// What relaxing one build file's warning policy changed, each said once
 /// however many build files changed it. Switching a static analyser off is
 /// named separately: it is a bigger thing than not failing on a warning, and
@@ -1142,9 +1136,10 @@ struct InstrumentedWorkspace {
     /// What had to be relaxed in the copy's build files for instrumented code
     /// to compile, named so the user knows rather than infers.
     relaxed: Vec<&'static str>,
-    /// The build checks every file for a license header (Apache RAT), and
-    /// the copy holds Supercov's own runtime and listeners, which carry none.
-    license_check: bool,
+    /// The checks the build runs over every source file (a license header,
+    /// a style) that the copy's code would fail, and the properties that
+    /// skip them.
+    source_checks: Vec<(&'static str, &'static [&'static str])>,
     /// Modules Supercov instrumented but cannot attribute, and why they were
     /// left without a listener rather than broken by one.
     unmeasurable: Vec<String>,
@@ -1409,7 +1404,11 @@ fn instrument_workspace(
         note_relaxations(&existing, &updated, &mut relaxed);
         write(&path, &updated)?;
     }
-    let license_check = build == JvmBuild::Maven && checks_license_headers(workspace);
+    let source_checks = if build == JvmBuild::Maven {
+        source_checks(workspace)
+    } else {
+        Vec::new()
+    };
 
     // The platform listener is compiled from the project's own test sources,
     // so the launcher API it implements has to be on the compile classpath. A
@@ -1587,7 +1586,7 @@ fn instrument_workspace(
         concurrent,
         added_vintage,
         relaxed,
-        license_check,
+        source_checks,
         unmeasurable,
         modular,
     })
@@ -2054,7 +2053,7 @@ fn instrument_ant(
         concurrent: BTreeSet::new(),
         added_vintage: false,
         relaxed: Vec::new(),
-        license_check: false,
+        source_checks: Vec::new(),
         unmeasurable,
         modular: Vec::new(),
     })
@@ -2080,30 +2079,74 @@ fn ant_build_file_elsewhere(root: &Path, command: &[String]) -> Option<PathBuf> 
 /// How the copy's build skips Apache RAT's license check.
 #[derive(Debug, PartialEq)]
 enum RatSkip {
-    /// A property on the command, which starts Maven itself.
-    Argument,
+    /// Properties on the command, which starts Maven itself.
+    Arguments(Vec<String>),
     /// The `MAVEN_OPTS` a wrapper passes on to Maven.
     MavenOpts(String),
 }
 
-/// How to skip the license check, given the user's own `MAVEN_OPTS`;
-/// nothing when the command or those options already skip it.
-fn rat_skip(command: &[String], maven_opts: Option<String>) -> Option<RatSkip> {
-    if command.iter().any(|a| a.contains("rat.skip"))
-        || maven_opts
-            .as_deref()
-            .is_some_and(|opts| opts.contains("rat.skip"))
-    {
+/// The checks a build runs over every source file that the copy's code
+/// would fail: Supercov's runtime and listeners carry no license header,
+/// and instrumented sources follow no project's style. Each by the plugin
+/// that runs it, the properties that skip it and its name.
+const SOURCE_CHECKS: &[(&str, &[&str], &str)] = &[
+    ("apache-rat", &["rat.skip"], "Apache RAT"),
+    (
+        "maven-checkstyle-plugin",
+        &["checkstyle.skip"],
+        "Checkstyle",
+    ),
+    ("maven-pmd-plugin", &["pmd.skip", "cpd.skip"], "PMD"),
+    ("spotbugs-maven-plugin", &["spotbugs.skip"], "SpotBugs"),
+    (
+        "spotless-maven-plugin",
+        &["spotless.check.skip"],
+        "Spotless",
+    ),
+];
+
+/// The source checks a Maven build declares, by name, and the properties
+/// that skip them.
+fn source_checks(workspace: &Path) -> Vec<(&'static str, &'static [&'static str])> {
+    let Ok(pom) = fs::read_to_string(workspace.join("pom.xml")) else {
+        return Vec::new();
+    };
+    let effective = maven_effective(workspace, &pom);
+    SOURCE_CHECKS
+        .iter()
+        .filter(|(plugin, _, _)| effective.contains(plugin))
+        .map(|(_, properties, name)| (*name, *properties))
+        .collect()
+}
+
+/// How to skip `properties`, given the user's own `MAVEN_OPTS`; nothing
+/// when the command or those options already skip each.
+fn rat_skip(
+    command: &[String],
+    maven_opts: Option<String>,
+    properties: &[&str],
+) -> Option<RatSkip> {
+    let wanted = properties
+        .iter()
+        .filter(|property| {
+            !command.iter().any(|a| a.contains(*property))
+                && !maven_opts
+                    .as_deref()
+                    .is_some_and(|opts| opts.contains(*property))
+        })
+        .map(|property| format!("-D{property}=true"))
+        .collect::<Vec<_>>();
+    if wanted.is_empty() {
         return None;
     }
     if starts_maven(command) {
-        return Some(RatSkip::Argument);
+        return Some(RatSkip::Arguments(wanted));
     }
     Some(RatSkip::MavenOpts(
         maven_opts
             .filter(|opts| !opts.trim().is_empty())
             .into_iter()
-            .chain(["-Drat.skip=true".to_owned()])
+            .chain(wanted)
             .collect::<Vec<_>>()
             .join(" "),
     ))
@@ -2299,16 +2342,37 @@ pub fn run_direct_jvm(
         // Through a wrapper, the property reaches Maven in MAVEN_OPTS, which
         // it reads as system properties.
         let mut maven_opts = None;
-        if instrumented.license_check
-            && let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok())
-        {
-            match skip {
-                RatSkip::Argument => command.push("-Drat.skip=true".into()),
-                RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
-            }
+        let properties = instrumented
+            .source_checks
+            .iter()
+            .flat_map(|(_, properties)| properties.iter().copied())
+            .collect::<Vec<_>>();
+        if let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok(), &properties) {
+            let added = match skip {
+                RatSkip::Arguments(arguments) => {
+                    let added = arguments.join(" ");
+                    command.extend(arguments);
+                    added
+                }
+                RatSkip::MavenOpts(opts) => {
+                    let added = opts
+                        .split_whitespace()
+                        .filter(|word| properties.iter().any(|p| word.contains(p)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    maven_opts = Some(opts);
+                    added
+                }
+            };
+            let names = instrumented
+                .source_checks
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
             let _ = writeln!(
                 diagnostics,
-                "[supercov] added -Drat.skip=true: Apache RAT checks every file in the build for a license header, and the workspace copy holds Supercov's own runtime and listeners, which carry none. Your own build still runs the check."
+                "[supercov] added {added}: {names} check every source file in the build, and the workspace copy holds instrumented sources and Supercov's own runtime and listeners, written to no project's license headers or style. Your own build still runs the checks."
             );
         }
         if let Some(note) = note {
@@ -2463,6 +2527,14 @@ pub fn run_direct_jvm(
             } else {
                 "Supercov attributes through each framework's own lifecycle, so the suite has to run on the JUnit Platform or TestNG"
             };
+            // A command that failed without one test reporting failed in a
+            // build step before the tests (a compile error, a check over the
+            // sources): that, not the framework, is what to say.
+            if exit_code != 0 && instrumented.build != JvmBuild::Ant {
+                return Err(format!(
+                    "the test run wrote no coverage evidence: the command exited {exit_code} before any test reported, as a build that fails before its tests does (a compile error, a check over the sources). Its output above says which step failed."
+                ));
+            }
             return Err(format!(
                 "the test run wrote no coverage evidence (the command exited {exit_code}). {lifecycle}."
             ));
@@ -3575,13 +3647,22 @@ mod tests {
             "<project><parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version><relativePath>parent/pom.xml</relativePath></parent></project>",
         )
         .unwrap();
-        assert!(checks_license_headers(&root));
+        assert_eq!(source_checks(&root), [("Apache RAT", &["rat.skip"][..])]);
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>plain</artifactId><build><plugins><plugin><artifactId>maven-checkstyle-plugin</artifactId></plugin></plugins></build></project>",
+        )
+        .unwrap();
+        assert_eq!(
+            source_checks(&root),
+            [("Checkstyle", &["checkstyle.skip"][..])]
+        );
         fs::write(
             root.join("pom.xml"),
             "<project><artifactId>plain</artifactId></project>",
         )
         .unwrap();
-        assert!(!checks_license_headers(&root));
+        assert!(source_checks(&root).is_empty());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -4303,7 +4384,7 @@ mod tests {
         let root = make();
         instrument_workspace(&root, &root.join("evidence"), true, None, None).expect("instrument");
         fs::remove_dir_all(&root).ok();
-        for line in [1390, 1410, 1499, 1543, 1554] {
+        for line in [1385, 1405, 1498, 1542, 1553] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4370,13 +4451,13 @@ mod tests {
         // A source that cannot be read counts for no root: with one of
         // b's two unread, the roots tie, and the first by name takes it.
         let root = make();
-        crate::fault::during("fs.read_to_string#jvm_run.rs:1847@2", || {
+        crate::fault::during("fs.read_to_string#jvm_run.rs:1846@2", || {
             instrument_workspace(&root, &root.join("evidence"), true, None, None)
         })
         .expect("instrument");
         assert!(runtime_in(&root, "a/src") && !runtime_in(&root, "b/src"));
         fs::remove_dir_all(&root).ok();
-        for line in [1864, 1884, 1890, 1894, 1900, 1906, 1912, 2029] {
+        for line in [1863, 1883, 1889, 1893, 1899, 1905, 1911, 2028] {
             let root = make();
             let fault = format!("fs.write#jvm_run.rs:{line}");
             let failed = crate::fault::during(&fault, || {
@@ -4476,13 +4557,13 @@ mod tests {
         // A harness that cannot be read is no task's file; each step that
         // fails stops it.
         let (top, copy, workspace) = make(false, &beside);
-        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1998", || {
+        let _ = crate::fault::during("fs.read_to_string#jvm_run.rs:1997", || {
             instrument_workspace(&workspace, &top.join("evidence"), true, None, None)
         });
         assert!(!changed(&copy));
         fs::remove_dir_all(top).ok();
         for fault in [
-            "fs.read_dir#jvm_run.rs:1975",
+            "fs.read_dir#jvm_run.rs:1974",
             "fs.read_dir#workspace.rs:2469",
             "fs.symlink_metadata#workspace.rs:2354",
         ] {
@@ -4737,6 +4818,15 @@ mod tests {
         let mut diagnostics = Vec::new();
         let error = run_direct_jvm(&jvm_request(&root, &["true"]), &mut diagnostics).unwrap_err();
         assert!(error.contains("wrote no coverage evidence"), "{error}");
+        assert!(error.contains("JUnit Platform"), "{error}");
+        // A build that failed before any test reported failed in a step of
+        // its own: that is what it says, not the framework.
+        let error = run_direct_jvm(&jvm_request(&root, &["false"]), &mut diagnostics).unwrap_err();
+        assert!(
+            error.contains("exited 1 before any test reported"),
+            "{error}"
+        );
+        assert!(!error.contains("JUnit Platform"), "{error}");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -4817,7 +4907,7 @@ mod tests {
             run_direct_jvm(&jvm_request(&root, command), &mut diagnostics).unwrap_err();
             let diagnostics = String::from_utf8(diagnostics).unwrap();
             assert_eq!(
-                diagnostics.contains("added -Drat.skip=true"),
+                diagnostics.contains("added -Drat.skip=true: Apache RAT"),
                 added,
                 "{command:?}\n{diagnostics}"
             );
@@ -4878,26 +4968,40 @@ mod tests {
     fn the_license_check_is_skipped_once_and_after_the_user_s_own_options() {
         let command = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
         let wrapper = command(&["./build.sh", "test"]);
+        let rat = &["rat.skip"][..];
         assert_eq!(
-            rat_skip(&command(&["mvn", "test"]), None),
-            Some(RatSkip::Argument)
+            rat_skip(&command(&["mvn", "test"]), None, rat),
+            Some(RatSkip::Arguments(vec!["-Drat.skip=true".into()]))
         );
         assert_eq!(
-            rat_skip(&command(&["mvn", "-Drat.skip=true", "test"]), None),
+            rat_skip(&command(&["mvn", "-Drat.skip=true", "test"]), None, rat),
             None
         );
         assert_eq!(
-            rat_skip(&wrapper, Some("-Drat.skip=true -Xmx1g".into())),
+            rat_skip(&wrapper, Some("-Drat.skip=true -Xmx1g".into()), rat),
             None
         );
         assert_eq!(
-            rat_skip(&wrapper, Some("-Xmx1g".into())),
+            rat_skip(&wrapper, Some("-Xmx1g".into()), rat),
             Some(RatSkip::MavenOpts("-Xmx1g -Drat.skip=true".into()))
         );
         assert_eq!(
-            rat_skip(&wrapper, Some(" ".into())),
+            rat_skip(&wrapper, Some(" ".into()), rat),
             Some(RatSkip::MavenOpts("-Drat.skip=true".into()))
         );
+        // Only what the command does not skip already.
+        assert_eq!(
+            rat_skip(
+                &command(&["mvn", "-Dpmd.skip", "test"]),
+                None,
+                &["checkstyle.skip", "pmd.skip", "cpd.skip"]
+            ),
+            Some(RatSkip::Arguments(vec![
+                "-Dcheckstyle.skip=true".into(),
+                "-Dcpd.skip=true".into()
+            ]))
+        );
+        assert_eq!(rat_skip(&command(&["mvn", "test"]), None, &[]), None);
     }
 }
 
@@ -5130,11 +5234,14 @@ pub fn run_strong_jvm(
         );
         let (mut command, _) = command_with_fresh_results(instrumented.build, &request.command);
         let mut maven_opts = None;
-        if instrumented.license_check
-            && let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok())
-        {
+        let properties = instrumented
+            .source_checks
+            .iter()
+            .flat_map(|(_, properties)| properties.iter().copied())
+            .collect::<Vec<_>>();
+        if let Some(skip) = rat_skip(&command, std::env::var("MAVEN_OPTS").ok(), &properties) {
             match skip {
-                RatSkip::Argument => command.push("-Drat.skip=true".into()),
+                RatSkip::Arguments(arguments) => command.extend(arguments),
                 RatSkip::MavenOpts(opts) => maven_opts = Some(opts),
             }
         }
