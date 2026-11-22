@@ -323,9 +323,16 @@ into a fresh directory beside its output directory, and each file is renamed
 into place only where its bytes changed. A rebuild of the same wasm changes
 nothing in place, and a test never reads a file half written. Jobs start one
 at a time until a wrapper has run; a build that writes its wasm some other
-way keeps them so. On gl-matrix-wasm the pass takes 40 s (84 s one at a
-time), with every verdict the same over two passes. Jest and Mocha's
-resident runners, Vitest and Playwright start the command once.
+way keeps them so. Jest and Mocha's resident runners, Vitest and Playwright
+start the command once.
+
+Validated on gl-matrix-wasm (its `src/vector2.rs`, 300 mutants, under its
+own vec2 specs run by node:test; `benchmarks/mutation/wasm-js`) against
+cargo-mutants 27.1.0, whose `cargo test` runs the same command: every one of
+the 300 agrees (164 killed, 78 survived, 51 no-coverage against missed, 7
+unviable). On 16-CPU Linux machines (c8a/m8a.4xlarge) Supercov's strong pass
+takes 29 s (106 s with its jobs one at a time), cargo-mutants 655 s over its
+shards; the verdicts are the same over two passes.
 
 A wasm mutant's hit limit is off: a loop it makes endless is stopped by the
 time limit. Not yet: wasm in Vitest Browser Mode's pages, which no run
