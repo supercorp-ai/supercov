@@ -3737,6 +3737,19 @@ fn known_method_type(object: Option<&str>, name: &str) -> Option<Ty> {
 
 // --- Kotlin ------------------------------------------------------------------------
 
+/// Whether `node` is the receiver of the call, navigation or index chain
+/// around it.
+fn kotlin_chain_receiver(node: Node) -> bool {
+    node.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            "call_expression" | "navigation_expression" | "index_expression"
+        ) && named_children(parent)
+            .next()
+            .is_some_and(|first| first.id() == node.id())
+    })
+}
+
 /// Kotlin's standard library functions that are `inline`: a call of one is
 /// not a call in the bytecode, so PIT has no call to remove.
 const KOTLIN_INLINE: &[&str] = &[
@@ -4578,7 +4591,7 @@ impl Enumerator<'_> {
             }
             "call_expression" => {
                 self.note_kotlin_logging(node);
-                if context == Context::Condition {
+                if context == Context::Condition || self.kotlin_negated_chain(node) {
                     self.negate(node);
                 }
                 for child in named_children(node) {
@@ -4596,7 +4609,7 @@ impl Enumerator<'_> {
             }
             "navigation_expression" => {
                 let safe = children(node).any(|child| child.kind() == "?.");
-                if context == Context::Condition && !safe {
+                if (context == Context::Condition && !safe) || self.kotlin_negated_chain(node) {
                     self.negate(node);
                 }
                 if let Some(receiver) = named_children(node).next() {
@@ -4604,7 +4617,7 @@ impl Enumerator<'_> {
                 }
             }
             "index_expression" | "as_expression" | "this_expression" => {
-                if context == Context::Condition {
+                if context == Context::Condition || self.kotlin_negated_chain(node) {
                     self.negate(node);
                 }
                 self.kotlin_children(node, Context::Value);
@@ -4801,6 +4814,30 @@ impl Enumerator<'_> {
         self.kotlin_children(node, Context::Value);
     }
 
+    /// A call, navigation or index chain the grammar leads with a `!`
+    /// (`!name.isEmpty()`): Kotlin negates the whole chain, one jump to
+    /// negate wherever the chain stands, the outermost chain only.
+    fn kotlin_negated_chain(&self, node: Node) -> bool {
+        if kotlin_chain_receiver(node) {
+            return false;
+        }
+        let mut lead = node;
+        while matches!(
+            lead.kind(),
+            "call_expression" | "navigation_expression" | "index_expression"
+        ) {
+            match named_children(lead).next() {
+                Some(first) => lead = first,
+                None => return false,
+            }
+        }
+        lead.id() != node.id()
+            && lead.kind() == "unary_expression"
+            && lead
+                .child_by_field_name("operator")
+                .is_some_and(|op| text(op, self.source) == "!")
+    }
+
     fn kotlin_unary(&mut self, node: Node, context: Context) {
         let operator = node
             .child_by_field_name("operator")
@@ -4810,6 +4847,9 @@ impl Enumerator<'_> {
             return;
         };
         match operator.as_str() {
+            // `!a.b()` is `!(a.b())`, which the grammar reads as `(!a).b()`:
+            // the chain holds the jump, and `a` is its receiver.
+            "!" if kotlin_chain_receiver(node) => self.kotlin_node(operand, Context::Value),
             "!" => self.kotlin_node(operand, Context::Condition),
             "-" => {
                 if self.kotlin_constant_value(node).is_none()

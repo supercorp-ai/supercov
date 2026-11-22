@@ -363,9 +363,14 @@ fn kotlin_return(
         (ReturnValue::Zero(Prim::Byte | Prim::Short | Prim::Char), _) => {
             format!("{RUNTIME}.rZ({f}, {k}, {hole})")
         }
-        (ReturnValue::Zero(_), _) | (ReturnValue::EmptyString, _) | (_, None) => {
-            java_return(value, f, k, hole, None)
-        }
+        (
+            ReturnValue::Zero(_)
+            | ReturnValue::EmptyString
+            | ReturnValue::True
+            | ReturnValue::False,
+            _,
+        )
+        | (_, None) => java_return(value, f, k, hole, None),
         (other, Some(witness)) => {
             let plain = java_return(other, f, k, hole, None);
             let (name, rest) = plain.split_once('(').expect("a call");

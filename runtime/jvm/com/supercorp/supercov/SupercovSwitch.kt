@@ -20,8 +20,10 @@ import kotlin.contracts.contract
  * so `if (x != null) x.length` still compiles with the switch around
  * `x != null`. With the mutant on it is broken, as PIT's negated jump breaks
  * it: the branch runs with `x` null, and fails where the code relies on it.
+ *
+ * Public in so many words: a module in explicit API mode compiles it too.
  */
-fun supercovNegate(file: Int, index: Int, value: Boolean): Boolean {
+public fun supercovNegate(file: Int, index: Int, value: Boolean): Boolean {
     contract {
         returns(true) implies (value)
         returns(false) implies (!value)
