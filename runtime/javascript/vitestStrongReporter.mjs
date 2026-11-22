@@ -402,6 +402,17 @@ function forkThroughSpawner(ahead) {
             if (this.attached)
                 this.spawner.process?.send({ id: this.id, disconnect: true });
         }
+        // Vitest waits for "exit" when stopping a worker whose `exitCode` is
+        // null, as it is for a process a signal ended: one the pass stopped
+        // already (a copy a failed test decided) has emitted it, and would
+        // hold Vitest's close for its teardown limit.
+        once(event, listener) {
+            if (event === "exit" && this.ended) {
+                process.nextTick(listener, this.exitCode, this.signalCode);
+                return this;
+            }
+            return super.once(event, listener);
+        }
         ref() { }
         unref() { }
     }
