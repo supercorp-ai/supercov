@@ -1,0 +1,30 @@
+src/price.js
+
+Uncovered
+  Lines not executed              4
+  Statements not executed         4
+  Functions not called            1
+  Branch outcomes not taken       2
+  MC/DC conditions not shown      3
+  Measurement limitations         0
+
+Tests touching this file: 3
+
+Gaps
+  NOT COVERED = line never executed; PARTIAL = line executed but some behavior remains untested
+ LINE  STATUS        SOURCE
+    3  PARTIAL       member && amount > 100
+       Unobserved: no witness pair shows `amount > 100` independently changing the decision result
+       Inspect: npx supercov runs 'run_54d2d5f82ec801e7' line 'src/price.js:3'
+   13  PARTIAL       total > 50
+       Unobserved: no witness pair shows `total > 50` independently changing the decision result
+       Inspect: npx supercov runs 'run_54d2d5f82ec801e7' line 'src/price.js:13'
+   16  NOT COVERED   unused
+       Unobserved: function not called
+   17  NOT COVERED   value
+       Unobserved: zero-iteration outcome not observed
+       Unobserved: entered-loop outcome not observed
+   18  NOT COVERED   item < 0
+       Unobserved: no witness pair shows `item < 0` independently changing the decision result
+   20  NOT COVERED   return true;
+showing 1-6 of 6 gap lines

@@ -92,6 +92,10 @@ Inspect a run with small, paginated answers:
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
+Test the tests with mutants (JavaScript, TypeScript; Python, Rust, Go and Ruby in preview):
+  supercov mutants                     which mutants the tests kill, run by run
+  supercov mutants --diff main         only the mutants on changed lines
+
 Check what the tests assert:
   supercov runs latest assertions         how much executed code the tests assert
   supercov runs latest assertions assess  work it out with Jev (TYPESAFE_API_KEY)
@@ -105,7 +109,7 @@ Compare, combine, and maintain:
   supercov runs clean [--keep N]       remove stored runs (all by default)
   supercov quality clean [--keep N]    remove saved assessments
 
-Settings, in the environment of the measured command:
+Settings, in the environment of the measured command (supercov docs cli says what each does):
   SUPERCOV_SOURCE_ROOTS=src,app        measure only these directories or files
   SUPERCOV_TEST_ROOTS=test/src         an Ant build's tests, where its batches cannot be read
   SUPERCOV_TEST_KIND=e2e               the test level of the command's tests
@@ -113,7 +117,8 @@ Settings, in the environment of the measured command:
   SUPERCOV_SOURCE_TOOLS=<names>        run these linters on your files, not the copy
   SUPERCOV_KEEP_WORKSPACE=1            keep the instrumented copy after the run
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
-  supercov docs cli                    what each does
+  SUPERCOV_MUTANTS=1                   list mutants as the run measures, with their probes
+  SUPERCOV_STRONG_WORKERS=<n>          forks a Python strong pass runs at once
 
 Guides:
   supercov docs                        list bundled guides
@@ -128,6 +133,7 @@ const DOC_TOPICS: &[(&str, &str)] = &[
     ),
     ("agent-loop", include_str!("../assets/docs/agent-loop.md")),
     ("assertions", include_str!("../assets/docs/assertions.md")),
+    ("mutation", include_str!("../assets/docs/mutation.md")),
     (
         "troubleshooting",
         include_str!("../assets/docs/troubleshooting.md"),
@@ -163,7 +169,7 @@ fn queried_files(request: &supercov_engine::indexed_query::IndexedQueryRequest) 
     // `file` reaches here as the view it asked for.
     if matches!(
         request.command.as_str(),
-        "line" | "file-detail" | "file-decisions" | "decision" | "source"
+        "line" | "file-detail" | "file-decisions" | "decision" | "source" | "mutants"
     ) {
         if let Some(file) = &request.file {
             files.push(file.clone());
@@ -338,6 +344,7 @@ fn main() -> ExitCode {
                 Some("report") => html_report::report_command(asked),
                 Some("merge") => merge_command(asked),
                 Some("import") => import_command(asked),
+                Some("mutants") => mutants_test_command::mutants_command(asked),
                 Some(other) => {
                     eprintln!(
                         "[supercov] No help for {other}: it is no command. Try supercov help."
@@ -355,6 +362,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--") => public_coverage_run(arguments.collect(), RunOptions::default()),
+        Some("mutants") => mutants_test_command::mutants_command(arguments.collect()),
         // The one thing worth asking for before the command: credit every test
         // with what it reached, wherever that can only be had by running the
         // suite differently. Written once here rather than as a flag per
@@ -772,7 +780,7 @@ fn explain_failed_command(
     run_id: &str,
     exit_code: i32,
     unrun_build: &[String],
-    command: &str,
+    command: &[String],
 ) {
     let tests = discover_runs(root)
         .ok()
@@ -821,8 +829,21 @@ fn explain_failed_command(
         } else {
             "the run recorded no test"
         };
+        // A command that runs once the copy has the folders this checkout
+        // has: a build that starts by removing its output fails without it.
+        let hint = supercov_engine::javascript_run::build_first(
+            &supercov_engine::javascript_run::build_output_here(root),
+            unrun_build,
+            command,
+        );
         eprintln!(
-            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `supercov -- sh -c \"{build} && {command}\"`"
+            "[supercov] the command exited {exit_code} and {tests}. It ran in a copy of the project that starts without build output, and Supercov runs only the command it is given: if these tests need `{build}` first, put it in the command, as in `{hint}`"
+        );
+    } else if !recorded {
+        // The command builds already, or needs no build: what it printed
+        // says why no test ran.
+        eprintln!(
+            "[supercov] the command exited {exit_code} and the run recorded no test: its own output above says why"
         );
     }
 }
@@ -1535,6 +1556,101 @@ fn changed_lines_against(
     Ok(changed)
 }
 
+/// `mutants --diff <base>`: the lines the change the run measured added or
+/// modified since it left `base`. The run's recorded commit is compared
+/// with the merge base where the run was measured on a clean checkout;
+/// otherwise the working tree is, with untracked files as added whole.
+pub(crate) fn mutant_diff(
+    root: &Path,
+    base: &str,
+    run: &StoredRun,
+) -> Result<supercov_engine::mutants_query::MutantDiff, String> {
+    git_output(root, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")])
+        .map_err(|error| {
+            if error.starts_with("could not run git") {
+                format!("--diff needs git: {error}")
+            } else {
+                format!(
+                    "--diff {base}: git knows no commit by that name here. Fetch it first (actions/checkout needs fetch-depth: 0 for a pull request's base), or name another ref."
+                )
+            }
+        })?;
+    // The commit the run measured, where the checkout had nothing else.
+    let commit = run
+        .metadata
+        .integrity
+        .git
+        .as_ref()
+        .filter(|git| !git.dirty)
+        .and_then(|git| git.revision.clone())
+        .filter(|revision| {
+            git_output(root, &["cat-file", "-e", &format!("{revision}^{{commit}}")]).is_ok()
+        });
+    let head = commit.as_deref().unwrap_or("HEAD");
+    let merge_base = git_output(root, &["merge-base", base, head])
+        .map_err(|error| format!(
+            "{error}\nCould not find where this change left {base}. A shallow checkout has no merge base: fetch with enough history (actions/checkout uses fetch-depth: 0)."
+        ))?
+        .trim()
+        .to_owned();
+    let mut arguments = vec![
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--unified=0",
+        "--no-color",
+        "--find-renames",
+        merge_base.as_str(),
+    ];
+    if let Some(commit) = commit.as_deref() {
+        arguments.push(commit);
+    }
+    arguments.push("--");
+    let diff = git_output(root, &arguments)?;
+    let prefix = repository_prefix(root)?;
+    let relocate = |path: String| -> Option<String> {
+        match prefix.as_ref() {
+            Some(prefix) => path.strip_prefix(prefix).map(str::to_owned),
+            None => Some(path),
+        }
+    };
+    let changed = supercov_engine::patch_view::changed_lines(&diff)
+        .into_iter()
+        .filter_map(|(path, lines)| {
+            let lines = lines
+                .into_iter()
+                .filter_map(|line| u32::try_from(line).ok())
+                .collect();
+            relocate(path).map(|path| (path, lines))
+        })
+        .collect();
+    let mut untracked = std::collections::BTreeSet::new();
+    if commit.is_none() {
+        for path in git_output(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--full-name",
+            ],
+        )?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        {
+            untracked.extend(relocate(path.to_owned()));
+        }
+    }
+    Ok(supercov_engine::mutants_query::MutantDiff {
+        base: base.to_owned(),
+        merge_base,
+        commit,
+        changed,
+        untracked,
+    })
+}
+
 /// Report coverage of the lines a change touches.
 fn coverage_patch_command(arguments: &[String]) -> ExitCode {
     let mut base: Option<String> = None;
@@ -1881,6 +1997,15 @@ pub(crate) fn load_run_view_filtered(
     selector: Option<&str>,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
 ) -> Result<supercov_engine::run_view::RunView, String> {
+    load_run_and_view(root, selector, filter).map(|(_, view)| view)
+}
+
+/// The run `selector` picks, and its view for only the tests `filter` picks.
+fn load_run_and_view(
+    root: &Path,
+    selector: Option<&str>,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+) -> Result<(StoredRun, supercov_engine::run_view::RunView), String> {
     if let Some(filter) = filter {
         eprintln!(
             "[supercov] reading only the tests {} picks",
@@ -1889,7 +2014,7 @@ pub(crate) fn load_run_view_filtered(
     }
     let inventory = public_run_inventory(root).map_err(|error| error.to_string())?;
     let run = select_run(&inventory, selector).map_err(|error| error.to_string())?;
-    run_view_of(root, run, filter)
+    run_view_of(root, run, filter).map(|view| (run.clone(), view))
 }
 
 /// The view of `run` in the checkout at `root`, for only the tests `filter`
@@ -1985,7 +2110,7 @@ fn point_tests(run: &StoredRun) -> Result<Vec<(String, usize, Vec<String>)>, Str
 /// look like it invokes the tools they are named after.
 fn report_usage() -> String {
     format!(
-        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>]\n",
+        "supercov runs <run-id> report --format {} [--output <path>] [--force] [--kind <kind>] [--runner <runner>] [--tag <tag>] [--title <text>] [--test-file <path>] [--diff <base>]\n",
         supercov_engine::coverage_export::FORMATS
     )
 }
@@ -2026,6 +2151,8 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
     let mut force = false;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
     let mut selector: Option<&str> = None;
+    // `--diff <base>`: the HTML report's mutants of a change alone.
+    let mut diff_base: Option<String> = None;
     // Dispatch put the word first or second, so there is a first argument.
     if arguments[0] != "report" {
         selector = Some(arguments[0].as_str());
@@ -2042,16 +2169,16 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                 print!("{}", report_usage());
                 return ExitCode::SUCCESS;
             }
-            "--format" | "--output" => {
+            "--format" | "--output" | "--diff" => {
                 let Some(value) = rest.get(index) else {
                     eprintln!("[supercov] {argument} needs a value\n{}", report_usage());
                     return ExitCode::from(2);
                 };
                 index += 1;
-                if argument == "--format" {
-                    format = Some(value.to_ascii_lowercase());
-                } else {
-                    output = Some(PathBuf::from(value));
+                match argument {
+                    "--format" => format = Some(value.to_ascii_lowercase()),
+                    "--output" => output = Some(PathBuf::from(value)),
+                    _ => diff_base = Some(value.clone()),
                 }
             }
             // The coverage of some tests alone, from the run as recorded.
@@ -2072,11 +2199,19 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
         eprintln!("[supercov] report needs --format\n{}", report_usage());
         return ExitCode::from(2);
     };
+    // The other formats have no place for a mutant.
+    if diff_base.is_some() && format != "html" {
+        eprintln!(
+            "[supercov] --diff narrows the HTML report's mutants: give it with --format html\n{}",
+            report_usage()
+        );
+        return ExitCode::from(2);
+    }
 
     let result = (|| -> Result<(), String> {
         let root = std::env::current_dir().map_err(|error| error.to_string())?;
-        let view =
-            load_run_view_filtered(&root, selector, (!filter.is_empty()).then_some(&filter))?;
+        let (run, view) =
+            load_run_and_view(&root, selector, (!filter.is_empty()).then_some(&filter))?;
         // A report from a failed or stale run is still worth reading, so this
         // writes it and says so on stderr rather than refusing. Only a gate
         // must never go green over one.
@@ -2117,7 +2252,14 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
                     "The file could not be read from this checkout.".to_owned(),
                 )
             };
-            supercov_engine::coverage_html::html(&view, &sources, &reason)
+            // The run's mutants, of a change alone with `--diff`.
+            let diff = diff_base
+                .as_deref()
+                .map(|base| mutant_diff(&root, base, &run))
+                .transpose()?;
+            let mutants =
+                html_report::run_mutants(&run, (!filter.is_empty()).then_some(&filter), diff)?;
+            supercov_engine::coverage_html::html(&view, &sources, &reason, mutants.as_ref())
         } else {
             let sources = if supercov_engine::coverage_export::needs_source(&format) {
                 read_sources()
@@ -2126,6 +2268,17 @@ fn coverage_report_command(arguments: &[String]) -> ExitCode {
             };
             supercov_engine::coverage_export::export(&view, &format, timestamp, &root, &sources)?
         };
+        // An HTML document is not for a terminal: without `--output` it goes
+        // beside the store's other reports, whose `.gitignore` keeps it out
+        // of a commit, and the path is said. A pipe or a redirect still gets
+        // the document.
+        let to_terminal = output.is_none()
+            && format == "html"
+            && std::io::IsTerminal::is_terminal(&std::io::stdout());
+        // The store's own report is replaced each time, as `report`'s is.
+        let force = force || to_terminal;
+        let output = output
+            .or_else(|| to_terminal.then(|| root.join(".supercov/reports/coverage-report.html")));
         match output {
             Some(path) => {
                 // `--output coverage/report` names a directory for the HTML
@@ -2520,13 +2673,14 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
-    let command_text = command.join(" ");
+    let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
         run_id: Some(run_id),
         started_at: Some(started_at),
         watchdog_program,
+        strong: None,
     };
     let mut diagnostics = supercov_engine::fault::diagnostics();
     let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);
@@ -2540,7 +2694,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
                     &result.run_id,
                     result.exit_code,
                     &result.unrun_build,
-                    &command_text,
+                    &command_words,
                 );
             }
             // A server's run directory is named by its run id.
@@ -3134,6 +3288,54 @@ fn execute_coverage_query(
         .get_or_insert(run.metadata.test_exit_code == Some(0));
     request.test_exit_code = run.metadata.test_exit_code;
     let mut warnings = Vec::new();
+    if request.command == "mutants"
+        && let Some(base) = request.mutants.diff_base.clone()
+    {
+        let diff = mutant_diff(root, &base, run).map_err(|message| agent_json::AgentError {
+            code: agent_json::ErrorCode::InvalidArgument,
+            message,
+            retryable: false,
+            details: Some(serde_json::json!({ "diff": base })),
+        })?;
+        request.mutants.diff = Some(diff);
+    }
+    if request.command == "mutants" {
+        // A plain run lists its mutants the first time they are asked for.
+        let changed = supercov_engine::strong_plan::list_run_mutants(
+            &supercov_engine::coverage_report::ArchiveReportRequest {
+                archive_path: run.evidence_path.clone(),
+                run_id: run.id.clone(),
+                generated_at: run.metadata.started_at.clone(),
+                integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
+                test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
+                    run.metadata.test_exit_code,
+                ),
+                test_filter: None,
+            },
+            root,
+        )
+        .unwrap_or_default();
+        if !changed.is_empty() {
+            warnings.push(format!(
+                "[supercov] {} file(s) changed since run {}: their mutants are not listed until it is measured again",
+                changed.len(),
+                run.id
+            ));
+        }
+    }
+    // The strong verdicts a pass saved: the mutants listing shows each, and
+    // the summary their score.
+    if matches!(request.command.as_str(), "mutants" | "summary") {
+        let saved = mutants_test_command::read_saved(run);
+        if !saved.is_empty() {
+            request.mutants.strong = Some(
+                saved
+                    .into_iter()
+                    .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
+                    .collect(),
+            );
+        }
+    }
     let mut diff_inputs = None;
     {
         let comparison = checkout_comparison(root, run);
@@ -3429,10 +3631,22 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
         return assertions_command::command(&arguments);
     }
     if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.get(2).is_some_and(|a| a == "test")
+    {
+        return mutants_test_command::command(&arguments);
+    }
+    if command == "runs"
         && arguments.get(1).is_some_and(|a| a == "gaps")
         && arguments.iter().any(|a| a == "--format")
     {
         return gaps_export::command(&arguments);
+    }
+    if command == "runs"
+        && arguments.get(1).is_some_and(|a| a == "mutants")
+        && arguments.iter().any(|a| a == "--format")
+    {
+        return mutants_export::command(&arguments);
     }
     if command == "runs" && arguments.get(1).is_some_and(|a| a == "source") {
         return source_query::command(&arguments);
@@ -3538,10 +3752,15 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                     say_page_cut(page, asked);
                 }
             }
+            let violated = soundness_violated(&output);
             match output.agent_json() {
                 Ok(output) => {
                     print!("{output}");
-                    ExitCode::SUCCESS
+                    if violated {
+                        ExitCode::from(1)
+                    } else {
+                        ExitCode::SUCCESS
+                    }
                 }
                 Err(error) => {
                     print!("{}", agent_json::failure(Some(&agent_command), &error));
@@ -3556,7 +3775,11 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
                 }
             }
             println!("{}", render_human(&output));
-            ExitCode::SUCCESS
+            if soundness_violated(&output) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(failure) => {
             if !json_output {
@@ -3575,6 +3798,28 @@ fn public_query_command(command: &str, mut arguments: Vec<String>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Whether `mutants --stryker` found a mutant this run says no test infects
+/// or reaches that StrykerJS killed, or `--fail-on` a mutant with a status
+/// it refuses: either fails the command.
+fn soundness_violated(output: &PublicQueryOutput) -> bool {
+    matches!(
+        output,
+        PublicQueryOutput::Coverage { output, .. }
+            if matches!(
+                &output.data,
+                supercov_engine::indexed_query::IndexedQueryData::Mutants(data)
+                    if mutants_failed(data)
+            )
+    )
+}
+
+pub(crate) fn mutants_failed(data: &supercov_engine::mutants_query::CoverageMutantsData) -> bool {
+    data.stryker
+        .as_ref()
+        .is_some_and(|join| join.soundness_violations.total > 0)
+        || data.fail_on.as_ref().is_some_and(|gate| gate.mutants > 0)
 }
 
 fn run_js_direct() -> ExitCode {
@@ -4035,6 +4280,10 @@ fn instrument_js() -> ExitCode {
     }
     ExitCode::SUCCESS
 }
+
+// Below the lines tests name by number (main.rs:2482).
+mod mutants_export;
+mod mutants_test_command;
 
 #[cfg(test)]
 mod docs_command_tests {

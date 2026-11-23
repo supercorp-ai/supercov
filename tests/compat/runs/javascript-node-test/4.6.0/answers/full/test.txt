@@ -1,0 +1,11 @@
+coupons take five off
+outcome passed; retry 0=passed
+6 lines, 6 hits, 2 decisions, 1 phases
+line: src/price.js:1
+line: src/price.js:2
+line: src/price.js:3
+line: src/price.js:6
+line: src/price.js:7
+line: src/price.js:9
+assertion: node:assert/strict.equal at test/price.test.js:10:3
+showing 1-6 of 6 per evidence category

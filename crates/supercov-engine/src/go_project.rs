@@ -71,6 +71,9 @@ pub struct PreparedGoProject {
     /// than skipped silently: a file Supercov cannot read is a hole in the
     /// denominator, and a hole nobody is told about is a wrong number.
     pub unparseable: Vec<(String, String)>,
+    /// Each measured file's mutants, linked to the value probes placed in
+    /// it, where the run lists its mutants (`SUPERCOV_MUTANTS`).
+    pub mutants: std::collections::BTreeMap<String, Vec<crate::js_mutant_links::CandidateMutant>>,
 }
 
 /// A Go test file is exactly one whose name ends `_test.go`. The toolchain
@@ -344,9 +347,14 @@ pub(crate) fn unparseable_limitation(file: &str, reason: &str) -> serde_json::Va
     })
 }
 
+/// `root`'s sources measured; `project` is where the run's caches are (the
+/// project the workspace `root` is a copy of), and `tags` the build tags
+/// the command builds with.
 pub fn prepare_go_project(
     root: &Path,
+    project: &Path,
     roots: Option<&crate::source_discovery::ExplicitSourceRoots>,
+    tags: &str,
 ) -> Result<PreparedGoProject, String> {
     let mut files = discover_go_files(root)?;
     match roots {
@@ -391,6 +399,14 @@ pub fn prepare_go_project(
     let mut unparseable = Vec::new();
     let mut next_probe = 0_u64;
     let mut next_decision = 0_u32;
+    // A run that lists its mutants probes their values; an operation's probe
+    // needs its type, which only the type checker knows.
+    let requested = crate::go_run::mutants_requested();
+    let mut mutants = std::collections::BTreeMap::new();
+    let facts = requested
+        .then(|| crate::go_strong::site_facts(root, project, &files.sources, tags))
+        .flatten()
+        .unwrap_or_default();
     for relative in &files.sources {
         let path = root.join(relative);
         let Ok(source) = crate::fault_fs::read_to_string(&path) else {
@@ -401,13 +417,19 @@ pub fn prepare_go_project(
             unparseable.push((relative.clone(), reason.to_owned()));
             continue;
         };
-        match crate::go_instrumenter::build_go_obligations_for(
+        // Weak mutation's value probes, where the run lists its mutants: a
+        // file that has one is compiled as Go 1.21 at least, whose inference
+        // of untyped operands the probe's generic call leans on.
+        let language = language_minor(root, relative, &source);
+        match crate::go_instrumenter::build_go_obligations_valued(
             relative,
             &source,
             &mut next_probe,
             &mut next_decision,
             crate::go_instrumenter::RUNTIME_ALIAS,
-            has_generics(root, relative, &source),
+            language >= 18,
+            requested,
+            facts.get(relative),
         ) {
             Ok(obligations) => {
                 manifest.decisions.extend(obligations.manifest.decisions);
@@ -419,12 +441,34 @@ pub fn prepare_go_project(
                 manifest
                     .limitations
                     .extend(obligations.manifest.limitations);
+                if requested {
+                    let probed = obligations
+                        .probes
+                        .values()
+                        .filter_map(|probe| match &probe.target {
+                            crate::go_instrumenter::GoProbeTarget::Comparison { site }
+                            | crate::go_instrumenter::GoProbeTarget::Operation { site } => {
+                                Some(site.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let listed =
+                        crate::go_mutants::candidate_mutants_probed(relative, &source, &probed)
+                            .expect("a file that was instrumented parses");
+                    mutants.insert(relative.clone(), listed);
+                }
                 probes.extend(obligations.probes);
                 decision_widths.extend(obligations.decision_widths);
-                instrumented.push((
-                    relative.clone(),
-                    crate::go_instrumenter::rewrite(&source, &obligations.edits),
-                ));
+                let mut text = crate::go_instrumenter::rewrite_removing(
+                    &source,
+                    &obligations.edits,
+                    &obligations.removed,
+                );
+                if !obligations.removed.is_empty() && language < 21 {
+                    crate::go_instrumenter::upgrade_to_go_1_21(&mut text);
+                }
+                instrumented.push((relative.clone(), text));
             }
             Err(error) => {
                 manifest
@@ -469,7 +513,9 @@ pub fn prepare_go_project(
         }
     };
     manifest.scope = Some(serde_json::to_value(scope).expect("plain data serializes"));
+    mutants.retain(|_, listed: &mut Vec<_>| !listed.is_empty());
     Ok(PreparedGoProject {
+        mutants,
         root: root.to_owned(),
         files,
         manifest,
@@ -499,7 +545,15 @@ pub fn go_integrity_inputs(files: &GoFiles, command: &[String]) -> ExplicitInteg
 /// Whether a file's Go has generics (1.18): its module's `go` directive --
 /// 1.16 when it has none, as the toolchain reads it -- unless a
 /// `//go:build go1.N` line above its package clause sets an older one.
+#[cfg(test)]
 fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
+    language_minor(root, relative, source) >= 18
+}
+
+/// The minor version of the Go language a file is compiled as: its
+/// module's `go` directive (1.16 where it has none), or an older `//go:build
+/// go1.N` above its package clause.
+pub(crate) fn language_minor(root: &Path, relative: &str, source: &str) -> u32 {
     let minor = |text: &str| -> Option<u32> {
         let rest = text.strip_prefix("1.")?;
         let end = rest
@@ -536,7 +590,7 @@ fn has_generics(root: &Path, relative: &str, source: &str) -> bool {
                 .collect::<Vec<_>>()
         })
         .min();
-    constrained.map_or(declared, |file| file.min(declared)) >= 18
+    constrained.map_or(declared, |file| file.min(declared))
 }
 
 /// The module path declared in `go.mod`, which package identities are relative
@@ -626,11 +680,11 @@ mod tests {
         for fault in [
             "fs.read_dir",
             "fs.read_dir entry",
-            "fs.read_dir#go_project.rs:139@2",
-            "fs.read_dir#go_project.rs:279",
-            "fs.read_dir entry#go_project.rs:279",
-            "fs.file_type#go_project.rs:285",
-            "fs.read_dir#go_project.rs:279@2",
+            "fs.read_dir#go_project.rs:142@2",
+            "fs.read_dir#go_project.rs:282",
+            "fs.read_dir entry#go_project.rs:282",
+            "fs.file_type#go_project.rs:288",
+            "fs.read_dir#go_project.rs:282@2",
         ] {
             assert!(
                 crate::fault::during(fault, || discover_go_files(&root)).is_err(),
@@ -673,7 +727,9 @@ mod tests {
             "package extra\n\nfunc G() int {\n\treturn 1\n}\n",
         );
 
-        let project = prepare_go_project(&root, Some(&explicit_roots(&root, &["app.go"]))).unwrap();
+        let project =
+            prepare_go_project(&root, &root, Some(&explicit_roots(&root, &["app.go"])), "")
+                .unwrap();
         assert_eq!(project.files.sources, ["app.go"], "{:?}", project.files);
         assert!(
             project
@@ -734,7 +790,7 @@ mod tests {
             &format!("package lib{function}"),
         );
 
-        let project = prepare_go_project(&root, None).unwrap();
+        let project = prepare_go_project(&root, &root, None, "").unwrap();
         assert_eq!(
             project.files.sources,
             ["app.go", "doc/gen.go", "internal/examples/kept.go"]
@@ -774,7 +830,13 @@ mod tests {
         );
 
         // A root someone named is what they say it is.
-        let named = prepare_go_project(&root, Some(&explicit_roots(&root, &["examples"]))).unwrap();
+        let named = prepare_go_project(
+            &root,
+            &root,
+            Some(&explicit_roots(&root, &["examples"])),
+            "",
+        )
+        .unwrap();
         assert_eq!(named.files.sources, ["examples/echo/main.go"]);
         fs::remove_dir_all(root).ok();
     }
@@ -845,7 +907,7 @@ mod tests {
         );
         write(&root, "broken.go", "package main\n\nfunc f( {\n");
 
-        let project = prepare_go_project(&root, None).unwrap();
+        let project = prepare_go_project(&root, &root, None, "").unwrap();
         assert_eq!(project.unparseable.len(), 1);
         assert_eq!(project.unparseable[0].0, "broken.go");
         // And the hole it leaves is declared, not merely printed: a
@@ -878,7 +940,7 @@ mod tests {
         // measure has to say so instead of reporting success.
         let root = fixture("empty");
         write(&root, "go.mod", "module example.com/app\n");
-        assert!(prepare_go_project(&root, None).is_err());
+        assert!(prepare_go_project(&root, &root, None, "").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

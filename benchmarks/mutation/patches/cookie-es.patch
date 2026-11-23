@@ -1,0 +1,13 @@
+diff --git a/src/_utils.ts b/src/_utils.ts
+index b632638..8d8f63e 100644
+--- a/src/_utils.ts
++++ b/src/_utils.ts
+@@ -23,7 +23,7 @@ export function eqIndex(str: string, min: number, max: number) {
+  * Slice out a value between start to max.
+  */
+ export function valueSlice(str: string, min: number, max: number) {
+-  if (min === max) return "";
++  if (max - min === 0) return "";
+   let start = min;
+   let end = max;
+ 

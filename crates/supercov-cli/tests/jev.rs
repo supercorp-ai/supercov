@@ -364,14 +364,14 @@ fn security_reads_a_coverage_run_beside_its_findings() {
     // store of runs, listed before either.
     for (fault, place) in [
         (
-            "fs.read_from#evidence_archive.rs:676",
-            "evidence_archive.rs:676",
+            "fs.read_from#evidence_archive.rs:677",
+            "evidence_archive.rs:677",
         ),
         (
-            "fs.read_from#evidence_archive.rs:676@3",
-            "evidence_archive.rs:676",
+            "fs.read_from#evidence_archive.rs:677@3",
+            "evidence_archive.rs:677",
         ),
-        ("fs.read_dir#run_store.rs:672", "run_store.rs:672"),
+        ("fs.read_dir#run_store.rs:681", "run_store.rs:681"),
     ] {
         let mut env = jev.to_vec();
         env.push(("SUPERCOV_TEST_FAULT", fault));
@@ -4582,12 +4582,12 @@ fn a_security_assessment_alone_is_reported() {
     // A source whose size cannot be read is left out.
     let unsized_source = project.supercov_with(
         &["report", "--no-open", "--output", "unsized.html"],
-        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:654")],
+        &[("SUPERCOV_TEST_FAULT", "fs.metadata#html_report.rs:725")],
     );
     assert!(
         unsized_source
             .stderr()
-            .contains("test fault at fs (html_report.rs:654 metadata)"),
+            .contains("test fault at fs (html_report.rs:725 metadata)"),
         "{}",
         unsized_source.stderr()
     );
@@ -5876,7 +5876,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let project = Project::cart("assess-unread");
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
-    let unread = "fs.open#run_store.rs:1332,fs.read_from#evidence_archive.rs:676";
+    let unread = "fs.open#run_store.rs:1369,fs.read_from#evidence_archive.rs:677";
     let refused = |args: &[&str], fault: &str| {
         let mut full = vec!["runs", run.as_str(), "assertions"];
         full.extend_from_slice(args);
@@ -5885,7 +5885,7 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         project.supercov_with(&full, &env).exits(2)
     };
     let said = refused(&["assess"], unread);
-    assert!(said.contains("evidence_archive.rs:676"), "{said}");
+    assert!(said.contains("evidence_archive.rs:677"), "{said}");
     project
         .supercov_with(&["runs", &run, "assertions", "assess"], &through(&base))
         .succeeds();
@@ -5895,17 +5895,17 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
         .supercov(&["runs", &run, "assertions", "--title", "total"])
         .succeeds();
     let said = refused(&["--title", "total"], unread);
-    assert!(said.contains("evidence_archive.rs:676"), "{said}");
+    assert!(said.contains("evidence_archive.rs:677"), "{said}");
     project.edit(
         "src/cart.js",
         "return express ? 15 : 5;",
         "return express ? 20 : 5;",
     );
     for (fault, place) in [
-        (unread, "evidence_archive.rs:676"),
-        ("fs.open#source_manifest.rs:359", "source_manifest.rs:359"),
+        (unread, "evidence_archive.rs:677"),
+        ("fs.open#source_manifest.rs:365", "source_manifest.rs:365"),
         (
-            "fs.read#source_manifest.rs:773",
+            "fs.read#source_manifest.rs:779",
             "no per-test execution record",
         ),
         (
@@ -5922,13 +5922,13 @@ fn an_assertion_assessment_that_cannot_read_runs_or_keep_answers_says_so() {
     let (base, _) = gateway(MODEL, answer_no);
     let run = project.measure(&[]);
     let mut env = through(&base).to_vec();
-    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2306"));
+    env.push(("SUPERCOV_TEST_FAULT", "fs.write#assertion_coverage.rs:2309"));
     let assessed = project.supercov_with(&["runs", &run, "assertions", "assess"], &env);
     assert_eq!(assessed.code(), 0, "{}", assessed.stderr());
     assert!(
         assessed
             .stderr()
-            .contains("test fault at fs (assertion_coverage.rs:2306 write)"),
+            .contains("test fault at fs (assertion_coverage.rs:2309 write)"),
         "{}",
         assessed.stderr()
     );

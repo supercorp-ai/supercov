@@ -3,11 +3,18 @@ import { relative, resolve, sep } from "node:path";
 import { afterAll, afterEach, beforeEach } from "vitest";
 import { coverageSnapshot as localCoverageSnapshot, coverageSnapshotColumns as localCoverageSnapshotColumns, activateCoverageScope as localActivateCoverageScope, enableRuntimeSnapshotEvidence as localEnableRuntimeSnapshotEvidence, resetCoverage as localResetCoverage, takeNodeAssertionPhases as localTakeNodeAssertionPhases, } from "./runtime.mjs";
 import { inferTestProvenance, testTags } from "./provenance.mjs";
+import { strongJob } from "./strongJob.mjs";
 import { appendEvidenceRecord, installCompileCache, saveCompileCache } from "./atomic.mjs";
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set();
 const attempts = new Map();
 const activeScopes = new Map();
+// When each test began, for the time it took: the strong pass orders a
+// mutant's tests by it and sets their time limits from it.
+const startedAt = new Map();
+// The clock as it is now: a test that fakes timers fakes `performance.now`
+// too, and a duration read from it can come out negative.
+const realNow = performance.now.bind(performance);
 const runtimeGlobal = globalThis;
 const runtime = runtimeGlobal.__SUPERCOV_DIRECT_RUNTIME__ ?? {
     activateCoverageScope: localActivateCoverageScope,
@@ -48,8 +55,62 @@ function writeEvidence(payload) {
         return;
     appendEvidenceRecord(resolve(process.cwd(), evidenceDirectory), "vitest-worker", payload);
 }
+// Work a test file did while none of its tests ran: a `beforeAll` of a
+// later `describe`, an `afterAll`, async work a test left going. It is the
+// file's, as its module setup is, and no test's: written as one more setup
+// record of the file. A test's afterEach clears what it ran, so what is
+// there at the next test's start, or at the file's end, is that work.
+const fileWork = new Map();
+function writeFileWork(file, testFile, title) {
+    const snapshot = runtime.coverageSnapshotColumns();
+    if (!snapshot.hits.length && !snapshot.decisions.length)
+        return;
+    const nth = (fileWork.get(file.id) ?? 0) + 1;
+    fileWork.set(file.id, nth);
+    writeEvidence({
+        testId: `vitest:${file.id}:between:${nth}`,
+        test: `${testFile} > ${title}`,
+        testFile,
+        title,
+        retry: 0,
+        status: "passed",
+        provenance: inferTestProvenance({
+            runner: "vitest",
+            file: testFile,
+            project: file.projectName,
+            explicitKind: process.env["SUPERCOV_TEST_KIND"],
+        }),
+        role: "setup",
+        runtime: [snapshot],
+        browser: [],
+        server: [],
+    });
+}
+// The file this worker is running: hooks take no argument, since Vitest 3
+// and later read a hook's first parameter as a fixture context.
+let currentFile;
+afterAll(() => {
+    const file = currentFile;
+    if (!file?.filepath)
+        return;
+    const testFile = relative(process.cwd(), file.filepath).split(sep).join("/");
+    if (emittedSetupFiles.has(testFile))
+        writeFileWork(file, testFile, "after the tests");
+});
+// The test a hook runs for: Vitest before 0.30 gives it as `meta`, and
+// gives an afterEach hook no context of its test where its beforeEach had one.
+let currentTask;
 beforeEach((context) => {
-    const task = context.task;
+    const task = context.task ?? context.meta;
+    currentTask = task;
+    currentFile = task.file;
+    // A strong pass's job (strongJobs.mjs, where the run also had browser
+    // tests): its own tests, none after its first failure.
+    const job = strongJob();
+    if (job && (job.stopped || !job.selects(task.file.filepath, `vitest:${task.id}`))) {
+        context.skip();
+        return;
+    }
     const testFile = relative(process.cwd(), task.file.filepath)
         .split(sep)
         .join("/");
@@ -78,6 +139,9 @@ beforeEach((context) => {
             });
         }
     }
+    else {
+        writeFileWork(task.file, testFile, "between tests");
+    }
     const testId = `vitest:${task.id}`;
     const retry = attempts.get(testId) ?? 0;
     attempts.set(testId, retry + 1);
@@ -92,16 +156,21 @@ beforeEach((context) => {
         attemptId: `${testKey}-${retry}`,
     };
     activeScopes.set(task.id, scope);
+    startedAt.set(task.id, realNow());
     runtime.activateCoverageScope(scope);
     runtime.resetCoverage(testId);
 });
 afterEach((context) => {
-    const task = context.task;
+    const task = context?.task ?? context?.meta ?? currentTask;
+    if (task.result?.state === "fail")
+        strongJob()?.fail();
     const testFile = relative(process.cwd(), task.file.filepath)
         .split(sep)
         .join("/");
     const scope = activeScopes.get(task.id);
     const retry = scope?.retry ?? task.result?.retryCount ?? 0;
+    const began = startedAt.get(task.id);
+    startedAt.delete(task.id);
     const payload = {
         testId: scope?.testId ?? `vitest:${task.id}`,
         ...(scope ? { scope } : {}),
@@ -110,6 +179,7 @@ afterEach((context) => {
         title: task.name,
         retry,
         status: attemptStatus(task.result?.state),
+        ...(began === undefined ? {} : { durationMs: Math.max(0, Math.round(realNow() - began)) }),
         provenance: inferTestProvenance({
             runner: "vitest",
             file: testFile,
@@ -128,4 +198,6 @@ afterEach((context) => {
     writeEvidence(payload);
     activeScopes.delete(task.id);
     runtime.activateCoverageScope();
+    // What runs from here to the next test is the file's (writeFileWork).
+    runtime.resetCoverage(`vitest:${task.file.id}:between`);
 });

@@ -1,0 +1,123 @@
+{
+  "project": "defu",
+  "scenario": "pr-supercov",
+  "shard": null,
+  "variant": null,
+  "commit": "82632b66f5914e9946edce300e10633a3d5c0cb7",
+  "startedAt": "2026-11-20T06:28:22.185Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "supercovWrapper": "4.28.0",
+    "supercov": "supercov 4.28.0 (rust contract v1)",
+    "supercovBinaryKey": "6176aa9dd959d1da",
+    "node": "v24.22.2",
+    "pnpm": "10.33.4",
+    "vitest": "4.1.6",
+    "vitestProject": "4.1.6"
+  },
+  "notes": [
+    "Supercov instruments only the mutate set: SUPERCOV_SOURCE_ROOTS lists its 3 files"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/defu 82632b66f5914e9946edce300e10633a3d5c0cb7 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.28,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0,
+        "cpuS": 0.02,
+        "cpuPercent": "12%",
+        "maxRssKiB": 19052,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@10.33.4 >/dev/null && pnpm --version",
+      "startOffsetS": 0.29,
+      "wallS": 1.431,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.64,
+        "sysS": 0.16,
+        "cpuS": 0.8,
+        "cpuPercent": "56%",
+        "maxRssKiB": 142004,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.72,
+      "wallS": 1.043,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.66,
+        "sysS": 0.43,
+        "cpuS": 3.09,
+        "cpuPercent": "297%",
+        "maxRssKiB": 912532,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "npm i --prefix /home/runner/work/_temp/mutation-bench/supercov-cli --no-audit --no-fund supercov@4.28.0 >/dev/null && ls /home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin",
+      "startOffsetS": 2.77,
+      "wallS": 3.382,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.17,
+        "sysS": 0.21,
+        "cpuS": 1.38,
+        "cpuPercent": "41%",
+        "maxRssKiB": 349312,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "supercov-measure",
+      "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov -- node_modules/.bin/vitest run",
+      "startOffsetS": 6.2,
+      "wallS": 1.166,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.63,
+        "sysS": 0.11,
+        "cpuS": 0.74,
+        "cpuPercent": "64%",
+        "maxRssKiB": 153208,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "runDir": ".supercov/runs/run_d2fb5d90ff81c5fd"
+    },
+    {
+      "name": "supercov-diff",
+      "command": "/home/runner/work/_temp/mutation-bench/supercov-cli/node_modules/.bin/supercov runs latest mutants test --json --diff HEAD~1 > /home/runner/work/supercov/supercov/out/supercov-diff.result.json",
+      "startOffsetS": 7.36,
+      "wallS": 0.868,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.1,
+        "sysS": 0.18,
+        "cpuS": 1.28,
+        "cpuPercent": "148%",
+        "maxRssKiB": 161312,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "result": "supercov-diff.result.json",
+      "strongFile": "supercov-diff.strong-mutation.json",
+      "mutants": "supercov-diff.mutants.jsonl"
+    }
+  ],
+  "totalS": 8.26
+}

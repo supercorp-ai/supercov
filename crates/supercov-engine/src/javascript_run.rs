@@ -51,7 +51,14 @@ pub struct DirectJavascriptRunRequest {
     pub started_at: Option<String>,
     #[serde(skip)]
     pub watchdog_program: Option<PathBuf>,
+    /// Strong mutation (`docs/design/strong-mutation.md`): run the command
+    /// over a copy with every mutant behind a switch, driven by the plan, and
+    /// publish no run. `None` for an ordinary run.
+    #[serde(skip)]
+    pub strong: Option<StrongRun>,
 }
+
+pub use crate::strong_driver::StrongRun;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -280,6 +287,7 @@ fn javascript_archive_entries(
             _ => "failed",
         };
         let command_result = RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(format!("command:{run_id}")),
             scope: None,
@@ -561,15 +569,18 @@ fn javascript_integrity_for_project(
 
 /// Execute one JavaScript suite with every language-neutral stage owned by
 /// Rust. Target-language runtime and runner adapters remain generated shims.
-pub fn run_direct_javascript(
+fn run_javascript(
     request: &DirectJavascriptRunRequest,
     diagnostics: &mut dyn std::io::Write,
-) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
+) -> Result<Finished, DirectJavascriptRunError> {
     if request.command.is_empty() {
         return Err(DirectJavascriptRunError::Failed(
             "test command must not be empty".into(),
         ));
     }
+    // A strong pass instruments its copy with the mutants behind switches,
+    // in this process and in the test's; set back when the run ends.
+    let _strong = StrongModeGuard::set(request.strong.as_ref());
     let total_started = Instant::now();
     let initialization_started = Instant::now();
     let root = crate::workspace::canonicalize_simplified(&request.root)
@@ -655,18 +666,18 @@ pub fn run_direct_javascript(
         "javascript",
         crate::integrity::javascript_assertion_paths(&root, &project).map_err(|e| e.to_string())?,
     )?;
-    // The root too, which a moved project must not reuse. And the files that
-    // are instrumented: the fingerprint digests every first-party file
-    // whatever its classification, so SUPERCOV_SOURCE_ROOTS set on a project
-    // that had already run was silently ignored until the workspace was
-    // deleted.
+    // The root, which a moved project must not reuse; the files instrumented
+    // (SUPERCOV_SOURCE_ROOTS set on a project that had already run was ignored
+    // until the workspace was deleted); and the probes, whose switch changed
+    // nothing once an instrumented copy was cached.
+    let probes = crate::js_instrumenter::probe_options();
     let frontend_cache_key = format!(
         "{}:{}:{}:{}:{}",
         integrity.fingerprint.combined,
         integrity.fingerprint.execution,
         crate::source_manifest::digest(&request.command),
         crate::source_manifest::digest(&project.root.to_string_lossy()),
-        crate::source_manifest::digest(&(&project.source_files, &source_roots))
+        crate::source_manifest::digest(&(&project.source_files, &source_roots, probes))
     );
     let prior_workspace = cached_workspace_path(&root, cleanup.lock());
     let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);
@@ -809,7 +820,17 @@ pub fn run_direct_javascript(
             .map(Server::RustWorker),
         );
     }
-    if serves_rust_wasm {
+    // A strong pass switches the wasm crates' mutants in where a run
+    // instruments them.
+    let mut wasm_strong = None;
+    if serves_rust_wasm && let Some(strong) = &request.strong {
+        wasm_strong = Some(crate::rust_wasm::switch_for_strong_pass(
+            &root,
+            &workspace,
+            strong,
+            diagnostics,
+        )?);
+    } else if serves_rust_wasm {
         servers.extend(
             crate::rust_wasm::RustWasmServer::prepare(
                 &root,
@@ -822,7 +843,7 @@ pub fn run_direct_javascript(
             .map(Server::RustWasm),
         );
     }
-    if project.source_files.is_empty() && servers.is_empty() {
+    if project.source_files.is_empty() && servers.is_empty() && wasm_strong.is_none() {
         return Err(
             crate::project_discovery::no_source_error(&root, &environment)
                 .to_string()
@@ -960,6 +981,35 @@ pub fn run_direct_javascript(
         "SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(),
         project.playwright_test_export.clone(),
     );
+    if let Some(strong) = &request.strong {
+        overrides.insert("SUPERCOV_STRONG".into(), "1".into());
+        overrides.insert(
+            "SUPERCOV_STRONG_PLAN".into(),
+            strong.plan.display().to_string(),
+        );
+        overrides.insert(
+            "SUPERCOV_STRONG_RESULTS".into(),
+            strong.results.display().to_string(),
+        );
+        overrides.extend(wasm_strong.clone().unwrap_or_default());
+        if let Some(files) = strong.switched_files() {
+            let mut files = files.into_iter().collect::<Vec<_>>();
+            files.sort();
+            let path = strong.switched_files_path();
+            crate::fault_fs::write(
+                &path,
+                serde_json::to_vec(&files).expect("plain data serializes"),
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] strong pass: switches in {} of {} source file(s)",
+                files.len(),
+                project.source_files.len()
+            );
+            overrides.insert("SUPERCOV_STRONG_FILES".into(), path.display().to_string());
+        }
+    }
     overrides.insert(
         "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
         "./.supercov/node_modules/playwright.mjs".into(),
@@ -1052,18 +1102,30 @@ pub fn run_direct_javascript(
     // What the tools of a command before this one changed in the source has
     // been applied or let go; this command starts from the project as it is.
     let _ = crate::source_tools::clear_source_changes(&workspace);
+    // A strong pass may start the command again for a mutant that must run
+    // alone (`run_strong_restarts`), with these settings and its own.
+    let strong_overrides = request.strong.as_ref().map(|_| overrides.clone());
     // The command, and nothing before it.
+    let command = match &request.strong {
+        Some(strong) => strong_command(strong, &request.command, &workspace),
+        None => request.command.clone(),
+    };
     let plan = ExecutionPlan {
         preparation: Vec::new(),
         test: ExecutionPhase {
             name: "test".into(),
             kind: PhaseKind::Test,
             command: CommandSpec {
-                program: request.command[0].clone().into(),
-                arguments: request.command[1..].iter().map(OsString::from).collect(),
+                program: command[0].clone().into(),
+                arguments: command[1..].iter().map(OsString::from).collect(),
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
-                captured_output: None,
+                // A strong pass's command prints its stages: they go to a
+                // log beside its results, and the answer alone to stdout.
+                captured_output: request
+                    .strong
+                    .as_ref()
+                    .map(|strong| strong.results.with_extension("log")),
                 console: None,
             },
         },
@@ -1108,7 +1170,7 @@ pub fn run_direct_javascript(
                 writeln!(
                     diagnostics,
                     "[supercov] running in isolated workspace: {}",
-                    request.command.join(" ")
+                    shell_words(&request.command)
                 )
                 .map_err(|error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
@@ -1183,6 +1245,25 @@ pub fn run_direct_javascript(
             },
             total_ms: rounded_millisecond(elapsed_ms(total_started)),
         });
+    }
+    // A strong pass publishes no run and leaves the working tree alone: its
+    // verdicts are in the results file the driver wrote.
+    if let (Some(strong), Some(overrides)) = (&request.strong, strong_overrides) {
+        run_strong_restarts(
+            strong,
+            &request.command,
+            &workspace,
+            overrides,
+            &supervisor,
+            options,
+            diagnostics,
+        )?;
+        update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
+            .map_err(|error| error.to_string())?;
+        cleanup.mark_terminal();
+        let _ = remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&run_id));
+        // Its verdicts are in its results: it publishes no run.
+        return Ok(Finished::strong(execution.exit_code));
     }
     // Leave the real working tree as the command alone would have: updated
     // snapshots, generated fixtures, and reports belong in the repository,
@@ -1297,6 +1378,9 @@ pub fn run_direct_javascript(
 
     let publication_started = Instant::now();
     // Read before the evidence is archived and removed.
+    servers
+        .iter_mut()
+        .for_each(|server| server.read_evidence(&run_id));
     let served = if servers.is_empty() && !support_directory.is_dir() {
         Vec::new()
     } else {
@@ -1456,7 +1540,7 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
-        return Ok(DirectJavascriptRunResult {
+        return Ok(Finished::published(Box::new(DirectJavascriptRunResult {
             run_id,
             run_directory,
             workspace,
@@ -1466,7 +1550,7 @@ pub fn run_direct_javascript(
             metadata,
             server_runs,
             unrun_build: project.unrun_build.clone(),
-        });
+        })));
     }
     let archive_path = root
         .join(".supercov/work")
@@ -1477,9 +1561,9 @@ pub fn run_direct_javascript(
             file: frontend.manifest_path,
             path: "manifest.json".into(),
         },
-        EvidenceArchiveSource::File {
-            file: workspace.join(".supercov/statement-exclusions.json"),
-            path: "statement-exclusions.json".into(),
+        EvidenceArchiveSource::Directory {
+            directory: workspace.join(".supercov/frontend-evidence"),
+            prefix: None,
         },
         EvidenceArchiveSource::Directory {
             directory: evidence_directory,
@@ -1667,7 +1751,7 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
     cleanup.mark_terminal();
-    Ok(DirectJavascriptRunResult {
+    Ok(Finished::published(Box::new(DirectJavascriptRunResult {
         run_id,
         run_directory,
         workspace,
@@ -1682,7 +1766,7 @@ pub fn run_direct_javascript(
         } else {
             project.unrun_build.clone()
         },
-    })
+    })))
 }
 
 /// Where JavaScript builds write their output: none is source, and the copy
@@ -1712,11 +1796,62 @@ fn missing_build_output_note(missing: &[&str], build: &[String], command: &[Stri
         .map(|folder| format!("`{folder}/`"))
         .collect::<Vec<_>>()
         .join(", ");
-    let build = build.join(" ");
-    let command = command.join(" ");
     format!(
-        "[supercov] the copy the command runs in starts without {folders}, which this checkout has, and the command does not run `{build}`: if the tests need that output, stop and measure `supercov -- sh -c \"{build} && {command}\"` instead"
+        "[supercov] the copy the command runs in starts without {folders}, which this checkout has, and the command does not run `{}`: if the tests need that output, stop and measure `{}` instead",
+        shell_words(build),
+        build_first(missing, build, command)
     )
+}
+
+/// The build output folders this checkout holds, which the copy a command
+/// runs in starts without.
+pub fn build_output_here(root: &Path) -> Vec<&'static str> {
+    BUILD_OUTPUTS
+        .iter()
+        .copied()
+        .filter(|folder| root.join(folder).is_dir())
+        .collect()
+}
+
+/// The command to measure where a suite needs a build the command does not
+/// run: `supercov -- sh -c "mkdir -p dist && npm run build && <command>"`.
+/// The folders are made first, as this checkout has them: a build that
+/// begins by removing its output (`rm -r dist`) fails in a copy without it.
+pub fn build_first(folders: &[&str], build: &[String], command: &[String]) -> String {
+    let make = if folders.is_empty() {
+        String::new()
+    } else {
+        format!("mkdir -p {} && ", folders.join(" "))
+    };
+    let script = format!("{make}{} && {}", shell_words(build), shell_words(command));
+    format!(
+        "supercov -- sh -c \"{}\"",
+        script
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    )
+}
+
+/// A command as a shell takes it back: each word quoted where it needs to
+/// be, so a line that shows it can be run as it reads.
+pub fn shell_words(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|word| {
+            if !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))
+            {
+                word.clone()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The id of the `nth` run published beside `run_id` from the same command:
@@ -2046,6 +2181,14 @@ impl Server {
         }
     }
 
+    /// Read what the tests left before the run archives and removes it:
+    /// only a wasm crate's server reads it later.
+    fn read_evidence(&mut self, evidence_run_id: &str) {
+        if let Self::RustWasm(server) = self {
+            server.read_evidence(evidence_run_id);
+        }
+    }
+
     /// The server's run, built and waiting for the metadata it is published
     /// under, when it has one.
     fn build_run<'a>(
@@ -2203,6 +2346,35 @@ mod environment_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The hint for a build the command does not run makes the folders the
+    /// checkout has first, and reads back as the shell would take it.
+    #[test]
+    fn a_build_hint_runs_as_it_reads() {
+        let words = |text: &[&str]| text.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            build_first(
+                &["dist"],
+                &words(&["npm", "run", "build"]),
+                &words(&["npx", "vitest", "run"])
+            ),
+            "supercov -- sh -c \"mkdir -p dist && npm run build && npx vitest run\""
+        );
+        assert_eq!(
+            build_first(
+                &[],
+                &words(&["yarn", "build"]),
+                &words(&["sh", "-c", "echo \"$HOME\" `x` \\ it's"])
+            ),
+            "supercov -- sh -c \"yarn build && sh -c 'echo \\\"\\$HOME\\\" \\`x\\` \\\\ it'\\\\''s'\""
+        );
+        assert_eq!(shell_words(&words(&["a", "", "b c"])), "a '' 'b c'");
+        let root = std::env::temp_dir().join(format!("supercov-build-here-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("build"), "a file").unwrap();
+        assert_eq!(build_output_here(&root), ["dist"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn an_interrupted_run_says_by_what() {
         let interrupted = DirectJavascriptRunError::Interrupted {
@@ -2223,6 +2395,134 @@ mod tests {
 
     use super::*;
     use crate::coverage_report::{ExecutionScope, RuntimeSnapshot, TestProvenance};
+
+    /// A strong pass needs its plan, and a run asked for publishes one: each
+    /// refuses the other's request before running anything, and a strong
+    /// pass with no command runs none.
+    #[test]
+    fn a_strong_pass_and_a_run_each_refuse_the_other_s_request() {
+        let request = |command: &[&str], strong: bool| DirectJavascriptRunRequest {
+            root: PathBuf::from("/nonexistent"),
+            command: command.iter().map(|part| (*part).to_owned()).collect(),
+            run_id: None,
+            started_at: None,
+            watchdog_program: None,
+            strong: strong.then(|| StrongRun {
+                plan: PathBuf::from("/nonexistent/plan.json"),
+                results: PathBuf::from("/nonexistent/results.jsonl"),
+            }),
+        };
+        let failed = |result: Result<(), DirectJavascriptRunError>| match result {
+            Err(DirectJavascriptRunError::Failed(message)) => message,
+            other => panic!("{:?}", other.map_err(|error| error.to_string())),
+        };
+        assert_eq!(
+            failed(run_strong_javascript(&request(&["true"], false), &mut Vec::new()).map(drop)),
+            "a strong pass needs its plan"
+        );
+        assert_eq!(
+            failed(run_direct_javascript(&request(&["true"], true), &mut Vec::new()).map(drop)),
+            "a strong pass ran where a run was asked for"
+        );
+        assert_eq!(
+            failed(run_strong_javascript(&request(&[], true), &mut Vec::new()).map(drop)),
+            "test command must not be empty"
+        );
+    }
+
+    /// A strong pass starts the command itself, or the jobs driver before
+    /// it where a mutant's candidate ran under a job runner, on Bun where
+    /// the command is Bun's.
+    #[test]
+    fn a_strong_pass_starts_the_jobs_driver_for_a_job_runner_s_candidates() {
+        let directory = std::env::temp_dir().join(format!(
+            "supercov-strong-command-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let strong = StrongRun {
+            plan: directory.join("plan.json"),
+            results: directory.join("results.jsonl"),
+        };
+        let workspace = Path::new("/copy");
+        let command = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let driver = workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string();
+        // No plan to read: the command.
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["npx", "jest"])
+        );
+        let plan = |runner: &str| {
+            serde_json::json!({
+                "tests": [{"runner": runner}],
+                "mutants": [
+                    {"candidates": [{"test": 0}, {"test": 9}]},
+                    {"decided": "survived", "candidates": [{"test": 0}]}
+                ]
+            })
+        };
+        std::fs::write(&strong.plan, plan("jest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "jest"]), workspace),
+            command(&["node", &driver, "--", "npx", "jest"])
+        );
+        assert_eq!(
+            strong_command(&strong, &command(&["/usr/bin/bun", "test"]), workspace),
+            command(&["/usr/bin/bun", &driver, "--", "/usr/bin/bun", "test"])
+        );
+        // Vitest drives itself from within the command.
+        std::fs::write(&strong.plan, plan("vitest").to_string()).unwrap();
+        assert_eq!(
+            strong_command(&strong, &command(&["npx", "vitest"]), workspace),
+            command(&["npx", "vitest"])
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The files a strong pass switches are those of the plan's mutants it
+    /// runs; a plan that does not read, or lists no mutants, switches every
+    /// file.
+    #[test]
+    fn a_strong_pass_switches_the_files_of_the_mutants_it_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-strong-files-{}-{}",
+            std::process::id(),
+            now_nonce()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let strong = StrongRun {
+            plan: root.join("plan.json"),
+            results: root.join("results.jsonl"),
+        };
+        assert_eq!(strong.switched_files(), None);
+        std::fs::write(&strong.plan, "not json").unwrap();
+        assert_eq!(strong.switched_files(), None);
+        std::fs::write(&strong.plan, r#"{"mutants": {}}"#).unwrap();
+        assert_eq!(strong.switched_files(), None);
+        std::fs::write(
+            &strong.plan,
+            r#"{"mutants": [
+                {"file": "src/run.js"},
+                {"file": "src/null.js", "decided": null},
+                {"file": "src/decided.js", "decided": "survived"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            strong.switched_files(),
+            Some(["src/run.js".to_owned(), "src/null.js".to_owned()].into())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Each warning of "nothing came back" decides on its own: tests a
     /// `docker exec` ran that reported none, whatever the servers did; and
@@ -2357,6 +2657,7 @@ mod tests {
         observed: bool,
     ) -> RawTestResult {
         RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: test_id.map(str::to_owned),
             scope: scope.map(|(worker, test, retry)| ExecutionScope {
@@ -2391,7 +2692,7 @@ mod tests {
                     hits: vec!["h".into()],
                     events: vec![],
                     logicals: vec![],
-                    phase_id: None,
+                    ..Default::default()
                 }]
             } else {
                 vec![]
@@ -2594,5 +2895,233 @@ mod tests {
             .map(|runner| runner["runner"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(runners, ["background", "vitest"]);
+    }
+}
+
+/// How a run ended: the command's exit code, and the run it published,
+/// which a strong pass does not.
+struct Finished {
+    exit_code: i32,
+    run: Option<Box<DirectJavascriptRunResult>>,
+}
+
+impl Finished {
+    fn strong(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            run: None,
+        }
+    }
+
+    fn published(run: Box<DirectJavascriptRunResult>) -> Self {
+        Self {
+            exit_code: run.exit_code,
+            run: Some(run),
+        }
+    }
+}
+
+pub fn run_direct_javascript(
+    request: &DirectJavascriptRunRequest,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
+    if request.strong.is_some() {
+        return Err(DirectJavascriptRunError::Failed(
+            "a strong pass ran where a run was asked for".into(),
+        ));
+    }
+    let finished = run_javascript(request, diagnostics)?;
+    Ok(*finished
+        .run
+        .expect("a run that is no strong pass publishes one"))
+}
+
+/// A strong pass (`supercov runs <id> mutants test`): the command over a copy
+/// with every listed mutant behind a switch, the driver running the plan.
+/// Publishes no run; the verdicts are in `strong.results`. Returns the
+/// command's exit code.
+pub fn run_strong_javascript(
+    request: &DirectJavascriptRunRequest,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<i32, DirectJavascriptRunError> {
+    if request.strong.is_none() {
+        return Err(DirectJavascriptRunError::Failed(
+            "a strong pass needs its plan".into(),
+        ));
+    }
+    // A strong pass publishes no run: its verdicts are in its results.
+    let finished = run_javascript(request, diagnostics)?;
+    Ok(finished.exit_code)
+}
+
+/// The further invocations a strong pass's driver asks for, in `restart`
+/// records in the results (`playwrightStrong.mjs`): each starts the command
+/// again with the job in `SUPERCOV_STRONG_RESTART`, and a job that says
+/// `everywhere` (one mutant a server ran outside any request) with the
+/// mutant switched on in every process from its start
+/// (`SUPERCOV_ACTIVE_MUTANT`). A job's own invocation may ask for more (the
+/// survivors' other candidates, kills to confirm alone); they run in turn.
+/// Each invocation's output goes to a log beside the results. A Vitest pass
+/// asks for none.
+fn run_strong_restarts(
+    strong: &StrongRun,
+    command: &[String],
+    workspace: &Path,
+    overrides: BTreeMap<String, String>,
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
+    diagnostics: &mut dyn std::io::Write,
+) -> Result<(), DirectJavascriptRunError> {
+    let mut read = 0usize;
+    let mut number = 0usize;
+    let mut asked;
+    // Every pass that can ask for more asks for fewer: a bound, all the same.
+    loop {
+        let text = std::fs::read_to_string(&strong.results).unwrap_or_default();
+        let lines = text.lines().collect::<Vec<_>>();
+        let jobs = lines[read.min(lines.len())..]
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| record.get("restart").cloned())
+            .collect::<Vec<_>>();
+        read = lines.len();
+        asked = !jobs.is_empty();
+        for job in jobs {
+            let path = strong
+                .results
+                .with_file_name(format!("restart-{number}.json"));
+            let log = strong
+                .results
+                .with_file_name(format!("restart-{number}.log"));
+            number += 1;
+            crate::fault_fs::write(
+                &path,
+                serde_json::to_vec(&job).expect("plain data serializes"),
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+            let everywhere = job["everywhere"] == true;
+            let mutants = job["mutants"].as_array().map_or(0, Vec::len);
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] strong pass {}: {} mutant(s), {}{} ({})",
+                path.file_stem().unwrap_or_default().to_string_lossy(),
+                mutants,
+                job["kind"].as_str().unwrap_or("alone"),
+                if everywhere {
+                    ", every process started with it switched on"
+                } else {
+                    ""
+                },
+                job["reason"].as_str().unwrap_or("restart")
+            );
+            let mut environment = overrides.clone();
+            if everywhere && let Some(mutant) = job["mutants"][0]["mutant"].as_str() {
+                environment.insert("SUPERCOV_ACTIVE_MUTANT".into(), mutant.to_owned());
+            }
+            environment.insert("SUPERCOV_STRONG_RESTART".into(), path.display().to_string());
+            let plan = ExecutionPlan {
+                preparation: Vec::new(),
+                test: ExecutionPhase {
+                    name: "test".into(),
+                    kind: PhaseKind::Test,
+                    command: CommandSpec {
+                        program: command[0].clone().into(),
+                        arguments: command[1..].iter().map(OsString::from).collect(),
+                        cwd: workspace.to_owned(),
+                        environment: Some(environment_with(environment)),
+                        captured_output: Some(log),
+                        console: None,
+                    },
+                },
+            };
+            let execution = execute_plan_with_supervisor(
+                supervisor,
+                &plan,
+                options,
+                diagnostics,
+                |_, _| Ok(()),
+            )
+            .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+            // An interrupted pass ends here; the mutants left have no verdict.
+            if execution.interrupted_signal.is_some() {
+                return Ok(());
+            }
+        }
+        if !asked || number >= 1_000 {
+            return Ok(());
+        }
+    }
+}
+
+/// What a strong pass starts: the command itself, which Vitest's and
+/// Playwright's configurations turn into their drivers, or, where a mutant's
+/// candidates ran under a runner of `JAVASCRIPT_JOB_RUNNERS`, the jobs driver with the
+/// command after `--`. It runs on Bun where the command is Bun's.
+fn strong_command(strong: &StrongRun, command: &[String], workspace: &Path) -> Vec<String> {
+    let Some(plan) = std::fs::read(&strong.plan)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return command.to_vec();
+    };
+    let tests = plan["tests"].as_array().cloned().unwrap_or_default();
+    let jobs = plan["mutants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|mutant| mutant.get("decided").is_none_or(serde_json::Value::is_null))
+        .flat_map(|mutant| mutant["candidates"].as_array().cloned().unwrap_or_default())
+        .filter_map(|candidate| candidate["test"].as_u64())
+        .filter_map(|test| tests.get(test as usize))
+        .any(|test| {
+            crate::strong_driver::JAVASCRIPT_JOB_RUNNERS
+                .contains(&test["runner"].as_str().unwrap_or_default())
+        });
+    if !jobs {
+        return command.to_vec();
+    }
+    let on_bun = command.first().is_some_and(|program| {
+        Path::new(program)
+            .file_stem()
+            .is_some_and(|stem| stem == "bun")
+    });
+    let mut driver = vec![
+        if on_bun {
+            command[0].clone()
+        } else {
+            "node".to_owned()
+        },
+        workspace
+            .join(".supercov/node_modules/strongJobs.mjs")
+            .display()
+            .to_string(),
+        "--".to_owned(),
+    ];
+    driver.extend(command.iter().cloned());
+    driver
+}
+
+/// Strong mode for the run's own instrumentation, set back when it ends.
+/// Only the files the plan has a mutant to run in get switches: written
+/// for the processes that instrument on their own beside the results
+/// (`SUPERCOV_STRONG_FILES`), and set for this one.
+struct StrongModeGuard(bool);
+
+impl StrongModeGuard {
+    fn set(strong: Option<&StrongRun>) -> Self {
+        if let Some(strong) = strong {
+            crate::js_instrumenter::set_strong_mode(Some(true));
+            crate::js_instrumenter::set_strong_files(strong.switched_files());
+        }
+        Self(strong.is_some())
+    }
+}
+
+impl Drop for StrongModeGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::js_instrumenter::set_strong_mode(None);
+            crate::js_instrumenter::set_strong_files(None);
+        }
     }
 }

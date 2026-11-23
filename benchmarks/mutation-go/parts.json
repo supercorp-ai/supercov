@@ -1,0 +1,71 @@
+{
+ "parts": {
+  "2": {
+   "project": "go-humanize",
+   "tool": "gremlins"
+  },
+  "3": {
+   "project": "go-humanize",
+   "tool": "supercov"
+  },
+  "4": {
+   "project": "go-humanize",
+   "tool": "probes"
+  },
+  "5": {
+   "project": "btree",
+   "tool": "gremlins"
+  },
+  "6": {
+   "project": "btree",
+   "tool": "supercov"
+  },
+  "7": {
+   "project": "btree",
+   "tool": "probes"
+  },
+  "8": {
+   "project": "golang-lru",
+   "tool": "gremlins"
+  },
+  "9": {
+   "project": "golang-lru",
+   "tool": "supercov"
+  },
+  "10": {
+   "project": "golang-lru",
+   "tool": "probes"
+  },
+  "11": {
+   "project": "uuid",
+   "tool": "gremlins"
+  },
+  "12": {
+   "project": "uuid",
+   "tool": "supercov"
+  },
+  "13": {
+   "project": "uuid",
+   "tool": "probes"
+  },
+  "14": {
+   "project": "cast",
+   "tool": "gremlins"
+  },
+  "15": {
+   "project": "cast",
+   "tool": "supercov"
+  },
+  "16": {
+   "project": "cast",
+   "tool": "probes"
+  }
+ },
+ "projects": [
+  "go-humanize",
+  "btree",
+  "golang-lru",
+  "uuid",
+  "cast"
+ ]
+}

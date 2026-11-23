@@ -45,11 +45,13 @@ struct ReportOptions {
     runs: usize,
     /// Only these tests' coverage, in every run the report holds.
     filter: supercov_engine::coverage_report::TestFilter,
+    /// Only the mutants on lines a change made since this base.
+    diff: Option<String>,
 }
 
 fn help() -> &'static str {
     "Usage: supercov report [run-id] [options]\n\nGenerates one private, self-contained interactive HTML file from stored runs.\nNo server or network connection is required.\n\nOptions:\n  --compare <run-id>   choose the initial comparison run\n  --runs <n>           include up to n runs (default: 5, maximum: 20)\n  --output <path>      write to this path, relative to the working directory
-                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  --kind <kind>, --runner <runner>, --tag <tag>, --title <text>, --test-file <path>\n                       only the coverage of the tests these pick\n  -h, --help           show this help\n"
+                       (default: .supercov/reports/supercov-report.html in the project)\n  --no-open            do not open the report in the default browser\n  --kind <kind>, --runner <runner>, --tag <tag>, --title <text>, --test-file <path>\n                       only the coverage of the tests these pick\n  --diff <base>        only the mutants on lines the change since <base> made\n  -h, --help           show this help\n"
 }
 
 fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
@@ -59,9 +61,19 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
     let mut open = true;
     let mut runs = DEFAULT_RUNS;
     let mut filter = supercov_engine::coverage_report::TestFilter::default();
+    let mut diff = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
+            "--diff" => {
+                index += 1;
+                diff = Some(
+                    arguments
+                        .get(index)
+                        .ok_or_else(|| "--diff requires a base, such as origin/main".to_owned())?
+                        .clone(),
+                );
+            }
             "--compare" => {
                 index += 1;
                 comparison = Some(
@@ -121,6 +133,7 @@ fn parse_options(arguments: &[String]) -> Result<ReportOptions, String> {
         open,
         runs,
         filter,
+        diff,
     })
 }
 
@@ -226,6 +239,61 @@ struct ReportRun {
     lines: Vec<ReportLine>,
     scope: Option<serde_json::Value>,
     sources: BTreeMap<String, ReportSource>,
+    /// The run's mutants, of whatever language, for a run that listed them;
+    /// absent otherwise, and the report then shows none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutants: Option<supercov_engine::mutation_report::Section>,
+}
+
+/// The run's mutants as a report shows them (`mutation_report::Section`),
+/// `diff`'s alone when given, or `None` for a run that listed none. The
+/// interactive report and `runs report --format html` both read it.
+pub(crate) fn build_mutants(
+    index: &CoverageIndex<'_>,
+    run: &StoredRun,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
+) -> Result<Option<supercov_engine::mutation_report::Section>, String> {
+    use supercov_engine::mutants_query::{
+        CoverageMutantsQueryOptions, MutantsOptions, coverage_mutants_query,
+    };
+    let saved = crate::mutants_test_command::read_saved(run);
+    let options = MutantsOptions {
+        diff,
+        strong: (!saved.is_empty()).then(|| {
+            saved
+                .into_iter()
+                .map(|(id, verdict)| (id, serde_json::to_value(verdict).expect("plain data")))
+                .collect()
+        }),
+        ..MutantsOptions::default()
+    };
+    let (data, _) = coverage_mutants_query(
+        index,
+        CoverageMutantsQueryOptions {
+            run: &run.id,
+            file: None,
+            line: None,
+            options: &options,
+            offset: 0,
+            limit: usize::MAX,
+        },
+    )
+    .map_err(|error| format!("could not read mutants for run {}: {error:?}", run.id))?;
+    Ok(supercov_engine::mutation_report::section(data))
+}
+
+/// A stored run's mutants for a report, read from its index for the tests
+/// `filter` picks.
+pub(crate) fn run_mutants(
+    run: &StoredRun,
+    filter: Option<&supercov_engine::coverage_report::TestFilter>,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
+) -> Result<Option<supercov_engine::mutation_report::Section>, String> {
+    let container = crate::open_query_index_for(run, filter)
+        .map_err(|error| format!("could not open run {}: {error}", run.id))?;
+    let index = CoverageIndex::new(&container)
+        .map_err(|error| format!("could not read run {}: {error}", run.id))?;
+    build_mutants(&index, run, diff)
 }
 
 #[derive(Serialize)]
@@ -388,6 +456,7 @@ fn build_run(
     root: &Path,
     run: &StoredRun,
     filter: Option<&supercov_engine::coverage_report::TestFilter>,
+    diff: Option<supercov_engine::mutants_query::MutantDiff>,
 ) -> Result<Option<ReportRun>, String> {
     let current_integrity = current_integrity_for_run(root, run);
     let source_exact = current_integrity.as_ref().is_some_and(|current| {
@@ -538,6 +607,7 @@ fn build_run(
         }
     };
     let (sources, omitted_sources) = collect_sources(root, &files, source_exact);
+    let mutants = build_mutants(&index, run, diff)?;
 
     Ok(Some(ReportRun {
         id: run.id.clone(),
@@ -562,6 +632,7 @@ fn build_run(
         lines,
         scope,
         sources,
+        mutants,
     }))
 }
 
@@ -1024,7 +1095,12 @@ pub fn report_command(arguments: Vec<String>) -> ExitCode {
                 let _ = std::io::stderr().flush();
             }
             let filter = (!options.filter.is_empty()).then_some(&options.filter);
-            match build_run(&root, run, filter)? {
+            let diff = options
+                .diff
+                .as_deref()
+                .map(|base| crate::mutant_diff(&root, base, run))
+                .transpose()?;
+            match build_run(&root, run, filter, diff)? {
                 Some(built) => runs.push(built),
                 // The run asked for must have the tests; an older one
                 // without them is left out of the comparison.

@@ -1,0 +1,148 @@
+{
+  "project": "cookie-es",
+  "scenario": "stryker-cold",
+  "shard": null,
+  "commit": "f89ede8b60204adfa84a97fb833e0cbae75d0478",
+  "startedAt": "2026-11-19T23:55:28.135Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "10.33.0",
+    "vitest": "4.1.2",
+    "vitestProject": "4.1.2"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/cookie-es f89ede8b60204adfa84a97fb833e0cbae75d0478 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.248,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0,
+        "cpuS": 0.02,
+        "cpuPercent": "13%",
+        "maxRssKiB": 18928,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@10.33.0 >/dev/null && pnpm --version",
+      "startOffsetS": 0.26,
+      "wallS": 1.322,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.65,
+        "sysS": 0.13,
+        "cpuS": 0.78,
+        "cpuPercent": "59%",
+        "maxRssKiB": 144260,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.58,
+      "wallS": 1.062,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.42,
+        "sysS": 0.37,
+        "cpuS": 2.79,
+        "cpuPercent": "264%",
+        "maxRssKiB": 825720,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 2.65,
+      "wallS": 1.365,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.85,
+        "sysS": 0.41,
+        "cpuS": 3.26,
+        "cpuPercent": "239%",
+        "maxRssKiB": 870692,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 4.02,
+      "wallS": 0.392,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.64,
+        "sysS": 0.08,
+        "cpuS": 0.72,
+        "cpuPercent": "188%",
+        "maxRssKiB": 121864,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 134,
+        "passed": 134,
+        "failed": 0,
+        "files": 25
+      }
+    },
+    {
+      "name": "stryker-cold",
+      "command": "node_modules/.bin/stryker run stryker.stryker-cold.json",
+      "startOffsetS": 4.41,
+      "wallS": 10.429,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 113.09,
+        "sysS": 6.29,
+        "cpuS": 119.38,
+        "cpuPercent": "1145%",
+        "maxRssKiB": 329764,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-cold.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-cold.json"
+    }
+  ],
+  "totalS": 14.84
+}

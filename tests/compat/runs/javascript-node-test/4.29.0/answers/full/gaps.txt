@@ -1,0 +1,7 @@
+Coverage gaps — only files with unresolved obligations
+
+src/price.js
+  uncovered: lines 4  statements 4  functions 1  branch outcomes 5  MC/DC conditions 3
+
+showing 1-1 of 1
+inspect file: npx supercov runs 'run_0524aa0ca175a570' file 'src/price.js'

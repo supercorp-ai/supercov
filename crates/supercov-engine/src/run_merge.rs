@@ -271,6 +271,159 @@ fn recorded_files(
     ))
 }
 
+/// The merged run's one `mutants.json`, from each run's (`base` the run
+/// whose manifest the merge takes): the mutants of every file a run listed,
+/// each file's from the first run that listed it, `base` first. Runs that
+/// recorded a file with the same bytes and listed it differently, or where
+/// one listed it and the other did not, did not enumerate the same mutants,
+/// and are not merged. A run that listed none (its probes off, or recorded
+/// before they were) lends its tests, whose hits say what ran and whose
+/// values were not recorded: `testsWithoutValues`.
+fn merged_mutants(
+    inputs: &[&StoredRun],
+    archives: &[Vec<EvidenceArchiveEntry>],
+    base: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    use crate::mutant_list::MutantsFile;
+    const NAME: &str = "mutants.json";
+    let mut listed = Vec::new();
+    let mut unlisted = Vec::new();
+    let mut first_file = None;
+    for index in std::iter::once(base).chain((0..archives.len()).filter(|index| *index != base)) {
+        let entry = archives[index].iter().find(|entry| entry.path == NAME);
+        let file = entry
+            .map(|entry| {
+                serde_json::from_slice::<MutantsFile>(&entry.contents).map_err(|error| {
+                    format!(
+                        "Cannot merge coverage run {}: its {NAME} cannot be read: {error}",
+                        inputs[index].id
+                    )
+                })
+            })
+            .transpose()?;
+        if first_file.is_none() {
+            first_file = entry.map(|entry| entry.contents.clone());
+        }
+        match file {
+            Some(file) if file.mutant_set.is_some() => listed.push((index, file)),
+            _ => unlisted.push(index),
+        }
+    }
+    let Some((first, others)) = listed.split_first() else {
+        // No run listed mutants: the merge lists none either, as a run
+        // measured with them off says.
+        return Ok(first_file);
+    };
+    // Each file's bytes as a run recorded them, where it did.
+    let hashes = archives
+        .iter()
+        .map(|archive| {
+            recorded_files(archive)
+                .map(|(_, manifest)| {
+                    manifest
+                        .files
+                        .into_iter()
+                        .map(|(file, fingerprint)| (file, fingerprint.sha256))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    fn ids(mutants: &[crate::js_mutant_links::CandidateMutant]) -> Vec<&str> {
+        mutants.iter().map(|mutant| mutant.id.as_str()).collect()
+    }
+    let mut files = BTreeMap::<String, (usize, Vec<_>)>::new();
+    let mut without_values = BTreeSet::new();
+    // Each language's mutant set, from the first run that listed it: a run
+    // that listed the same language with another set did not enumerate the
+    // same mutants.
+    let mut sets = BTreeMap::<String, (usize, String)>::new();
+    let mut languages = BTreeMap::<String, String>::new();
+    for (index, file) in std::iter::once(first).chain(others) {
+        // A listed run lists at least one language's set.
+        file.sets().into_iter().try_for_each(|(language, set)| {
+            match sets.get(&language) {
+                Some((kept, kept_set)) if *kept_set != set => {
+                    return Err(format!(
+                        "Cannot merge coverage run {}: it listed the mutants of {set}, and run {} those of {kept_set}",
+                        inputs[*index].id, inputs[*kept].id,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    sets.insert(language, (*index, set));
+                }
+            }
+            Ok(())
+        })?;
+        for (path, language) in &file.languages {
+            languages
+                .entry(path.clone())
+                .or_insert_with(|| language.clone());
+        }
+        without_values.extend(file.tests_without_values.iter().cloned());
+        for (path, mutants) in &file.files {
+            match files.get(path) {
+                Some((kept, kept_mutants))
+                    if hashes[*kept].get(path) == hashes[*index].get(path)
+                        && ids(kept_mutants) != ids(mutants) =>
+                {
+                    return Err(format!(
+                        "Cannot merge coverage runs {} and {}: they listed different mutants of {path}, recorded with the same bytes",
+                        inputs[*kept].id, inputs[*index].id
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    files.insert(path.clone(), (*index, mutants.clone()));
+                }
+            }
+        }
+    }
+    // A file one run listed and another, which recorded it with the same
+    // bytes, did not.
+    for (index, file) in std::iter::once(first).chain(others) {
+        for (path, (kept, _)) in &files {
+            let same = hashes[*index]
+                .get(path)
+                .is_some_and(|hash| hashes[*kept].get(path) == Some(hash));
+            if same && !file.files.contains_key(path) {
+                let (kept, missing) = (&inputs[*kept].id, &inputs[*index].id);
+                return Err(format!(
+                    "Cannot merge coverage runs {kept} and {missing}: {kept} listed the mutants of {path}, and {missing}, which recorded it with the same bytes, did not"
+                ));
+            }
+        }
+    }
+    for index in unlisted {
+        without_values.extend(measured_tests(&archives[index]).into_keys());
+    }
+    // Each language's files under its set; one run listed, so one set at
+    // least.
+    let mut merged = sets
+        .into_iter()
+        .map(|(language, (_, set))| {
+            let files = files
+                .iter()
+                .filter(|(path, _)| {
+                    languages
+                        .get(*path)
+                        .map_or(crate::mutant_list::JAVASCRIPT, String::as_str)
+                        == language
+                })
+                .map(|(path, (_, mutants))| (path.clone(), mutants.clone()))
+                .collect::<BTreeMap<_, _>>();
+            MutantsFile::listed(&language, &set, files)
+        })
+        .fold(MutantsFile::unlisted(), |merged, one| {
+            merged.merge(one).expect("each language is merged once")
+        });
+    merged.tests_without_values = without_values.into_iter().collect();
+    Ok(Some(
+        serde_json::to_vec(&merged).expect("plain data serializes"),
+    ))
+}
+
 /// Runs merged although their tests or configuration differ: the latest,
 /// whose record of the files and integrity the merge takes, and what differed
 /// that does not reach the others.
@@ -775,6 +928,12 @@ pub fn merge_coverage_runs(
     })?;
     merged_declaration.runners = runners.into_values().collect();
 
+    let mutants = merged_mutants(
+        &inputs,
+        &archives,
+        grown.as_ref().map_or(0, |grown| grown.latest),
+    )?;
+
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
         .map_err(|error| format!("Cannot lock coverage store for merge: {error}"))?;
     let work = root.join(".supercov/work").join(merged_run_id);
@@ -793,8 +952,12 @@ pub fn merge_coverage_runs(
                 contents: manifest.to_vec(),
             },
         ];
-        // Two runs at least, each with evidence besides its three files of
-        // the whole run. Each entry is rewritten on its own, side by side,
+        entries.extend(mutants.map(|contents| EvidenceArchiveEntry {
+            path: "mutants.json".into(),
+            contents,
+        }));
+        // Two runs at least, each with evidence besides its files of the
+        // whole run. Each entry is rewritten on its own, side by side,
         // and they are kept in order: one after another, parsing and writing
         // every record again was most of merging a large run.
         let jobs = archives
@@ -806,7 +969,10 @@ pub fn merge_coverage_runs(
                     .filter(|entry| {
                         !matches!(
                             entry.path.as_str(),
-                            "coverage-model.json" | "frontend.json" | "manifest.json"
+                            "coverage-model.json"
+                                | "frontend.json"
+                                | "manifest.json"
+                                | "mutants.json"
                         )
                     })
                     .map(move |entry| (shard, entry))
@@ -1849,5 +2015,310 @@ mod tests {
         assert_eq!(listed(&items(0)), "");
         assert_eq!(listed(&items(3)), "i1; i2; i3");
         assert_eq!(listed(&items(5)), "i1; i2; i3; and 2 more");
+    }
+
+    /// A mutants list in the shape instrumentation writes, of `files`, each
+    /// with the mutants of `src/app.js`'s fixture decision (all but those
+    /// `dropped` names), or none listed at all.
+    fn list_mutants(root: &Path, id: &str, files: Option<&[&str]>, dropped: &[&str]) {
+        let candidate = |file: &str, mutator: &str, descriptor: &str| {
+            serde_json::json!({
+                "id": format!("{file}:1:5-1:18:{mutator}:{descriptor}"),
+                "mutator": mutator,
+                "replacement": descriptor,
+                "start": [1, 5],
+                "end": [1, 18],
+                "original": "left && right",
+                "statement": "statement",
+                "decision": { "id": "decision" },
+            })
+        };
+        let listed = match files {
+            Some(files) => serde_json::json!({
+                "schemaVersion": 1,
+                "mutantSet": "stryker-js@10.1.1",
+                "files": files
+                    .iter()
+                    .map(|file| {
+                        let mutants = ["true", "false"]
+                            .into_iter()
+                            .filter(|descriptor| !dropped.contains(descriptor))
+                            .map(|descriptor| candidate(file, "ConditionalExpression", descriptor))
+                            .collect::<Vec<_>>();
+                        (file.to_string(), Value::from(mutants))
+                    })
+                    .collect::<serde_json::Map<_, _>>(),
+            }),
+            None => serde_json::json!({ "schemaVersion": 1, "mutantSet": null, "files": {} }),
+        };
+        rewrite_entry(
+            root,
+            id,
+            "mutants.json",
+            Some(serde_json::to_vec(&listed).unwrap()),
+        );
+    }
+
+    fn merge_two(root: &Path, first: &str, second: &str) -> Result<String, String> {
+        merge_coverage_runs(
+            root,
+            &[first.into(), second.into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+    }
+
+    /// The merged run's archive entries named `mutants.json`, at any depth,
+    /// and the one at its top read.
+    fn merged_mutants_file(root: &Path) -> (Vec<String>, crate::js_mutant_links::MutantsFile) {
+        let archive = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        let named = archive
+            .iter()
+            .filter(|entry| entry.path.ends_with("mutants.json"))
+            .map(|entry| entry.path.clone())
+            .collect();
+        let top = archive
+            .iter()
+            .find(|entry| entry.path == "mutants.json")
+            .unwrap();
+        (named, serde_json::from_slice(&top.contents).unwrap())
+    }
+
+    /// Each mutant of the merged run, with its status, from its index.
+    fn merged_verdicts(root: &Path) -> Vec<(String, crate::coverage_index::MutantStatus)> {
+        let run = discover_runs(root)
+            .unwrap()
+            .runs
+            .into_iter()
+            .find(|run| run.id == "merged")
+            .unwrap();
+        let container = crate::run_store::open_or_rebuild_query_index(&run).unwrap();
+        let index = crate::coverage_index::CoverageIndex::new(&container).unwrap();
+        let mutation = index.mutation().unwrap().unwrap();
+        mutation
+            .files
+            .iter()
+            .flat_map(|file| index.mutants_of(file).unwrap())
+            .map(|mutant| (mutant.id(), mutant.status))
+            .collect()
+    }
+
+    /// Runs that listed the same mutants merge into a run that lists them
+    /// once, not once per run.
+    #[test]
+    fn a_merged_run_lists_its_mutants_once() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        list_mutants(&root, "run-b", Some(&["src/app.js"]), &[]);
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (named, merged) = merged_mutants_file(&root);
+        assert_eq!(named, ["mutants.json"]);
+        assert_eq!(merged.mutant_set.as_deref(), Some("stryker-js@10.1.1"));
+        assert_eq!(merged.files["src/app.js"].len(), 2);
+        assert!(merged.tests_without_values.is_empty());
+        use crate::coverage_index::MutantStatus::Infected;
+        assert_eq!(
+            merged_verdicts(&root),
+            [
+                (
+                    "src/app.js:1:5-1:18:ConditionalExpression:true".to_owned(),
+                    Infected
+                ),
+                (
+                    "src/app.js:1:5-1:18:ConditionalExpression:false".to_owned(),
+                    Infected
+                ),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that listed no mutants adds no files to the list, and its
+    /// tests, which recorded no values, are named so their silence decides
+    /// nothing; whichever run comes first.
+    #[test]
+    fn a_run_without_mutants_lends_its_tests_and_not_its_files() {
+        for (first, second) in [("run-a", "run-b"), ("run-b", "run-a")] {
+            let root = temporary();
+            create_analyzable_test_run(&root, "run-a");
+            create_analyzable_test_run(&root, "run-b");
+            list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+            list_mutants(&root, "run-b", None, &[]);
+            merge_two(&root, first, second).unwrap();
+            let (named, merged) = merged_mutants_file(&root);
+            assert_eq!(named, ["mutants.json"], "{first} first");
+            assert_eq!(
+                merged.files.keys().collect::<Vec<_>>(),
+                ["src/app.js"],
+                "{first} first"
+            );
+            assert_eq!(merged.tests_without_values, ["test"], "{first} first");
+            assert_eq!(merged_verdicts(&root).len(), 2, "{first} first");
+            fs::remove_dir_all(root).unwrap();
+        }
+        // Neither listed any: the merge lists none either.
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", None, &[]);
+        list_mutants(&root, "run-b", None, &[]);
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (named, merged) = merged_mutants_file(&root);
+        assert_eq!(named, ["mutants.json"]);
+        assert_eq!(merged.mutant_set, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Different files' mutants are kept together; the same file, with the
+    /// same bytes, listed differently is refused.
+    #[test]
+    fn runs_that_listed_a_file_differently_are_not_merged() {
+        // Each run listed a file of its own: both are kept.
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        list_mutants(&root, "run-b", Some(&["src/other.js"]), &[]);
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (_, merged) = merged_mutants_file(&root);
+        assert_eq!(
+            merged.files.keys().collect::<Vec<_>>(),
+            ["src/app.js", "src/other.js"]
+        );
+        fs::remove_dir_all(root).unwrap();
+        // The same file, other mutants.
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        list_mutants(&root, "run-b", Some(&["src/app.js"]), &["false"]);
+        assert_eq!(
+            merge_two(&root, "run-a", "run-b").unwrap_err(),
+            "Cannot merge coverage runs run-a and run-b: they listed different mutants of src/app.js, recorded with the same bytes"
+        );
+        assert!(!root.join(".supercov/runs/merged").exists());
+        fs::remove_dir_all(root).unwrap();
+        // Both recorded src/app.js with the same bytes, and one did not
+        // list its mutants.
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        let files = [("src/app.js", "left && right"), ("src/other.js", "other")];
+        record_files(&root, "run-a", &files);
+        record_files(&root, "run-b", &files);
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        list_mutants(&root, "run-b", Some(&["src/other.js"]), &[]);
+        assert_eq!(
+            merge_two(&root, "run-a", "run-b").unwrap_err(),
+            "Cannot merge coverage runs run-b and run-a: run-b listed the mutants of src/other.js, and run-a, which recorded it with the same bytes, did not"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run's mutants list that does not read, or that lists another
+    /// version's mutants than the first run's, is not merged.
+    #[test]
+    fn runs_whose_mutant_lists_do_not_read_or_differ_in_version_are_not_merged() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        rewrite_entry(&root, "run-b", "mutants.json", Some(b"not json".to_vec()));
+        let unread = merge_two(&root, "run-a", "run-b").unwrap_err();
+        assert!(
+            unread
+                .starts_with("Cannot merge coverage run run-b: its mutants.json cannot be read: "),
+            "{unread}"
+        );
+        let other_version = serde_json::json!({
+            "schemaVersion": 1, "mutantSet": "stryker-js@9.0.0", "files": {}
+        });
+        rewrite_entry(
+            &root,
+            "run-b",
+            "mutants.json",
+            Some(serde_json::to_vec(&other_version).unwrap()),
+        );
+        assert_eq!(
+            merge_two(&root, "run-a", "run-b").unwrap_err(),
+            "Cannot merge coverage run run-b: it listed the mutants of stryker-js@9.0.0, and run run-a those of stryker-js@10.1.1"
+        );
+        assert!(!root.join(".supercov/runs/merged").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that listed another language's mutants merges with one that
+    /// listed JavaScript's: each file keeps its language and each language
+    /// its set.
+    #[test]
+    fn runs_that_listed_different_languages_merge_each_with_its_set() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&["src/app.js"]), &[]);
+        let python = serde_json::json!({
+            "schemaVersion": 1,
+            "mutantSet": "mutmut@3",
+            "mutantSets": {"python": "mutmut@3"},
+            "languages": {"src/app.py": "python"},
+            "files": {"src/app.py": [{
+                "mutator": "BooleanLiteral", "replacement": "False",
+                "start": [1, 1], "end": [1, 5], "original": "True"
+            }]}
+        });
+        rewrite_entry(
+            &root,
+            "run-b",
+            "mutants.json",
+            Some(serde_json::to_vec(&python).unwrap()),
+        );
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (_, merged) = merged_mutants_file(&root);
+        assert_eq!(merged.language_of("src/app.py"), "python");
+        assert_eq!(merged.language_of("src/app.js"), "javascript");
+        assert_eq!(
+            merged.mutant_set.as_deref(),
+            Some("stryker-js@10.1.1, mutmut@3")
+        );
+        assert_eq!(merged.files.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Runs that listed no file's mutants merge into a run of the same
+    /// mutants that lists none; a file only one run recorded is listed as
+    /// the run the merge grows into listed it, however the other did.
+    #[test]
+    fn runs_that_listed_no_file_or_a_file_one_did_not_record_merge() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        list_mutants(&root, "run-a", Some(&[]), &[]);
+        list_mutants(&root, "run-b", Some(&[]), &[]);
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (_, merged) = merged_mutants_file(&root);
+        assert_eq!(merged.mutant_set.as_deref(), Some("stryker-js@10.1.1"));
+        assert!(merged.files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        record_files(&root, "run-a", &[("src/other.js", "left && right")]);
+        record_files(&root, "run-b", &[]);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/other.js"), "left && right").unwrap();
+        list_mutants(&root, "run-a", Some(&["src/other.js"]), &[]);
+        list_mutants(&root, "run-b", Some(&["src/other.js"]), &["false"]);
+        merge_two(&root, "run-a", "run-b").unwrap();
+        let (_, merged) = merged_mutants_file(&root);
+        let ids = merged.files["src/other.js"]
+            .iter()
+            .map(|mutant| mutant.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["src/other.js:1:5-1:18:ConditionalExpression:true"]);
+        fs::remove_dir_all(root).unwrap();
     }
 }

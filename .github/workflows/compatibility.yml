@@ -55,6 +55,9 @@ jobs:
         timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/no-build-node
+        # This commit's build, not the published package `npm ci` installed.
+        env:
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -138,7 +141,9 @@ jobs:
         timeout-minutes: 10
       - run: node ../../../bin/supercov.js -- npm test
         working-directory: tests/fixtures/generic-playwright
+        # This commit's build, not the published package `npm ci` installed.
         env:
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
           SUPERCOV_BROWSER: ${{ matrix.browser }}
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
@@ -148,14 +153,17 @@ jobs:
   # there, and engine-integrations the supervision and crash scripts.
   filesystems:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) }}
-    name: Filesystem safety (${{ matrix.os }})
+    name: Filesystem safety (${{ matrix.os }}, ${{ matrix.partition }})
     runs-on: ${{ matrix.os }}
-    # Windows on Arm builds and tests the workspace in about 25 minutes.
+    # Windows builds the workspace in about 7 minutes and ran its tests in
+    # about 23 minutes more, past the step's limit: a third of the tests
+    # each, side by side.
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.os || '["ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        partition: [1, 2, 3]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -170,17 +178,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: compatibility
-          save-if: true
+          save-if: ${{ matrix.partition == 1 }}
       - run: npm ci
       # The only clippy pass that sees Windows- and macOS-only code.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: matrix.partition == 1
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # `npm run test:platform` under nextest: the test binaries side by side,
       # where `cargo test` ran them one after another.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      - run: cargo nextest run --workspace --no-fail-fast && cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
+      - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.partition }}/3
         timeout-minutes: 30
+      - if: matrix.partition == 1
+        run: cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
+        timeout-minutes: 20
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure

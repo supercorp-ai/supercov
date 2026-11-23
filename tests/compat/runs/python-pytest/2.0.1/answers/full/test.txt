@@ -1,0 +1,15 @@
+tests/test_price.py::test_coupons_take_five_off
+outcome passed; retry 0=passed
+6 lines, 9 hits, 2 decisions, 5 phases
+line: src/shop/price.py:1
+line: src/shop/price.py:2
+line: src/shop/price.py:3
+line: src/shop/price.py:5
+line: src/shop/price.py:6
+line: src/shop/price.py:7
+setup: pytest setup at tests/test_price.py::test_coupons_take_five_off
+assertion: pytest assertion at tests/test_price.py:9:4 at tests/test_price.py:9:4
+test: pytest call at tests/test_price.py::test_coupons_take_five_off
+assertion: pytest assertion at tests/test_price.py::test_coupons_take_five_off
+teardown: pytest teardown at tests/test_price.py::test_coupons_take_five_off
+showing 1-9 of 9 per evidence category

@@ -124,6 +124,23 @@ just the percentage.
 For a recorded example and prompts for longer runs, see
 [Agent workflow](agent-loop.md).
 
+## 5. Check that the tests catch bugs
+
+Coverage shows the new test ran the code. To see whether it would fail if
+that code were wrong, the agent runs the tests against mutants: small changes
+to the source, such as `<` to `<=`, each of which a good test fails on.
+
+```sh supercov-example
+npx supercov mutants -- npm test
+npx supercov runs latest mutants app/checkout/session.ts
+```
+
+A mutant that every test passes with survived: its line names a check no test
+makes. On a pull request, `npx supercov mutants --diff origin/main` keeps the
+mutants on the lines the change touched. Mutation testing reruns the tests, so
+it takes longer than a measured run; a plain run costs nothing more for it.
+See [Mutation testing](mutation.md).
+
 ## Environment requirements
 
 These requirements apply wherever the agent runs commands: your machine,
@@ -184,4 +201,5 @@ before changing the project.
 - [Agent workflow](agent-loop.md) — run a safe, repeatable coverage loop.
 - [Supported suites](supported-suites.md) — check languages, runners, and limits.
 - [Coverage model](coverage-model.md) — understand gaps, metrics, and measurement limits.
+- [Mutation testing](mutation.md) — check that the tests fail when the code is wrong.
 - [CLI reference](cli.md) — find every command and filter.

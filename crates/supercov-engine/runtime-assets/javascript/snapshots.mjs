@@ -37,6 +37,9 @@ export function mergeSnapshots(snapshots) {
     const events = new Map();
     const decisions = new Map();
     const logicals = new Map();
+    // What each comparison and infection probe saw: a page's probes run in
+    // the browser, and a merge that left them out lost every outcome there.
+    const comparisons = new Map();
     const vectorsOf = (map, key, initial) => {
         let entry = map.get(key);
         if (!entry) {
@@ -73,13 +76,25 @@ export function mergeSnapshots(snapshots) {
             for (const vector of logical.vectors ?? [])
                 entry.seen.set(JSON.stringify(vector), vector);
         }
+        for (const comparison of snapshot?.comparisons ?? []) {
+            let outcomes = comparisons.get(comparison.id);
+            if (!outcomes) {
+                outcomes = new Set();
+                comparisons.set(comparison.id, outcomes);
+            }
+            for (const outcome of comparison.outcomes ?? [])
+                outcomes.add(outcome);
+        }
     }
-    return {
+    const merged = {
         decisions: [...decisions.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
         hits: [...hits],
         events: [...events.values()],
         logicals: [...logicals.values()].map(({ seen, id }) => ({ id, vectors: [...seen.values()] })),
     };
+    if (comparisons.size)
+        merged.comparisons = [...comparisons].map(([id, outcomes]) => ({ id, outcomes: [...outcomes] }));
+    return merged;
 }
 /**
  * A snapshot as JSON.parse would give it from the text a page's runtime

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 3,
+  "inputsDigest": "e5eefc89eb0b426f8fa70953cd24ebc6506da0fc7a8ee188646e95fc17a821ef",
+  "evidenceDigest": "169422fee50e933129433e776f6d9be0b4f62226c7713d1ffc9c221fb5032859",
+  "flows": {},
+  "changes": [],
+  "inheritance": {
+    "from": null,
+    "skipped": []
+  },
+  "executions": {
+    "tests": [
+      {
+        "test": {
+          "file": "test/label.test.js",
+          "name": "large totals"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            2
+          ]
+        }
+      },
+      {
+        "test": {
+          "file": "test/price.test.js",
+          "name": "coupons take five off"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            1
+          ]
+        }
+      },
+      {
+        "test": {
+          "file": "test/price.test.js",
+          "name": "members save on large orders"
+        },
+        "passed": true,
+        "files": {
+          "src/price.js": [
+            1
+          ]
+        }
+      }
+    ],
+    "probed": {
+      "src/price.js": [
+        1,
+        2,
+        3
+      ]
+    }
+  }
+}

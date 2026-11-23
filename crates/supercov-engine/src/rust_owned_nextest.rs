@@ -304,6 +304,7 @@ pub(crate) fn run_nextest(
             &attempt_id,
         )?;
         results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
@@ -1499,8 +1500,8 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
             );
         }
         for fault in [
-            "fs.canonicalize#rust_owned_nextest.rs:427",
-            "fs.read_dir entry#rust_owned_nextest.rs:505",
+            "fs.canonicalize#rust_owned_nextest.rs:428",
+            "fs.read_dir entry#rust_owned_nextest.rs:506",
         ] {
             let fake = FakeNextest::new();
             fake.runs(&[("tests::alpha", 1, 0)], 0);

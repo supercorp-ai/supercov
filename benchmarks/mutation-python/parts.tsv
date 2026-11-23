@@ -1,0 +1,14 @@
+# What each part of a validation run does, read by part.sh: one part per line,
+# numbered from 2 (part 1 builds Supercov). Columns, tab or space separated:
+#   part  project  scenario  shard
+# Scenarios: supercov-<runner>[-values], overhead, mutmut, matrix (with a
+# shard such as 2/4 of mutmut's kill matrix). Edit the lines to choose a run.
+2 python-slugify supercov-pytest-values -
+3 cachetools supercov-pytest-values -
+4 cachetools supercov-unittest-values -
+5 parse supercov-pytest-values -
+6 humanize supercov-pytest-values -
+7 python-slugify overhead -
+8 cachetools overhead -
+9 parse overhead -
+10 humanize overhead -

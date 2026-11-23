@@ -547,9 +547,13 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
     const directory = resolve(root, "run-clone", "background");
     const files = readdirSync(directory).sort();
     assert.equal(files.length, 2, `expected a second shard after the clone, saw ${files}`);
-    const ids = files.map((file) =>
-      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    const shards = files.map((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)),
     );
+    // Each shard is a writer of its own, and says first that it records
+    // values; the clone's line is not that writer's first.
+    assert.ok(shards.every((records) => records[0].type === "values"), JSON.stringify(shards));
+    const ids = shards.map((records) => records.filter((record) => record.type !== "values").map((record) => record.id));
     assert.deepEqual(ids.flat().sort(), ["after-clone", "before-clone", "from-a-clone"]);
     assert.ok(ids.some((shard) => shard.length === 1 && shard[0] === "after-clone"));
   } finally {
@@ -590,8 +594,8 @@ test("background evidence is on disk once its turn ends, before an uncatchable p
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    assert.equal(records.length, 1);
-    assert.equal(records[0].id, "kill-safe-hit");
+    assert.deepEqual(records.map((record) => record.type), ["values", "hit"]);
+    assert.equal(records[1].id, "kill-safe-hit");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -648,9 +652,12 @@ test("background records are written once per turn through one open shard", () =
     assert.equal(calls.appendFileSync, undefined, child.stdout);
     assert.equal(calls.writeSync, 9, child.stdout);
     const directory = resolve(root, "run-descriptor", "background");
-    const ids = readdirSync(directory).flatMap((file) =>
-      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    const records = readdirSync(directory).flatMap((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)),
     );
+    // The writer's first record says it records values.
+    assert.equal(records[0].type, "values");
+    const ids = records.slice(1).map((record) => record.id);
     assert.deepEqual(ids.sort(), Array.from({ length: 100 }, (_, index) => `hit-${index}`).sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1393,6 +1400,106 @@ test("a worker compiles instrumented modules from the code the worker before it 
   }
 });
 
+test("every and some that stop at the first of several elements are decided by a pure callback's copy", async () => {
+  const { methodV2, resetCoverage, coverageSnapshot } = await import("../../runtime/javascript/runtime.mjs");
+  resetCoverage("pure-callbacks");
+  const outcomes = () =>
+    Object.fromEntries((coverageSnapshot().comparisons ?? []).map(({ id, outcomes }) => [id, [...outcomes].sort()]));
+  // A real bug: useState(items.every((item) => item.enabled)), with
+  // lists of two that agree, and a mixed one.
+  let calls = 0;
+  const program = (c) => (calls++, c.enabled);
+  const copy = (c) => c.enabled;
+  const list = (...flags) => flags.map((enabled) => ({ enabled }));
+  assert.equal(methodV2("agree", list(true, true), "every", "agree-arrow", copy).every(program), true);
+  assert.equal(methodV2("agree", list(false, false), "every", "agree-arrow", copy).every(program), false);
+  // The program's callback ran as the built-in ran it: three times, not five.
+  assert.equal(calls, 3);
+  assert.equal(methodV2("mixed", list(false, true), "every", "mixed-arrow", copy).every(program), false);
+  assert.equal(methodV2("some-mixed", list(true, false), "some", "some-mixed-arrow", copy).some(program), true);
+  // A copy that throws on a later element decides nothing.
+  assert.equal(methodV2("throws", [{ enabled: false }, null], "every", "throws-arrow", copy).every(program), false);
+  // Without a copy (an impure callback), as before.
+  assert.equal(methodV2("impure", list(false, true), "every", "impure-arrow").every(program), false);
+  const seen = outcomes();
+  assert.deepEqual(
+    { agree: seen.agree, mixed: seen.mixed, "some-mixed": seen["some-mixed"], throws: seen.throws, impure: seen.impure },
+    { agree: ["same"], mixed: ["differs"], "some-mixed": ["differs"], throws: ["unknown"], impure: ["unknown"] },
+  );
+});
+
+test("the mutants' probes record whether Stryker's replacement would differ, running the program's code once", async () => {
+  const { arithV2, assignV2, methodV2, valueV2, resetCoverage, coverageSnapshot } = await import(
+    "../../runtime/javascript/runtime.mjs"
+  );
+  resetCoverage("infection-probes");
+  const outcomes = () =>
+    Object.fromEntries((coverageSnapshot().comparisons ?? []).map(({ id, outcomes }) => [id, [...outcomes].sort()]));
+  // Arithmetic: 3 + 0 is 3 - 0; 6 * 2 is not 6 / 2; 2n / 0n throws, so it
+  // differs; an object operand is unknown, and its valueOf runs once.
+  assert.equal(arithV2("a", 3, 0, 0), 3);
+  assert.equal(arithV2("b", 6, 2, 2), 12);
+  assert.equal(arithV2("c", 2n, 0n, 2), 0n);
+  let valueOfCalls = 0;
+  assert.equal(arithV2("d", { valueOf: () => (valueOfCalls++, 4) }, 1, 1), 3);
+  assert.equal(valueOfCalls, 1);
+  // `x += 0` is `x -= 0`; the assigned value comes back.
+  assert.equal(assignV2("e", 5, 0, 0), 0);
+  // some/every: the callback runs as the built-in runs it.
+  let calls = 0;
+  const above1 = (x) => (calls++, x > 1);
+  assert.equal(methodV2("f", [0, 2, 3], "some", "f-arrow").some(above1), true);
+  assert.equal(calls, 2);
+  assert.equal(methodV2("g", [2, 0], "some").some(above1), true);
+  assert.equal(calls, 3);
+  assert.equal(methodV2("h", [2], "every").every(above1), true);
+  assert.equal(methodV2("i", [], "every").every(above1), true);
+  // filter and sort removal, by what the call changed.
+  assert.deepEqual(methodV2("j", [1, 2, 3], "filter", "j-arrow").filter((x) => (x > 1 ? x : undefined)), [2, 3]);
+  assert.deepEqual(methodV2("k", [1, 2, 3], "filter").filter(Boolean), [1, 2, 3]);
+  const sorted = [1, 2];
+  assert.equal(methodV2("l", sorted, "sort").sort(), sorted);
+  // Strings, Math and dates, against the built-in counterpart.
+  assert.equal(methodV2("m", "ABC", "toUpperCase").toUpperCase(), "ABC");
+  assert.equal(methodV2("n", "a", "trim").trim(), "a");
+  assert.equal(methodV2("o", "http", "startsWith").startsWith("http"), true);
+  assert.equal(methodV2("p", Math, "min").min(2, 2), 2);
+  const date = new Date(0);
+  assert.equal(methodV2("q", date, "setUTCHours").setUTCHours(1), 3_600_000);
+  assert.equal(date.getUTCHours(), 1);
+  // Any other receiver comes back as it is.
+  const custom = { some: () => "own" };
+  assert.equal(methodV2("r", custom, "some"), custom);
+  const plain = [1];
+  assert.equal(methodV2("r", plain, "map"), plain);
+  // A concise arrow's value. A regular expression comes back as it is.
+  assert.equal(valueV2("s", undefined), undefined);
+  const pattern = /^a+$/;
+  assert.equal(methodV2("u", pattern, "test"), pattern);
+  assert.deepEqual(outcomes(), {
+    a: ["same"],
+    b: ["differs"],
+    c: ["differs"],
+    d: ["unknown"],
+    e: ["same"],
+    f: ["differs"],
+    "f-arrow": ["defined"],
+    g: ["unknown"],
+    h: ["same"],
+    i: ["differs"],
+    j: ["differs"],
+    "j-arrow": ["defined", "undefined"],
+    k: ["same"],
+    l: ["same"],
+    m: ["differs"],
+    n: ["same"],
+    o: ["same"],
+    p: ["same"],
+    q: ["differs"],
+    s: ["undefined"],
+  });
+});
+
 // Node's compile cache goes where the run keeps compiled code, and a
 // command's own NODE_COMPILE_CACHE is left alone.
 test("a process compiles into the run's cache unless the command named its own", () => {
@@ -1501,5 +1608,88 @@ test("a snapshot's events kept as columns are what columnarEvents made of them",
     assert.deepEqual(Object.keys(event), event.type === "hit"
       ? ["type", "id", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]
       : ["type", "id", "vector", "timestampMs", ...(event.phaseId ? ["phaseId"] : []), "environment"]);
+  }
+});
+
+test("a process writing records writes each value its probes see once per context, after saying it records values", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-server-values-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(${JSON.stringify(runtime)});
+         // One selection: points 0-3 are short falsy, short truthy, right
+         // falsy and right truthy, named by their table's key and place.
+         const file = runtime.registerProbeV2({
+           key: "k",
+           points: 4,
+           decisionWidths: [],
+           selectionPoints: [0, 1],
+         });
+         const scope = (attemptId) => ({ version: 1, runId: "run-values", workerId: "w", testId: attemptId, testKey: attemptId, retry: 0, attemptId });
+         // Outside any test: the process's background. A repeat is not
+         // written again.
+         runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+         runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+         runtime.compareV2("src/a.js:1:1", 2, 2, 0);
+         // Each test's own, once each: the relation the background saw is
+         // the first test's too.
+         for (const attempt of ["first", "second"]) {
+           await runtime.withCoverageCarrier({ version: 1, scope: scope(attempt) }, async () => {
+             runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+             runtime.compareV2("src/a.js:1:1", 1, 2, 0);
+             runtime.arithV2("src/a.js:2:1-2:6#arith", 3, 0, 0);
+             runtime.selectShortV2(file, 0, "", 0) || runtime.selectRightV2(file, 0, 0);
+             runtime.selectShortV2(file, 0, "", 0) || runtime.selectRightV2(file, 0, 0);
+           });
+         }
+         await new Promise((done) => setImmediate(done));
+         // A snapshot keeps its values itself: nothing more is written.
+         runtime.enableRuntimeSnapshotEvidence();
+         runtime.compareV2("src/a.js:1:1", 3, 2, 0);
+         process.stdout.write(JSON.stringify(runtime.coverageSnapshot().comparisons));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_RUN_ID: "run-values", SUPERCOV_SERVER_EVIDENCE_ROOT: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    assert.deepEqual(JSON.parse(child.stdout), [
+      { id: "src/a.js:1:1", outcomes: ["lt", "eq", "gt"] },
+      { id: "src/a.js:2:1-2:6#arith", outcomes: ["same"] },
+    ]);
+    const read = (directory) =>
+      readdirSync(directory)
+        .filter((file) => file.endsWith(".jsonl"))
+        .sort()
+        .map((file) => readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line)));
+    const values = (records) =>
+      records
+        .filter((record) => record.type !== "hit")
+        .map(({ type, id, outcome }) => [type, id, outcome].filter((part) => part !== undefined).join(" "));
+    const [background] = read(resolve(root, "run-values", "background"));
+    assert.deepEqual(values(background), ["values", "comparison src/a.js:1:1 lt", "comparison src/a.js:1:1 eq"]);
+    const attempts = read(resolve(root, "run-values", "attempts"));
+    assert.equal(attempts.length, 2);
+    for (const records of attempts) {
+      // The note comes first, and names the attempt the lines after it are.
+      assert.equal(records[0].type, "values");
+      assert.equal(records.filter((record) => record.scope).length, 1);
+      assert.deepEqual(values(records), [
+        "values",
+        "comparison src/a.js:1:1 lt",
+        "comparison src/a.js:2:1-2:6#arith same",
+        // By the place of the point hit: the report reads its branch there.
+        "logical ~pk.2 RF",
+      ]);
+    }
+    assert.deepEqual(attempts.map((records) => records[0].scope.attemptId).sort(), ["first", "second"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

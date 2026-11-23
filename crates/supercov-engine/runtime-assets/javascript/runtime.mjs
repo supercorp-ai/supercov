@@ -51,7 +51,7 @@ function pathComponent(value) {
   return safe || "unscoped";
 }
 function encodeCoverageScope(scope) {
-  return new URLSearchParams({
+  return new URLSearchParams(Object.assign({
     v: String(scope.version),
     r: scope.runId,
     w: scope.workerId,
@@ -59,7 +59,7 @@ function encodeCoverageScope(scope) {
     k: scope.testKey,
     a: String(scope.retry),
     i: scope.attemptId
-  }).toString();
+  }, scope.mutant ? { m: scope.mutant } : {})).toString();
 }
 function decodeCoverageScope(encoded) {
   if (!encoded)
@@ -72,9 +72,13 @@ function decodeCoverageScope(encoded) {
     const testKey = values.get("k");
     const attemptId = values.get("i");
     const retry = Number(values.get("a"));
-    if (values.get("v") !== "1" || !nonEmpty(runId) || !nonEmpty(workerId) || !nonEmpty(testId2) || !nonEmpty(testKey) || !safeKey(testKey) || !nonEmpty(attemptId) || !safeKey(attemptId) || !Number.isSafeInteger(retry) || retry < 0)
+    // A strong pass's attempt names its mutant (`file#index`, `-` for none).
+    const mutant = values.get("m");
+    if (values.get("v") !== "1" || !nonEmpty(runId) || !nonEmpty(workerId) || !nonEmpty(testId2) || !nonEmpty(testKey) || !safeKey(testKey) || !nonEmpty(attemptId) || !safeKey(attemptId) || !Number.isSafeInteger(retry) || retry < 0 || mutant !== null && parseMutant(mutant) === void 0)
       return void 0;
-    return {
+    if (mutant !== null)
+      enablePerRequestMutants();
+    return __spreadValues({
       version: 1,
       runId,
       workerId,
@@ -82,7 +86,7 @@ function decodeCoverageScope(encoded) {
       testKey,
       retry,
       attemptId
-    };
+    }, mutant !== null ? { mutant } : {});
   } catch (e) {
     return void 0;
   }
@@ -150,6 +154,45 @@ var builtinSetHas = Set.prototype.has;
 var builtinWeakMapGet = WeakMap.prototype.get;
 var builtinWeakMapSet = WeakMap.prototype.set;
 var runtimeGlobal = globalThis;
+// Supercov keeps its state on globals, some first set while a test runs
+// (the test's id, an async scope). A suite that checks for globals its tests
+// add (Mocha's --check-leaks) lists the global object's enumerable keys, so
+// each is made here, before any test, and never enumerable.
+for (const name of [
+  "__SUPERCOV_ACTIVATE_PROBE_CONTEXT__",
+  "__SUPERCOV_ACTIVE_SCOPE__",
+  "__SUPERCOV_ASSERTION_PHASE_BRIDGE__",
+  "__SUPERCOV_ASSERTION_PHASE_OPENER__",
+  "__SUPERCOV_ASSERTION_PHASE_STARTED__",
+  "__SUPERCOV_ATTEMPT__",
+  "__SUPERCOV_BROWSER_FETCH_PATCHED__",
+  "__SUPERCOV_BUFFER_EXIT_INSTALLED__",
+  "__SUPERCOV_BUFFER_FLUSHERS__",
+  "__SUPERCOV_CHILD_PATCHED__",
+  "__SUPERCOV_COMPACT_SNAPSHOT__",
+  "__SUPERCOV_COVERAGE_SNAPSHOT__",
+  "__SUPERCOV_DIRECT_RUNTIME__",
+  "__SUPERCOV_EMITTER_CONTEXT_MAPS__",
+  "__SUPERCOV_EMITTER_PATCHED_INSTANCES__",
+  "__SUPERCOV_FETCH_PATCHED__",
+  "__SUPERCOV_MCDC_SNAPSHOT__",
+  "__SUPERCOV_MCDC_STATES__",
+  "__SUPERCOV_MCDC_TEST_ID__",
+  "__SUPERCOV_MODULE_LOADS__",
+  "__SUPERCOV_PHASE_ID__",
+  "__SUPERCOV_RESET__",
+  "__SUPERCOV_SERVER_PHASE_STORAGES__",
+  "__SUPERCOV_TERMINATION_FLUSHERS__",
+  "__SUPERCOV_TERMINATION_INSTALLED__",
+  "__SUPERCOV_WASM_REGIONS__",
+  "__SUPERCOV_WASM_REGISTRY__",
+  "__SUPERCOV_WASM_STRONG__",
+  "__SUPERCOV_WORKER_EVIDENCE__",
+  "__SUPERCOV_WORKER_TOKEN__",
+]) {
+  if (!Object.prototype.hasOwnProperty.call(runtimeGlobal, name))
+    Object.defineProperty(runtimeGlobal, name, { value: void 0, writable: true, configurable: true, enumerable: false });
+}
 var runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
 var runtimeInstance = runtimeInstanceToken === "__SUPERCOV_RUNTIME_INSTANCE__" ? "application" : runtimeInstanceToken;
 var _a;
@@ -197,6 +240,15 @@ function createState() {
     // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
     // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
     logicals: /* @__PURE__ */ new Map(),
+    // Per relational comparison site ("file:line:column"): the operand
+    // relations seen -- lt, eq, gt, unordered (NaN), or other (objects that
+    // are not Dates) -- that decide comparison mutants, beside the coverage.
+    // Each relation maps to the epoch a process writing records last wrote
+    // it in (0 where none did): see noteValue.
+    comparisons: /* @__PURE__ */ new Map(),
+    // Per logical selection, outside a snapshot: each outcome's epoch, as
+    // for comparisons.
+    logicalEpochs: /* @__PURE__ */ new Map(),
     // The events already recorded, by phase: a hit by its id, anything else
     // by its type and what tells it apart (eventSeen).
     eventKeys: /* @__PURE__ */ new Map(),
@@ -299,6 +351,11 @@ function activateProbeV2Key(key, force = false) {
             vectors.clear();
         }
       }
+      for (const outcomes of state.comparisons.values()) {
+        for (const outcome of outcomes.keys())
+          outcomes.set(outcome, 0);
+      }
+      state.logicalEpochs.clear();
     }
     epoch = state.probeV2NextEpoch;
     builtinMapSet.call(state.probeV2ContextEpochs, key, epoch);
@@ -419,13 +476,22 @@ function logicalSnapshot() {
     vectors: [...vectors.values()]
   }));
 }
+function comparisonSnapshot() {
+  return [...state.comparisons.entries()].map(([id, outcomes]) => ({
+    id,
+    outcomes: [...outcomes.keys()]
+  }));
+}
 function coverageSnapshot() {
-  return {
+  const snapshot = {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
     events: eventObjects(state.eventLog),
     logicals: logicalSnapshot()
   };
+  if (state.comparisons.size)
+    snapshot.comparisons = comparisonSnapshot();
+  return snapshot;
 }
 // coverageSnapshot as snapshots.mjs's columnarEvents gives it, built from the
 // columns the events are kept in rather than from an object per event.
@@ -434,8 +500,11 @@ function coverageSnapshotColumns() {
   const decisions = decisionSnapshot();
   const hits = [...state.hits];
   const logicals = logicalSnapshot();
+  // The comparisons go with the columns as with the objects: a snapshot
+  // without them reads as if no comparison ran.
+  const comparisons = state.comparisons.size ? { comparisons: comparisonSnapshot() } : {};
   if (log.id.length === 0)
-    return { decisions, hits, events: [], logicals };
+    return { decisions, hits, events: [], logicals, ...comparisons };
   const tables = { types: /* @__PURE__ */ new Map(), phases: /* @__PURE__ */ new Map(), environments: /* @__PURE__ */ new Map() };
   const index = (table, value) => {
     let found = table.get(value);
@@ -470,6 +539,7 @@ function coverageSnapshotColumns() {
     decisions,
     hits,
     logicals,
+    ...comparisons,
     eventColumns: {
       types: [...tables.types.keys()],
       phases: [...tables.phases.keys()],
@@ -483,6 +553,8 @@ function resetCoverage(testId2) {
   state.hits.clear();
   state.eventLog = emptyEventLog();
   state.logicals.clear();
+  state.comparisons.clear();
+  state.logicalEpochs.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
   state.probeV2EpochGeneration = (state.probeV2EpochGeneration || 0) + 1;
@@ -656,6 +728,8 @@ function evidenceSize() {
     size += decision.vectors.size;
   for (const vectors of state.logicals.values())
     size += vectors.size;
+  for (const outcomes of state.comparisons.values())
+    size += outcomes.size;
   return size;
 }
 // The evidence's size when this document gave it to the Playwright collector
@@ -722,8 +796,14 @@ function persistBrowser() {
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
 }
+// Every writer says, before its first record, that it records the values
+// its comparisons, selections and probes see (`comparison` and `logical`
+// records): a writer that does not, a runtime older than them, leaves its
+// silence about values unread rather than read as "never seen".
+var valuesRecord = { type: "values" };
 // An attempt's file says its scope once per writing process: each line
-// without one is of the scope of the line before it in the same file.
+// without one is of the scope of the line before it in the same file. The
+// first is the writer's note that it records values.
 var scopedPathsWritten = /* @__PURE__ */ new Set();
 function serverLine(record, path) {
   if (!path)
@@ -731,13 +811,13 @@ function serverLine(record, path) {
   const { scope, ...line } = record;
   if (scope && !scopedPathsWritten.has(path)) {
     scopedPathsWritten.add(path);
-    line.scope = scope;
+    return JSON.stringify(__spreadProps(__spreadValues({}, valuesRecord), { scope })) + "\n" + JSON.stringify(line);
   }
   return JSON.stringify(line);
 }
 function serverRecordKey(record) {
   var _a8;
-  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.id;
+  const suffix = record.type === "decision" ? `${record.id}:${vectorKey(record.vector)}` : record.outcome !== void 0 ? `${record.id}\0${record.outcome}` : record.id;
   // Each request that names no test keeps its own first hits: the report
   // credits them to the test running when it came, and a later request's
   // work belongs to whichever test was running then.
@@ -950,6 +1030,9 @@ function writeBackgroundLines(fs, runId, payload) {
   if (!path) {
     const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
     const writer = `${shard}-${process.pid}-${backgroundWriterToken()}`;
+    // A writer's records are read together, by its name: its first says it
+    // records values.
+    payload = JSON.stringify(valuesRecord) + "\n" + payload;
     const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
     state.backgroundSequence = nextSequence;
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
@@ -1070,8 +1153,22 @@ function wasmRegionsWanted() {
     return true;
   return typeof process !== "undefined" && process.env != null && process.env.SUPERCOV_WASM_REGIONS === "1";
 }
+// A strong pass over Rust compiled to wasm: the mutant each instance runs is
+// handed to it through its exports (SUPERCOV_WASM_STRONG names the crates'
+// directories, `docs/design/mutation-drivers.md`).
+function wasmStrongRoots() {
+  if (Array.isArray(runtimeGlobal.__SUPERCOV_WASM_STRONG__))
+    return runtimeGlobal.__SUPERCOV_WASM_STRONG__;
+  const named = typeof process !== "undefined" && process.env != null ? process.env.SUPERCOV_WASM_STRONG : void 0;
+  if (typeof named !== "string" || named === "")
+    return void 0;
+  if (parsedWasmRoots === void 0 || parsedWasmRoots[0] !== named)
+    parsedWasmRoots = [named, JSON.parse(named)];
+  return parsedWasmRoots[1];
+}
+var parsedWasmRoots;
 function installWasmRegistry() {
-  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !wasmRegionsWanted())
+  if (runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ || typeof WebAssembly === "undefined" || !(wasmRegionsWanted() || wasmStrongRoots()))
     return;
   runtimeGlobal.__SUPERCOV_WASM_REGISTRY__ = true;
   if (!runtimeGlobal.__supercovWasm)
@@ -1095,6 +1192,7 @@ function registerWasmRealm(realm) {
   function Recorded(module, imports) {
     const instance = new Instance(module, imports);
     instances.push(instance);
+    activateWasm(instance);
     return instance;
   }
   Recorded.prototype = Instance.prototype;
@@ -1109,13 +1207,59 @@ function registerWasmRealm(realm) {
     try {
       wasm[name] = function() {
         return original.apply(wasm, arguments).then(function(result) {
-          instances.push(result instanceof Instance ? result : result.instance);
+          const instance = result instanceof Instance ? result : result.instance;
+          instances.push(instance);
+          activateWasm(instance);
           return result;
         });
       };
     } catch (e) {
     }
   });
+}
+/**
+ * Switches the active mutant on in a wasm instance, as the Rust strong
+ * runtime exports it: the mutant's file, relative to its crate's Cargo
+ * workspace, written into `__supercov_strong_buffer_<key>`, and its index
+ * given to `__supercov_strong_activate_<key>`. A mutant of no crate's (or
+ * none) switches every crate's off.
+ */
+function activateWasm(instance) {
+  const roots = wasmStrongRoots();
+  const exports = instance && instance.exports;
+  if (!roots || !exports || !exports.memory)
+    return;
+  const strong = strongState();
+  let file = "";
+  let index = BigInt.asUintN(64, BigInt(-1));
+  for (const root of roots) {
+    if (typeof strong.file === "string" && strong.index >= 0 && strong.file.startsWith(root)) {
+      file = strong.file.slice(root.length);
+      index = BigInt(strong.index);
+      break;
+    }
+  }
+  const bytes = new TextEncoder().encode(file);
+  for (const name of Object.keys(exports)) {
+    if (name.indexOf("__supercov_strong_activate_") !== 0)
+      continue;
+    const buffer = exports["__supercov_strong_buffer_" + name.slice("__supercov_strong_activate_".length)];
+    if (typeof buffer !== "function" || bytes.length > 4096)
+      continue;
+    try {
+      new Uint8Array(exports.memory.buffer, Number(buffer()), bytes.length).set(bytes);
+      exports[name](bytes.length, index);
+    } catch (e) {
+    }
+  }
+}
+/** Every instance the runtime remembers runs the active mutant. */
+function activateWasmInstances() {
+  const instances = runtimeGlobal.__supercovWasm;
+  if (!instances || !wasmStrongRoots())
+    return;
+  for (const instance of instances)
+    activateWasm(instance);
 }
 installWasmRegistry();
 function wasmBase64(bytes) {
@@ -1280,6 +1424,9 @@ function scheduleServerFlush() {
 function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
+    // A snapshot holds its values itself.
+    if (record.type !== "hit" && record.type !== "decision")
+      return;
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
     if (record.type === "decision")
       recordBrowserEvent("decision", record.id, record.vector, timestampMs, record.phaseId, "server");
@@ -1367,7 +1514,7 @@ function activateCoverageScope(scope) {
   if (scope)
     runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
   else
-    delete runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
+    runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = void 0;
   activateProbeV2Context(scope ? { scope } : {});
 }
 function coverageCarrier() {
@@ -1507,6 +1654,11 @@ function withNodeAssertionPhase(operation, source, callback) {
   // as Jest started from another tool's process. The assertion still fails
   // with the frames its author would see.
   if (!scope) {
+    // An adapter that makes such an assertion a test's (a node:test file's
+    // top level) is told, and the assertion runs as it would have.
+    const unscoped = runtimeGlobal.__SUPERCOV_UNSCOPED_ASSERTION__;
+    if (typeof unscoped === "function")
+      unscoped();
     try {
       return withStackRoom(callback);
     } catch (error) {
@@ -2399,12 +2551,575 @@ function recordLogicalOutcome(branchId, outcome) {
     builtinMapSet.call(vectors, key, { right: outcome >= 2, truthy: (outcome & 1) === 1 });
     workerEvidenceChanged();
   }
+  if (isBrowser || state.runtimeSnapshots)
+    return;
+  let epochs = state.logicalEpochs.get(branchId);
+  if (epochs === void 0) {
+    epochs = /* @__PURE__ */ new Map();
+    state.logicalEpochs.set(branchId, epochs);
+  }
+  const clock = state.probeV2Clock;
+  if (!clock.fast || epochs.get(key) !== clock.e)
+    noteValue(epochs, "logical", branchId, key);
 }
 // A JSX expression container has nowhere to put a statement and cannot hold a
 // bare comma operator, so a rendered expression carries its probe as a call
 // that returns the value through. Like optionalSelect, it records after the
 // value evaluates: an expression that throws is reported unevaluated rather
 // than covered.
+// `a < b` (op 0), `a <= b` (1), `a > b` (2), `a >= b` (3). The operands were
+// evaluated once, by the program, before this call; the relation is read
+// from them only when both are primitives of one kind or both Dates, which
+// no user code can observe, and the comparison itself runs once as written.
+function compareRelation(left, right) {
+  const lt = typeof left, rt = typeof right;
+  if (lt === "number" && rt === "number" || lt === "string" && rt === "string" || lt === "bigint" && rt === "bigint") {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left === right ? "eq" : "unordered";
+  }
+  if (left instanceof Date && right instanceof Date) {
+    const a = Date.prototype.getTime.call(left), b = Date.prototype.getTime.call(right);
+    return a < b ? "lt" : a > b ? "gt" : a === b ? "eq" : "unordered";
+  }
+  if ((lt === "number" || lt === "bigint") && (rt === "number" || rt === "bigint")) {
+    if (left < right) return "lt";
+    if (left > right) return "gt";
+    return left == right ? "eq" : "unordered";
+  }
+  return "other";
+}
+// Op 4: an equality the program evaluated as the argument; its value is
+// recorded as "true" or "false" and handed back.
+function compareV2(site, left, right, op) {
+  const result = op === 4 ? left : op === 0 ? left < right : op === 1 ? left <= right : op === 2 ? left > right : left >= right;
+  try {
+    recordProbeOutcome(site, op === 4 ? result ? "true" : "false" : compareRelation(left, right));
+  } catch {
+  }
+  return result;
+}
+// The mutants' probes (on unless SUPERCOV_MUTANTS=0). Each helper gets the
+// values the program computed, does the program's own operation or
+// call once, and records whether Stryker's replacement would have given a
+// different value ("differs"), the same one ("same"), or cannot be told
+// ("unknown"), under the site's id in the comparison records. Counterparts
+// are computed only by built-ins on primitives (or on verified built-in
+// arrays, strings, dates and Math), so no user code runs an extra time.
+// Every repeat in the same context ends at the first check, as a hit's does:
+// a snapshot keeps each outcome once per test, a process writing records
+// once per context.
+function recordProbeOutcome(site, outcome) {
+  let outcomes = state.comparisons.get(site);
+  if (outcomes === void 0) {
+    outcomes = /* @__PURE__ */ new Map();
+    state.comparisons.set(site, outcomes);
+  }
+  const seen = outcomes.get(outcome);
+  const clock = state.probeV2Clock;
+  if (seen !== void 0 && (clock.fast && seen === clock.e || isBrowser || state.runtimeSnapshots))
+    return;
+  noteValue(outcomes, "comparison", site, outcome);
+}
+// An outcome new to this test's snapshot, or to this context's records. A
+// process that writes records rather than snapshots -- a server, or a
+// node:test, AVA or tap test process -- writes each outcome a site sees once
+// per context, as recordCoverageHit writes a point's hit: the report reads
+// those records as it reads a snapshot's values. `epochs` maps each outcome
+// to the epoch it was last written in.
+function noteValue(epochs, type, id, outcome) {
+  const known = epochs.has(outcome);
+  if (isBrowser || state.runtimeSnapshots) {
+    if (!known) {
+      epochs.set(outcome, 0);
+      workerEvidenceChanged();
+    }
+    return;
+  }
+  const clock = state.probeV2Clock;
+  let epoch = clock.e;
+  if (!clock.fast) {
+    const previousEpoch = clock.e;
+    activateProbeV2Context(currentRequestContext());
+    epoch = clock.e;
+    clock.e = previousEpoch;
+  } else if (epoch !== epoch) {
+    epoch = resolveProbeV2Epoch();
+  }
+  if (epochs.get(outcome) === epoch)
+    return;
+  epochs.set(outcome, epoch);
+  if (!known)
+    workerEvidenceChanged();
+  const phaseId = currentPhaseId();
+  appendServer(__spreadValues({
+    type,
+    id,
+    outcome,
+    timestampMs: Date.now()
+  }, phaseId ? { phaseId } : {}));
+}
+function probePrimitive(value) {
+  return value === null || typeof value !== "object" && typeof value !== "function" && typeof value !== "symbol";
+}
+// + - * / % << >> & | ; Stryker's replacement of each: - + / * * >> << | &
+const probeArithmeticSwap = [1, 0, 3, 2, 2, 6, 5, 8, 7];
+function probeArithmetic(left, right, op) {
+  switch (op) {
+    case 0: return left + right;
+    case 1: return left - right;
+    case 2: return left * right;
+    case 3: return left / right;
+    case 4: return left % right;
+    case 5: return left << right;
+    case 6: return left >> right;
+    case 7: return left & right;
+    default: return left | right;
+  }
+}
+function probeCounterpart(result, left, right, op) {
+  if (!probePrimitive(left) || !probePrimitive(right)) return "unknown";
+  // `+` with a string operand gives a string, and `-` always a number (and
+  // the reverse): they differ, whatever the operands. Working the other out
+  // would also turn a string the program builds by `+` (which V8 keeps as a
+  // rope) flat at every step: a path built a segment at a time copied every
+  // prefix of itself, and dot-prop's test of 100,000 levels ran out of memory.
+  if ((op === 0 || op === 1) && (typeof left === "string" || typeof right === "string")) return "differs";
+  let other;
+  try {
+    other = probeArithmetic(left, right, probeArithmeticSwap[op]);
+  } catch {
+    return "differs";
+  }
+  return Object.is(result, other) ? "same" : "differs";
+}
+function arithV2(site, left, right, op) {
+  const result = probeArithmetic(left, right, op);
+  try {
+    recordProbeOutcome(site, probeCounterpart(result, left, right, op));
+  } catch {
+  }
+  return result;
+}
+// `x op= value`: `current` is x as the assignment read it, before `value`.
+function assignV2(site, current, value, op) {
+  try {
+    let result;
+    let outcome;
+    try {
+      result = probeArithmetic(current, value, op);
+      outcome = probeCounterpart(result, current, value, op);
+    } catch {
+      outcome = "unknown";
+    }
+    recordProbeOutcome(site, outcome);
+  } catch {
+  }
+  return value;
+}
+// A concise arrow's value: Stryker's mutant returns undefined.
+function valueV2(site, value) {
+  try {
+    recordProbeOutcome(site, value === void 0 ? "undefined" : "defined");
+  } catch {
+  }
+  return value;
+}
+// Strong mutation (mutant schemata). A file instrumented in strong mode has
+// every listed mutant behind a switch and reads one record from here when
+// it loads, `strongSlot(file)`, with `file` its path from the project root
+// as mutants.json keys it. Each switch reads the record's `a`, the index of
+// the active mutant in the file's list (-1 for none), every time it is
+// evaluated, and the active mutant's branch calls `h()`, which counts its
+// evaluations and throws MutantTimeoutError past the limit, so a loop the
+// mutant made endless ends where it runs. The state is kept on the global
+// object, so copies of this runtime in one realm agree on it.
+class MutantTimeoutError extends Error {
+  constructor(file, index, hits) {
+    super(`Supercov: mutant ${index} of ${file} was evaluated more than ${hits - 1} times`);
+    this.name = "MutantTimeoutError";
+    this.code = "SUPERCOV_MUTANT_TIMEOUT";
+    this.file = file;
+    this.index = index;
+  }
+}
+const strongStateKey = Symbol.for("supercov.strongMutation");
+// SUPERCOV_MUTANT_HIT_LIMIT: how often the active mutant may be evaluated in
+// a process before its switch throws (docs/design/mutation-drivers.md).
+function environmentHitLimit() {
+  try {
+    const given = typeof process !== "undefined" && process.env ? Number(process.env["SUPERCOV_MUTANT_HIT_LIMIT"]) : NaN;
+    return Number.isSafeInteger(given) && given > 0 ? given : 1e6;
+  } catch (e) {
+    return 1e6;
+  }
+}
+function strongState() {
+  let strong = globalThis[strongStateKey];
+  if (strong === void 0) {
+    strong = { slots: /* @__PURE__ */ new Map(), file: void 0, index: -1, hits: 0, limit: environmentHitLimit() };
+    Object.defineProperty(globalThis, strongStateKey, { value: strong, configurable: true });
+  }
+  return strong;
+}
+// `file#index`, or `-` for no mutant: what a strong pass's attempt names in
+// its scope, and what SUPERCOV_ACTIVE_MUTANT names for a whole process.
+const parsedMutants = /* @__PURE__ */ new Map();
+function parseMutant(text) {
+  if (typeof text !== "string")
+    return void 0;
+  let parsed = parsedMutants.get(text);
+  if (parsed !== void 0)
+    return parsed;
+  if (text === "-") {
+    parsed = { file: void 0, index: -1, key: text };
+  } else {
+    const at = text.lastIndexOf("#");
+    const index = Number(text.slice(at + 1));
+    if (at <= 0 || !/^\d+$/.test(text.slice(at + 1)) || !Number.isSafeInteger(index))
+      return void 0;
+    parsed = { file: text.slice(0, at), index, key: text };
+  }
+  parsedMutants.set(text, parsed);
+  return parsed;
+}
+// The mutant of the attempt whose request is being served: a strong pass of
+// browser tests gives each attempt its own mutant in its scope, which comes
+// with every request the attempt sends and stays with the request's work.
+// `undefined` outside any such attempt's work: the process's own mutant
+// applies there.
+function requestMutant(strong) {
+  for (const resolve of strong.resolvers) {
+    const scope = resolve();
+    if (scope !== void 0)
+      return parseMutant(scope.mutant);
+  }
+  return void 0;
+}
+function slotIndex(file) {
+  const strong = strongState();
+  if (strong.perRequest) {
+    const mutant = requestMutant(strong);
+    if (mutant !== void 0)
+      return mutant.file === file ? mutant.index : -1;
+  }
+  return strong.file === file ? strong.index : -1;
+}
+// Each switch reads the slot's `a`. Where requests carry their own mutants
+// it is read from the request being served, so one server runs several
+// attempts' mutants at once; everywhere else it is a plain value, as cheap
+// as a switch can be.
+function requestSlot(slot, file) {
+  Object.defineProperty(slot, "a", {
+    configurable: true,
+    enumerable: true,
+    get: () => slotIndex(file),
+    set: () => {
+    }
+  });
+  return slot;
+}
+function enablePerRequestMutants() {
+  if (isBrowser)
+    return;
+  const strong = strongState();
+  if (strong.resolvers === void 0)
+    strong.resolvers = /* @__PURE__ */ new Set();
+  strong.resolvers.add(requestScopeOfThisRuntime);
+  if (strong.perRequest)
+    return;
+  strong.perRequest = true;
+  strong.requestHits = /* @__PURE__ */ new Map();
+  for (const [file, slot] of strong.slots)
+    requestSlot(slot, file);
+}
+function requestScopeOfThisRuntime() {
+  const scope = currentRequestContext().scope;
+  return scope !== void 0 && scope.mutant !== void 0 ? scope : void 0;
+}
+// A mutant evaluated past the limit: a loop it made endless. The process
+// says so where the strong pass reads it (SUPERCOV_STRONG_RESULTS beside),
+// since the error may never reach a test.
+function noteMutantTimeout(file, index, attemptId) {
+  const strong = strongState();
+  try {
+    if (typeof strong.onTimeout === "function") {
+      strong.onTimeout(file, index, attemptId);
+      return;
+    }
+    if (isBrowser || typeof process === "undefined")
+      return;
+    const results = process.env["SUPERCOV_STRONG_RESULTS"];
+    const fs = results ? getFs() : void 0;
+    if (!fs)
+      return;
+    fs.appendFileSync(`${results}.timeouts.jsonl`, JSON.stringify({
+      mutant: `${file}#${index}`,
+      attemptId: attemptId != null ? attemptId : null,
+      pass: process.env["SUPERCOV_STRONG_RESTART"] || "main"
+    }) + "\n");
+  } catch (e) {
+  }
+}
+function strongHit() {
+  const strong = strongState();
+  if (strong.perRequest) {
+    let attemptId;
+    for (const resolve of strong.resolvers) {
+      const scope = resolve();
+      if (scope !== void 0) {
+        attemptId = scope.attemptId;
+        break;
+      }
+    }
+    const mutant = attemptId !== void 0 ? requestMutant(strong) : void 0;
+    if (mutant !== void 0 && mutant.file !== void 0) {
+      const key = `${attemptId}\0${mutant.key}`;
+      const hits = (strong.requestHits.get(key) || 0) + 1;
+      strong.requestHits.set(key, hits);
+      if (hits > strong.limit) {
+        noteMutantTimeout(mutant.file, mutant.index, attemptId);
+        throw new MutantTimeoutError(mutant.file, mutant.index, hits);
+      }
+      return;
+    }
+  }
+  if (++strong.hits > strong.limit) {
+    noteMutantTimeout(strong.file, strong.index);
+    throw new MutantTimeoutError(strong.file, strong.index, strong.hits);
+  }
+}
+function strongSlot(file) {
+  const strong = strongState();
+  let slot = strong.slots.get(file);
+  if (slot === void 0) {
+    slot = { a: strong.file === file ? strong.index : -1, h: strongHit };
+    if (strong.perRequest)
+      requestSlot(slot, file);
+    strong.slots.set(file, slot);
+  }
+  return slot;
+}
+function setActiveMutant(file, index) {
+  const strong = strongState();
+  const previous = strong.slots.get(strong.file);
+  if (previous !== void 0)
+    previous.a = -1;
+  strong.file = file;
+  strong.index = index;
+  strong.hits = 0;
+  const slot = strong.slots.get(file);
+  if (slot !== void 0)
+    slot.a = index;
+  activateWasmInstances();
+}
+function clearActiveMutant() {
+  setActiveMutant(void 0, -1);
+}
+function setMutantHitLimit(limit) {
+  strongState().limit = limit;
+}
+function mutantHitCount() {
+  return strongState().hits;
+}
+// A process a strong pass starts with a mutant switched on everywhere
+// (SUPERCOV_ACTIVE_MUTANT=<file>#<index>: a server whose module-level code
+// or background work the mutant changes), or a child started for one
+// attempt's work, whose context names the attempt's mutant.
+(function activateProcessMutant() {
+  if (isBrowser || typeof process === "undefined" || !process.env)
+    return;
+  try {
+    const named = parseMutant(process.env["SUPERCOV_ACTIVE_MUTANT"]);
+    const carried = named === void 0 ? environmentRequestContext() : void 0;
+    const mutant = named !== void 0 ? named : parseMutant(carried && carried.scope && carried.scope.mutant);
+    if (mutant !== void 0 && mutant.file !== void 0 && strongState().file !== mutant.file)
+      setActiveMutant(mutant.file, mutant.index);
+  } catch (e) {
+  }
+})();
+function isMutantTimeout(error) {
+  return error instanceof MutantTimeoutError || error != null && error.code === "SUPERCOV_MUTANT_TIMEOUT";
+}
+const probeArray = Array.prototype, probeString = String.prototype, probeDate = Date.prototype;
+const probeBuiltins = {
+  array: new Map(["some", "every", "filter", "reverse", "slice", "sort", "find", "findIndex", "findLast", "findLastIndex"].filter((name) => typeof probeArray[name] === "function").map((name) => [name, probeArray[name]])),
+  string: new Map(["charAt", "endsWith", "startsWith", "substr", "substring", "slice", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart"].filter((name) => typeof probeString[name] === "function").map((name) => [name, probeString[name]])),
+  date: new Map(["setDate", "setTime", "setFullYear", "setMonth", "setHours", "setMinutes", "setSeconds", "setMilliseconds", "setUTCDate", "setUTCFullYear", "setUTCMonth", "setUTCHours", "setUTCMinutes", "setUTCSeconds", "setUTCMilliseconds"].map((name) => [name, probeDate[name]])),
+  min: Math.min,
+  max: Math.max,
+  getTime: probeDate.getTime
+};
+// Stryker's swaps (StrykerJS 10.1.1); a name it removes has none.
+const probeSwaps = {
+  endsWith: "startsWith", startsWith: "endsWith", every: "some", some: "every",
+  toLocaleLowerCase: "toLocaleUpperCase", toLocaleUpperCase: "toLocaleLowerCase",
+  toLowerCase: "toUpperCase", toUpperCase: "toLowerCase", trimEnd: "trimStart", trimStart: "trimEnd",
+  min: "max", max: "min", setDate: "setTime", setTime: "setDate", setFullYear: "setMonth", setMonth: "setFullYear",
+  setHours: "setMinutes", setMinutes: "setHours", setSeconds: "setMilliseconds", setMilliseconds: "setSeconds",
+  setUTCDate: "setTime", setUTCFullYear: "setUTCMonth", setUTCMonth: "setUTCFullYear",
+  setUTCHours: "setUTCMinutes", setUTCMinutes: "setUTCHours", setUTCSeconds: "setUTCMilliseconds",
+  setUTCMilliseconds: "setUTCSeconds"
+};
+const probeRemoved = /* @__PURE__ */ new Set(["charAt", "filter", "reverse", "slice", "sort", "substr", "substring", "trim"]);
+function probeAllPrimitive(values) {
+  for (const value of values) if (!probePrimitive(value)) return false;
+  return true;
+}
+// The callback the program passed, called exactly as the built-in calls it;
+// the wrapper only reads what it returned.
+function probeObservedCallback(callback, arrow, observe) {
+  return function(value, index) {
+    const result = Reflect.apply(callback, this, arguments);
+    try {
+      observe(result, index);
+      if (arrow !== void 0) recordProbeOutcome(arrow, result === void 0 ? "undefined" : "defined");
+    } catch {
+    }
+    return result;
+  };
+}
+// `pure` is a copy of a some/every callback the instrumenter found pure
+// (pure_callback: no calls, no writes, only its parameters' properties), without
+// the program's probes: where the call stopped at the first of several
+// elements, the probe runs it through the other method to decide.
+function probeArrayCall(site, receiver, name, arrow, args, pure) {
+  const builtin = probeBuiltins.array.get(name);
+  const length = receiver.length;
+  if (name === "some" || name === "every" || name === "filter" || name.startsWith("find")) {
+    if (typeof args[0] !== "function") return Reflect.apply(builtin, receiver, args);
+    let calls = 0, lastIndex = -1;
+    const observed = [probeObservedCallback(args[0], arrow, (_, index) => {
+      calls++;
+      lastIndex = index;
+    })];
+    for (let index = 1; index < args.length; index++) observed.push(args[index]);
+    const result = Reflect.apply(builtin, receiver, observed);
+    try {
+      if (name === "filter") recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+      else if (name === "some" || name === "every") {
+        // some stops at its first truthy outcome, every at its first falsy
+        // one; the other method's value follows from the outcomes seen,
+        // except when it stopped at the first element of several.
+        const stoppedEarly = name === "some" ? result : !result;
+        let outcome;
+        if (calls === 0) outcome = "differs";
+        else if (!stoppedEarly) outcome = "same";
+        else if (calls > 1) outcome = "differs";
+        else if (lastIndex === length - 1) outcome = "same";
+        else if (typeof pure === "function") {
+          // A throw from the copy (a property of null) is no answer.
+          try {
+            const other = Reflect.apply(probeBuiltins.array.get(name === "some" ? "every" : "some"), receiver, [pure]);
+            outcome = other === result ? "same" : "differs";
+          } catch {
+            outcome = "unknown";
+          }
+        } else outcome = "unknown";
+        recordProbeOutcome(site, outcome);
+      }
+    } catch {
+    }
+    return result;
+  }
+  if (name === "sort" || name === "reverse") {
+    const before = probeBuiltins.array.get("slice").call(receiver);
+    const result = Reflect.apply(builtin, receiver, args);
+    try {
+      let changed = before.length !== receiver.length;
+      for (let index = 0; !changed && index < before.length; index++) changed = !Object.is(before[index], receiver[index]);
+      recordProbeOutcome(site, changed ? "differs" : "same");
+    } catch {
+    }
+    return result;
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    recordProbeOutcome(site, result.length !== length ? "differs" : "same");
+  } catch {
+  }
+  return result;
+}
+function probeStringCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.string.get(name);
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (probeRemoved.has(name)) recordProbeOutcome(site, Object.is(result, receiver) ? "same" : "differs");
+    else if (probeSwaps[name] !== void 0) {
+      if (!probeAllPrimitive(args)) recordProbeOutcome(site, "unknown");
+      else {
+        let other, threw = false;
+        try {
+          other = Reflect.apply(probeBuiltins.string.get(probeSwaps[name]), receiver, args);
+        } catch {
+          threw = true;
+        }
+        recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+      }
+    }
+  } catch {
+  }
+  return result;
+}
+function probeDateCall(site, receiver, name, args) {
+  const builtin = probeBuiltins.date.get(name);
+  let copy;
+  try {
+    copy = probeAllPrimitive(args) ? new Date(probeBuiltins.getTime.call(receiver)) : void 0;
+  } catch {
+  }
+  const result = Reflect.apply(builtin, receiver, args);
+  try {
+    if (copy === void 0) recordProbeOutcome(site, "unknown");
+    else {
+      let other, threw = false;
+      try {
+        other = Reflect.apply(probeBuiltins.date.get(probeSwaps[name]), copy, args);
+      } catch {
+        threw = true;
+      }
+      recordProbeOutcome(site, threw || !Object.is(result, other) ? "differs" : "same");
+    }
+  } catch {
+  }
+  return result;
+}
+function probeMathCall(site, name, args) {
+  const result = Reflect.apply(probeBuiltins[name], Math, args);
+  try {
+    let numbers = true;
+    for (const value of args) if (typeof value !== "number") numbers = false;
+    if (!numbers) recordProbeOutcome(site, "unknown");
+    else recordProbeOutcome(site, Object.is(result, Reflect.apply(probeBuiltins[probeSwaps[name]], Math, args)) ? "same" : "differs");
+  } catch {
+  }
+  return result;
+}
+// `receiver.name(...)` as `methodV2(site, receiver, "name", arrow).name(...)`.
+// For a built-in receiver whose method is the built-in, the stand-in makes
+// the program's one call itself and compares Stryker's replacement; any
+// other receiver comes back unchanged and the call is the program's own.
+function methodV2(site, receiver, name, arrow, pure) {
+  try {
+    let call;
+    if (Array.isArray(receiver)) {
+      if (Object.getPrototypeOf(receiver) === probeArray && probeBuiltins.array.has(name) && receiver[name] === probeBuiltins.array.get(name))
+        call = (args) => probeArrayCall(site, receiver, name, arrow, args, pure);
+    } else if (typeof receiver === "string") {
+      if (probeBuiltins.string.has(name) && probeString[name] === probeBuiltins.string.get(name))
+        call = (args) => probeStringCall(site, receiver, name, args);
+    } else if (receiver instanceof Date) {
+      if (Object.getPrototypeOf(receiver) === probeDate && probeBuiltins.date.has(name) && receiver[name] === probeBuiltins.date.get(name))
+        call = (args) => probeDateCall(site, receiver, name, args);
+    } else if (receiver === Math) {
+      if ((name === "min" || name === "max") && Math[name] === probeBuiltins[name])
+        call = (args) => probeMathCall(site, name, args);
+    }
+    if (call !== void 0) return { [name]: (...args) => call(args) };
+  } catch {
+  }
+  return receiver;
+}
 function renderedValueV2(file, index, value) {
   coverageHitV2(file, index);
   return value;
@@ -2700,6 +3415,18 @@ const directRuntimeApi = {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
+  strongSlot,
+  setActiveMutant,
+  clearActiveMutant,
+  setMutantHitLimit,
+  mutantHitCount,
+  isMutantTimeout,
+  MutantTimeoutError,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,
@@ -2770,6 +3497,18 @@ export {
   selectionRight,
   selectShortV2,
   selectRightV2,
+  compareV2,
+  arithV2,
+  assignV2,
+  methodV2,
+  valueV2,
+  strongSlot,
+  setActiveMutant,
+  clearActiveMutant,
+  setMutantHitLimit,
+  mutantHitCount,
+  isMutantTimeout,
+  MutantTimeoutError,
   selectNamedRightV2,
   selectAssignEndV2,
   selectPathV2,

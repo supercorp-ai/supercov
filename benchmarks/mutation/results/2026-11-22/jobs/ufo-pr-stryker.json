@@ -1,0 +1,216 @@
+{
+  "project": "ufo",
+  "scenario": "pr-stryker",
+  "shard": null,
+  "commit": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+  "startedAt": "2026-11-19T23:55:59.521Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "stryker": "10.1.1",
+    "node": "v24.22.2",
+    "pnpm": "10.33.2",
+    "vitest": "4.1.5",
+    "vitestProject": "4.1.5"
+  },
+  "notes": [],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/ufo f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.291,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0.01,
+        "cpuS": 0.03,
+        "cpuPercent": "12%",
+        "maxRssKiB": 19004,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@10.33.2 >/dev/null && pnpm --version",
+      "startOffsetS": 0.3,
+      "wallS": 1.307,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.64,
+        "sysS": 0.13,
+        "cpuS": 0.77,
+        "cpuPercent": "60%",
+        "maxRssKiB": 143372,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.61,
+      "wallS": 0.894,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.57,
+        "sysS": 0.4,
+        "cpuS": 2.97,
+        "cpuPercent": "334%",
+        "maxRssKiB": 881440,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @stryker-mutator/core@10.1.1 @stryker-mutator/vitest-runner@10.1.1",
+      "startOffsetS": 2.51,
+      "wallS": 1.339,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.76,
+        "sysS": 0.42,
+        "cpuS": 3.18,
+        "cpuPercent": "239%",
+        "maxRssKiB": 813132,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "stryker-incremental-base",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental-base.json",
+      "startOffsetS": 3.85,
+      "wallS": 16.379,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 190.69,
+        "sysS": 10.9,
+        "cpuS": 201.59,
+        "cpuPercent": "1231%",
+        "maxRssKiB": 699980,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental-base.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental-base.json"
+    },
+    {
+      "name": "stryker-lines",
+      "command": "node_modules/.bin/stryker run stryker.stryker-lines.json",
+      "startOffsetS": 20.24,
+      "wallS": 2.518,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 9.14,
+        "sysS": 0.95,
+        "cpuS": 10.09,
+        "cpuPercent": "401%",
+        "maxRssKiB": 256452,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": false,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/utils.ts:328-328"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-lines.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-lines.json"
+    },
+    {
+      "name": "stryker-incremental",
+      "command": "node_modules/.bin/stryker run stryker.stryker-incremental.json",
+      "startOffsetS": 22.76,
+      "wallS": 2.943,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 9.28,
+        "sysS": 1.12,
+        "cpuS": 10.4,
+        "cpuPercent": "353%",
+        "maxRssKiB": 358588,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "config": {
+        "packageManager": "pnpm",
+        "testRunner": "vitest",
+        "plugins": [
+          "@stryker-mutator/vitest-runner"
+        ],
+        "vitest": {},
+        "coverageAnalysis": "perTest",
+        "concurrency": 16,
+        "incremental": true,
+        "incrementalFile": "reports/stryker-incremental.json",
+        "checkers": [],
+        "disableBail": false,
+        "mutate": [
+          "src/**/*.ts"
+        ],
+        "ignorePatterns": [],
+        "reporters": [
+          "json",
+          "progress-append-only"
+        ],
+        "jsonReporter": {
+          "fileName": "reports/mutation/stryker-incremental.json"
+        },
+        "tempDirName": ".stryker-tmp",
+        "cleanTempDir": true
+      },
+      "report": "stryker-incremental.json"
+    }
+  ],
+  "changedLines": [
+    "src/utils.ts:328-328"
+  ],
+  "totalS": 25.7
+}

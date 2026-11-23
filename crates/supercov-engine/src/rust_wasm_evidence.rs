@@ -225,6 +225,7 @@ pub(crate) fn publish(
             .map_err(|error| error.to_string())?;
             let test_id = format!("{}::{}", test.file, test.test_id);
             raw_results.push(RawTestResult {
+                duration_ms: None,
                 test_id: Some(test_id.clone()),
                 scope: Some(ExecutionScope {
                     version: 1,
@@ -275,6 +276,7 @@ pub(crate) fn publish(
                 .map_err(|error| error.to_string())?;
         let test_id = "rust::background".to_owned();
         raw_results.push(RawTestResult {
+            duration_ms: None,
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
                 version: 1,
@@ -847,8 +849,8 @@ mod tests {
         for fault in [
             "report-request",
             "fs.create_dir_all@1",
-            "fs.rename#evidence_archive.rs:511",
-            "fs.rename#lifecycle.rs:1211",
+            "fs.rename#evidence_archive.rs:512",
+            "fs.rename#lifecycle.rs:1216",
         ] {
             let attempt = fresh();
             assert!(

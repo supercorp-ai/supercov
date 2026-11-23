@@ -1,0 +1,31 @@
+{
+  "tests": [
+    {
+      "test": {
+        "file": "tests/test_label.py",
+        "name": "tests/test_label.py::test_large_totals"
+      },
+      "passed": true,
+      "files": {
+        "src/shop/price.py": [
+          2
+        ]
+      },
+      "attribution": "exact"
+    }
+  ],
+  "probed": {
+    "src/shop/price.py": [
+      1,
+      2,
+      3
+    ]
+  },
+  "covered": {
+    "src/shop/price.py": [
+      1,
+      2,
+      3
+    ]
+  }
+}

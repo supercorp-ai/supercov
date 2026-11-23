@@ -1,0 +1,30 @@
+{
+  "setup": [
+    "apt-get update -qq && apt-get install -y -qq python3-pytest >/dev/null"
+  ],
+  "command": [
+    "python3",
+    "-m",
+    "pytest",
+    "-q"
+  ],
+  "file": "src/shop/price.py",
+  "test": "test_coupons_take_five_off",
+  "shards": [
+    [
+      "python3",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/test_price.py"
+    ],
+    [
+      "python3",
+      "-m",
+      "pytest",
+      "-q",
+      "tests/test_label.py"
+    ]
+  ],
+  "since": "1.2.0"
+}

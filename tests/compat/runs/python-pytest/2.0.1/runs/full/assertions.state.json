@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 3,
+  "inputsDigest": "d0d59f8037b6538344922373464e6e0d7965345790c3091e7c57066cfe1bfb10",
+  "evidenceDigest": "dc4ead9aecc619f48ee3a2299f04ebcefc63df96701fabc10387926ff2ff33ae",
+  "flows": {},
+  "changes": [],
+  "inheritance": {
+    "from": null,
+    "skipped": []
+  },
+  "executions": {
+    "tests": [
+      {
+        "test": {
+          "file": "tests/test_label.py",
+          "name": "tests/test_label.py::test_large_totals"
+        },
+        "passed": true,
+        "files": {
+          "src/shop/price.py": [
+            2
+          ]
+        },
+        "attribution": "exact"
+      },
+      {
+        "test": {
+          "file": "tests/test_price.py",
+          "name": "tests/test_price.py::test_coupons_take_five_off"
+        },
+        "passed": true,
+        "files": {
+          "src/shop/price.py": [
+            1
+          ]
+        },
+        "attribution": "exact"
+      },
+      {
+        "test": {
+          "file": "tests/test_price.py",
+          "name": "tests/test_price.py::test_members_save_on_large_orders"
+        },
+        "passed": true,
+        "files": {
+          "src/shop/price.py": [
+            1
+          ]
+        },
+        "attribution": "exact"
+      }
+    ],
+    "probed": {
+      "src/shop/price.py": [
+        1,
+        2,
+        3
+      ]
+    },
+    "covered": {
+      "src/shop/price.py": [
+        1,
+        2,
+        3
+      ]
+    }
+  }
+}

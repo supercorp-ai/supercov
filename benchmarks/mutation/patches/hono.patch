@@ -1,0 +1,13 @@
+diff --git a/src/utils/url.ts b/src/utils/url.ts
+index ecc78fe..48a9fc0 100644
+--- a/src/utils/url.ts
++++ b/src/utils/url.ts
+@@ -141,7 +141,7 @@ export const getPath = (request: Request): string => {
+         }
+       }
+       return decoded
+-    } else if (charCode === 63 || charCode === 35) {
++    } else if (charCode === 0x3f || charCode === 0x23) {
+       // '?' or '#'
+       break
+     }

@@ -11,6 +11,13 @@ keywords = ["coverage", "testing", "mcdc"]
 categories = ["development-tools::testing"]
 publish = ["crates-io"]
 
+[features]
+# The JSON Schema of each type a run stores, for the engine's test that
+# compares what runs hold with what the last release stored
+# (`supercov-engine/src/store_shapes.rs`). Nothing else turns it on.
+store-shapes = ["dep:schemars"]
+
 [dependencies]
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

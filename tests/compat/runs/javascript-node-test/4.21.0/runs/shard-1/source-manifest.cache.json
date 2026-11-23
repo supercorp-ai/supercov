@@ -1,0 +1,112 @@
+{
+  "evidenceDigest": "0d5e482d05b8348d4c25ea57f8293ccad1d14340b4ee50c7bd80bdd5fa0d3ec6",
+  "manifest": {
+    "schemaVersion": 3,
+    "language": "javascript",
+    "files": {
+      "package.json": {
+        "sha256": "ac5626f74d108ebddaa3d42a74ef518bbf9b02bd1087bdb056716db24462c649",
+        "bytes": 102
+      },
+      "src/price.js": {
+        "sha256": "826a3bda9c5f369b1dcdbdc28ce382bd1f07d664b52302652b71559fa95c0f0d",
+        "bytes": 396,
+        "code": {
+          "semantic": "a7a4e3ce2ee2666bd2cdccd108458a17",
+          "structure": "797b137d69f7fb75d59bab98d2df5eb8",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 22,
+              "endColumn": 1,
+              "digest": "5514c2797b889f0a5cff1a6d665bb07a"
+            },
+            {
+              "path": "price",
+              "kind": "function",
+              "line": 1,
+              "column": 8,
+              "endLine": 10,
+              "endColumn": 2,
+              "digest": "424d07a494214df4fe929e64aabf7cdb",
+              "parent": 0
+            },
+            {
+              "path": "label",
+              "kind": "function",
+              "line": 12,
+              "column": 8,
+              "endLine": 14,
+              "endColumn": 2,
+              "digest": "1baaf843c09d59f376c1e36f4cc8161f",
+              "parent": 0
+            },
+            {
+              "path": "unused",
+              "kind": "function",
+              "line": 16,
+              "column": 8,
+              "endLine": 21,
+              "endColumn": 2,
+              "digest": "e4458af21d4b7947e6c955c157fb8ca0",
+              "parent": 0
+            }
+          ],
+          "erased": [
+            11,
+            15
+          ]
+        }
+      },
+      "test/label.test.js": {
+        "sha256": "941ee89907ba1163711447b3f46af4246fa8fc400f45b90fc7c8dde61cf5fc7f",
+        "bytes": 159,
+        "code": {
+          "semantic": "b69729940232ae1ee78cf91dca5a0cdc",
+          "structure": "e3b0c44298fc1c149afbf4c8996fb924",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 8,
+              "endColumn": 1,
+              "digest": "b69729940232ae1ee78cf91dca5a0cdc"
+            }
+          ],
+          "erased": [
+            4
+          ]
+        }
+      },
+      "test/price.test.js": {
+        "sha256": "0597ec335b5f60937fc7f805d3d48a085549bb07dc5efb4e76b6ddb6f55529a8",
+        "bytes": 295,
+        "code": {
+          "semantic": "7512f07d48d0fa073176dccd2fa42d38",
+          "structure": "e3b0c44298fc1c149afbf4c8996fb924",
+          "units": [
+            {
+              "path": "",
+              "kind": "file",
+              "line": 1,
+              "column": 1,
+              "endLine": 12,
+              "endColumn": 1,
+              "digest": "7512f07d48d0fa073176dccd2fa42d38"
+            }
+          ],
+          "erased": [
+            4,
+            8
+          ]
+        }
+      }
+    }
+  },
+  "statementExclusions": []
+}

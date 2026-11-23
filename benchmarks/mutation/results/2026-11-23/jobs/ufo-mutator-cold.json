@@ -1,0 +1,153 @@
+{
+  "project": "ufo",
+  "scenario": "mutator-cold",
+  "shard": null,
+  "commit": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+  "startedAt": "2026-11-19T23:56:02.533Z",
+  "machine": {
+    "instanceType": "c8a.4xlarge",
+    "cpus": 16,
+    "cpuModel": "AMD EPYC 9R45",
+    "memGiB": 30.7
+  },
+  "versions": {
+    "mutator": "0.5.0",
+    "node": "v24.22.2",
+    "pnpm": "10.33.2",
+    "vitest": "5.1.1",
+    "vitestProject": "4.1.5"
+  },
+  "notes": [
+    "Vitest upgraded in this job from 4.1.5 to 5.1.1 (removed @vitest/coverage-v8): mizchi/mutator needs Vitest 5"
+  ],
+  "phases": [
+    {
+      "name": "clone",
+      "command": "git init -q . && git fetch -q --depth 1 https://github.com/unjs/ufo f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6 && git checkout -q FETCH_HEAD",
+      "startOffsetS": 0.01,
+      "wallS": 0.245,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.02,
+        "sysS": 0.01,
+        "cpuS": 0.03,
+        "cpuPercent": "15%",
+        "maxRssKiB": 18824,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "pnpm-setup",
+      "command": "npm i -g pnpm@10.33.2 >/dev/null && pnpm --version",
+      "startOffsetS": 0.26,
+      "wallS": 1.281,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 0.66,
+        "sysS": 0.13,
+        "cpuS": 0.79,
+        "cpuPercent": "62%",
+        "maxRssKiB": 143544,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "install",
+      "command": "pnpm install --frozen-lockfile",
+      "startOffsetS": 1.54,
+      "wallS": 0.88,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 2.56,
+        "sysS": 0.44,
+        "cpuS": 3,
+        "cpuPercent": "343%",
+        "maxRssKiB": 888512,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-plugins-remove",
+      "command": "pnpm remove @vitest/coverage-v8",
+      "startOffsetS": 2.42,
+      "wallS": 1.066,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.81,
+        "sysS": 0.23,
+        "cpuS": 2.04,
+        "cpuPercent": "192%",
+        "maxRssKiB": 642372,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "vitest-upgrade",
+      "command": "pnpm add -D vitest@5.1.1",
+      "startOffsetS": 3.49,
+      "wallS": 0.86,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.54,
+        "sysS": 0.23,
+        "cpuS": 1.77,
+        "cpuPercent": "207%",
+        "maxRssKiB": 610580,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tool-install",
+      "command": "pnpm add -D @mizchi/mutator@0.5.0",
+      "startOffsetS": 4.35,
+      "wallS": 0.937,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.69,
+        "sysS": 0.27,
+        "cpuS": 1.96,
+        "cpuPercent": "210%",
+        "maxRssKiB": 669120,
+        "note": "GNU time: the process and every descendant it waited for"
+      }
+    },
+    {
+      "name": "tests",
+      "command": "node_modules/.bin/vitest run --reporter=json --outputFile=/home/runner/work/supercov/supercov/out/tests.json",
+      "startOffsetS": 5.29,
+      "wallS": 0.438,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 1.37,
+        "sysS": 0.22,
+        "cpuS": 1.59,
+        "cpuPercent": "365%",
+        "maxRssKiB": 145060,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "tests": {
+        "total": 489,
+        "passed": 489,
+        "failed": 0,
+        "files": 54
+      }
+    },
+    {
+      "name": "mutator-cold",
+      "command": "node_modules/.bin/mutator --include 'src/**/*.ts' --reporter json --reporter text --report-dir reports-mutator/mutator-cold",
+      "startOffsetS": 5.73,
+      "wallS": 33.115,
+      "exitCode": 0,
+      "rusage": {
+        "userS": 168.67,
+        "sysS": 26.15,
+        "cpuS": 194.82,
+        "cpuPercent": "588%",
+        "maxRssKiB": 2133944,
+        "note": "GNU time: the process and every descendant it waited for"
+      },
+      "report": "mutator-cold.json"
+    }
+  ],
+  "totalS": 38.85
+}

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 3,
+  "inputsDigest": "d0d59f8037b6538344922373464e6e0d7965345790c3091e7c57066cfe1bfb10",
+  "evidenceDigest": "fcb3f567d6ccfa64bd3dd155d858d87fc9dce7a8670c081b1ec3b17be8f58387",
+  "flows": {},
+  "changes": [],
+  "inheritance": {
+    "from": null,
+    "skipped": []
+  },
+  "executions": {
+    "tests": [
+      {
+        "test": {
+          "file": "tests/test_label.py",
+          "name": "tests/test_label.py::test_large_totals"
+        },
+        "passed": true,
+        "files": {
+          "src/shop/price.py": [
+            2
+          ]
+        },
+        "attribution": "exact"
+      }
+    ],
+    "probed": {
+      "src/shop/price.py": [
+        1,
+        2,
+        3
+      ]
+    },
+    "covered": {
+      "src/shop/price.py": [
+        1,
+        2,
+        3
+      ]
+    }
+  }
+}

@@ -48,6 +48,14 @@ pub const SECTION_DECISION_VECTOR_OBSERVATIONS: u32 = 31;
 pub const SECTION_DECISION_CONDITIONS: u32 = 32;
 pub const SECTION_LIMITATIONS: u32 = 33;
 pub const SECTION_COVERAGE_MODEL: u32 = 34;
+/// Weak mutation: whether the run listed its mutants, and which set.
+pub const SECTION_MUTATION: u32 = 35;
+/// Each file's mutants by status, and where its mutants start.
+pub const SECTION_MUTATION_FILES: u32 = 36;
+/// One record per mutant, a file's together, in order of position.
+pub const SECTION_MUTANTS: u32 = 37;
+/// The text the three sections above refer to.
+pub const SECTION_MUTANT_TEXT: u32 = 38;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -74,6 +82,9 @@ const DECISION_VECTOR_OBSERVATION_RECORD_SIZE: usize = 64;
 const DECISION_CONDITION_RECORD_SIZE: usize = 64;
 const LIMITATION_RECORD_SIZE: usize = 64;
 const COVERAGE_MODEL_RECORD_SIZE: usize = 48;
+const MUTATION_RECORD_SIZE: usize = 16;
+const MUTATION_FILE_RECORD_SIZE: usize = 40;
+const MUTANT_RECORD_SIZE: usize = 104;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2007,17 +2018,18 @@ fn coverage_model_record(
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
-    // A run whose every result passed has the whole view as its passed view;
-    // its records are then the whole view's, written again under its id.
-    sections_from(
+    let mut sections = sections_from(
         [
             (CoverageViewId::All, &report.view),
             (CoverageViewId::Passed, &report.filters.passed),
             (CoverageViewId::Failed, &report.filters.failed),
         ]
-        .map(Ok),
+        .map(Ok::<_, CoverageIndexError>),
         report.passed_is_whole,
-    )
+        Some(&report.view),
+    )?;
+    sections.extend(mutation_sections(report.mutation.as_ref())?);
+    Ok(sections)
 }
 
 /// The index of a run's views, given one at a time: a view built for the
@@ -2030,7 +2042,7 @@ where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
     E: From<CoverageIndexError>,
 {
-    sections_from(views, false)
+    sections_from(views, false, None)
 }
 
 /// [`coverage_index_sections_from`], told whether the passed view is the
@@ -2050,12 +2062,58 @@ where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
     E: From<CoverageIndexError>,
 {
-    sections_from(views, passed_is_whole)
+    sections_from(views, passed_is_whole, None)
+}
+
+/// Where the whole view's own records lie in each section, as (start, end)
+/// byte ranges: its lines, its phases, its decisions' details and metadata
+/// with the anchors and hits of every obligation, and each test's records.
+#[derive(Default)]
+struct WholeBlocks {
+    lines: (usize, usize),
+    phases: (usize, usize),
+    obligations: [(usize, usize); 4],
+    tests: HashMap<String, [(usize, usize); 6]>,
+}
+
+/// Whether `passed` has every obligation, line and phase of the whole view
+/// as it is, and each of its tests as the whole view has it: what a skipped
+/// test that recorded nothing leaves out of a passed view and nothing else.
+/// Those records are then the whole view's, under the passed view's id.
+fn copies_whole(
+    whole: &crate::coverage_report::CoverageView,
+    passed: &crate::coverage_report::CoverageView,
+) -> bool {
+    let tests = whole
+        .tests
+        .iter()
+        .map(|test| (test.id.as_str(), test))
+        .collect::<HashMap<_, _>>();
+    passed.lines == whole.lines
+        && passed.decisions == whole.decisions
+        && passed.branches == whole.branches
+        && passed.points == whole.points
+        && passed.phases == whole.phases
+        && passed
+            .tests
+            .iter()
+            .all(|test| tests.get(test.id.as_str()) == Some(&test))
+}
+
+/// The records in `range` of `records` again at its end, as the passed
+/// view's: every per-view record starts with its view's id.
+fn copy_as_passed(records: &mut Vec<u8>, (start, end): (usize, usize), size: usize) {
+    let at = records.len();
+    records.extend_from_within(start..end);
+    records[at..]
+        .chunks_exact_mut(size)
+        .for_each(|record| record[0] = CoverageViewId::Passed as u8);
 }
 
 fn sections_from<V, E>(
     views: impl IntoIterator<Item = Result<(CoverageViewId, V), E>>,
     passed_is_whole: bool,
+    whole_view: Option<&crate::coverage_report::CoverageView>,
 ) -> Result<Vec<QueryIndexSection>, E>
 where
     V: std::borrow::Borrow<crate::coverage_report::CoverageView>,
@@ -2140,6 +2198,11 @@ where
             )*
         }};
     }
+    // Where the whole view's own records lie, when the whole view is at hand:
+    // a passed view that differs from it only by tests that recorded nothing
+    // (skipped ones, most often) has those records copied rather than built
+    // again (`copies_whole`).
+    let mut blocks: Option<WholeBlocks> = None;
     for item in views {
         let (id, owned) = item?;
         // Written with the whole view's, below.
@@ -2148,6 +2211,11 @@ where
         }
         let starts = (id == CoverageViewId::All).then_some(per_view!(lengths));
         let view = owned.borrow();
+        let copied = blocks.as_ref().filter(|_| {
+            id == CoverageViewId::Passed
+                && whole_view.is_some_and(|whole| copies_whole(whole, view))
+        });
+        let mut recorded = WholeBlocks::default();
         check_view(view)?;
         let scope = scope_projection(view.scope.as_ref(), &view.model.language, &view.model.name)?;
         if id == CoverageViewId::All {
@@ -2189,239 +2257,331 @@ where
         for limitation in &view.limitations {
             limitations.extend_from_slice(&limitation_record(id, limitation, &mut strings));
         }
-        for line in &view.lines {
-            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
-            confidence_records.extend_from_slice(&confidence_record(
-                &line.confidence,
-                &mut strings,
-                &mut relations,
-            )?);
-            line_records.extend_from_slice(&line_record(
-                id,
-                line,
-                confidence_index,
-                &mut strings,
-                &mut relations,
-            ));
-        }
-        for test in &view.tests {
-            test_summaries.extend_from_slice(&test_summary_record(
-                id,
-                test,
-                &mut strings,
-                &mut relations,
-            )?);
-            // Interned by its summary: each record of the test names it by
-            // that number rather than hashing the long id again.
-            let test_string = strings.intern(&test.id);
-            for retry in &test.retries {
-                test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
-            }
-            for attempt in &test.attempts {
-                test_attempts.extend_from_slice(&test_attempt_record(
-                    id,
-                    test_string,
-                    attempt,
-                    &mut strings,
-                ));
-            }
-            for line in &test.lines {
-                test_lines.extend_from_slice(&test_line_record(
-                    id,
-                    test_string,
-                    line,
-                    &mut strings,
-                ));
-            }
-            for hit in &test.hits {
-                test_hits.extend_from_slice(&test_hit_record(id, test_string, hit, &mut strings));
-            }
-            for decision in &test.decisions {
-                let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                for vector in &decision.vectors {
-                    test_vectors.extend_from_slice(&test_vector_record(vector, &mut vector_values));
-                }
-                test_decisions.extend_from_slice(&test_decision_record(
-                    id,
-                    test_string,
-                    &decision.id,
-                    vectors_offset,
-                    decision.vectors.len(),
-                    &mut strings,
-                ));
-            }
-        }
-        for phase in &view.phases {
-            phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings));
-        }
-        for decision in &view.decisions {
-            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
-            confidence_records.extend_from_slice(&confidence_record(
-                &decision.confidence,
-                &mut strings,
-                &mut relations,
-            )?);
-            let observations_offset =
-                decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE;
-            for observation in &decision.vector_observations {
-                let observation_confidence = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+        let at = line_records.len();
+        if let Some(copied) = copied {
+            copy_as_passed(&mut line_records, copied.lines, LINE_RECORD_SIZE);
+        } else {
+            for line in &view.lines {
+                let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
                 confidence_records.extend_from_slice(&confidence_record(
-                    &observation.confidence,
+                    &line.confidence,
                     &mut strings,
                     &mut relations,
                 )?);
-                let vector_index = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                test_vectors.extend_from_slice(&test_vector_record(
-                    &observation.vector,
-                    &mut vector_values,
-                ));
-                decision_vector_observations.extend_from_slice(
-                    &decision_vector_observation_record(
-                        observation,
-                        observation_confidence,
-                        vector_index,
-                        &mut strings,
-                        &mut relations,
-                    ),
-                );
-            }
-            let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
-            // A decision has conditions.
-            decision.conditions.iter().for_each(|condition| {
-                let witness_vectors = if let Some(witness) = &condition.witness {
-                    let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                    test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[0], &mut vector_values));
-                    let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
-                    test_vectors
-                        .extend_from_slice(&test_vector_record(&witness[1], &mut vector_values));
-                    Some((first, second))
-                } else {
-                    None
-                };
-                decision_conditions.extend_from_slice(&decision_condition_record(
-                    condition,
-                    witness_vectors,
+                line_records.extend_from_slice(&line_record(
+                    id,
+                    line,
+                    confidence_index,
                     &mut strings,
                     &mut relations,
                 ));
-            });
-            decision_details.extend_from_slice(&decision_detail_record(
-                DecisionDetailInput {
-                    view_id: id,
-                    decision,
-                    confidence_index,
-                    observations: (observations_offset, decision.vector_observations.len()),
-                    conditions: (conditions_offset, decision.conditions.len()),
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            decision_metadata.extend_from_slice(&decision_metadata_record(
-                id,
-                decision,
-                &mut strings,
-                &mut relations,
-            ));
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: 0,
-                    id: &decision.meta.id,
-                    file: &decision.meta.file,
-                    line: decision.meta.line,
-                    column: decision.meta.column,
-                    covered: decision.covered,
-                    conditions: Some((
-                        decision
-                            .conditions
-                            .iter()
-                            .filter(|condition| condition.covered)
-                            .count(),
-                        decision.conditions.len(),
-                    )),
-                    tests: &decision.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
+            }
         }
-        for branch in &view.branches {
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: 1,
-                    id: &branch.meta.id,
-                    file: &branch.meta.file,
-                    line: branch.meta.line,
-                    column: branch.meta.column,
-                    covered: branch.covered,
-                    conditions: None,
-                    tests: &[],
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            for alternative in &branch.alternatives {
-                hit_metadata.extend_from_slice(&hit_metadata_record(
-                    HitMetadataInput {
+        recorded.lines = (at, line_records.len());
+        if let Some(copied) = copied {
+            for test in &view.tests {
+                let ranges = &copied.tests[test.id.as_str()];
+                copy_as_passed(&mut test_summaries, ranges[0], TEST_SUMMARY_RECORD_SIZE);
+                copy_as_passed(&mut test_retries, ranges[1], TEST_RETRY_RECORD_SIZE);
+                copy_as_passed(&mut test_attempts, ranges[2], TEST_ATTEMPT_RECORD_SIZE);
+                copy_as_passed(&mut test_lines, ranges[3], TEST_LINE_RECORD_SIZE);
+                copy_as_passed(&mut test_hits, ranges[4], TEST_HIT_RECORD_SIZE);
+                copy_as_passed(&mut test_decisions, ranges[5], TEST_DECISION_RECORD_SIZE);
+            }
+        } else {
+            for test in &view.tests {
+                let at = [
+                    test_summaries.len(),
+                    test_retries.len(),
+                    test_attempts.len(),
+                    test_lines.len(),
+                    test_hits.len(),
+                    test_decisions.len(),
+                ];
+                test_summaries.extend_from_slice(&test_summary_record(
+                    id,
+                    test,
+                    &mut strings,
+                    &mut relations,
+                )?);
+                // Interned by its summary: each record of the test names it by
+                // that number rather than hashing the long id again.
+                let test_string = strings.intern(&test.id);
+                for retry in &test.retries {
+                    test_retries.extend_from_slice(&test_retry_record(id, test_string, *retry));
+                }
+                for attempt in &test.attempts {
+                    test_attempts.extend_from_slice(&test_attempt_record(
+                        id,
+                        test_string,
+                        attempt,
+                        &mut strings,
+                    ));
+                }
+                for line in &test.lines {
+                    test_lines.extend_from_slice(&test_line_record(
+                        id,
+                        test_string,
+                        line,
+                        &mut strings,
+                    ));
+                }
+                for hit in &test.hits {
+                    test_hits.extend_from_slice(&test_hit_record(
+                        id,
+                        test_string,
+                        hit,
+                        &mut strings,
+                    ));
+                }
+                for decision in &test.decisions {
+                    let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    for vector in &decision.vectors {
+                        test_vectors
+                            .extend_from_slice(&test_vector_record(vector, &mut vector_values));
+                    }
+                    test_decisions.extend_from_slice(&test_decision_record(
+                        id,
+                        test_string,
+                        &decision.id,
+                        vectors_offset,
+                        decision.vectors.len(),
+                        &mut strings,
+                    ));
+                }
+                if whole_view.is_some() {
+                    let end = [
+                        test_summaries.len(),
+                        test_retries.len(),
+                        test_attempts.len(),
+                        test_lines.len(),
+                        test_hits.len(),
+                        test_decisions.len(),
+                    ];
+                    recorded.tests.insert(
+                        test.id.clone(),
+                        std::array::from_fn(|at_| (at[at_], end[at_])),
+                    );
+                }
+            }
+        }
+        let at = phase_summaries.len();
+        if let Some(copied) = copied {
+            copy_as_passed(
+                &mut phase_summaries,
+                copied.phases,
+                PHASE_SUMMARY_RECORD_SIZE,
+            );
+        } else {
+            for phase in &view.phases {
+                phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings));
+            }
+        }
+        recorded.phases = (at, phase_summaries.len());
+        let at = [
+            decision_details.len(),
+            decision_metadata.len(),
+            anchors.len(),
+            hit_metadata.len(),
+        ];
+        if let Some(copied) = copied {
+            copy_as_passed(
+                &mut decision_details,
+                copied.obligations[0],
+                DECISION_DETAIL_RECORD_SIZE,
+            );
+            copy_as_passed(
+                &mut decision_metadata,
+                copied.obligations[1],
+                DECISION_METADATA_RECORD_SIZE,
+            );
+            copy_as_passed(&mut anchors, copied.obligations[2], ANCHOR_RECORD_SIZE);
+            copy_as_passed(
+                &mut hit_metadata,
+                copied.obligations[3],
+                HIT_METADATA_RECORD_SIZE,
+            );
+        } else {
+            for decision in &view.decisions {
+                let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+                confidence_records.extend_from_slice(&confidence_record(
+                    &decision.confidence,
+                    &mut strings,
+                    &mut relations,
+                )?);
+                let observations_offset =
+                    decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE;
+                for observation in &decision.vector_observations {
+                    let observation_confidence = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+                    confidence_records.extend_from_slice(&confidence_record(
+                        &observation.confidence,
+                        &mut strings,
+                        &mut relations,
+                    )?);
+                    let vector_index = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    test_vectors.extend_from_slice(&test_vector_record(
+                        &observation.vector,
+                        &mut vector_values,
+                    ));
+                    decision_vector_observations.extend_from_slice(
+                        &decision_vector_observation_record(
+                            observation,
+                            observation_confidence,
+                            vector_index,
+                            &mut strings,
+                            &mut relations,
+                        ),
+                    );
+                }
+                let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
+                // A decision has conditions.
+                decision.conditions.iter().for_each(|condition| {
+                    let witness_vectors = if let Some(witness) = &condition.witness {
+                        let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                        test_vectors.extend_from_slice(&test_vector_record(
+                            &witness[0],
+                            &mut vector_values,
+                        ));
+                        let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                        test_vectors.extend_from_slice(&test_vector_record(
+                            &witness[1],
+                            &mut vector_values,
+                        ));
+                        Some((first, second))
+                    } else {
+                        None
+                    };
+                    decision_conditions.extend_from_slice(&decision_condition_record(
+                        condition,
+                        witness_vectors,
+                        &mut strings,
+                        &mut relations,
+                    ));
+                });
+                decision_details.extend_from_slice(&decision_detail_record(
+                    DecisionDetailInput {
                         view_id: id,
-                        kind: 2,
-                        id: &alternative.id,
+                        decision,
+                        confidence_index,
+                        observations: (observations_offset, decision.vector_observations.len()),
+                        conditions: (conditions_offset, decision.conditions.len()),
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                decision_metadata.extend_from_slice(&decision_metadata_record(
+                    id,
+                    decision,
+                    &mut strings,
+                    &mut relations,
+                ));
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: 0,
+                        id: &decision.meta.id,
+                        file: &decision.meta.file,
+                        line: decision.meta.line,
+                        column: decision.meta.column,
+                        covered: decision.covered,
+                        conditions: Some((
+                            decision
+                                .conditions
+                                .iter()
+                                .filter(|condition| condition.covered)
+                                .count(),
+                            decision.conditions.len(),
+                        )),
+                        tests: &decision.tests,
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+            }
+            for branch in &view.branches {
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: 1,
+                        id: &branch.meta.id,
                         file: &branch.meta.file,
                         line: branch.meta.line,
                         column: branch.meta.column,
-                        branch_kind: Some(&branch.meta.kind),
-                        label: Some(&branch.meta.id),
-                        alternative: Some(&alternative.label),
-                        source: &branch.meta.source,
-                        tests: &alternative.tests,
+                        covered: branch.covered,
+                        conditions: None,
+                        tests: &[],
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                for alternative in &branch.alternatives {
+                    hit_metadata.extend_from_slice(&hit_metadata_record(
+                        HitMetadataInput {
+                            view_id: id,
+                            kind: 2,
+                            id: &alternative.id,
+                            file: &branch.meta.file,
+                            line: branch.meta.line,
+                            column: branch.meta.column,
+                            branch_kind: Some(&branch.meta.kind),
+                            label: Some(&branch.meta.id),
+                            alternative: Some(&alternative.label),
+                            source: &branch.meta.source,
+                            tests: &alternative.tests,
+                        },
+                        &mut strings,
+                        &mut relations,
+                    ));
+                }
+            }
+            for point in &view.points {
+                anchors.extend_from_slice(&anchor_record(
+                    AnchorInput {
+                        view_id: id,
+                        kind: match point.meta.kind {
+                            crate::coverage_analysis::PointKind::Statement => 2,
+                            crate::coverage_analysis::PointKind::Function => 3,
+                        },
+                        id: &point.meta.id,
+                        file: &point.meta.file,
+                        line: point.meta.line,
+                        column: point.meta.column,
+                        covered: point.covered,
+                        conditions: None,
+                        tests: &point.tests,
+                    },
+                    &mut strings,
+                    &mut relations,
+                ));
+                hit_metadata.extend_from_slice(&hit_metadata_record(
+                    HitMetadataInput {
+                        view_id: id,
+                        kind: match point.meta.kind {
+                            crate::coverage_analysis::PointKind::Statement => 0,
+                            crate::coverage_analysis::PointKind::Function => 1,
+                        },
+                        id: &point.meta.id,
+                        file: &point.meta.file,
+                        line: point.meta.line,
+                        column: point.meta.column,
+                        branch_kind: None,
+                        label: point.meta.label.as_deref(),
+                        alternative: None,
+                        source: &point.meta.source,
+                        tests: &point.tests,
                     },
                     &mut strings,
                     &mut relations,
                 ));
             }
         }
-        for point in &view.points {
-            anchors.extend_from_slice(&anchor_record(
-                AnchorInput {
-                    view_id: id,
-                    kind: match point.meta.kind {
-                        crate::coverage_analysis::PointKind::Statement => 2,
-                        crate::coverage_analysis::PointKind::Function => 3,
-                    },
-                    id: &point.meta.id,
-                    file: &point.meta.file,
-                    line: point.meta.line,
-                    column: point.meta.column,
-                    covered: point.covered,
-                    conditions: None,
-                    tests: &point.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
-            hit_metadata.extend_from_slice(&hit_metadata_record(
-                HitMetadataInput {
-                    view_id: id,
-                    kind: match point.meta.kind {
-                        crate::coverage_analysis::PointKind::Statement => 0,
-                        crate::coverage_analysis::PointKind::Function => 1,
-                    },
-                    id: &point.meta.id,
-                    file: &point.meta.file,
-                    line: point.meta.line,
-                    column: point.meta.column,
-                    branch_kind: None,
-                    label: point.meta.label.as_deref(),
-                    alternative: None,
-                    source: &point.meta.source,
-                    tests: &point.tests,
-                },
-                &mut strings,
-                &mut relations,
-            ));
-        }
+        let end = [
+            decision_details.len(),
+            decision_metadata.len(),
+            anchors.len(),
+            hit_metadata.len(),
+        ];
+        recorded.obligations = std::array::from_fn(|at_| (at[at_], end[at_]));
         let unnamed = || CoverageIndexError::InvalidRecord("dimension name");
         for value in &view.coverage_by_kind {
             let name = value.kind.as_deref().ok_or_else(unnamed)?;
@@ -2520,6 +2680,9 @@ where
                     &mut strings,
                 ));
             }
+        }
+        if id == CoverageViewId::All && whole_view.is_some() {
+            blocks = Some(recorded);
         }
         if let Some(starts) = starts
             && passed_is_whole
@@ -2755,6 +2918,10 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_DECISION_CONDITIONS, DECISION_CONDITION_RECORD_SIZE),
             (SECTION_LIMITATIONS, LIMITATION_RECORD_SIZE),
             (SECTION_COVERAGE_MODEL, COVERAGE_MODEL_RECORD_SIZE),
+            (SECTION_MUTATION, MUTATION_RECORD_SIZE),
+            (SECTION_MUTATION_FILES, MUTATION_FILE_RECORD_SIZE),
+            (SECTION_MUTANTS, MUTANT_RECORD_SIZE),
+            (SECTION_MUTANT_TEXT, 1),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -4242,6 +4409,458 @@ fn percentage(covered: usize, total: usize) -> f64 {
     }
 }
 
+/// How far a run's tests got toward killing a mutant, by weak mutation
+/// (`docs/design/mutants.md`). Strong statuses are reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MutantStatus {
+    NotReached,
+    NotInfected,
+    Infected,
+    Unknown,
+    /// No input can make it differ, by a static rule: decided before reach
+    /// and infection, and left out of both weak scores.
+    Equivalent,
+}
+
+impl MutantStatus {
+    pub const ALL: [Self; 5] = [
+        Self::NotReached,
+        Self::NotInfected,
+        Self::Infected,
+        Self::Unknown,
+        Self::Equivalent,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotReached => "not-reached",
+            Self::NotInfected => "not-infected",
+            Self::Infected => "infected",
+            Self::Unknown => "unknown",
+            Self::Equivalent => "equivalent",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|status| status.name() == name)
+    }
+
+    fn code(self) -> u8 {
+        self as u8
+    }
+
+    fn from_code(code: u8) -> Result<Self, CoverageIndexError> {
+        Self::ALL
+            .get(usize::from(code))
+            .copied()
+            .ok_or(CoverageIndexError::InvalidRecord("mutant status"))
+    }
+}
+
+/// Why the input that would make a mutant differ is practically out of a
+/// test's reach. A hint: it changes no status or score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Untestable {
+    /// A boundary comparison of what reads the clock: equal only on one
+    /// exact millisecond.
+    Clock,
+    /// A boundary comparison of what reads `Math.random()`.
+    Random,
+}
+
+impl Untestable {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clock => "clock",
+            Self::Random => "random",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Clock, Self::Random]
+            .into_iter()
+            .find(|kind| kind.name() == name)
+    }
+
+    fn code(kind: Option<Self>) -> u8 {
+        match kind {
+            None => 0,
+            Some(Self::Clock) => 1,
+            Some(Self::Random) => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Option<Self>, CoverageIndexError> {
+        match code {
+            0 => Ok(None),
+            1 => Ok(Some(Self::Clock)),
+            2 => Ok(Some(Self::Random)),
+            _ => Err(CoverageIndexError::InvalidRecord("mutant untestable")),
+        }
+    }
+}
+
+/// One mutant and its weak-mutation verdict, as the index keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMutant {
+    pub file: String,
+    /// 1-based line and 1-based UTF-16 column, as StrykerJS reports them.
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub mutator: String,
+    /// What names the mutant within its span and mutator (`<=`, `false`).
+    pub descriptor: String,
+    /// The mutated code on one line, shortened.
+    pub original: String,
+    /// The code with the mutant in place, on one line, shortened; the
+    /// descriptor where it is not simply written.
+    pub replacement: String,
+    /// The part of `original` the mutant changes and what replaces it,
+    /// without the start and end they share, where it is one part.
+    pub changed: Option<(String, String)>,
+    pub status: MutantStatus,
+    /// An infection that is only that the code around it ran.
+    pub proxy: bool,
+    /// A stable reason code, and the sentence that says why. An equivalent
+    /// mutant's code is its rule's.
+    pub code: String,
+    pub reason: String,
+    /// Why the input that would make it differ is out of a test's reach.
+    pub untestable: Option<(Untestable, String)>,
+}
+
+impl IndexedMutant {
+    /// `file:startLine:startCol-endLine:endCol:Mutator:descriptor`.
+    pub fn id(&self) -> String {
+        format!(
+            "{}:{}:{}-{}:{}:{}:{}",
+            self.file,
+            self.start.0,
+            self.start.1,
+            self.end.0,
+            self.end.1,
+            self.mutator,
+            self.descriptor
+        )
+    }
+}
+
+/// Each mutant of a run with its verdict, from the tests of one view.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MutationResults {
+    /// `stryker-js@10.1.1`.
+    pub mutant_set: String,
+    /// Grouped by file, in order of position within each.
+    pub mutants: Vec<IndexedMutant>,
+}
+
+/// A file's mutants by status.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MutantCounts {
+    pub not_reached: usize,
+    pub not_infected: usize,
+    pub infected: usize,
+    pub unknown: usize,
+    pub equivalent: usize,
+}
+
+impl MutantCounts {
+    pub fn add(&mut self, status: MutantStatus) {
+        *self.slot(status) += 1;
+    }
+
+    fn slot(&mut self, status: MutantStatus) -> &mut usize {
+        match status {
+            MutantStatus::NotReached => &mut self.not_reached,
+            MutantStatus::NotInfected => &mut self.not_infected,
+            MutantStatus::Infected => &mut self.infected,
+            MutantStatus::Unknown => &mut self.unknown,
+            MutantStatus::Equivalent => &mut self.equivalent,
+        }
+    }
+
+    pub fn of(&self, status: MutantStatus) -> usize {
+        match status {
+            MutantStatus::NotReached => self.not_reached,
+            MutantStatus::NotInfected => self.not_infected,
+            MutantStatus::Infected => self.infected,
+            MutantStatus::Unknown => self.unknown,
+            MutantStatus::Equivalent => self.equivalent,
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.not_reached + self.not_infected + self.infected + self.unknown + self.equivalent
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        MutantStatus::ALL
+            .into_iter()
+            .for_each(|status| *self.slot(status) += other.of(status));
+    }
+}
+
+/// One file of the run's mutants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedFileMutation {
+    pub file: String,
+    pub counts: MutantCounts,
+    /// Of its not-infected mutants, those at a clock or random boundary.
+    pub untestable: usize,
+    /// The file's mutants are records `first..first + count`.
+    first: u64,
+    count: u64,
+}
+
+/// What the index holds of a run's mutants: `None` when the run did not
+/// list them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMutation {
+    pub mutant_set: String,
+    pub files: Vec<IndexedFileMutation>,
+}
+
+/// Text the mutation sections refer to, each distinct string once.
+#[derive(Default)]
+struct MutantText {
+    bytes: Vec<u8>,
+    known: HashMap<String, (u32, u32)>,
+}
+
+impl MutantText {
+    /// Offsets and lengths are stored in 32 bits, as `usize_u32`'s are: no
+    /// run lists four gigabytes of mutant text.
+    fn put(&mut self, record: &mut [u8], offset: usize, text: &str) {
+        let (at, length) = match self.known.get(text) {
+            Some(known) => *known,
+            None => {
+                let at = usize_u32(self.bytes.len());
+                let length = usize_u32(text.len());
+                self.bytes.extend_from_slice(text.as_bytes());
+                self.known.insert(text.to_owned(), (at, length));
+                (at, length)
+            }
+        };
+        put_u32(record, offset, at);
+        put_u32(record, offset + 4, length);
+    }
+}
+
+/// The sections of a run's mutants: present and empty for a run that did
+/// not list them, so every index has them.
+pub(crate) fn mutation_sections(
+    results: Option<&MutationResults>,
+) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
+    let mut text = MutantText::default();
+    let mut run = [0_u8; MUTATION_RECORD_SIZE];
+    let mut files = Vec::new();
+    let mut mutants = Vec::new();
+    if let Some(results) = results {
+        run[0] = 1;
+        text.put(&mut run, 8, &results.mutant_set);
+        let mut file_numbers = HashMap::<&str, usize>::new();
+        let mut file_records = Vec::<([u8; MUTATION_FILE_RECORD_SIZE], MutantCounts, usize)>::new();
+        for (index, mutant) in results.mutants.iter().enumerate() {
+            let number = match file_numbers.get(mutant.file.as_str()) {
+                Some(number) if *number + 1 == file_records.len() => *number,
+                Some(_) => {
+                    return Err(CoverageIndexError::InvalidRecord(
+                        "a file's mutants are not together",
+                    ));
+                }
+                None => {
+                    let mut record = [0_u8; MUTATION_FILE_RECORD_SIZE];
+                    text.put(&mut record, 0, &mutant.file);
+                    put_u32(&mut record, 24, usize_u32(index));
+                    file_numbers.insert(&mutant.file, file_records.len());
+                    file_records.push((record, MutantCounts::default(), 0));
+                    file_records.len() - 1
+                }
+            };
+            file_records[number].1.add(mutant.status);
+            if mutant.status == MutantStatus::NotInfected && mutant.untestable.is_some() {
+                file_records[number].2 += 1;
+            }
+            let mut record = [0_u8; MUTANT_RECORD_SIZE];
+            record[0] = mutant.status.code();
+            record[1] = u8::from(mutant.proxy);
+            record[2] = Untestable::code(mutant.untestable.as_ref().map(|(kind, _)| *kind));
+            record[3] = u8::from(mutant.changed.is_some());
+            put_u32(&mut record, 4, usize_u32(number));
+            put_u32(&mut record, 8, mutant.start.0);
+            put_u32(&mut record, 12, mutant.start.1);
+            put_u32(&mut record, 16, mutant.end.0);
+            put_u32(&mut record, 20, mutant.end.1);
+            for (offset, value) in [
+                (24, &mutant.mutator),
+                (32, &mutant.descriptor),
+                (40, &mutant.original),
+                (48, &mutant.replacement),
+                (56, &mutant.code),
+                (64, &mutant.reason),
+            ] {
+                text.put(&mut record, offset, value);
+            }
+            if let Some((_, reason)) = &mutant.untestable {
+                text.put(&mut record, 72, reason);
+            }
+            if let Some((from, to)) = &mutant.changed {
+                text.put(&mut record, 80, from);
+                text.put(&mut record, 88, to);
+            }
+            mutants.extend_from_slice(&record);
+        }
+        for (mut record, counts, untestable) in file_records {
+            put_u32(&mut record, 8, usize_u32(counts.not_reached));
+            put_u32(&mut record, 12, usize_u32(counts.not_infected));
+            put_u32(&mut record, 16, usize_u32(counts.infected));
+            put_u32(&mut record, 20, usize_u32(counts.unknown));
+            put_u32(&mut record, 28, usize_u32(counts.total()));
+            put_u32(&mut record, 32, usize_u32(counts.equivalent));
+            put_u32(&mut record, 36, usize_u32(untestable));
+            files.extend_from_slice(&record);
+        }
+    }
+    Ok(vec![
+        QueryIndexSection {
+            kind: SECTION_MUTATION,
+            record_size: MUTATION_RECORD_SIZE as u32,
+            count: 1,
+            bytes: run.to_vec(),
+        },
+        QueryIndexSection {
+            kind: SECTION_MUTATION_FILES,
+            record_size: MUTATION_FILE_RECORD_SIZE as u32,
+            count: usize_u64(files.len() / MUTATION_FILE_RECORD_SIZE),
+            bytes: files,
+        },
+        QueryIndexSection {
+            kind: SECTION_MUTANTS,
+            record_size: MUTANT_RECORD_SIZE as u32,
+            count: usize_u64(mutants.len() / MUTANT_RECORD_SIZE),
+            bytes: mutants,
+        },
+        QueryIndexSection {
+            kind: SECTION_MUTANT_TEXT,
+            record_size: 1,
+            count: usize_u64(text.bytes.len()),
+            bytes: text.bytes,
+        },
+    ])
+}
+
+impl CoverageIndex<'_> {
+    fn mutant_text(&self, record: &[u8], offset: usize) -> Result<String, CoverageIndexError> {
+        let value = self.index.bytes(
+            SECTION_MUTANT_TEXT,
+            u64::from(get_u32(record, offset)),
+            u64::from(get_u32(record, offset + 4)),
+        )?;
+        std::str::from_utf8(value)
+            .map(str::to_owned)
+            .map_err(|_| CoverageIndexError::InvalidUtf8)
+    }
+
+    /// The run's mutants file by file, or `None` when the run did not list
+    /// them.
+    #[track_caller]
+    pub fn mutation(&self) -> Result<Option<IndexedMutation>, CoverageIndexError> {
+        self.readable("mutation")?;
+        if self.section(SECTION_MUTATION).count != 1 {
+            return Err(CoverageIndexError::InvalidRecord("mutation record count"));
+        }
+        let run = self.index.record(SECTION_MUTATION, 0)?;
+        if run[1..8].iter().any(|byte| *byte != 0) {
+            return Err(CoverageIndexError::InvalidRecord("mutation reserved bytes"));
+        }
+        match run[0] {
+            0 => return Ok(None),
+            1 => {}
+            _ => return Err(CoverageIndexError::InvalidRecord("mutation presence")),
+        }
+        let mutant_set = self.mutant_text(run, 8)?;
+        let mutants = self.section(SECTION_MUTANTS).count;
+        let mut files = Vec::new();
+        let mut next = 0;
+        for index in 0..self.section(SECTION_MUTATION_FILES).count {
+            let record = self.index.record(SECTION_MUTATION_FILES, index)?;
+            let counts = MutantCounts {
+                not_reached: get_u32(record, 8) as usize,
+                not_infected: get_u32(record, 12) as usize,
+                infected: get_u32(record, 16) as usize,
+                unknown: get_u32(record, 20) as usize,
+                equivalent: get_u32(record, 32) as usize,
+            };
+            let untestable = get_u32(record, 36) as usize;
+            let first = u64::from(get_u32(record, 24));
+            let count = u64::from(get_u32(record, 28));
+            if first != next
+                || count != counts.total() as u64
+                || untestable > counts.not_infected
+                || first + count > mutants
+            {
+                return Err(CoverageIndexError::InvalidRecord("mutation file range"));
+            }
+            next = first + count;
+            files.push(IndexedFileMutation {
+                file: self.mutant_text(record, 0)?,
+                counts,
+                untestable,
+                first,
+                count,
+            });
+        }
+        if next != mutants {
+            return Err(CoverageIndexError::InvalidRecord("mutation file range"));
+        }
+        Ok(Some(IndexedMutation { mutant_set, files }))
+    }
+
+    /// The mutants of one file of [`Self::mutation`], in order of position.
+    #[track_caller]
+    pub fn mutants_of(
+        &self,
+        file: &IndexedFileMutation,
+    ) -> Result<Vec<IndexedMutant>, CoverageIndexError> {
+        self.readable("mutants_of")?;
+        let mut mutants = Vec::with_capacity(file.count as usize);
+        for index in file.first..file.first + file.count {
+            let record = self.index.record(SECTION_MUTANTS, index)?;
+            if record[96..].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("mutant reserved bytes"));
+            }
+            let untestable = match Untestable::from_code(record[2])? {
+                Some(kind) => Some((kind, self.mutant_text(record, 72)?)),
+                None => None,
+            };
+            let changed = match record[3] {
+                0 => None,
+                1 => Some((self.mutant_text(record, 80)?, self.mutant_text(record, 88)?)),
+                _ => return Err(CoverageIndexError::InvalidRecord("mutant changed")),
+            };
+            mutants.push(IndexedMutant {
+                file: file.file.clone(),
+                start: (get_u32(record, 8), get_u32(record, 12)),
+                end: (get_u32(record, 16), get_u32(record, 20)),
+                mutator: self.mutant_text(record, 24)?,
+                descriptor: self.mutant_text(record, 32)?,
+                original: self.mutant_text(record, 40)?,
+                replacement: self.mutant_text(record, 48)?,
+                changed,
+                status: MutantStatus::from_code(record[0])?,
+                proxy: bool_field(record[1])?,
+                code: self.mutant_text(record, 56)?,
+                reason: self.mutant_text(record, 64)?,
+                untestable,
+            });
+        }
+        Ok(mutants)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4291,6 +4910,327 @@ mod tests {
         report_with_phases(Vec::new())
     }
 
+    /// A run's mutants, as the index keeps them: each file's together, its
+    /// counts by status, every text field, and a run that listed none.
+    #[test]
+    fn mutation_sections_round_trip() {
+        let mutant = |file: &str, line: u32, status: MutantStatus, proxy: bool| IndexedMutant {
+            file: file.into(),
+            start: (line, 3),
+            end: (line, 9),
+            mutator: "EqualityOperator".into(),
+            descriptor: "<=".into(),
+            original: "a < b".into(),
+            replacement: "a <= b".into(),
+            changed: None,
+            status,
+            proxy,
+            code: format!("code-{line}"),
+            reason: format!("the reason on line {line} — ünïcode"),
+            untestable: None,
+        };
+        let mutants = vec![
+            IndexedMutant {
+                changed: Some(("<".into(), "<=".into())),
+                untestable: Some((Untestable::Clock, "reads the clock".into())),
+                ..mutant("src/a.js", 1, MutantStatus::NotInfected, false)
+            },
+            mutant("src/a.js", 2, MutantStatus::Infected, true),
+            IndexedMutant {
+                untestable: Some((Untestable::Random, "reads Math.random()".into())),
+                ..mutant("src/a.js", 3, MutantStatus::NotInfected, false)
+            },
+            mutant("src/b.js", 7, MutantStatus::NotReached, false),
+            mutant("src/b.js", 8, MutantStatus::Unknown, false),
+            IndexedMutant {
+                changed: Some((".slice(0, n)".into(), String::new())),
+                ..mutant("src/b.js", 9, MutantStatus::Infected, false)
+            },
+            mutant("src/b.js", 10, MutantStatus::Equivalent, false),
+        ];
+        let mut report = report();
+        report.mutation = Some(MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants: mutants.clone(),
+        });
+        let root = root();
+        let path = root.join("query-index.v1.bin");
+        write_query_index(
+            &coverage_index_sections(&report).unwrap(),
+            &identity(),
+            &path,
+        )
+        .unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        container.verify_all().unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let mutation = index.mutation().unwrap().unwrap();
+        assert_eq!(mutation.mutant_set, "stryker-js@10.1.1");
+        assert_eq!(
+            mutation
+                .files
+                .iter()
+                .map(|file| (file.file.as_str(), file.counts.clone(), file.untestable))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "src/a.js",
+                    MutantCounts {
+                        not_infected: 2,
+                        infected: 1,
+                        ..MutantCounts::default()
+                    },
+                    2
+                ),
+                (
+                    "src/b.js",
+                    MutantCounts {
+                        not_reached: 1,
+                        infected: 1,
+                        unknown: 1,
+                        equivalent: 1,
+                        ..MutantCounts::default()
+                    },
+                    0
+                ),
+            ]
+        );
+        let read = mutation
+            .files
+            .iter()
+            .flat_map(|file| index.mutants_of(file).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(read, mutants);
+        assert_eq!(read[0].id(), "src/a.js:1:3-1:9:EqualityOperator:<=");
+
+        // A file's mutants apart are refused, not misfiled.
+        let mut scattered = mutants.clone();
+        scattered.swap(2, 3);
+        assert!(matches!(
+            mutation_sections(Some(&MutationResults {
+                mutant_set: "stryker-js@10.1.1".into(),
+                mutants: scattered,
+            })),
+            Err(CoverageIndexError::InvalidRecord(_))
+        ));
+
+        // A run that listed none has the sections, empty.
+        let path = root.join("none.bin");
+        write_query_index(
+            &coverage_index_sections(&self::report()).unwrap(),
+            &identity(),
+            &path,
+        )
+        .unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        assert_eq!(index.mutation().unwrap(), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The test report with one mutant that names every text a mutant
+    /// record can: a changed span and a clock boundary.
+    fn mutated_report() -> CoverageReport {
+        let mut report = report();
+        report.mutation = Some(MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants: vec![IndexedMutant {
+                file: "src/a.js".into(),
+                start: (1, 3),
+                end: (1, 9),
+                mutator: "EqualityOperator".into(),
+                descriptor: "<=".into(),
+                original: "a < b".into(),
+                replacement: "a <= b".into(),
+                changed: Some(("<".into(), "<=".into())),
+                status: MutantStatus::NotInfected,
+                proxy: false,
+                code: "operands-never-equal".into(),
+                reason: "the operands were never equal".into(),
+                untestable: Some((Untestable::Clock, "reads the clock".into())),
+            }],
+        });
+        report
+    }
+
+    /// Whatever a run's mutation records say against each other, or of text
+    /// the index does not hold, is refused by the reader that reads it, by
+    /// what it is; so is a page of them damaged on disk.
+    #[test]
+    fn mutation_records_that_do_not_agree_are_refused_by_what_they_say() {
+        let report = mutated_report();
+        let read = |edit: &dyn Fn(&mut Vec<QueryIndexSection>)| {
+            let (_root, container) = index_of(&report, edit);
+            let index = CoverageIndex::new(&container).unwrap();
+            match index.mutation() {
+                Ok(Some(mutation)) => match index.mutants_of(&mutation.files[0]) {
+                    Ok(mutants) => format!("accepted {}", mutants.len()),
+                    Err(error) => format!("{error:?}"),
+                },
+                Ok(None) => "none".to_owned(),
+                Err(error) => format!("{error:?}"),
+            }
+        };
+        assert_eq!(read(&|_| {}), "accepted 1");
+        let set = |kind: u32, size: usize, at: usize, bytes: Vec<u8>| -> Edit {
+            Box::new(move |s: &mut Vec<QueryIndexSection>| patch(s, kind, 0, size, at, &bytes))
+        };
+        let file = |at: usize, value: u32| {
+            set(
+                SECTION_MUTATION_FILES,
+                MUTATION_FILE_RECORD_SIZE,
+                at,
+                value.to_le_bytes().to_vec(),
+            )
+        };
+        let mutant =
+            |at: usize, bytes: Vec<u8>| set(SECTION_MUTANTS, MUTANT_RECORD_SIZE, at, bytes);
+        // A text whose length runs past the text the index holds.
+        let past = |at: usize| mutant(at + 4, u32::MAX.to_le_bytes().to_vec());
+        let cases: Vec<(&str, Edit)> = vec![
+            // Text that is not UTF-8.
+            ("InvalidUtf8", set(SECTION_MUTANT_TEXT, 1, 0, vec![0xff])),
+            (
+                "mutation record count",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    duplicate(s, SECTION_MUTATION, 0, MUTATION_RECORD_SIZE);
+                }),
+            ),
+            // The file's first mutant, its count, its untestable mutants and
+            // its end, each in turn out of line.
+            ("mutation file range", file(24, 1)),
+            ("mutation file range", file(28, 2)),
+            ("mutation file range", file(36, 2)),
+            (
+                "mutation file range",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    for at in [16, 28] {
+                        let size = MUTATION_FILE_RECORD_SIZE;
+                        let value = u64_at(s, SECTION_MUTATION_FILES, 0, size, at) as u32;
+                        patch(
+                            s,
+                            SECTION_MUTATION_FILES,
+                            0,
+                            size,
+                            at,
+                            &(value + 1).to_le_bytes(),
+                        );
+                    }
+                }),
+            ),
+            // A mutant no file's range holds.
+            (
+                "mutation file range",
+                Box::new(|s: &mut Vec<QueryIndexSection>| {
+                    duplicate(s, SECTION_MUTANTS, 0, MUTANT_RECORD_SIZE);
+                }),
+            ),
+            ("OutOfBounds", file(4, u32::MAX)),
+            ("mutant reserved bytes", mutant(96, vec![1])),
+            ("mutant untestable", mutant(2, vec![3])),
+            ("mutant changed", mutant(3, vec![2])),
+            ("mutant status", mutant(0, vec![200])),
+            ("boolean", mutant(1, vec![2])),
+        ];
+        for (said, edit) in &cases {
+            let got = read(edit.as_ref());
+            assert!(got.contains(said), "{said}: {got}");
+        }
+        for text in [72, 80, 88, 24, 32, 40, 48, 56, 64] {
+            let got = read(past(text).as_ref());
+            assert!(got.contains("OutOfBounds"), "{text}: {got}");
+        }
+
+        // A page damaged on disk, of each mutation section in turn.
+        let (root, container) = index_of(&report, &|_| {});
+        let index = CoverageIndex::new(&container).unwrap();
+        let file = index.mutation().unwrap().unwrap().files.remove(0);
+        // A test fault fails each reader where it starts.
+        assert!(crate::fault::during("coverage-index-read", || index.mutation()).is_err());
+        assert!(crate::fault::during("coverage-index-read", || index.mutants_of(&file)).is_err());
+        // A file of no mutants reads none of them.
+        let none = IndexedFileMutation {
+            count: 0,
+            counts: MutantCounts::default(),
+            ..file.clone()
+        };
+        assert_eq!(index.mutants_of(&none).unwrap(), []);
+        let descriptors = [
+            SECTION_MUTATION,
+            SECTION_MUTATION_FILES,
+            SECTION_MUTANTS,
+            SECTION_MUTANT_TEXT,
+        ]
+        .map(|kind| container.descriptor(kind).unwrap());
+        drop(container);
+        let path = root.join("query-index.v1.bin");
+        let pristine = fs::read(&path).unwrap();
+        for descriptor in descriptors {
+            let mut bytes = pristine.clone();
+            bytes[descriptor.offset as usize] ^= 0xff;
+            fs::write(&path, &bytes).unwrap();
+            let container = QueryIndex::open(&path, &identity()).unwrap();
+            let index = CoverageIndex::new(&container).unwrap();
+            let refused = match descriptor.kind {
+                SECTION_MUTANTS => index.mutants_of(&file).map(|_| ()),
+                _ => index.mutation().map(|_| ()),
+            };
+            assert!(
+                matches!(
+                    refused,
+                    Err(CoverageIndexError::Container(
+                        QueryIndexError::CorruptPage { .. }
+                    ))
+                ),
+                "{}: {refused:?}",
+                descriptor.kind
+            );
+        }
+    }
+
+    /// A run that listed no mutant still has its mutant set, with no file;
+    /// one whose files' mutants are apart builds no index.
+    #[test]
+    fn a_run_of_no_mutants_keeps_its_set_and_one_of_scattered_mutants_builds_none() {
+        let mut report = report();
+        report.mutation = Some(MutationResults {
+            mutant_set: "stryker-js@10.1.1".into(),
+            mutants: Vec::new(),
+        });
+        let (_root, container) = index_of(&report, &|_| {});
+        let mutation = CoverageIndex::new(&container)
+            .unwrap()
+            .mutation()
+            .unwrap()
+            .unwrap();
+        assert_eq!(mutation.mutant_set, "stryker-js@10.1.1");
+        assert!(mutation.files.is_empty());
+
+        let mut scattered = mutated_report();
+        let mutation = scattered.mutation.as_mut().unwrap();
+        let first = mutation.mutants[0].clone();
+        mutation.mutants.push(IndexedMutant {
+            file: "src/b.js".into(),
+            ..first.clone()
+        });
+        mutation.mutants.push(first);
+        assert!(matches!(
+            coverage_index_sections(&scattered),
+            Err(CoverageIndexError::InvalidRecord(
+                "a file's mutants are not together"
+            ))
+        ));
+    }
+
+    #[test]
+    fn untestable_kinds_are_named_and_parsed_by_their_names() {
+        for kind in [Untestable::Clock, Untestable::Random] {
+            assert_eq!(Untestable::parse(kind.name()), Some(kind));
+        }
+        assert_eq!(Untestable::Random.name(), "random");
+        assert_eq!(Untestable::parse("other"), None);
+    }
+
     /// The test report, its test's attempt holding these phases.
     fn report_with_phases(phases: Vec<crate::coverage_report::CoveragePhase>) -> CoverageReport {
         let decision = DecisionMeta {
@@ -4331,6 +5271,7 @@ mod tests {
                 probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some("test".into()),
                 scope: None,
@@ -4362,7 +5303,7 @@ mod tests {
                     hits: vec!["point".into()],
                     events: Vec::new(),
                     logicals: Vec::new(),
-                    phase_id: None,
+                    ..Default::default()
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),
@@ -4656,6 +5597,7 @@ mod tests {
                 probe_tables: Default::default(),
             },
             raw_results: vec![RawTestResult {
+                duration_ms: None,
                 span: None,
                 test_id: Some("unstarted".into()),
                 scope: None,
@@ -5767,7 +6709,7 @@ mod tests {
             whole.filters.passed = whole.view.clone();
             whole.passed_is_whole = true;
             let copied = coverage_index_sections(&whole).unwrap();
-            let built = sections_from::<_, CoverageIndexError>(
+            let mut built = sections_from::<_, CoverageIndexError>(
                 [
                     (CoverageViewId::All, &whole.view),
                     (CoverageViewId::Passed, &whole.filters.passed),
@@ -5775,8 +6717,10 @@ mod tests {
                 ]
                 .map(Ok),
                 false,
+                None,
             )
             .unwrap();
+            built.extend(mutation_sections(whole.mutation.as_ref()).unwrap());
             let read = |sections: &[QueryIndexSection]| {
                 let root = root();
                 let path = root.join("query-index.v1.bin");
@@ -5789,6 +6733,77 @@ mod tests {
             assert!(copied_read.contains("Passed summary"), "{copied_read}");
             assert_eq!(copied_read, built_read);
         }
+    }
+
+    /// A passed view that lacks only a skipped test that recorded nothing
+    /// has the whole view's records copied, each test's by its own, and
+    /// every reader answers as it did when they were built again; a passed
+    /// view whose tests differ otherwise is built again.
+    #[test]
+    fn a_passed_view_without_a_silent_skipped_test_reads_as_when_built_again() {
+        for mut run in [report(), scoped_report(), phased_report()] {
+            run.filters.passed = run.view.clone();
+            let mut skipped = run.view.tests[0].clone();
+            skipped.id = "skipped-test".into();
+            skipped.name = "a skipped test".into();
+            skipped.outcome = "skipped".into();
+            skipped.hits.clear();
+            skipped.lines.clear();
+            skipped.decisions.clear();
+            run.view.tests.insert(0, skipped);
+            // Not every result passed: one was skipped.
+            run.passed_is_whole = false;
+            assert!(copies_whole(&run.view, &run.filters.passed));
+            let copied = coverage_index_sections(&run).unwrap();
+            let mut built = sections_from::<_, CoverageIndexError>(
+                [
+                    (CoverageViewId::All, &run.view),
+                    (CoverageViewId::Passed, &run.filters.passed),
+                    (CoverageViewId::Failed, &run.filters.failed),
+                ]
+                .map(Ok),
+                false,
+                None,
+            )
+            .unwrap();
+            built.extend(mutation_sections(run.mutation.as_ref()).unwrap());
+            let read = |sections: &[QueryIndexSection]| {
+                let root = root();
+                let path = root.join("query-index.v1.bin");
+                write_query_index(sections, &identity(), &path).unwrap();
+                let container = QueryIndex::open(&path, &identity()).unwrap();
+                everything_read(&CoverageIndex::new(&container).unwrap())
+            };
+            let (copied_read, built_read) = (read(&copied), read(&built));
+            assert!(copied_read.contains("Passed summary"), "{copied_read}");
+            assert_eq!(copied_read, built_read);
+            run.filters.passed.tests[0].hits.clear();
+            run.filters.passed.tests[0].hits.push("elsewhere".into());
+            assert!(!copies_whole(&run.view, &run.filters.passed));
+        }
+    }
+
+    /// A passed view whose decisions, branches or points differ from the
+    /// whole view's, its lines alike, is not the whole view's records.
+    #[test]
+    fn a_passed_view_whose_obligations_differ_is_not_copied() {
+        let whole = [report(), scoped_report(), phased_report()]
+            .into_iter()
+            .map(|run| run.view)
+            .find(|view| {
+                !view.decisions.is_empty() && !view.branches.is_empty() && !view.points.is_empty()
+            })
+            .expect("a fixture view with decisions, branches and points");
+        assert!(copies_whole(&whole, &whole.clone()));
+        let mut decisions = whole.clone();
+        decisions.decisions.pop();
+        assert!(!copies_whole(&whole, &decisions));
+        let mut branches = whole.clone();
+        branches.branches.pop();
+        assert!(!copies_whole(&whole, &branches));
+        let mut points = whole.clone();
+        points.points.pop();
+        assert!(!copies_whole(&whole, &points));
     }
 
     fn read_everything(index: &CoverageIndex<'_>) -> Result<usize, CoverageIndexError> {
@@ -5910,6 +6925,27 @@ mod tests {
             query_indexed(&index, None, &request("diff", "all", None), None),
             Err(E::MissingNewerRun)
         ));
+        // A page of no mutants is no page.
+        let no_page: IndexedQueryRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run", "filter": "all", "command": "mutants", "limit": 0,
+        }))
+        .unwrap();
+        assert!(matches!(
+            query_indexed(&index, None, &no_page, None),
+            Err(E::Query(
+                crate::coverage_query::QueryError::InvalidPagination
+            ))
+        ));
+        // A reply holds a mutants answer only where it answered a mutants
+        // query.
+        let mutants: IndexedQueryRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run", "filter": "all", "command": "mutants",
+        }))
+        .unwrap();
+        let answered = query_indexed(&index, None, &mutants, None).unwrap();
+        assert!(answered.data.mutants().is_some());
+        let summary = query_indexed(&index, None, &request("summary", "all", None), None).unwrap();
+        assert!(summary.data.mutants().is_none());
         assert!(matches!(
             crate::indexed_query::execute_indexed_query(
                 &index,

@@ -1,0 +1,51 @@
+{
+  "id": "run_d9640c52d7574b1b",
+  "startedAt": "2026-11-22T00:47:16.689Z",
+  "durationMs": 90.1,
+  "command": [
+    "python3",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/test_label.py"
+  ],
+  "testExitCode": 0,
+  "integrity": {
+    "schemaVersion": 2,
+    "instrumenterVersion": "supercov-python-python-probes-v1",
+    "git": {
+      "revision": "33fbafe0c4e832c2ca92e477d922085c27ffbed6",
+      "branch": "main",
+      "dirty": true
+    },
+    "fingerprint": {
+      "algorithm": "sha256",
+      "source": "3fb3b459c0616743d51450075e3579946a403656aed829a979f8ad94db2ec67c",
+      "tests": "b1e71d06068bbc5c7111bf9366dc29464c1c349d025f2b971ccbc1d341acc727",
+      "dependencies": "14bff2a5f80f439287b6961b035410bd48e99e21664e10f06a3fa041a44375ed",
+      "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumenter": "7adb4112044e66f799a3b2bf34713037f333600fbb4f82f35d27b6077dc8a4f9",
+      "execution": "8ce097181eda6e39523468854f6609f48df2cae72124501283f1029e3d784744",
+      "combined": "62b1de433f218dbf828e687eface74b45443312940866bd079454b5cc12b94f7",
+      "sourceFiles": 2,
+      "testFiles": 2
+    }
+  },
+  "rawEvidence": {
+    "schemaVersion": 3,
+    "format": "framed+gzip",
+    "file": "evidence.raw.gz",
+    "files": 6,
+    "uncompressedBytes": 13398,
+    "compressedBytes": 5410
+  },
+  "timings": {
+    "initializationMs": 0.1,
+    "workspacePreparationMs": 0,
+    "adapterSetupMs": 2.4,
+    "instrumentedBuildMs": 0,
+    "testCommandMs": 82.5,
+    "evidencePublicationMs": 5.1
+  },
+  "recordedBy": "4.27.0"
+}

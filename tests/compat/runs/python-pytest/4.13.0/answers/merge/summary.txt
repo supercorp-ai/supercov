@@ -1,0 +1,34 @@
+run run_39dbd2807161767c
+command: supercov merge run_aa4ecd2586449063 run_00f9a6bdd4bc5d69
+
+Coverage
+  Lines      71.43% (10/14)
+  Branches   58.33% (7/12)
+  MC/DC      40.00% (2/5)
+Assertions   not assessed — npx supercov runs run_39dbd2807161767c assertions assess
+
+By test kind
+  unit            3 test(s)  lines  71.43%  branches  58.33%  MC/DC  40.00%
+  no test                    lines   7.14%  branches   0.00%  MC/DC   0.00%
+  "no test" is code that ran only while no test was running: start-up and setup, module loading, work between tests. It counts in the run's total and in no test's.
+
+Measurement
+  Instrumentation  Complete for the measured command and coverage model
+  Attribution      Exact for 3 test(s)
+  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.
+
+Tests
+  Total       3
+  Passed      3
+
+Remaining
+  Files with uncovered code         1
+  Files with measurement limits     0
+
+Commands
+  npx supercov runs 'run_39dbd2807161767c' files
+  npx supercov runs 'run_39dbd2807161767c' gaps
+  npx supercov runs 'run_39dbd2807161767c' kinds
+  npx supercov runs 'run_39dbd2807161767c' runners
+  npx supercov runs 'run_39dbd2807161767c' scope
+  npx supercov runs run_39dbd2807161767c --help

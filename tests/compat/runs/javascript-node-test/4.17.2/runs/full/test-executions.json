@@ -1,0 +1,56 @@
+{
+  "tests": [
+    {
+      "test": {
+        "file": "test/label.test.js",
+        "name": "large totals"
+      },
+      "passed": true,
+      "files": {
+        "src/price.js": [
+          2
+        ]
+      },
+      "attribution": "exact"
+    },
+    {
+      "test": {
+        "file": "test/price.test.js",
+        "name": "coupons take five off"
+      },
+      "passed": true,
+      "files": {
+        "src/price.js": [
+          1
+        ]
+      },
+      "attribution": "exact"
+    },
+    {
+      "test": {
+        "file": "test/price.test.js",
+        "name": "members save on large orders"
+      },
+      "passed": true,
+      "files": {
+        "src/price.js": [
+          1
+        ]
+      },
+      "attribution": "exact"
+    }
+  ],
+  "probed": {
+    "src/price.js": [
+      1,
+      2,
+      3
+    ]
+  },
+  "covered": {
+    "src/price.js": [
+      1,
+      2
+    ]
+  }
+}

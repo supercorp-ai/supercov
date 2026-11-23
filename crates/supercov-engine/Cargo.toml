@@ -88,3 +88,7 @@ sha2 = { workspace = true, features = ["asm"] }
 [build-dependencies]
 cc.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+supercov-contracts = { workspace = true, features = ["store-shapes"] }

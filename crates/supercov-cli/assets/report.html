@@ -406,6 +406,7 @@
     .source-key-symbol.missed { color: var(--bad); }
     .source-key-symbol.asserted { color: var(--accent); }
     .source-key-symbol.declared { color: var(--faint); }
+    .source-key-symbol.mutant { color: var(--open-ink); }
     .code { overflow-x: auto; border: 1px solid var(--rule-soft); border-radius: 14px; color: var(--code-ink); background: var(--code-bg); box-shadow: var(--shadow); font: 12.5px/1.7 var(--mono); }
     .code-row, .code-line { display: grid; grid-template-columns: 56px 14px 18px minmax(max-content, 1fr); min-height: 21px; }
     .code-line { grid-template-columns: 56px 14px minmax(max-content, 1fr); }
@@ -413,6 +414,8 @@
     .code-row.open-gap .code-state { color: #ff8f2b; }
     .code-row.covered .code-state { color: #4cd07d; }
     .code-row.uncovered .code-state { color: #ff6b5c; }
+    .code-row.has-mutants .code-no::before { content: "\2731"; float: left; padding-left: 2px; color: #ff8f2b; font-weight: 800; }
+    .source-key-symbol.mutant-dealt { color: var(--good); }
     .code-row.continuation .code-state, .code-row.continuation .code-assert { opacity: .42; }
     .code-row.asserted-open { background: var(--code-assert); }
     .code-no, .code-gutter { color: var(--code-muted); text-align: right; padding: 0 10px; border-right: 1px solid var(--code-rule); user-select: none; font-size: 11.5px; }
@@ -706,6 +709,35 @@
     .overview-card .instrument-head, .file-quality-summary { align-items: flex-start; }
     .overview-card .instrument-head > .jmark { margin-top: 3px; }
     .overview-metrics { grid-template-columns: repeat(2, minmax(0, 350px)); gap: 40px; }
+    .overview-metrics.with-mutants { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .mutant-counts { display: grid; gap: 4px; margin: 16px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 12.5px; }
+    .mutant-counts strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mutant-counts .open strong { color: var(--open-ink); }
+    .mutation-card { gap: 18px; }
+    .mutation-card-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; justify-content: space-between; }
+    .mutation-card-head h2 { font: 600 15px/1.3 var(--sans); letter-spacing: -.015em; margin: 0; }
+    .mutation-card-head .small { color: var(--muted); }
+    .mutation-levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; }
+    .mutation-level h3 { font-size: 13px; margin: 0 0 10px; letter-spacing: -.01em; }
+    .mutation-level .figure-number { font-size: 34px; }
+    .mutation-level .figure-unit { font-size: 13px; }
+    .mutation-level > p { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+    .mutation-level code, .mutation-card code { font: 11.5px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .mutation-why { display: grid; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+    .mutation-why strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mutation-languages { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .mutation-languages th, .mutation-languages td { padding: 7px 8px; text-align: right; font-variant-numeric: tabular-nums; }
+    .mutation-languages th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+    .mutation-languages th:first-child, .mutation-languages td:first-child { text-align: left; }
+    .mutation-languages tbody tr:hover { background: var(--card-2); }
+    .survivor-file { margin-top: 12px; }
+    .survivor-file > .file-row-name { font-size: 12.5px; }
+    .survivor-row .evidence-name { font: 12px/1.5 var(--mono); }
+    .mutant-entry.alive { margin: 4px 0; padding: 8px 0 8px 10px; border-left: 3px solid var(--open-ink); }
+    .mutant-entry.alive > strong { color: var(--open-ink); }
+    .mutant-entry .mutant-level { margin-top: 4px; }
+    .mutant-entry .mutant-level b { color: var(--ink); font-weight: 550; }
+    .code-row.mutants-dealt .code-no::before { content: "\2731"; float: left; padding-left: 2px; color: var(--good); font-weight: 800; opacity: .7; }
     .quality-rating { text-transform: capitalize; font: 600 12px/1.25 var(--sans); padding: 5px 9px; letter-spacing: 0; }
     .figure .quality-rating { align-self: center; margin-left: 6px; }
     .quality-score-line { display: flex; gap: 12px; align-items: center; }
@@ -1069,6 +1101,12 @@
       return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-left" d="M8 3.1v5.6" fill="none" stroke-width="2.1" stroke-linecap="round"/><circle class="ic-core" cx="8" cy="12.2" r="1.15"/></svg>`, `${integer(open)} left to reach`);
     }
 
+    function markMutants(left, size) {
+      const dimension = size || 15;
+      if (!left) return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-reached" d="M3.2 8.6 6.4 11.8 12.8 4.6" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`, "no mutant left alive");
+      return svgMark(`<svg width="${dimension}" height="${dimension}" viewBox="0 0 16 16"><path class="ic-left" d="M8 3.1v5.6" fill="none" stroke-width="2.1" stroke-linecap="round"/><circle class="ic-core" cx="8" cy="12.2" r="1.15"/></svg>`, `${integer(left)} ${left === 1 ? "mutant" : "mutants"} left alive`);
+    }
+
     // ---------- the obligation pool ----------
     // Coverage is counted, never averaged. The engine's own definition of a missing
     // obligation is uncoveredLines + uncoveredStatements + uncoveredFunctions +
@@ -1407,6 +1445,156 @@
       return metric;
     }
 
+    // The run's mutants beside its coverage: the mutation score once a strong
+    // pass ran, the weak score before, and the mutants the tests leave alive.
+    function renderMutants(run) {
+      const data = mutantData(run); if (!data) return null;
+      const tally = data.tally, weak = tally.weak || {}, strong = tally.strong || {};
+      const metric = node("div", "overview-metric mutants-metric");
+      const heading = node("div", "metric-heading"); heading.append(node("h2", "overview-label", "Mutants")); metric.append(heading);
+      const head = node("div", "instrument-head");
+      const score = mutantScore(run, tally);
+      head.append(markCoverage(score, 62, tally.survivors));
+      const stack = node("div", "figure-stack");
+      const figure = node("div", "figure"); figure.append(node("span", "figure-number", score == null ? "\u2014" : pct(score)));
+      const basis = data.strong ? strongBasis(tally) : weakBasis(tally);
+      stack.append(figure, node("div", "figure-unit", `${data.strong ? "mutation score" : "weak mutation score"} \u00b7 ${basisLabel(basis, tally.mutants)}`)); head.append(stack); metric.append(head);
+      if (score == null && data.strong) metric.title = noScoreReason(tally);
+      const counts = node("ul", "mutant-counts"); counts.setAttribute("aria-label", "Mutants by status");
+      const count = (value, label, open) => { const item = node("li", open && value ? "open" : ""); item.append(node("strong", "", integer(value)), document.createTextNode(` ${label}`)); counts.append(item); };
+      count(tally.survivors, "left alive", true);
+      if (data.strong) {
+        count((strong.killed || 0) + (strong.timeout || 0), "killed or timed out");
+        count(strong.pending || 0, "without a strong verdict");
+        if (tally.weakScore != null) counts.append(node("li", "", `weak score ${pct(tally.weakScore * 100)}`));
+      } else {
+        count(weak["not-infected"] || 0, data.summary.untestable ? `not infected (${integer(data.summary.untestable)} at a clock or random boundary)` : "not infected", true);
+        count(weak["not-reached"] || 0, "not reached", true);
+        count(weak.infected || 0, "infected");
+      }
+      metric.append(counts);
+      return metric;
+    }
+
+    // The run's mutation testing in full: both levels' scores and counts, why
+    // a mutant has no verdict, each language, and what the tests leave alive.
+    function renderMutationSection(run) {
+      const data = mutantData(run); if (!data) return null;
+      const tally = data.tally, weak = tally.weak || {}, strong = tally.strong || {};
+      const card = node("section", "instrument mutation-card"); card.setAttribute("aria-label", "Mutation testing");
+      const head = node("div", "mutation-card-head");
+      const languages = Object.keys(data.languages || {});
+      head.append(node("h2", "", "Mutation testing"), node("span", "small", `${integer(tally.mutants)} ${tally.mutants === 1 ? "mutant" : "mutants"} \u00b7 ${languages.map(name => MUTANT_LANGUAGE[name] || name).join(", ") || "no language"} \u00b7 ${data.mutantSet}`));
+      card.append(head);
+      if (data.diff) {
+        const note = node("div", "scope-note"); note.setAttribute("role", "note");
+        note.append(node("b", "", "This change only"));
+        note.append(node("span", "", `the mutants on ${integer(data.diff.linesWithMutants)} of ${integer(data.diff.changedLines)} lines changed since ${data.diff.base} (merge base ${String(data.diff.mergeBase).slice(0, 12)})${data.diff.commit ? "" : ", the working tree included"}. Mutants on other lines are left out.`));
+        card.append(note);
+      }
+      if (!tally.mutants) { card.append(node("p", "muted", data.diff ? "No mutant is on a line this change added or changed." : "This run has no mutants.")); return card; }
+      const levels = node("div", "mutation-levels");
+      const level = (title, score, unit) => {
+        const block = node("div", "mutation-level"); block.append(node("h3", "", title));
+        const top = node("div", "instrument-head"); top.append(markCoverage(score, 44, 0));
+        const stack = node("div", "figure-stack"); const figure = node("div", "figure"); figure.append(node("span", "figure-number", score == null ? "\u2014" : pct(score)));
+        stack.append(figure, node("div", "figure-unit", unit)); top.append(stack); block.append(top); return block;
+      };
+      const list = (rows) => { const counts = node("ul", "mutant-counts"); rows.filter(([value, , always]) => value || always).forEach(([value, label, , open]) => { const item = node("li", open && value ? "open" : ""); item.append(node("strong", "", integer(value)), document.createTextNode(` ${label}`)); counts.append(item); }); return counts; };
+      const weakBlock = level("Weak mutation", tally.weakScore == null ? null : tally.weakScore * 100, `infected, ${basisLabel(weakBasis(tally), tally.mutants)}`);
+      if ((weak.unknown || 0) + (weak.equivalent || 0)) weakBlock.append(node("p", "", `The score leaves out ${integer((weak.unknown || 0) + (weak.equivalent || 0))} unknown or equivalent ${(weak.unknown || 0) + (weak.equivalent || 0) === 1 ? "mutant" : "mutants"}.`));
+      weakBlock.append(list([
+        [weak.infected || 0, "infected: a test changed the mutant's value", true],
+        [weak["not-infected"] || 0, data.summary.untestable ? `not infected (${integer(data.summary.untestable)} at a clock or random boundary)` : "not infected: reached, its value never changed", true, true],
+        [weak["not-reached"] || 0, "not reached: no test runs it", true, true],
+        [weak.unknown || 0, "unknown: the run cannot tell"],
+        [weak.equivalent || 0, "equivalent: no input can tell it apart"]
+      ]));
+      if (data.summary.weakScoreReached != null) weakBlock.append(node("p", "", `${pct(data.summary.weakScoreReached * 100)} of the mutants a test reaches.`));
+      const strongBlock = level("Strong mutation", data.strong && tally.mutationScore != null ? tally.mutationScore * 100 : null, data.strong ? `killed or timed out, ${basisLabel(strongBasis(tally), tally.mutants)}` : "no strong pass yet");
+      if (data.strong && tally.mutationScore == null) strongBlock.append(node("p", "", noScoreReason(tally)));
+      if (!data.strong) {
+        const copy = node("p", ""); copy.append(document.createTextNode("No strong pass has run: no test was run against a mutant yet. "), node("code", "", `npx supercov runs ${run.id} mutants test`), document.createTextNode(" runs each infected mutant against the tests that infected it."));
+        strongBlock.append(copy);
+      } else {
+        const undriven = [...new Set(data.mutants.filter(item => item.outcome === "not-run").map(item => item.why.replace(/^not run: no driver for /, "").replace(/ yet$/, "")))];
+        strongBlock.append(list([
+          [strong.killed || 0, "killed", true],
+          [strong.timeout || 0, "timed out", true],
+          [strong.survived || 0, "survived", true, true],
+          [strong.noCoverage || 0, "no coverage", true, true],
+          [strong.equivalent || 0, "equivalent"],
+          [strong.unviable || 0, "unviable: does not compile"],
+          [strong.error || 0, "error: no verdict"],
+          [strong.notRun || 0, `not run: no driver for ${undriven.join(", ")}`],
+          [strong.pending || 0, "without a strong verdict yet"]
+        ]));
+        const unsettled = data.mutants.filter(item => ["error", "not-run", "pending"].includes(item.outcome) && !item.alive);
+        if (unsettled.length) {
+          strongBlock.append(node("p", "", strong.pending ? "Part of the mutants have no verdict. Why:" : "Why these have no verdict:"));
+          const why = node("ul", "mutation-why");
+          const reasons = mutantReasons(unsettled);
+          reasons.slice(0, 4).forEach(([text, value]) => { const item = node("li"); item.append(node("strong", "", integer(value)), document.createTextNode(` ${text}`)); why.append(item); });
+          if (reasons.length > 4) why.append(node("li", "", `and ${integer(reasons.length - 4)} more reasons`));
+          strongBlock.append(why);
+        }
+      }
+      levels.append(weakBlock, strongBlock); card.append(levels);
+      if (languages.length > 1) {
+        const table = node("table", "mutation-languages"); table.setAttribute("aria-label", "Mutants by language");
+        const headRow = node("tr"); ["Language", "Mutants", "Weak score", "Mutation score", "Left alive"].forEach(label => { const cell = node("th", "", label); cell.scope = "col"; headRow.append(cell); });
+        const thead = node("thead"); thead.append(headRow); const body = node("tbody");
+        languages.forEach(name => {
+          const each = data.languages[name], row = node("tr");
+          [MUTANT_LANGUAGE[name] || name, integer(each.mutants), each.weakScore == null ? "\u2014" : pct(each.weakScore * 100), each.mutationScore == null ? "\u2014" : pct(each.mutationScore * 100), integer(each.survivors)].forEach(value => row.append(node("td", "", value)));
+          body.append(row);
+        });
+        table.append(thead, body); card.append(table);
+      }
+      card.append(renderSurvivors(run, data.mutants.filter(item => item.alive), "Left alive", true));
+      return card;
+    }
+
+    // The mutants the tests leave alive, by file, each opening its line.
+    function survivorRow(mutant, withFile) {
+      const row = button("", "evidence-row survivor-row", () => openMutant(mutant));
+      const copy = node("span"); copy.append(node("span", "evidence-name", mutant.change), node("span", "evidence-meta", `${withFile ? `${mutant.file}:` : "line "}${mutant.line} \u00b7 ${mutantHeadline(mutant)} \u00b7 ${mutant.mutator} \u2014 ${mutant.why}`));
+      row.append(copy, node("span", "relation-count", `line ${mutant.line}`), node("span", "file-chevron", "\u203a")); return row;
+    }
+    function renderSurvivors(run, survivors, title, grouped) {
+      const section = node("div", "survivors");
+      const heading = node("div", "detail-card-head"); heading.append(node("h3", "", title), node("span", "small", survivors.length ? `${integer(survivors.length)} ${survivors.length === 1 ? "mutant" : "mutants"}` : "none")); section.append(heading);
+      if (!survivors.length) { section.append(node("p", "muted small", "No mutant is left alive: every one a test can reach is killed, or has no verdict yet.")); return section; }
+      const FILES = 5, EACH = 3;
+      let shown = 0;
+      if (grouped) {
+        const byFile = new Map(); survivors.forEach(item => { if (!byFile.has(item.file)) byFile.set(item.file, []); byFile.get(item.file).push(item); });
+        [...byFile.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0])).slice(0, FILES).forEach(([file, items]) => {
+          const group = node("div", "survivor-file"); group.append(filePath(file));
+          const list = node("div", "evidence-list"); items.slice(0, EACH).forEach(item => list.append(survivorRow(item, false))); shown += Math.min(items.length, EACH);
+          if (items.length > EACH) list.append(node("p", "evidence-meta", `and ${integer(items.length - EACH)} more in this file`));
+          group.append(list); section.append(group);
+        });
+      } else {
+        const list = node("div", "evidence-list"); survivors.slice(0, EACH).forEach(item => list.append(survivorRow(item, false))); shown = Math.min(survivors.length, EACH); section.append(list);
+      }
+      if (survivors.length > shown) {
+        const footer = node("div", "overview-footer");
+        const more = button(`and ${integer(survivors.length - shown)} more \u203a`, "subtle-button", () => openReportModal("evidence", run, more, { title, content: searchableEvidence(survivors, item => survivorRow(item, true), item => `${item.file} ${item.line} ${item.change} ${item.mutator} ${item.why}`, "Find a mutant\u2026") }));
+        footer.append(more); section.append(footer);
+      }
+      return section;
+    }
+
+    function renderFileMutants(run, file) {
+      const tally = mutantFileTally(run, file); if (!tally) return null;
+      const card = node("section", "detail-card file-mutants");
+      const survivors = mutantsIn(run, file).filter(item => item.alive);
+      card.append(renderSurvivors(run, survivors, "Mutants left alive", false));
+      card.append(node("p", "evidence-meta", mutantFileSummary(run, tally)));
+      return card;
+    }
+
     function openOverviewFile(file, assessed = false) {
       state.tab = "explore"; state.file = file; state.line = null; state.assertLine = null; state.sourceRadius = 32; state.qualityFiles = assessed; render();
     }
@@ -1425,7 +1613,9 @@
 
     function renderTestEvidence(run) {
       const card = node("section", "instrument overview-card"); card.setAttribute("aria-label", "Coverage and assertions");
-      const metrics = node("div", "overview-metrics"); metrics.append(renderCoverageInstrument(run), renderAssertions(run)); card.append(metrics);
+      const metrics = node("div", "overview-metrics"); metrics.append(renderCoverageInstrument(run), renderAssertions(run));
+      const mutants = renderMutants(run); if (mutants) { metrics.classList.add("with-mutants"); metrics.append(mutants); }
+      card.append(metrics);
       const tests = (run.tests || []).filter(test => test.role === "test");
       const passed = tests.filter(test => testTone(test) === "good").length;
       const skipped = tests.filter(test => /skip|ignored|todo|pending/i.test(test.outcome || "")).length;
@@ -1661,6 +1851,7 @@
     function renderHero(shell, run) {
       const hero = node("section", "hero"); hero.append(renderRecord(run));
       const instruments = node("div", "instruments"); instruments.append(renderTestEvidence(run));
+      const mutation = renderMutationSection(run); if (mutation) instruments.append(mutation);
       const quality = currentQuality();
       instruments.append(quality ? renderQuality(quality) : renderMissing("quality", "Not assessed", "No quality assessment matches this source.", true));
       instruments.append(renderSecurity()); hero.append(instruments); shell.append(hero);
@@ -1707,6 +1898,48 @@
     // Assertion credit is per statement and only exists once a map explains a
     // flow, so every reader below returns nothing rather than a zero until then.
     function assertionData(run) { return run.assertions && run.assertions.available ? run.assertions : null; }
+    // A run's mutants: absent for a run that listed none, and then nothing of
+    // them is shown.
+    function mutantData(run) { return run.mutants || null; }
+    function mutantFileTally(run, file) { const data = mutantData(run); return data ? data.files[file] || null : null; }
+    function mutantsIn(run, file) { const data = mutantData(run); return data ? data.mutants.filter(item => item.file === file) : []; }
+    // The score a reader acts on: the strong mutation score once a pass ran
+    // for some of them, the weak one before.
+    function mutantScore(run, tally) { if (!tally) return null; const strong = mutantData(run)?.strong && tally.mutationScore != null; const score = strong ? tally.mutationScore : tally.weakScore; return score == null ? null : score * 100; }
+    const MUTANT_WEAK = { "not-reached": "Not reached", "not-infected": "Not infected", infected: "Infected", unknown: "Unknown", equivalent: "Equivalent" };
+    const MUTANT_OUTCOME = { killed: "Killed", timeout: "Timed out", survived: "Survived", "no-coverage": "No coverage", equivalent: "Equivalent", unviable: "Unviable", error: "Error", "not-run": "Not run", pending: "No strong verdict" };
+    const MUTANT_LANGUAGE = { javascript: "JavaScript", typescript: "TypeScript", python: "Python", rust: "Rust", go: "Go", ruby: "Ruby", java: "Java", kotlin: "Kotlin", other: "Other" };
+    function mutantStatusLabel(status) { return MUTANT_WEAK[status] || status; }
+    function mutantOutcomeLabel(outcome) { return MUTANT_OUTCOME[outcome] || outcome; }
+    // What a mutant came to: its strong verdict, or its weak status before one.
+    function mutantHeadline(mutant) { return mutant.outcome && mutant.outcome !== "pending" ? mutantOutcomeLabel(mutant.outcome) : mutantStatusLabel(mutant.status); }
+    function mutantFileSummary(run, tally) {
+      const parts = [`${integer(tally.survivors)} of ${integer(tally.mutants)} ${tally.mutants === 1 ? "mutant" : "mutants"} left alive`];
+      if (tally.weakScore != null) parts.push(`weak score ${pct(tally.weakScore * 100)}`);
+      if (mutantData(run)?.strong) parts.push(tally.mutationScore == null ? "no mutation score yet" : `mutation score ${pct(tally.mutationScore * 100)}`);
+      return parts.join(" \u00b7 ");
+    }
+    // How many mutants each score is over: a score of a few decided mutants
+    // is not a score of the run.
+    function weakBasis(tally) { const weak = tally.weak || {}; return (weak.infected || 0) + (weak["not-infected"] || 0) + (weak["not-reached"] || 0); }
+    function strongBasis(tally) { const strong = tally.strong || {}; return (strong.killed || 0) + (strong.timeout || 0) + (strong.survived || 0) + (strong.noCoverage || 0); }
+    function basisLabel(count, total) { return `of ${integer(count)}${count === total ? "" : ` of ${integer(total)}`} ${total === 1 ? "mutant" : "mutants"}`; }
+    // Why there is no mutation score, from what the mutants did get.
+    function noScoreReason(tally) {
+      const strong = tally.strong || {};
+      const parts = [[strong.error, "errors"], [strong.notRun, "not run for want of a driver"], [strong.unviable, "unviable"], [strong.equivalent, "equivalent"], [strong.pending, "without a verdict yet"]].filter(([value]) => value).map(([value, label]) => `${integer(value)} ${label}`);
+      return `No mutation score: none of the ${integer(tally.mutants)} ${tally.mutants === 1 ? "mutant was" : "mutants was"} killed, timed out, survived or left uncovered${parts.length ? ` (${parts.join(", ")})` : ""}.`;
+    }
+    function mutantHint(mutant) { return mutant.untestable ? `At a ${mutant.untestable} boundary: only one exact ${mutant.untestable === "clock" ? "millisecond" : "random value"} tells it apart` : ""; }
+    function mutantLine(mutant) { return `${mutantHeadline(mutant)}: ${mutant.change} \u2014 ${mutant.why}`; }
+    // The run's record of the test that killed a mutant, where it has one.
+    function mutantKiller(run, name) { return name ? (run.tests || []).find(test => test.role === "test" && (test.id === name || test.name === name || `${test.file} > ${test.name}` === name)) || null : null; }
+    function openMutant(mutant) { state.tab = "explore"; state.file = mutant.file; state.line = mutant.line; state.assertLine = mutant.line; state.scrollToLine = mutant.line; state.sourceWindow = null; state.sourceRadius = 32; render(); }
+    // Why some mutants have no verdict, each reason once with how many share it.
+    function mutantReasons(mutants) {
+      const reasons = new Map(); mutants.forEach(item => reasons.set(item.why, (reasons.get(item.why) || 0) + 1));
+      return [...reasons.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    }
     function assertionFileCount(run, file) { const data = assertionData(run); return data && data.files ? data.files[file] || null : null; }
     function assertionStatementsIn(run, file) { const data = assertionData(run); return ((data && data.statements) || []).filter(item => item.file === file); }
     // A flow selects tests by file and displayed name, which is how the run's
@@ -1759,6 +1992,30 @@
         const more = button("View decision evidence", "subtle-button evidence-more", () => openReportModal("evidence", run, more, { title: `Decision evidence · line ${line}`, content: decisions })); coverage.append(more);
       }
       panel.append(coverage);
+      const lineMutants = mutantsIn(run, file).filter(item => item.line === line);
+      if (lineMutants.length) {
+        const mutants = node("section", "line-evidence-section"); mutants.append(node("h4", "", "Mutants"));
+        lineMutants.forEach(item => {
+          const entry = node("div", `line-gap mutant-entry${item.alive ? " alive" : ""}`);
+          entry.append(node("strong", "", `${item.alive ? "Left alive \u00b7 " : ""}${mutantHeadline(item)} \u00b7 ${item.mutator}`), node("p", "annotation-assertion", item.change));
+          const levelLine = (name, label, text) => { const line = node("p", "mutant-level"); line.append(node("b", "", `${name}: ${label}`), document.createTextNode(` \u2014 ${text}`)); return line; };
+          entry.append(levelLine("Weak", mutantStatusLabel(item.status), item.reason));
+          if (!["pending", "not-run"].includes(item.outcome)) entry.append(levelLine("Strong", mutantOutcomeLabel(item.outcome), item.why));
+          else if (item.outcome === "not-run" || mutantData(run).strong) { const line = node("p", "mutant-level"); line.append(node("b", "", "Strong:"), document.createTextNode(` ${item.why}`)); entry.append(line); }
+          if (item.killedBy) {
+            const killer = mutantKiller(run, item.killedBy);
+            const actions = node("div", "card-actions");
+            if (killer) actions.append(button(`Killed by ${killer.name} \u203a`, "subtle-button", () => openTest(killer)));
+            else actions.append(node("span", "annotation-meta", `Killed by ${item.killedBy}`));
+            entry.append(actions);
+          }
+          if (item.tests != null && item.outcome !== "pending") entry.append(node("p", "annotation-meta", `${integer(item.tests)} ${item.tests === 1 ? "test" : "tests"} ran against it${item.durationMs ? ` in ${integer(item.durationMs)} ms` : ""}`));
+          const hint = mutantHint(item); if (hint) entry.append(node("p", "annotation-meta", hint));
+          entry.append(node("p", "annotation-meta", item.id));
+          mutants.append(entry);
+        });
+        panel.append(mutants);
+      }
       const assertions = node("section", "line-evidence-section"); assertions.append(node("h4", "", "Assertions"));
       if (!assertionData(run)) assertions.append(node("p", "", run.assertions?.error || "Assertions were not assessed for this run."));
       else if (!claims.length) assertions.append(node("p", "", "Not assessed: no statement a passing test ran starts on this line, or it is an import or declaration."));
@@ -1816,8 +2073,12 @@
       if (!source) headCopy.append(node("div", "small muted", "Only the recorded evidence lines were bundled for this file."));
       const legend = node("div", "source-legend");
       const assertedStatements = assertionStatementsIn(run, file);
+      const mutantsByLine = new Map(); mutantsIn(run, file).forEach(item => { if (!mutantsByLine.has(item.line)) mutantsByLine.set(item.line, []); mutantsByLine.get(item.line).push(item); });
       const legendKeys = [["!", "gap", "Open gap"], ["✓", "covered", "Covered executable line"], ["×", "missed", "Missed executable line"], ["·", "", "Non-executable source"]];
       if (assertedStatements.length) legendKeys.push(["◆", "asserted", "Asserted"], ["◇", "declared", "Not asserted"]);
+      const lineAlive = line => (mutantsByLine.get(line) || []).some(item => item.alive);
+      if ([...mutantsByLine.keys()].some(lineAlive)) legendKeys.push(["✱", "mutant", "Mutant left alive"]);
+      if ([...mutantsByLine.keys()].some(line => !lineAlive(line))) legendKeys.push(["✱", "mutant-dealt", "Mutants killed or settled"]);
       legendKeys.forEach(([symbol, tone, label]) => {
         const key = node("span", "source-key"); key.append(node("span", `source-key-symbol ${tone}`, symbol), node("span", "", label)); legend.append(key);
       });
@@ -1891,8 +2152,12 @@
         const assertMark = node("span", `code-assert${credited ? "" : effectiveClaims.length ? " declared" : " absent"}`, credited ? "◆" : effectiveClaims.length ? "◇" : "·");
         stateMark.setAttribute("aria-hidden", "true"); assertMark.setAttribute("aria-hidden", "true");
         const assertionLabel = effectiveClaims.length ? assertionCreditLabel(run, effectiveClaims) : "Assertions not assessed on this line";
-        gutter.title = `${stateLabel} · ${assertionLabel}`;
-        gutter.setAttribute("aria-label", `Line ${item.line}: ${stateLabel}. ${assertionLabel}. Show coverage and assertions`);
+        const lineMutants = mutantsByLine.get(item.line) || [];
+        const aliveHere = lineMutants.filter(value => value.alive).length;
+        const mutantLabel = lineMutants.length ? `${integer(lineMutants.length)} ${lineMutants.length === 1 ? "mutant" : "mutants"}, ${integer(aliveHere)} left alive` : "";
+        if (aliveHere) row.classList.add("has-mutants"); else if (lineMutants.length) row.classList.add("mutants-dealt");
+        gutter.title = `${stateLabel} · ${assertionLabel}${lineMutants.length ? `\n${lineMutants.map(mutantLine).join("\n")}` : ""}`;
+        gutter.setAttribute("aria-label", `Line ${item.line}: ${stateLabel}. ${assertionLabel}.${mutantLabel ? ` ${mutantLabel}.` : ""} Show coverage${mutantLabel ? ", mutants" : ""} and assertions`);
         gutter.setAttribute("aria-expanded", String(open)); gutter.setAttribute("aria-controls", panelId);
         gutter.append(stateMark, assertMark);
         if (open) row.classList.add("evidence-open");
@@ -2094,6 +2359,7 @@
       const sourceSection = node("div", "section"); sourceSection.append(node("h3", "", "Source"), renderSource(run, file, state.line)); panel.append(sourceSection);
       panel.append(renderFileTests(run, file));
       const assertions = renderFileAssertions(run, file); if (assertions) panel.append(assertions);
+      const fileMutants = renderFileMutants(run, file); if (fileMutants) panel.append(fileMutants);
       const fileQuality = renderFileQuality(file); if (fileQuality) panel.append(fileQuality);
       panel.append(renderSecurity(true));
       return panel;
@@ -2244,6 +2510,11 @@
         quality: { label: "Quality", compare: (a, b, d) => missingLast(healthOf(a), d) - missingLast(healthOf(b), d), descending: false },
         security: { label: "Security", compare: (a, b, d) => missingLast(securityCount(a.file), d) - missingLast(securityCount(b.file), d), descending: true }
       };
+      // Each file's mutation score, lowest first, and on a tie the file with
+      // more mutants left alive, for a run that listed mutants.
+      const mutantScoreOf = file => mutantScore(run, mutantFileTally(run, file.file));
+      const survivorsOf = file => mutantFileTally(run, file.file)?.survivors || 0;
+      if (mutantData(run)) columns.mutants = { label: "Mutants", compare: (a, b, d) => (missingLast(mutantScoreOf(a), d) - missingLast(mutantScoreOf(b), d)) || (survivorsOf(b) - survivorsOf(a)), descending: false };
       if (!columns[state.fileSort]) state.fileSort = "coverage";
       if (typeof state.fileSortDescending !== "boolean") state.fileSortDescending = columns[state.fileSort].descending;
       const activeColumn = columns[state.fileSort];
@@ -2298,6 +2569,7 @@
       columnMarks.append(headCell("asserted", ""));
       columnMarks.append(headCell("quality", ""));
       columnMarks.append(headCell("security", ""));
+      if (columns.mutants) columnMarks.append(headCell("mutants", ""));
       columnRow.append(columnMarks, node("span", "file-head-end"));
       const table = node("div", "file-table"); table.append(columnRow);
       const list = node("div", "file-list");
@@ -2330,8 +2602,14 @@
         if (assessed) { const mark = node("span", "file-row-mark"); mark.append(markQuality(assessed.health, 22), node("span", "", health(assessed.health))); mark.title = `Quality ${health(assessed.health)}, the ${band(assessed.health)} band`; trail.append(mark); }
         else { const mark = node("span", "file-row-mark quiet"); mark.append(markQuality(null, 22), node("span", "", "\u2014")); mark.title = "Not assessed"; trail.append(mark); }
         trail.append(securityFileMark(file.file));
+        if (columns.mutants) {
+          const tally = mutantFileTally(run, file.file), left = tally ? tally.survivors : 0, score = mutantScore(run, tally);
+          const mark = node("span", `file-row-mark${left ? " open" : tally ? "" : " quiet"}`);
+          mark.append(markMutants(left, 22), node("span", "", tally ? (score == null ? "\u2014" : pct(score)) : "\u2014"));
+          mark.title = tally ? mutantFileSummary(run, tally) : "No mutants in this file"; trail.append(mark);
+        }
         if (limited) trail.append(node("span", "file-row-metric limited", "Limited"));
-        labelFileMetrics(trail); row.append(trail);
+        labelFileMetrics(trail, columns.mutants ? ["Coverage", "Assertions", "Quality", "Security", "Mutants"] : undefined); row.append(trail);
         const chevron = node("span", "file-chevron", "\u203a"); chevron.setAttribute("aria-hidden", "true"); row.append(chevron); list.append(row);
       });
       if (!values.length) list.append(node("div", "empty", "No files match this search.")); table.append(list); panel.append(table); appendCrossFileFindings(panel); content.append(panel);

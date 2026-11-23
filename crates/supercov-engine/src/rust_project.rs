@@ -1138,6 +1138,176 @@ pub fn prepare_rust_project_for(
     })
 }
 
+impl PreparedRustProject {
+    /// A workspace built as written, with nothing instrumented: a strong
+    /// pass's copy for a mutant built on its own.
+    pub(crate) fn plain(workspace_root: PathBuf) -> Self {
+        Self {
+            target_directory: workspace_root.join("target"),
+            workspace_root,
+            source_files: Vec::new(),
+            crate_roots: Vec::new(),
+            runtime_module: String::new(),
+            manifest: CoverageManifest {
+                unmeasured: Vec::new(),
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+                assertion_sites: Vec::new(),
+                probe_tables: Default::default(),
+            },
+            probes: Default::default(),
+            preparation: Default::default(),
+        }
+    }
+}
+
+/// A strong pass's copy of the workspace: the files holding the mutants it
+/// switches, rewritten by `rust_schemata::switch`, and the strong runtime
+/// in the root of each crate that compiles one. Every other file stays as
+/// written, so a build after another pass rebuilds only those crates.
+pub(crate) struct StrongWorkspace {
+    pub project: PreparedRustProject,
+    /// Each switched file, by its path in the workspace.
+    pub switched: BTreeMap<String, crate::rust_schemata::SwitchedFile>,
+    /// Mutants given that were not switched (by file and index), and why:
+    /// their file is not one a crate compiles (`not-compiled`), or a
+    /// proc-macro crate's, which the compiler runs as it builds
+    /// (`proc-macro`).
+    pub declined: Vec<((String, u64), &'static str)>,
+}
+
+/// Switches `mutants` (by file, each with its index there) into the copy at
+/// `workspace`, which holds the project's sources as written.
+pub(crate) fn prepare_rust_strong_project(
+    workspace: &Path,
+    mutants: &BTreeMap<String, Vec<(u64, crate::rust_mutants::RustMutant)>>,
+) -> Result<StrongWorkspace, RustProjectError> {
+    let workspace = canonical_directory(workspace)?;
+    let metadata = cargo_metadata(&workspace)?;
+    let members = metadata
+        .workspace_members
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let packages = metadata
+        .packages
+        .into_iter()
+        .filter(|package| members.contains(&package.id))
+        .collect::<Vec<_>>();
+    if packages.is_empty() {
+        return Err(RustProjectError::NoWorkspacePackages);
+    }
+    let (roots, proc_macro_roots) = crate_roots(&workspace, &packages)?;
+    let mut files = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    let mut owners = BTreeMap::new();
+    resolve_module_tree(
+        &workspace,
+        &roots,
+        &test_target_roots(&packages),
+        &mut files,
+        &mut tests,
+        &mut owners,
+    )?;
+    let sources = files
+        .iter()
+        .map(|path| {
+            let relative = confined_relative(&workspace, path).expect(INSIDE);
+            let source = fs::read_to_string(path).map_err(|error| RustProjectError::Io {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+            Ok((relative, source))
+        })
+        .collect::<Result<BTreeMap<_, _>, RustProjectError>>()?;
+    let runtime_module = runtime_module_name(&sources);
+    let runtime_path = format!("crate::{runtime_module}");
+    let mut switched = BTreeMap::new();
+    let mut declined = Vec::new();
+    let mut needs_runtime = BTreeSet::new();
+    for (file, placed) in mutants {
+        let (Some(source), Some(file_owners)) = (
+            sources.get(file),
+            owners.get(&normalize(&workspace.join(file))),
+        ) else {
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "not-compiled")),
+            );
+            continue;
+        };
+        if file_owners
+            .iter()
+            .any(|root| proc_macro_roots.contains(root))
+        {
+            declined.extend(
+                placed
+                    .iter()
+                    .map(|(index, _)| ((file.clone(), *index), "proc-macro")),
+            );
+            continue;
+        }
+        let chosen = placed
+            .iter()
+            .map(|(ordinal, mutant)| (*ordinal, mutant))
+            .collect::<Vec<_>>();
+        let file_switched = crate::rust_schemata::switch(source, &runtime_path, file, &chosen);
+        let path = workspace.join(file);
+        fs::write(&path, &file_switched.code).map_err(|error| RustProjectError::Io {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
+        needs_runtime.extend(file_owners.iter().cloned());
+        switched.insert(file.clone(), file_switched);
+    }
+    let mut crate_roots = Vec::new();
+    for root in needs_runtime {
+        let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
+            path: root.clone(),
+            reason: error.to_string(),
+        })?;
+        source.push('\n');
+        let relative = confined_relative(&workspace, &root).expect(INSIDE);
+        source.push_str(&crate::rust_schemata::runtime(
+            &runtime_module,
+            &crate_key("strong", &relative),
+        ));
+        fs::write(&root, source).map_err(|error| RustProjectError::Io {
+            path: root.clone(),
+            reason: error.to_string(),
+        })?;
+        crate_roots.push(confined_relative(&workspace, &root).expect(INSIDE));
+    }
+    let mut project = PreparedRustProject {
+        target_directory: copy_target_directory(&workspace),
+        workspace_root: workspace,
+        source_files: sources.into_keys().collect(),
+        crate_roots,
+        runtime_module,
+        manifest: CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        },
+        probes: Default::default(),
+        preparation: Default::default(),
+    };
+    project.probes.token = "strong".into();
+    Ok(StrongWorkspace {
+        project,
+        switched,
+        declined,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1513,6 +1683,23 @@ fn integration_choice() {
                 "rust-proc-macro-runs-in-the-compiler#src/lib.rs",
             ])
         );
+        // A strong pass declines its mutants: the compiler would run them.
+        let source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let mutants = BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            crate::rust_mutants::enumerate(&source)
+                .unwrap()
+                .into_iter()
+                .take(1)
+                .map(|mutant| (0, mutant))
+                .collect::<Vec<_>>(),
+        )]);
+        let strong = prepare_rust_strong_project(&root, &mutants).unwrap();
+        assert_eq!(
+            strong.declined,
+            [(("src/lib.rs".to_owned(), 0), "proc-macro")]
+        );
+        assert!(strong.switched.is_empty());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2120,6 +2307,10 @@ fn integration_choice() {
             prepare_rust_project(&root, None),
             Err(RustProjectError::NoWorkspacePackages)
         ));
+        assert!(matches!(
+            prepare_rust_strong_project(&root, &BTreeMap::new()),
+            Err(RustProjectError::NoWorkspacePackages)
+        ));
         // A library whose path is a directory has no source to read.
         fs::write(
             root.join("Cargo.toml"),
@@ -2131,6 +2322,68 @@ fn integration_choice() {
             Err(RustProjectError::NoSourceFiles)
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A strong pass's copy whose sources, or a crate root the runtime is
+    /// added to, cannot be read or written fails, naming the file.
+    #[test]
+    fn a_strong_copy_that_cannot_be_read_or_written_fails() {
+        let root = fixture();
+        let source = "pub fn one() -> u8 {\n    1\n}\n";
+        fs::write(root.join("src/lib.rs"), source).unwrap();
+        let mutants = BTreeMap::from([(
+            "src/lib.rs".to_owned(),
+            crate::rust_mutants::enumerate(source)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .map(|(index, mutant)| (index as u64, mutant))
+                .collect::<Vec<_>>(),
+        )]);
+        let text = include_str!("rust_project.rs");
+        let body = &text[text
+            .find("pub(crate) fn prepare_rust_strong_project(")
+            .unwrap()..];
+        let start = text.len() - body.len();
+        // The line a call is on, wherever on it the call starts.
+        let line_of = |needle: &str| {
+            text[..start + body.find(needle).unwrap()]
+                .matches('\n')
+                .count()
+                + 1
+        };
+        // A crate's root, and the workspace as its modules are resolved,
+        // that cannot be found: their calls are earlier in the file.
+        let anywhere = |needle: &str| text[..text.find(needle).unwrap()].matches('\n').count() + 1;
+        for needle in [
+            "fs::canonicalize(&target.src_path).map_err",
+            "let canonical_workspace = ",
+        ] {
+            let site = format!("fs.canonicalize#rust_project.rs:{}", anywhere(needle));
+            let failed =
+                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
+            assert!(
+                matches!(failed, Err(RustProjectError::Io { .. })),
+                "{site}: {:?}",
+                failed.err()
+            );
+        }
+        for (fault, needle) in [
+            ("read_to_string", "fs::read_to_string(path)"),
+            ("read_to_string", "fs::read_to_string(&root)"),
+            ("write", "fs::write(&root, source)"),
+        ] {
+            fs::write(root.join("src/lib.rs"), source).unwrap();
+            let site = format!("fs.{fault}#rust_project.rs:{}", line_of(needle));
+            let failed =
+                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
+            assert!(
+                matches!(failed, Err(RustProjectError::Io { .. })),
+                "{site}: {:?}",
+                failed.err()
+            );
+        }
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

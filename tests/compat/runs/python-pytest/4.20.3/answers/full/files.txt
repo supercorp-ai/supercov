@@ -1,0 +1,7 @@
+Coverage files — every included source file
+
+src/shop/price.py
+  uncovered: lines 4  statements 4  functions 1  branch outcomes 5  MC/DC conditions 3
+
+showing 1-1 of 1
+inspect file: npx supercov runs 'run_51fc275b48d920a1' file 'src/shop/price.py'

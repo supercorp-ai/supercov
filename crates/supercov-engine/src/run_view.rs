@@ -1012,6 +1012,7 @@ mod tests {
             probe_tables: Default::default(),
         };
         let raw = RawTestResult {
+            duration_ms: None,
             span: None,
             test_id: Some("t".into()),
             scope: None,
@@ -1037,7 +1038,7 @@ mod tests {
                 hits: vec!["f".into(), "ran".into(), "then".into()],
                 events: Vec::new(),
                 logicals: Vec::new(),
-                phase_id: None,
+                ..Default::default()
             }],
             browser: Vec::new(),
             server: Vec::new(),

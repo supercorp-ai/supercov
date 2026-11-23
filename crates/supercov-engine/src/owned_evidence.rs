@@ -61,6 +61,10 @@ pub struct PackedVector {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnedTestEvidence {
     pub name: String,
+    /// The package whose binary recorded it, where a run merges several
+    /// (Go): two packages may each have a `TestLRU`, and each is its own
+    /// test. Empty where the evidence is one process's.
+    pub package: String,
     /// How the test ended, as the framework saw it: `passed`, `failed` or
     /// `skipped`.
     pub status: String,
@@ -176,6 +180,7 @@ pub fn read_evidence(bytes: &[u8]) -> Result<OwnedEvidence, OwnedEvidenceError> 
             });
         }
         tests.push(OwnedTestEvidence {
+            package: String::new(),
             name,
             status,
             runner,
@@ -460,13 +465,56 @@ fn stable_id(prefix: &str, values: &[&str]) -> String {
 fn obligations(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, String> {
     probes
         .iter()
-        .map(|(id, probe)| {
+        .filter_map(|(id, probe)| {
             let obligation = match &probe.target {
                 GoProbeTarget::Statement { id } | GoProbeTarget::Function { id } => id.clone(),
                 GoProbeTarget::Alternative { alternative, .. } => alternative.clone(),
+                GoProbeTarget::Comparison { .. } | GoProbeTarget::Operation { .. } => {
+                    return None;
+                }
             };
-            (*id as u32, obligation)
+            Some((*id as u32, obligation))
         })
+        .collect()
+}
+
+/// Each value probe's site, by probe id, and whether it is an operation's.
+fn comparison_sites(probes: &BTreeMap<u64, GoProbe>) -> BTreeMap<u32, (String, bool)> {
+    probes
+        .iter()
+        .filter_map(|(id, probe)| match &probe.target {
+            GoProbeTarget::Comparison { site } => Some((*id as u32, (site.clone(), false))),
+            GoProbeTarget::Operation { site } => Some((*id as u32, (site.clone(), true))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An operation probe's bits as the outcomes of each of its alternatives:
+/// `<site>#0` (bits 16, 32) and `<site>#1` (64, 128), `same` or `differs`.
+fn operation_outcomes(site: &str, bits: u32) -> Vec<crate::coverage_report::ComparisonSnapshot> {
+    (0..2)
+        .filter_map(|alternative| {
+            let shift = 2 * alternative;
+            let outcomes = [(16 << shift, "same"), (32 << shift, "differs")]
+                .into_iter()
+                .filter(|(bit, _)| bits & bit != 0)
+                .map(|(_, outcome)| outcome.to_owned())
+                .collect::<Vec<_>>();
+            (!outcomes.is_empty()).then(|| crate::coverage_report::ComparisonSnapshot {
+                id: format!("{site}#{alternative}"),
+                outcomes,
+            })
+        })
+        .collect()
+}
+
+/// The relations a comparison probe's bits say its operands were seen in.
+fn relations(bits: u32) -> Vec<String> {
+    [(1, "lt"), (2, "eq"), (4, "gt"), (8, "unordered")]
+        .into_iter()
+        .filter(|(bit, _)| bits & bit != 0)
+        .map(|(_, relation)| relation.to_owned())
         .collect()
 }
 
@@ -475,6 +523,7 @@ fn snapshot(
     evidence: &OwnedTestEvidence,
     manifest: &CoverageManifest,
     by_probe: &BTreeMap<u32, String>,
+    sites: &BTreeMap<u32, (String, bool)>,
     phase: &str,
 ) -> RuntimeSnapshot {
     let mut events = Vec::new();
@@ -531,12 +580,28 @@ fn snapshot(
             vectors: observed,
         });
     }
+    let comparisons = evidence
+        .probes
+        .iter()
+        .filter_map(|(probe, bits)| Some((sites.get(probe)?, *bits)))
+        .flat_map(|((site, operation), bits)| {
+            if *operation {
+                operation_outcomes(site, bits)
+            } else {
+                vec![crate::coverage_report::ComparisonSnapshot {
+                    id: site.clone(),
+                    outcomes: relations(bits),
+                }]
+            }
+        })
+        .collect();
     RuntimeSnapshot {
         decisions,
         hits: hits.into_iter().collect(),
         events,
         logicals: Vec::new(),
-        phase_id: None,
+        comparisons,
+        ..Default::default()
     }
 }
 
@@ -649,16 +714,23 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
         .collect::<BTreeSet<_>>();
     let source = declaration.frontend_version.clone();
     let by_probe = obligations(probes);
+    let sites = comparison_sites(probes);
     let recorded = evidence
         .tests
         .iter()
-        .map(|test| (test.name.clone(), test))
+        .map(|test| ((test.package.clone(), test.name.clone()), test))
         .collect::<BTreeMap<_, _>>();
     let empty = OwnedTestEvidence::default();
     let mut raw_results = outcomes
         .iter()
         .map(|outcome| {
-            let test = recorded.get(&outcome.name).copied().unwrap_or(&empty);
+            // By its package where the evidence names one: a test of the
+            // same name in another package is another test.
+            let test = recorded
+                .get(&(outcome.package.clone(), outcome.name.clone()))
+                .or_else(|| recorded.get(&(String::new(), outcome.name.clone())))
+                .copied()
+                .unwrap_or(&empty);
             // A test nothing could be credited to takes no hits at all, and
             // says so. Handing it the record's probes would be worse than
             // wrong: the runtime gives an unattributed record none, so the
@@ -684,6 +756,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 tags: test.tags.clone(),
             };
             RawTestResult {
+                duration_ms: None,
                 span: None,
                 scope: Some(ExecutionScope {
                     version: 1,
@@ -733,7 +806,14 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                     status: Some(outcome.status.clone()),
                     error: None,
                 }],
-                runtime: vec![snapshot(environment, test, manifest, &by_probe, &phase)],
+                runtime: vec![snapshot(
+                    environment,
+                    test,
+                    manifest,
+                    &by_probe,
+                    &sites,
+                    &phase,
+                )],
                 browser: Vec::new(),
                 server: Vec::new(),
             }
@@ -750,18 +830,26 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
     //
     // It is recorded as its own record, under a role that is not a test,
     // holding only what the tests did not claim: reached, by nobody nameable.
-    let claimed = evidence
-        .tests
-        .iter()
-        .filter(|test| !test.unattributed)
-        .flat_map(|test| test.probes.keys().copied())
-        .collect::<BTreeSet<_>>();
+    // By bit, not by slot: a comparison probe's slot holds the relations its
+    // operands were seen in, and an Example that saw them equal where every
+    // claimed test saw them apart left an `eq` no test claimed. Dropping it
+    // called btree's `len(n.children) > 0` to `>=` not infected, though
+    // `ExampleBTreeG` kills it.
+    let mut claimed = BTreeMap::<u32, u32>::new();
+    for test in evidence.tests.iter().filter(|test| !test.unattributed) {
+        for (probe, bits) in &test.probes {
+            *claimed.entry(*probe).or_default() |= bits;
+        }
+    }
     let unclaimed = evidence
         .global
         .iter()
         .enumerate()
-        .filter(|(index, mask)| **mask != 0 && !claimed.contains(&(*index as u32)))
-        .map(|(index, mask)| (index as u32, *mask))
+        .map(|(index, mask)| {
+            let left = mask & !claimed.get(&(index as u32)).copied().unwrap_or(0);
+            (index as u32, left)
+        })
+        .filter(|(_, left)| *left != 0)
         .collect::<BTreeMap<_, _>>();
     if !unclaimed.is_empty() {
         // Whether this counts as coverage turns on whether it was produced by
@@ -779,6 +867,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
         let test_id = format!("{}::background", declaration.language);
         let phase = test_phase(&test_id);
         let background = OwnedTestEvidence {
+            package: String::new(),
             name: "background".into(),
             status: "unknown".into(),
             runner: String::new(),
@@ -790,6 +879,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
             vectors: Vec::new(),
         };
         raw_results.push(RawTestResult {
+            duration_ms: None,
             span: None,
             scope: Some(ExecutionScope {
                 version: 1,
@@ -833,6 +923,7 @@ pub fn build_frontend_run(inputs: OwnedRunInputs) -> OwnedFrontendRun {
                 &background,
                 manifest,
                 &by_probe,
+                &sites,
                 &phase,
             )],
             browser: Vec::new(),
@@ -1206,6 +1297,7 @@ mod tests {
             global: vec![1, 1],
             tests: vec![
                 OwnedTestEvidence {
+                    package: String::new(),
                     name: "TestSerial".into(),
                     status: "passed".into(),
                     runner: String::new(),
@@ -1215,6 +1307,7 @@ mod tests {
                     vectors: Vec::new(),
                 },
                 OwnedTestEvidence {
+                    package: String::new(),
                     name: "TestParallel".into(),
                     status: "passed".into(),
                     runner: String::new(),
@@ -1321,6 +1414,135 @@ mod tests {
         assert_eq!(result.test, "TestSilent");
         assert_eq!(result.test_id.as_deref(), Some("example.com/p::TestSilent"));
         assert!(result.runtime[0].hits.is_empty());
+    }
+
+    #[test]
+    fn a_relation_only_unclaimed_work_saw_is_the_background_s() {
+        // A test saw the operands apart (`lt`), an Example nobody can claim
+        // saw them equal: the run-wide record holds the `eq`.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let probes = BTreeMap::from([(
+            1,
+            GoProbe {
+                id: 1,
+                target: GoProbeTarget::Comparison {
+                    site: "a.go:3:9".into(),
+                },
+                at: 0,
+            },
+        )]);
+        let evidence = OwnedEvidence {
+            global: vec![0, 1 | 2],
+            tests: vec![OwnedTestEvidence {
+                name: "TestA".into(),
+                status: "passed".into(),
+                probes: BTreeMap::from([(1, 1)]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[OwnedTestOutcome {
+                name: "TestA".into(),
+                runner: String::new(),
+                package: String::new(),
+                file: None,
+                status: "passed".into(),
+                attributed: true,
+            }],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        });
+        let outcomes = |index: usize| {
+            run.request.raw_results[index].runtime[0].comparisons[0]
+                .outcomes
+                .clone()
+        };
+        assert_eq!(run.request.raw_results.len(), 2);
+        assert_eq!(outcomes(0), ["lt"]);
+        assert_eq!(outcomes(1), ["eq"]);
+        assert!(run.request.raw_results[1].runtime[0].hits.is_empty());
+    }
+
+    #[test]
+    fn tests_of_one_name_in_two_packages_keep_their_own_evidence() {
+        // golang-lru has a `TestLRU` in its root package and another in
+        // `simplelru`: keyed by name alone, one took the other's probes, and
+        // the root package's code read as run by no test.
+        let manifest = CoverageManifest {
+            decisions: Vec::new(),
+            points: Vec::new(),
+            branches: Vec::new(),
+            limitations: Vec::new(),
+            unmeasured: Vec::new(),
+            scope: None,
+            assertion_sites: Vec::new(),
+            probe_tables: Default::default(),
+        };
+        let probes = [(1, "go:statement:root"), (2, "go:statement:simple")]
+            .into_iter()
+            .map(|(id, point)| {
+                (
+                    id,
+                    GoProbe {
+                        id,
+                        target: GoProbeTarget::Statement { id: point.into() },
+                        at: 0,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let test = |package: &str, probe: u32| OwnedTestEvidence {
+            name: "TestLRU".into(),
+            package: package.into(),
+            status: "passed".into(),
+            probes: BTreeMap::from([(probe, 2)]),
+            ..Default::default()
+        };
+        let evidence = OwnedEvidence {
+            global: vec![0, 2, 2],
+            tests: vec![test(".", 1), test("simplelru", 2)],
+            ..Default::default()
+        };
+        let outcome = |package: &str| OwnedTestOutcome {
+            name: "TestLRU".into(),
+            runner: String::new(),
+            package: package.into(),
+            file: None,
+            status: "passed".into(),
+            attributed: true,
+        };
+        let run = build_frontend_run(OwnedRunInputs {
+            declaration: go_declaration(),
+            environment: "go",
+            manifest: &manifest,
+            probes: &probes,
+            evidence: &evidence,
+            outcomes: &[outcome("."), outcome("simplelru")],
+            run_id: "run",
+            generated_at: "now",
+            test_exit_code: 0,
+            coverage_model: go_coverage_model(),
+        });
+        let hits = |index: usize| run.request.raw_results[index].runtime[0].hits.clone();
+        assert_eq!(hits(0), ["go:statement:root"]);
+        assert_eq!(hits(1), ["go:statement:simple"]);
     }
 
     #[test]
