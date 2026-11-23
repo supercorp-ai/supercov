@@ -1404,6 +1404,9 @@ fn execute(
         // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
         let mut exit = 0;
+        // The first process said to have run out of heap: what ended the
+        // command before the verdicts of the mutants left.
+        let mut ran_out = None;
         for _ in 0..PASSES {
             if remaining.is_empty() {
                 break;
@@ -1430,6 +1433,10 @@ fn execute(
                         root, run, &plan, &remaining, &language, &command, &work, saved, budget_at,
                     );
                     let (verdicts, passes) = read_results(&results);
+                    for sentence in supercov_engine::strong_driver::out_of_memory(&work) {
+                        eprintln!("[supercov] {sentence}");
+                        ran_out.get_or_insert(sentence);
+                    }
                     // Success or failure, the pass keeps only its logs.
                     if !supercov_engine::strong_driver::keeps_work_directories(std::env::var_os(
                         supercov_engine::strong_driver::KEEP,
@@ -1465,9 +1472,12 @@ fn execute(
                 killed_by: None,
                 tests: 0,
                 duration_ms: 0,
-                reason: Some(format!(
-                    "the command ended (exit {exit}) before this mutant's verdict"
-                )),
+                reason: Some(match &ran_out {
+                    Some(sentence) => format!(
+                        "the command ended (exit {exit}) before this mutant's verdict: {sentence}"
+                    ),
+                    None => format!("the command ended (exit {exit}) before this mutant's verdict"),
+                }),
             });
         }
     }

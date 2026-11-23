@@ -1,7 +1,10 @@
 // Strong mutation for Playwright (docs/design/strong-mutation.md, browser
 // tests against a server).
 //
-// One Playwright invocation runs the plan. The generated config repeats every
+// An invocation of Playwright runs the plan, or as many of its rows as one
+// invocation holds (the rest run in further invocations, which the engine
+// starts); a harness may start several invocations at once, each with a
+// share of the tests, and they share the pass's files. The generated config repeats every
 // test (`repeatEach`) as often as the busiest test file has rows: a file's row
 // k is what every test of the file does in its k-th repetition -- run with
 // one mutant, run with none (the baseline, row 0, and canaries), or skip. A
@@ -31,9 +34,28 @@ const TIMEOUT_CONSTANT_MS = 5_000;
 const DEFAULT_DURATION_MS = 1_000;
 const CANARY_FILES = 3;
 const POLL_MS = 50;
+// Playwright makes every repetition of every test of a file it loads before
+// the first test runs, in the runner, whether a row names the test or not:
+// an invocation holds about this many of them, and the main pass's other
+// rows go to further invocations.
+const TEST_CASES_PER_INVOCATION = 20_000;
+// A baseline, two canaries and one mutant's row at least.
+const MIN_REPETITIONS = 4;
 
 /** What a page writes to its console when its mutant passed the hit limit. */
 export const PAGE_TIMEOUT_MARKER = "SUPERCOV_MUTANT_TIMEOUT";
+
+/**
+ * How many repetitions of each test one invocation holds: what fits
+ * `TEST_CASES_PER_INVOCATION` for the plan's Playwright tests, or
+ * `SUPERCOV_PLAYWRIGHT_REPETITIONS`.
+ */
+export function repetitionsPerInvocation(testCount) {
+    const asked = Number(process.env["SUPERCOV_PLAYWRIGHT_REPETITIONS"]);
+    if (Number.isInteger(asked) && asked >= MIN_REPETITIONS)
+        return asked;
+    return Math.max(MIN_REPETITIONS, Math.floor(TEST_CASES_PER_INVOCATION / Math.max(1, testCount)));
+}
 
 /** The pass this process belongs to, or `undefined` outside strong mode. */
 export function strongPass() {
@@ -63,7 +85,7 @@ export function writeJson(path, value) {
     renameSync(draft, path);
 }
 
-function readJson(path) {
+export function readJson(path) {
     return JSON.parse(readFileSync(path, "utf8"));
 }
 
@@ -151,22 +173,34 @@ function buildRows(pass, root, config) {
     });
     // `workers` set only where the pass runs one test at a time.
     const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests, fullyParallelOf(config)) };
-    if (pass.restart) {
-        const job = readJson(pass.restart);
+    const job = pass.restart ? readJson(pass.restart) : null;
+    const perInvocation = repetitionsPerInvocation(Object.keys(tests).length);
+    if (job && job.kind !== "main") {
         const files = {};
         const entries = {};
+        // A mutant with a row in a file this invocation has filled waits
+        // for the next invocation, which runs the same job.
+        const deferred = [];
         for (const entry of job.mutants) {
             const known = { ...entry, tests: entry.tests.filter((id) => tests[id]) };
+            const rows = mutantRows(tests, known);
+            if (rows.some(([file]) => (files[file]?.length ?? 0) >= perInvocation)) {
+                deferred.push(entry);
+                continue;
+            }
             entries[entry.id] = known;
-            for (const [file, row] of mutantRows(tests, known))
+            for (const [file, row] of rows)
                 (files[file] ??= []).push(row);
         }
         // A serial pass runs one test at a time: what it kills, nothing
         // beside it did.
         if (job.kind === "serial")
             concurrency.workers = 1;
-        return { pass: pass.name, kind: job.kind, job, tests, files, entries, concurrency, immediate: [], restarts: [], otherRunners: job.otherRunners ?? {} };
+        return { pass: pass.name, kind: job.kind, job, tests, files, entries, concurrency, immediate: [], restarts: [], otherRunners: job.otherRunners ?? {}, deferred };
     }
+    // A main pass's later invocation runs the mutants the one before had no
+    // room for, as the main pass would.
+    const only = job ? new Set(job.mutants.map((mutant) => mutant.id)) : undefined;
 
     // The copy's own list: the mutant at each index must be the run's, and
     // one the instrumenter could not place has no switch to turn on.
@@ -185,6 +219,9 @@ function buildRows(pass, root, config) {
 
     const immediate = [];
     const restarts = [];
+    const deferred = [];
+    // A file's mutated rows, beside its baseline and two canaries.
+    const rowsPerFile = perInvocation - 3;
     const otherRunners = {};
     const entries = {};
     const byFile = new Map();
@@ -195,7 +232,7 @@ function buildRows(pass, root, config) {
         baseline.get(file).add(id);
     };
     for (const mutant of plan.mutants) {
-        if (mutant.decided)
+        if (mutant.decided || (only && !only.has(mutant.id)))
             continue;
         // A Rust mutant (Rust compiled to wasm) is switched by its index in
         // its file's list, as the pass's build placed it.
@@ -231,19 +268,26 @@ function buildRows(pass, root, config) {
         }
         const ordered = [...own.filter((test) => test.infected), ...own.filter((test) => !test.infected)].map((test) => test.id);
         const switched = `${mutant.file}#${found.index}`;
-        for (const id of ordered)
-            needBaseline(tests[id].file, id);
         if (mutant.serverWide) {
+            for (const id of ordered)
+                needBaseline(tests[id].file, id);
             restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide, budgetFactor: 1 });
             continue;
         }
         const entry = { id: mutant.id, mutant: switched, tests: [ordered[0]], rest: ordered.slice(1), budgetFactor: 1 };
-        entries[mutant.id] = entry;
-        for (const [file, row] of mutantRows(tests, entry)) {
-            if (!byFile.has(file))
-                byFile.set(file, []);
-            byFile.get(file).push(row);
+        // One row, in its first test's file.
+        const [[file, row]] = mutantRows(tests, entry);
+        if (!byFile.has(file))
+            byFile.set(file, []);
+        // A file's rows past what this invocation holds wait for the next.
+        if (byFile.get(file).length >= rowsPerFile) {
+            deferred.push({ id: mutant.id });
+            continue;
         }
+        byFile.get(file).push(row);
+        entries[mutant.id] = entry;
+        for (const id of ordered)
+            needBaseline(tests[id].file, id);
     }
     const files = {};
     for (const [file, ids] of baseline) {
@@ -262,14 +306,50 @@ function buildRows(pass, root, config) {
             rows.splice(1 + Math.floor(mutated.length / 2), 0, canary());
         rows.push(canary());
     }
-    return { pass: pass.name, kind: "main", job: null, tests, files, entries, concurrency, immediate, restarts, otherRunners };
+    return { pass: pass.name, kind: "main", job: null, tests, files, entries, concurrency, immediate, restarts, otherRunners, deferred };
 }
 
-/** The rows of this pass: built and written by the runner, read elsewhere. */
+/** The rows of this pass: built and written by the runner, read by its reporter. */
 let rowsCache;
 export function loadRows(pass) {
     rowsCache ??= readJson(`${pass.round}/rows.json`);
     return rowsCache;
+}
+
+/**
+ * What a worker reads: the pass's shape (`worker.json`: the repetitions,
+ * the tests and how they run side by side), and the rows of the one
+ * repetition index it serves (`rows/<index>.json`), never the plan or the
+ * other rows. Each is small and the same size whatever the plan's.
+ */
+function writeWorkerFiles(pass, rows, repeatEach) {
+    writeJson(`${pass.round}/worker.json`, { repeatEach, tests: rows.tests, concurrency: rows.concurrency, job: Boolean(rows.job) });
+    const byIndex = Array.from({ length: repeatEach }, () => ({}));
+    for (const [file, fileRows] of Object.entries(rows.files))
+        fileRows.forEach((row, index) => { byIndex[index][file] = row; });
+    byIndex.forEach((at, index) => writeJson(`${pass.round}/rows/${index}.json`, at));
+}
+
+let workerCache;
+function loadWorker(pass) {
+    workerCache ??= readJson(`${pass.round}/worker.json`);
+    return workerCache;
+}
+
+const indexCache = new Map();
+function rowsAt(pass, index) {
+    if (!indexCache.has(index))
+        indexCache.set(index, readJson(`${pass.round}/rows/${index}.json`));
+    return indexCache.get(index);
+}
+
+/**
+ * Whether this process lists the tests (`playwright test --list`) rather
+ * than run them: it reads no plan and writes nothing, and lists the
+ * project's tests as they are, once each.
+ */
+function listing() {
+    return process.argv.includes("--list");
 }
 
 /**
@@ -279,18 +359,28 @@ export function loadRows(pass) {
  * serial pass), and the strong reporter alone.
  */
 export function strongConfig(normalized, root, reporterPath) {
+    if (listing())
+        return normalized;
     const pass = strongPass();
-    let rows;
+    let shape;
     if (process.env.TEST_WORKER_INDEX === undefined) {
-        rows = buildRows(pass, root, normalized);
-        rmSync(pass.round, { recursive: true, force: true });
+        // Every invocation of the pass (a harness may start several at
+        // once, each with a share of the tests) works out the same rows from
+        // the same plan and writes them alike; none removes what another
+        // wrote. The pass's directory is new with the pass.
+        const rows = buildRows(pass, root, normalized);
+        const repeatEach = Math.max(1, ...Object.values(rows.files).map((fileRows) => fileRows.length));
+        // This invocation, for its workers: they share its server.
+        process.env["SUPERCOV_PLAYWRIGHT_INVOCATION"] = String(process.pid);
         writeJson(`${pass.round}/rows.json`, rows);
+        writeWorkerFiles(pass, rows, repeatEach);
         rowsCache = rows;
+        shape = { repeatEach, concurrency: rows.concurrency };
     }
     else {
-        rows = loadRows(pass);
+        shape = loadWorker(pass);
     }
-    const repeatEach = Math.max(1, ...Object.values(rows.files).map((fileRows) => fileRows.length));
+    const { repeatEach, concurrency } = shape;
     const strongProject = (project) => ({ ...project, repeatEach, retries: 0 });
     return {
         ...normalized,
@@ -298,7 +388,7 @@ export function strongConfig(normalized, root, reporterPath) {
         repeatEach,
         retries: 0,
         maxFailures: 0,
-        ...(rows.concurrency.workers ? { workers: rows.concurrency.workers } : {}),
+        ...(concurrency.workers ? { workers: concurrency.workers } : {}),
         // The strong reporter alone: `mutants test --json` owns stdout.
         reporter: [[reporterPath]],
     };
@@ -317,15 +407,22 @@ export function baselineOf(pass, original) {
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-let repetitionsCache;
+/**
+ * Where a test is, the same for each of its repetitions and in every
+ * invocation: its project and title path. The reporter, from a test case.
+ */
+export function placeOf(test) {
+    return JSON.stringify(test.titlePath().slice(1));
+}
+
+/** The test the plan names (its first repetition's id) for a repetition, as its invocation's reporter wrote it. */
 async function originalTestId(pass, testInfo) {
     if (!testInfo.repeatEachIndex)
         return testInfo.testId;
+    const path = `${pass.round}/originals/${key(JSON.stringify([testInfo.project.name, ...testInfo.titlePath]))}`;
     for (let waited = 0; waited < 10_000; waited += POLL_MS) {
-        if (!repetitionsCache?.[testInfo.testId] && existsSync(`${pass.round}/repetitions.json`))
-            repetitionsCache = readJson(`${pass.round}/repetitions.json`);
-        if (repetitionsCache?.[testInfo.testId])
-            return repetitionsCache[testInfo.testId];
+        if (existsSync(path))
+            return readJson(path);
         await sleep(POLL_MS);
     }
     return undefined;
@@ -347,8 +444,10 @@ function alive(pid) {
  * whose holder died is taken over.
  */
 async function lockFile(pass, file) {
-    const lock = `${pass.round}/locks/${key(file)}`;
-    mkdirSync(`${pass.round}/locks`, { recursive: true });
+    // Per invocation: another invocation's tests reach a server of their own.
+    const locks = `${pass.round}/locks/${process.env["SUPERCOV_PLAYWRIGHT_INVOCATION"]}`;
+    const lock = `${locks}/${key(file)}`;
+    mkdirSync(locks, { recursive: true });
     for (;;) {
         try {
             mkdirSync(lock);
@@ -384,10 +483,10 @@ export async function strongClaim(testInfo) {
     if (!pass)
         return undefined;
     const started = Date.now();
-    const rows = loadRows(pass);
+    const rows = loadWorker(pass);
     const original = await originalTestId(pass, testInfo);
     const test = original && rows.tests[original];
-    const row = test && rows.files[test.file]?.[testInfo.repeatEachIndex];
+    const row = test && rowsAt(pass, testInfo.repeatEachIndex)[test.file];
     if (!row || !row.tests.includes(original))
         return null;
     const configured = testInfo.timeout;
@@ -427,7 +526,17 @@ export async function strongClaim(testInfo) {
     }
     else if (configured > 0)
         testInfo.setTimeout(Date.now() - started + configured);
-    const claimed = { original, kind: row.kind, id: row.id, mutant: row.mutant ?? "-", startedAt: Date.now(), lock };
+    const claimed = {
+        original,
+        index: testInfo.repeatEachIndex,
+        testId: testInfo.testId,
+        invocation: process.env["SUPERCOV_PLAYWRIGHT_INVOCATION"],
+        kind: row.kind,
+        id: row.id,
+        mutant: row.mutant ?? "-",
+        startedAt: Date.now(),
+        lock,
+    };
     writeJson(`${pass.round}/attempts/${key(testInfo.testId)}.json`, claimed);
     return claimed;
 }
