@@ -629,9 +629,12 @@ mod tests {
             plan: PathBuf::from("plan.json"),
             results: PathBuf::from("/work/a \"b\\c\"/results.jsonl"),
         };
+        // The directory is joined the platform's way: `/.` here, `\\.` on
+        // Windows, each backslash doubled inside the quotes.
+        let joined = if cfg!(windows) { "\\\\." } else { "/." };
         assert_eq!(
             run.node_report_options(),
-            "--report-on-fatalerror --report-directory=\"/work/a \\\"b\\\\c\\\"/.\""
+            format!("--report-on-fatalerror --report-directory=\"/work/a \\\"b\\\\c\\\"{joined}\"")
         );
     }
 
