@@ -1,11 +1,11 @@
-run run_7920d8056fca8459
-command: supercov merge run_4ba950fd8c41eed6 run_105873fc19828e4a
+run run_8d223b9f3a002873
+command: supercov merge run_365989986201f711 run_78c3b98d82fe1a5e
 
 Coverage
   Lines      71.43% (10/14)
   Branches   58.33% (7/12)
   MC/DC      40.00% (2/5)
-Assertions   not assessed — npx supercov runs run_7920d8056fca8459 assertions assess
+Assertions   not assessed — npx supercov runs run_8d223b9f3a002873 assertions assess
 
 By test kind
   unit            3 test(s)  lines  64.29%  branches  58.33%  MC/DC  40.00%
@@ -26,9 +26,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_7920d8056fca8459' files
-  npx supercov runs 'run_7920d8056fca8459' gaps
-  npx supercov runs 'run_7920d8056fca8459' kinds
-  npx supercov runs 'run_7920d8056fca8459' runners
-  npx supercov runs 'run_7920d8056fca8459' scope
-  npx supercov runs run_7920d8056fca8459 --help
+  npx supercov runs 'run_8d223b9f3a002873' files
+  npx supercov runs 'run_8d223b9f3a002873' gaps
+  npx supercov runs 'run_8d223b9f3a002873' kinds
+  npx supercov runs 'run_8d223b9f3a002873' runners
+  npx supercov runs 'run_8d223b9f3a002873' scope
+  npx supercov runs run_8d223b9f3a002873 --help

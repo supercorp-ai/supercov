@@ -1,11 +1,11 @@
-run run_dfc05065d38c5dcf
+run run_83062a515289039f
 command: node --test test/price.test.js
 
 Coverage
   Lines      53.85% (7/13)
   Branches   40.00% (4/10)
   MC/DC      40.00% (2/5)
-Assertions   not assessed — npx supercov runs run_dfc05065d38c5dcf assertions assess
+Assertions   not assessed — npx supercov runs run_83062a515289039f assertions assess
 
 By test kind
   unit            2 test(s)  lines  53.85%  branches  40.00%  MC/DC  40.00%
@@ -27,9 +27,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_dfc05065d38c5dcf' files
-  npx supercov runs 'run_dfc05065d38c5dcf' gaps
-  npx supercov runs 'run_dfc05065d38c5dcf' kinds
-  npx supercov runs 'run_dfc05065d38c5dcf' runners
-  npx supercov runs 'run_dfc05065d38c5dcf' scope
-  npx supercov runs run_dfc05065d38c5dcf --help
+  npx supercov runs 'run_83062a515289039f' files
+  npx supercov runs 'run_83062a515289039f' gaps
+  npx supercov runs 'run_83062a515289039f' kinds
+  npx supercov runs 'run_83062a515289039f' runners
+  npx supercov runs 'run_83062a515289039f' scope
+  npx supercov runs run_83062a515289039f --help

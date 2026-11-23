@@ -1,7 +1,7 @@
 {
-  "id": "run_0524aa0ca175a570",
-  "startedAt": "2026-11-22T23:28:18.052Z",
-  "durationMs": 236.3,
+  "id": "run_46a77bf8c46c5868",
+  "startedAt": "2026-11-23T08:09:50.761Z",
+  "durationMs": 385.8,
   "command": [
     "npm",
     "test"
@@ -21,9 +21,9 @@
       "tests": "9674ad7d760e0daac1159ad00f286b60c8e225bbe07177de1fcc8905d095c9c6",
       "dependencies": "76b57ae0c76b662be6aefb60e701521be010a76c40be969e25796bbbecf07f4c",
       "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "instrumenter": "a50c8b8e89a4c02ce27fd1acee3ca996bccbe8e443f776790101a1378b635520",
+      "instrumenter": "156a90cec90d9a771e2c1ab603259fcfabdf1d1835e31e2cc5801aa61c3f92f9",
       "execution": "3ceaa277ca2461fac225d55bf8ce9627e269e3e447678c3bf805b7ba994e6b46",
-      "combined": "0083ae77fa8be1e0c4d1d95f7a7dd70b685d977b0bfa6fdc1fa91ee9b7a83415",
+      "combined": "061964670848eca09be38bc0572f4c6560f86756b11ec95aa6943456b4856fc7",
       "sourceFiles": 1,
       "testFiles": 2
     }
@@ -34,16 +34,16 @@
     "file": "evidence.raw.gz",
     "files": 14,
     "uncompressedBytes": 23128,
-    "compressedBytes": 5547
+    "compressedBytes": 5592
   },
   "isolatedBuild": true,
   "timings": {
-    "initializationMs": 8.9,
-    "workspacePreparationMs": 17.8,
-    "adapterSetupMs": 20.2,
+    "initializationMs": 9.1,
+    "workspacePreparationMs": 26.3,
+    "adapterSetupMs": 17.6,
     "instrumentedBuildMs": 0,
-    "testCommandMs": 172,
-    "evidencePublicationMs": 7
+    "testCommandMs": 325,
+    "evidencePublicationMs": 3.2
   },
   "copy": 1,
   "recordedBy": "4.29.0"
