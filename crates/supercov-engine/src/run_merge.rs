@@ -1177,30 +1177,38 @@ fn kept_verdicts(
     if held.is_empty() {
         return Vec::new();
     }
-    // The merged run's plan, where its mutants can be planned: the run was
-    // just published.
+    // The merged run's plan. Its archive was published a moment ago, but
+    // reading it again can still fail (the file system, a note beside it
+    // that cannot be written): then nothing is lent, the merge stands, and a
+    // pass over the merged run runs its mutants. A run that lists no mutant
+    // and measured no point has no plan: it lists no set, so no run's
+    // verdicts are of its set, and none is lent.
     let planned = discover_runs(root)
-        .ok()
+        .map_err(|error| error.to_string())
         .and_then(|inventory| {
-            inventory
+            let run = inventory
                 .runs
                 .into_iter()
                 .find(|run| run.id == merged_run_id)
-        })
-        .and_then(|run| {
-            let plan = crate::strong_plan::plan_for_run(&run, root)
-                .ok()
-                .and_then(|planned| planned.plan);
-            plan.map(|plan| (run.directory, plan))
+                .expect("a run published under the project's lock is listed");
+            let planned = crate::strong_plan::plan_for_run(&run, root)
+                .map_err(|error| format!("{error:?}"))?;
+            Ok((run.directory, planned.plan))
         });
+    let (directory, plan) = match planned {
+        Ok(planned) => planned,
+        Err(error) => {
+            return vec![format!(
+                "the runs' strong verdicts are not kept: the merged run's mutants could not be planned ({error}); a strong pass over it runs them"
+            )];
+        }
+    };
     let mut notes = Vec::new();
     let mut lending = Vec::new();
+    // Not empty, as said above: a loop over it never runs zero times.
     held.into_iter().for_each(|(index, document)| {
         let id = &inputs[index].id;
-        if planned
-            .as_ref()
-            .is_none_or(|(_, plan)| plan.mutant_set != document.mutant_set)
-        {
+        if plan.as_ref().map(|plan| &plan.mutant_set) != Some(&document.mutant_set) {
             notes.push(format!(
                 "run {id}'s strong verdicts are not kept: they are of the mutants of {}, which the merged run does not list",
                 document.mutant_set
@@ -1217,10 +1225,10 @@ fn kept_verdicts(
             .collect::<BTreeSet<_>>();
         lending.push((id.clone(), document.mutants, tests, other_bytes));
     });
-    // Where any run lends verdicts, the merged run was planned.
-    let (false, Some((directory, plan))) = (lending.is_empty(), planned) else {
+    if lending.is_empty() {
         return notes;
-    };
+    }
+    let plan = plan.expect("a run lent verdicts of the set the merged run's plan lists");
     let lent = lending
         .iter()
         .map(
@@ -2613,6 +2621,48 @@ mod tests {
             "{notes:?}"
         );
         assert_eq!(kept_statuses(&root), None);
+        // The merged run's archive cannot be read again to plan it (the
+        // third archive opened: each run's, then the merged run's): nothing
+        // is lent, and the merge stands.
+        fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
+        let notes = crate::fault::during("fs.open#evidence_archive.rs:697@3", || {
+            merge_noted(&root, &["run-a", "run-b"])
+        });
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with(
+                "the runs' strong verdicts are not kept: the merged run's mutants could not be planned ("
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(kept_statuses(&root), None);
+        assert!(root.join(".supercov/runs/merged/run.json").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A run that recorded a listed file with other bytes than the run whose
+    /// list of it the merge took lends no verdict of that file's mutants:
+    /// here the merge grows into run-b, which recorded no file, and run-a's
+    /// record of src/app.js is not run-b's.
+    #[test]
+    fn a_run_that_recorded_a_file_otherwise_lends_none_of_its_verdicts() {
+        let root = temporary();
+        for id in ["run-a", "run-b"] {
+            create_analyzable_test_run(&root, id);
+            list_mutants(&root, id, Some(&["src/app.js"]), &[]);
+        }
+        record_files(&root, "run-a", &[("src/app.js", "left && right;\n")]);
+        record_files(&root, "run-b", &[]);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/app.js"), "left && right;\n").unwrap();
+        let set = "stryker-js@10.1.1";
+        save_verdicts(&root, "run-a", set, &[(TRUE, "killed")]);
+        save_verdicts(&root, "run-b", set, &[(FALSE, "killed")]);
+        merge_noted(&root, &["run-a", "run-b"]);
+        assert_eq!(
+            kept_statuses(&root).unwrap(),
+            [(FALSE.to_owned(), "killed".to_owned())]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
