@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+**Changed**
+
+- `supercov merge` keeps the strong mutation verdicts of the runs it merges, so a strong pass split across machines with `--shard` adds up to one run with every verdict, and `merge` says how many it kept and from which runs. A kill in any run is a kill; a survival stands only where the run that let the mutant survive measured every test of the merged suite that could kill it, and is otherwise left for a pass over the merged run. A run whose verdicts are of another mutant set is named and lends none.
+- After an edit, `supercov mutants` keeps verdicts from every earlier run of the same command that holds one, not only the latest: each mutant's comes from the newest run that can lend it, and the summary names each run (`193 verdict(s) kept from runs r2, r1`). A run whose record of what its tests ran is gone no longer stops older runs from lending theirs. In `--json`, `carried.from` is a list of run ids.
+- [Mutation testing](docs/mutation.md) shows a strong pass split across CI jobs, merged, and cached for the next commit.
+
 **Fixed**
 
 - A process Playwright starts as a `webServer` from its config's folder, such as a mock server in `tests/e2e` that imports `@playwright/test`, failed to start under Supercov ("ENOENT ... tests/e2e/.supercov/node_modules/playwright.mjs"), and the run recorded no test. Playwright is now found from the project's root, whatever folder the process starts in.

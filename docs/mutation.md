@@ -109,8 +109,12 @@ mutants the tests let survive.
   verdict for each mutant whose file is as it was and whose candidate tests,
   and their test files, nothing changed could reach, as `runs latest tests
   affected` reads a change: a test file's edit reaches its tests, a source's
-  edit the tests that ran the changed code. The rest run, and the summary says
-  how many verdicts were kept and from which run.
+  edit the tests that ran the changed code. Each mutant's verdict comes from
+  the newest earlier run of the same command, dependencies and configuration
+  that holds one it can keep, so a pass split across jobs, each holding part
+  of the verdicts in its own run, is kept whole. The rest run, and the summary
+  says how many verdicts were kept and from which runs (`193 verdict(s) kept
+  from runs r2, r1`).
 - **Interrupted.** Each verdict is saved as it is made. A pass stopped by
   Ctrl-C, a killed job or a test worker that never ended keeps what it
   decided, Ctrl-C stops every process the pass started, and the next pass runs
@@ -208,7 +212,8 @@ npx supercov runs latest mutants test --plan --json
 
 - `--critical <glob>` (repeatable): every mutant in those files must be killed
   or accepted, or the command fails.
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--shard k/n` runs one of n shares of the mutants, for parallel jobs (see
+  [A pass split across jobs](#a-pass-split-across-jobs)).
 - `--plan` prints what would run, and runs nothing.
 
 Some mutants no test can tell apart from the original. Accept them in
@@ -224,6 +229,50 @@ An accepted mutant still runs, is shown as accepted, and never fails the
 command. An entry whose mutant is killed or no longer exists is listed as
 stale. A mutant's id is its file, its span, its mutator and what it becomes,
 and stays the same while that code does.
+
+### A pass split across jobs
+
+A large application suite's strong pass can be split across machines. Each
+job measures the whole suite and runs its share of the mutants; a last job
+merges the runs, and the merged run holds every job's verdicts:
+
+```yaml
+# Each of four jobs (matrix.shard 1 to 4):
+- uses: actions/cache/restore@v4
+  with: { path: .supercov/runs, key: "mutants-${{ github.sha }}", restore-keys: "mutants-" }
+- run: npx supercov mutants --shard ${{ matrix.shard }}/4 -- npm test
+- uses: actions/upload-artifact@v4
+  with: { name: "mutants-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
+# Then one job:
+- uses: actions/download-artifact@v4
+  with: { pattern: "mutants-*", path: .supercov/runs, merge-multiple: true }
+- run: npx supercov merge
+- run: npx supercov runs latest mutants --status survived
+- run: npx supercov runs clean --keep 5 # the four jobs' runs and their merge
+- uses: actions/cache/save@v4
+  with: { path: .supercov/runs, key: "mutants-${{ github.sha }}" }
+```
+
+`supercov mutants --shard k/n -- <command>` is `supercov -- <command>` with
+the mutants' probes on, then `runs latest mutants test --shard k/n`, keeping
+earlier verdicts as after an edit. Name the command after `--`: without it,
+`supercov mutants` takes the latest run's, which after a merge is the merge.
+Every job must measure the same commit with the same dependencies, as for any
+merge ([CLI reference](cli.md#combine-shards)).
+
+- **The merge.** `supercov merge` keeps the strong verdicts of the runs it
+  merges, mutant by mutant, and says how many and from which runs. A kill in
+  any run is a kill. A survival stands where the run that let the mutant
+  survive measured every test of the merged suite that could kill it, as
+  shards of one suite each do; where another run's tests could kill it and
+  that run has no verdict for it, as a unit run merged with an end-to-end run
+  can, the mutant is left undecided, and a pass over the merged run runs it.
+  Verdicts of another mutant set are not kept, and the merge says whose.
+- **The next pass.** The restored runs lend their verdicts on a later
+  commit: each job keeps every verdict nothing changed could move, from
+  whichever earlier job's run holds it, and the shares are of what is left.
+  Keep the merged run's parts with it: a merged run's `tests affected` is
+  answered from them.
 
 ### Runners without a driver
 

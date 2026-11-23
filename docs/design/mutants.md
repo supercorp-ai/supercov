@@ -553,6 +553,50 @@ as one without values.
 `statement-exclusions.json` is still kept once per run under `shards/<n>/`;
 the reader requires every copy to be the same, which runs of one source are.
 
+### Strong verdicts
+
+Each run's `strong-mutation.json` holds the verdicts of a strong pass over it,
+whole or a `--shard` of it. The merge keeps them in one for the merged run,
+keyed by mutant id, for the mutants of the merged run's plan alone (the
+mutants of the merged list, with their candidates over the merged suite). A
+run lends verdicts only where its file of verdicts reads and is of the merged
+list's mutant set; a run of another set is named in the merge's output and
+lends none. A run some of whose tests another run measured again after a
+support file changed lends none: a kill there may be its old test's. A
+verdict of a file the run recorded with other bytes than the run whose list of
+it the merge took is of other code, and is not read.
+
+What a verdict claims decides how it merges:
+
+- A mutant the merged plan decides without running it (no test reached it, no
+  test infected it, or a static rule shows it equivalent) takes the plan's
+  verdict, as a pass over the merged run would.
+- `killed` and `timeout` say a test of that run told the mutant apart. That
+  test is a test of the merged suite, so a kill in any run is a kill (killed
+  before timeout). `unviable` says the mutant does not compile, whatever runs
+  it.
+- `survived` says no test of that run could tell it apart: the run ran it
+  against each of its candidates, and its other tests did not infect it. For
+  the merged suite that holds only if every test that could kill it there
+  (its candidates in the merged plan, and the tests of the files it runs
+  whole) is a test some run that let it survive measured, by test id. Shards
+  of one suite each measure every test, so a survival in one stands. A unit
+  run and an end-to-end run do not: where an end-to-end test infects the
+  mutant and that run has no verdict, survived is not known for the merged
+  suite, and the mutant is left without a verdict for a later pass to run. A
+  test a run recorded without an id lends no survival.
+- `error` says the mutant could not be run there: it stands only where no run
+  holds anything else, and never outranks a definite verdict or an undecided
+  survival.
+- `no-coverage` and `equivalent` from one run, where the merged plan does not
+  decide the mutant, say only that run's tests could not reach it: they claim
+  nothing for the merged suite.
+
+Runs whose mutant lists differ are refused before this (above); runs whose
+verdicts are of a set the merged run does not list are skipped, not refused,
+since their coverage still merges and a pass over the merged run runs what
+they would have lent.
+
 ## What stays out
 
 - A weak verdict that compares what the original and the mutated regex

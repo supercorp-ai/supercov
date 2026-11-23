@@ -12,6 +12,7 @@ use crate::{
     evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive},
     lifecycle::{ProjectLock, finalize_published_run, publish_run, remove_stored_tree_deferred},
     run_store::{RawEvidenceMetadata, RunMetadata, StoredRun, discover_runs},
+    strong_plan::StrongVerdicts,
 };
 
 /// A record's top-level entries as they were written, in their order: the
@@ -271,8 +272,31 @@ fn recorded_files(
     ))
 }
 
+/// Each file's bytes as each run recorded them, where it did.
+fn recorded_hashes(archives: &[Vec<EvidenceArchiveEntry>]) -> Vec<BTreeMap<String, String>> {
+    archives
+        .iter()
+        .map(|archive| {
+            recorded_files(archive)
+                .map(|(_, manifest)| {
+                    manifest
+                        .files
+                        .into_iter()
+                        .map(|(file, fingerprint)| (file, fingerprint.sha256))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Of each file the merged run lists mutants of, the run whose list of it
+/// the merge took.
+type Owners = BTreeMap<String, usize>;
+
 /// The merged run's one `mutants.json`, from each run's (`base` the run
-/// whose manifest the merge takes): the mutants of every file a run listed,
+/// whose manifest the merge takes), and of each file listed, the run whose
+/// list of it the merge took: the mutants of every file a run listed,
 /// each file's from the first run that listed it, `base` first. Runs that
 /// recorded a file with the same bytes and listed it differently, or where
 /// one listed it and the other did not, did not enumerate the same mutants,
@@ -282,8 +306,9 @@ fn recorded_files(
 fn merged_mutants(
     inputs: &[&StoredRun],
     archives: &[Vec<EvidenceArchiveEntry>],
+    hashes: &[BTreeMap<String, String>],
     base: usize,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<(Option<Vec<u8>>, Owners), String> {
     use crate::mutant_list::MutantsFile;
     const NAME: &str = "mutants.json";
     let mut listed = Vec::new();
@@ -312,23 +337,8 @@ fn merged_mutants(
     let Some((first, others)) = listed.split_first() else {
         // No run listed mutants: the merge lists none either, as a run
         // measured with them off says.
-        return Ok(first_file);
+        return Ok((first_file, BTreeMap::new()));
     };
-    // Each file's bytes as a run recorded them, where it did.
-    let hashes = archives
-        .iter()
-        .map(|archive| {
-            recorded_files(archive)
-                .map(|(_, manifest)| {
-                    manifest
-                        .files
-                        .into_iter()
-                        .map(|(file, fingerprint)| (file, fingerprint.sha256))
-                        .collect::<BTreeMap<_, _>>()
-                })
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>();
     fn ids(mutants: &[crate::js_mutant_links::CandidateMutant]) -> Vec<&str> {
         mutants.iter().map(|mutant| mutant.id.as_str()).collect()
     }
@@ -419,8 +429,13 @@ fn merged_mutants(
             merged.merge(one).expect("each language is merged once")
         });
     merged.tests_without_values = without_values.into_iter().collect();
-    Ok(Some(
-        serde_json::to_vec(&merged).expect("plain data serializes"),
+    let owners = files
+        .into_iter()
+        .map(|(path, (owner, _))| (path, owner))
+        .collect();
+    Ok((
+        Some(serde_json::to_vec(&merged).expect("plain data serializes")),
+        owners,
     ))
 }
 
@@ -735,6 +750,24 @@ pub fn merge_coverage_runs(
     started_at: &str,
     allow_changed: bool,
 ) -> Result<String, String> {
+    merge_runs(root, run_ids, merged_run_id, started_at, allow_changed).map(|merged| merged.id)
+}
+
+/// A merged run, and what its merge has to say beside it: which strong
+/// verdicts it kept of the runs merged, and whose it did not.
+pub struct MergedRun {
+    pub id: String,
+    pub notes: Vec<String>,
+}
+
+/// `merge_coverage_runs`, with what the merge has to say.
+pub fn merge_runs(
+    root: &Path,
+    run_ids: &[String],
+    merged_run_id: &str,
+    started_at: &str,
+    allow_changed: bool,
+) -> Result<MergedRun, String> {
     if run_ids.len() < 2 {
         return Err("Usage: supercov merge <run-id> <run-id> [...]".into());
     }
@@ -928,11 +961,34 @@ pub fn merge_coverage_runs(
     })?;
     merged_declaration.runners = runners.into_values().collect();
 
-    let mutants = merged_mutants(
+    let hashes = recorded_hashes(&archives);
+    let (mutants, owners) = merged_mutants(
         &inputs,
         &archives,
+        &hashes,
         grown.as_ref().map_or(0, |grown| grown.latest),
     )?;
+    // The strong verdicts each run saved, where they read. A run some of
+    // whose tests another measured again, after a support file changed,
+    // lends none: a kill there may be its old test's.
+    let held = inputs
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            grown
+                .as_ref()
+                .is_none_or(|grown| !grown.superseded.contains_key(index))
+        })
+        .filter_map(|(index, input)| {
+            let saved = std::fs::read(
+                input
+                    .directory
+                    .join(crate::strong_plan::STRONG_VERDICTS_FILE),
+            );
+            let document = serde_json::from_slice::<StrongVerdicts>(&saved.ok()?).ok()?;
+            Some((index, document))
+        })
+        .collect::<Vec<_>>();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
         .map_err(|error| format!("Cannot lock coverage store for merge: {error}"))?;
@@ -1080,7 +1136,19 @@ pub fn merge_coverage_runs(
             .map_err(|error| format!("Could not publish merged run: {error}"))?;
         finalize_published_run(root, merged_run_id)
             .map_err(|error| format!("Could not finalize merged run: {error}"))?;
-        Ok(merged_run_id.to_owned())
+        let notes = kept_verdicts(
+            root,
+            merged_run_id,
+            &inputs,
+            &archives,
+            held,
+            &owners,
+            &hashes,
+        );
+        Ok(MergedRun {
+            id: merged_run_id.to_owned(),
+            notes,
+        })
     })();
     let _ = remove_stored_tree_deferred(root, &work);
     let release = lock
@@ -1089,8 +1157,104 @@ pub fn merge_coverage_runs(
     match (result, release) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
-        (Ok(id), Ok(())) => Ok(id),
+        (Ok(merged), Ok(())) => Ok(merged),
     }
+}
+
+/// The merged run's strong verdicts, from those the runs merged saved
+/// (`strong_verdicts::merged_verdicts`), saved into it; what was kept, and
+/// each run whose verdicts were not, and why. A run's test ids are those its
+/// records name; a test it recorded only by name lends no survival.
+fn kept_verdicts(
+    root: &Path,
+    merged_run_id: &str,
+    inputs: &[&StoredRun],
+    archives: &[Vec<EvidenceArchiveEntry>],
+    held: Vec<(usize, StrongVerdicts)>,
+    owners: &BTreeMap<String, usize>,
+    hashes: &[BTreeMap<String, String>],
+) -> Vec<String> {
+    if held.is_empty() {
+        return Vec::new();
+    }
+    // The merged run's plan, where its mutants can be planned: the run was
+    // just published.
+    let planned = discover_runs(root)
+        .ok()
+        .and_then(|inventory| {
+            inventory
+                .runs
+                .into_iter()
+                .find(|run| run.id == merged_run_id)
+        })
+        .and_then(|run| {
+            let plan = crate::strong_plan::plan_for_run(&run, root)
+                .ok()
+                .and_then(|planned| planned.plan);
+            plan.map(|plan| (run.directory, plan))
+        });
+    let mut notes = Vec::new();
+    let mut lending = Vec::new();
+    held.into_iter().for_each(|(index, document)| {
+        let id = &inputs[index].id;
+        if planned
+            .as_ref()
+            .is_none_or(|(_, plan)| plan.mutant_set != document.mutant_set)
+        {
+            notes.push(format!(
+                "run {id}'s strong verdicts are not kept: they are of the mutants of {}, which the merged run does not list",
+                document.mutant_set
+            ));
+            return;
+        }
+        let tests = measured_tests(&archives[index])
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        let other_bytes = owners
+            .iter()
+            .filter(|(path, owner)| hashes[index].get(*path) != hashes[**owner].get(*path))
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>();
+        lending.push((id.clone(), document.mutants, tests, other_bytes));
+    });
+    // Where any run lends verdicts, the merged run was planned.
+    let (false, Some((directory, plan))) = (lending.is_empty(), planned) else {
+        return notes;
+    };
+    let lent = lending
+        .iter()
+        .map(
+            |(_, verdicts, tests, other_bytes)| crate::strong_verdicts::Lent {
+                verdicts,
+                tests,
+                other_bytes,
+            },
+        )
+        .collect::<Vec<_>>();
+    let document = StrongVerdicts {
+        schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
+        run: merged_run_id.to_owned(),
+        mutants: crate::strong_verdicts::merged_verdicts(&plan, &lent),
+        mutant_set: plan.mutant_set,
+    };
+    let from = lending
+        .iter()
+        .map(|(id, ..)| id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    notes.push(
+        match crate::strong_verdicts::save(
+            &directory.join(crate::strong_plan::STRONG_VERDICTS_FILE),
+            &document,
+        ) {
+            Ok(()) => format!(
+                "{} strong verdict(s) kept from runs {from}",
+                document.mutants.len()
+            ),
+            Err(error) => format!("the runs' strong verdicts are not kept: {error}"),
+        },
+    );
+    notes
 }
 
 #[cfg(test)]
@@ -2319,6 +2483,136 @@ mod tests {
             .map(|mutant| mutant.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, ["src/other.js:1:5-1:18:ConditionalExpression:true"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Writes `verdicts` (mutant id, status) into run `id` as its strong
+    /// verdicts of `set`.
+    fn save_verdicts(root: &Path, id: &str, set: &str, verdicts: &[(&str, &str)]) {
+        let mutants = verdicts
+            .iter()
+            .map(|(mutant, status)| {
+                (
+                    (*mutant).to_owned(),
+                    serde_json::json!({"status": status, "tests": 1}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        fs::write(
+            root.join(".supercov/runs")
+                .join(id)
+                .join(crate::strong_plan::STRONG_VERDICTS_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1, "run": id, "mutantSet": set, "mutants": mutants
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The merged run's strong verdicts, by mutant id, as statuses.
+    fn kept_statuses(root: &Path) -> Option<Vec<(String, String)>> {
+        let saved = fs::read(
+            root.join(".supercov/runs/merged")
+                .join(crate::strong_plan::STRONG_VERDICTS_FILE),
+        )
+        .ok()?;
+        let document = serde_json::from_slice::<StrongVerdicts>(&saved).unwrap();
+        assert_eq!(document.run, "merged");
+        Some(
+            document
+                .mutants
+                .into_iter()
+                .map(|(id, verdict)| (id, verdict.status))
+                .collect(),
+        )
+    }
+
+    fn merge_noted(root: &Path, ids: &[&str]) -> Vec<String> {
+        merge_runs(
+            root,
+            &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap()
+        .notes
+    }
+
+    const TRUE: &str = "src/app.js:1:5-1:18:ConditionalExpression:true";
+    const FALSE: &str = "src/app.js:1:5-1:18:ConditionalExpression:false";
+
+    /// The runs' strong verdicts are kept in the merged run, by mutant: a
+    /// kill in one, a survival in the other where it measured every test
+    /// that could kill it. A run whose verdicts are of another mutant set
+    /// lends none, and says so; one whose verdicts do not read lends none.
+    #[test]
+    fn merged_runs_keep_their_strong_verdicts() {
+        let root = temporary();
+        for id in ["run-a", "run-b", "run-c", "run-d"] {
+            create_analyzable_test_run(&root, id);
+            list_mutants(&root, id, Some(&["src/app.js"]), &[]);
+        }
+        let set = "stryker-js@10.1.1";
+        save_verdicts(&root, "run-a", set, &[(TRUE, "killed")]);
+        save_verdicts(
+            &root,
+            "run-b",
+            set,
+            &[(TRUE, "survived"), (FALSE, "survived")],
+        );
+        save_verdicts(&root, "run-c", "stryker-js@9.0.0", &[(FALSE, "killed")]);
+        fs::write(
+            root.join(".supercov/runs/run-d")
+                .join(crate::strong_plan::STRONG_VERDICTS_FILE),
+            b"not json",
+        )
+        .unwrap();
+        let notes = merge_noted(&root, &["run-a", "run-b", "run-c", "run-d"]);
+        assert_eq!(
+            notes,
+            [
+                "run run-c's strong verdicts are not kept: they are of the mutants of stryker-js@9.0.0, which the merged run does not list",
+                "2 strong verdict(s) kept from runs run-a, run-b",
+            ]
+        );
+        assert_eq!(
+            kept_statuses(&root).unwrap(),
+            [
+                (FALSE.to_owned(), "survived".to_owned()),
+                (TRUE.to_owned(), "killed".to_owned())
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where no merged run's verdicts are of the merged list's set, nothing
+    /// is saved; where the verdicts cannot be saved, the merge says so and
+    /// still stands.
+    #[test]
+    fn verdicts_of_another_set_or_that_cannot_be_saved_are_not_kept() {
+        let root = temporary();
+        for id in ["run-a", "run-b"] {
+            create_analyzable_test_run(&root, id);
+            list_mutants(&root, id, Some(&["src/app.js"]), &[]);
+        }
+        save_verdicts(&root, "run-a", "stryker-js@9.0.0", &[(TRUE, "killed")]);
+        let notes = merge_noted(&root, &["run-a", "run-b"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("run run-a's strong verdicts are not kept"));
+        assert_eq!(kept_statuses(&root), None);
+        fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
+        save_verdicts(&root, "run-a", "stryker-js@10.1.1", &[(TRUE, "killed")]);
+        let notes = crate::fault::during("fs.write#strong_verdicts.rs:33", || {
+            merge_noted(&root, &["run-a", "run-b"])
+        });
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("the runs' strong verdicts are not kept: "),
+            "{notes:?}"
+        );
+        assert_eq!(kept_statuses(&root), None);
         fs::remove_dir_all(root).unwrap();
     }
 }

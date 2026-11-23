@@ -13,9 +13,8 @@ use std::{
 
 use serde_json::{Value, json};
 use supercov_engine::{
-    coverage_report::{ArchiveReportRequest, ExitCodeInput},
     run_store::{StoredRun, discover_runs, select_run},
-    strong_plan::{StrongPlan, StrongVerdicts, Verdict, plan_for_archive},
+    strong_plan::{StrongPlan, StrongVerdicts, Verdict, plan_for_run},
 };
 
 pub(crate) const HELP: &str = "\
@@ -411,10 +410,10 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     let carried = if options.carry && !options.plan {
         carry_over(&root, &inventory.runs, run, &plan, &saved)
     } else {
-        None
+        Vec::new()
     };
     // Saved with the pass's own verdicts.
-    if let Some((_, verdicts)) = &carried {
+    for (_, verdicts) in &carried {
         saved.extend(verdicts.clone());
     }
     // A second pass over the same run runs only what has no verdict.
@@ -453,8 +452,11 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         "mutants": asked.len(),
         "of": total,
     });
-    if let Some((from, verdicts)) = &carried {
-        data["carried"] = json!({"from": from, "mutants": verdicts.len()});
+    if !carried.is_empty() {
+        data["carried"] = json!({
+            "from": carried.iter().map(|(from, _)| from).collect::<Vec<_>>(),
+            "mutants": carried.iter().map(|(_, verdicts)| verdicts.len()).sum::<usize>(),
+        });
     }
     data["gate"] = gate(&root, &asked, &verdicts, options)?;
     data["survivors"] = survivors(run, &asked, &verdicts);
@@ -599,18 +601,7 @@ fn markdown(data: &Value, options: &Options) -> ExitCode {
 }
 
 fn run_plan(root: &Path, run: &StoredRun) -> Result<StrongPlan, String> {
-    let planned = plan_for_archive(
-        &ArchiveReportRequest {
-            archive_path: run.evidence_path.clone(),
-            run_id: run.id.clone(),
-            generated_at: run.metadata.started_at.clone(),
-            integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
-            test_exit_code: ExitCodeInput::Present(run.metadata.test_exit_code),
-            test_filter: None,
-        },
-        root,
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let planned = plan_for_run(run, root).map_err(|error| format!("{error:?}"))?;
     if !planned.changed.is_empty() {
         eprintln!(
             "[supercov] {} file(s) changed since run {}; their mutants are left out until it is measured again: {}",
@@ -745,9 +736,16 @@ fn plan_text(data: &Value) -> String {
             format!(" ({asked} of its {of} mutants, {})", narrowed.join(" and "))
         };
         if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
+            let from = data["carried"]["from"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
             extra.push_str(&format!(
-                "  {carried} verdict(s) kept from run {}: nothing they depend on changed\n",
-                data["carried"]["from"].as_str().unwrap_or("")
+                "  {carried} verdict(s) kept from run{} {}: nothing they depend on changed\n",
+                if from.len() == 1 { "" } else { "s" },
+                from.join(", ")
             ));
         }
         return format!(
@@ -1205,19 +1203,15 @@ fn save_to(
     mutant_set: &str,
     saved: &std::collections::BTreeMap<String, Verdict>,
 ) -> Result<(), String> {
-    let document = StrongVerdicts {
-        schema_version: supercov_engine::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
-        run: run.to_owned(),
-        mutant_set: mutant_set.to_owned(),
-        mutants: saved.clone(),
-    };
-    let partial = path.with_extension("json.partial");
-    supercov_engine::fault_fs::write(
-        &partial,
-        serde_json::to_vec_pretty(&document).expect("plain data serializes"),
+    supercov_engine::strong_verdicts::save(
+        path,
+        &StrongVerdicts {
+            schema_version: supercov_engine::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
+            run: run.to_owned(),
+            mutant_set: mutant_set.to_owned(),
+            mutants: saved.clone(),
+        },
     )
-    .and_then(|()| supercov_engine::fault_fs::rename(&partial, path))
-    .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// What running a plan's mutants did, beside the verdicts it saved.
@@ -1242,24 +1236,11 @@ fn execute(
     saved: &mut std::collections::BTreeMap<String, Verdict>,
     options: &Options,
 ) -> Result<Executed, Stop> {
-    use supercov_engine::strong_plan::Decided;
     // Decided without running.
     for mutant in &plan.mutants {
-        let status = match mutant.decided {
-            Some(Decided::Survived) => "survived",
-            Some(Decided::NoCoverage) => "no-coverage",
-            Some(Decided::Equivalent) => "equivalent",
-            None => continue,
-        };
-        saved.insert(
-            mutant.id.clone(),
-            Verdict {
-                status: status.into(),
-                killed_by: None,
-                tests: 0,
-                duration_ms: 0,
-                reason: mutant.reason.clone(),
-            },
+        saved.extend(
+            supercov_engine::strong_verdicts::decided_verdict(mutant)
+                .map(|verdict| (mutant.id.clone(), verdict)),
         );
     }
     let to_run = plan.mutants.iter().filter(|m| m.decided.is_none()).count();
@@ -1487,26 +1468,24 @@ fn summary(
     })
 }
 
-/// Verdicts an earlier run of this checkout's project still gives `run`'s
-/// mutants, by mutant id, and that run's id: where the run is current, the
-/// latest earlier run of the same command, dependencies, configuration and
-/// mutant set that holds verdicts gives each mutant `kept_verdicts` keeps.
+/// Verdicts earlier runs of this checkout's project still give `run`'s
+/// mutants, by mutant id, with each run's id, newest first: of the earlier
+/// runs of the same command, dependencies, configuration and mutant set,
+/// newest first, each gives the mutants still undecided what
+/// `kept_verdicts` keeps of its verdicts. A strong pass split across
+/// machines leaves each part's verdicts in its own run.
 fn carry_over(
     root: &Path,
     runs: &[StoredRun],
     run: &StoredRun,
     plan: &StrongPlan,
     saved: &std::collections::BTreeMap<String, Verdict>,
-) -> Option<(String, std::collections::BTreeMap<String, Verdict>)> {
-    let undecided = plan
+) -> Vec<(String, std::collections::BTreeMap<String, Verdict>)> {
+    let mut undecided = plan
         .mutants
         .iter()
         .filter(|mutant| mutant.decided.is_none() && !saved.contains_key(&mutant.id))
         .collect::<Vec<_>>();
-    // The run is current: `supercov mutants` measures one where it is not.
-    if undecided.is_empty() {
-        return None;
-    }
     // The same command, Supercov and setup: what else a verdict rests on.
     let key = |of: &StoredRun| {
         let integrity = &of.metadata.integrity;
@@ -1517,20 +1496,34 @@ fn carry_over(
             integrity.fingerprint.configuration.clone(),
         )
     };
-    // Newest first, as runs are listed.
-    let (earlier, document) = runs
-        .iter()
-        .filter(|earlier| {
-            earlier.metadata.started_at < run.metadata.started_at && key(earlier) == key(run)
-        })
-        .find_map(|earlier| {
-            saved_document(earlier)
-                .filter(|document| document.mutant_set == plan.mutant_set)
-                .map(|document| (earlier, document))
-        })?;
-    let affected = supercov_engine::source_manifest::affected_tests(root, earlier).ok()?;
-    let carried = kept_verdicts(&undecided, &plan.tests, &document.mutants, &affected);
-    (!carried.is_empty()).then(|| (earlier.id.clone(), carried))
+    let mut carried = Vec::new();
+    // Newest first, as runs are listed. Once every mutant has a verdict,
+    // the rest are not read: `supercov mutants` measures a run where the
+    // checkout is not current, and an unchanged run decides nothing new.
+    for earlier in runs.iter().filter(|earlier| {
+        earlier.metadata.started_at < run.metadata.started_at && key(earlier) == key(run)
+    }) {
+        if undecided.is_empty() {
+            break;
+        }
+        let Some(document) =
+            saved_document(earlier).filter(|document| document.mutant_set == plan.mutant_set)
+        else {
+            continue;
+        };
+        // A run whose record of what each test ran is gone says nothing of
+        // what a change since could reach.
+        let Ok(affected) = supercov_engine::source_manifest::affected_tests(root, earlier) else {
+            continue;
+        };
+        let kept = kept_verdicts(&undecided, &plan.tests, &document.mutants, &affected);
+        if kept.is_empty() {
+            continue;
+        }
+        undecided.retain(|mutant| !kept.contains_key(&mutant.id));
+        carried.push((earlier.id.clone(), kept));
+    }
+    carried
 }
 
 /// The verdicts of `earlier` that no change since could move, by mutant id,
@@ -1847,7 +1840,7 @@ mod tests {
         let text = plan_text(&json!({
             "run": "r1", "summary": summary,
             "scope": {"diff": "main", "files": ["a.js", "b.js"], "mutants": 3, "of": 9},
-            "carried": {"from": "r0", "mutants": 4},
+            "carried": {"from": ["r0"], "mutants": 4},
         }));
         assert!(
             text.starts_with(
@@ -1859,6 +1852,16 @@ mod tests {
         assert!(
             text.contains("  4 verdict(s) kept from run r0: nothing they depend on changed\n"),
             "{text}"
+        );
+        let shards = plan_text(&json!({
+            "run": "r3", "summary": summary,
+            "carried": {"from": ["r2", "r1"], "mutants": 193},
+        }));
+        assert!(
+            shards.contains(
+                "  193 verdict(s) kept from runs r2, r1: nothing they depend on changed\n"
+            ),
+            "{shards}"
         );
         let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
         assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");

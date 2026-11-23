@@ -219,6 +219,26 @@ pub fn plan_for_archive(
     })
 }
 
+/// The plan for a stored run, as `plan_for_archive` makes it of its archive.
+pub fn plan_for_run(
+    run: &crate::run_store::StoredRun,
+    root: &std::path::Path,
+) -> Result<ArchivePlan, ReportError> {
+    plan_for_archive(
+        &ArchiveReportRequest {
+            archive_path: run.evidence_path.clone(),
+            run_id: run.id.clone(),
+            generated_at: run.metadata.started_at.clone(),
+            integrity: Some(serde_json::to_value(&run.metadata.integrity).expect("plain data")),
+            test_exit_code: crate::coverage_report::ExitCodeInput::Present(
+                run.metadata.test_exit_code,
+            ),
+            test_filter: None,
+        },
+        root,
+    )
+}
+
 /// Lists a run's mutants from its sources under `root`, unless the run or
 /// an earlier ask listed them: what a query about its mutants does first.
 /// The files changed since the run, whose mutants could not be listed.
