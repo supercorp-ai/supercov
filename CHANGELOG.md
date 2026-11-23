@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A Playwright strong pass runs the whole plan in one invocation of the command, without restarting a worker or a browser for each mutant. Each test a mutant needs is declared as many times as it may run (its copies, in describes of their own), so one worker runs them one after another with the browser it launched, and each copy takes the next mutant waiting for that test from a queue the pass's processes share. A mutant goes from candidate to candidate as copies take it and stops at its first kill; the main pass no longer ends before the survivors' other candidates run in a further invocation. On a large application's e2e suite a mutant took about 50 s, and an area of 1,688 mutants decided none in a CI job's ten minutes.
+- A kill is confirmed by a run of the same test with no mutant on the same server (its control) that passes; a failed control puts the kill in doubt, and it runs again one test at a time. Kills in different invocations of a harness, each with a server of its own, are no longer confirmed again as though they had shared one.
+- Verdicts are written as they are reached, so the progress line counts them, and a pass stopped by its budget keeps them.
+- The progress line says what the pass does: the round, how many invocations, baselines, mutant attempts and controls, the tests running and for how long, and when nothing has ended for two minutes, what it waits on. Before Playwright starts it shows the command's last line, and each invocation prints a line for each mutant attempt, so a harness that watches its processes sees them work. The estimate of the time left is paced from the first mutant attempt, not the command's start. The command's process tree is listed after ten minutes, not every minute.
+- Mutants a server must start with run several at once, one per invocation of a harness that starts several, each invocation's server started with its own; one its server did not run runs alone as before.
+- A `describe.serial` runs in order in one worker but goes on past a kill, and a project others depend on (a login setup) runs as it is in every invocation.
+
+**Fixed**
+
+- A strong pass stopped by its budget while a later round (a confirmation, a timeout's retry) had not yet run its tests no longer makes that round's mutants `error`s; they are left for the next pass.
+
 ## 4.29.3
 
 **Fixed**

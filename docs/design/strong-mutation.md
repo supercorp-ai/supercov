@@ -704,67 +704,121 @@ whose mutant passes the hit limit writes a marker to its console; a server
 appends the attempt to `<results>.timeouts.jsonl`. Either makes the verdict
 `timeout`, whether or not a test failed.
 
-**One invocation, rows of repetitions.** The generated config, on
-`SUPERCOV_STRONG_PLAN`, works out each test file's rows: row 0 is the
-baseline (every test of the file some mutant needs, no mutant), then one row
-per mutant with a candidate in the file, with canaries among them. It sets
-`repeatEach` to the most rows a file has, `retries: 0` and no failure limit,
-and keeps the project's workers; the k-th repetition of a test runs its
-file's row k if the row names the test, and skips otherwise. A row is found
-from the file and `repeatEachIndex` -- nothing is claimed at run time, so
-no two repetitions can take one job. (The Vitest driver claims because
-Vitest's copies of a file cannot be told apart; Playwright's repetitions
-can.) A row after the baseline waits for the test's own baseline: a test
-that fails without a mutant is no candidate.
+**One invocation, copies of the tests.** A Playwright test runs once per
+test case, with fresh test fixtures, and a worker runs test cases one after
+another with the browser it launched. So the pass declares each test a
+mutant needs several times over as its spec loads: Supercov's test
+declaration, on Playwright's test type, adds the test's copies after it, each
+in a describe of its own (`[supercov copy <k>]`) so that its full title is
+new; the title, the place (a `file:line` filter takes every copy) and the
+fixtures are the test's. A copy takes its work as it starts, from a queue on
+disk that every worker and every invocation of the pass share: the next
+mutant whose candidate the test is, not yet tried against it, one no other
+attempt runs first; making the claim's mark (a directory) is what takes it,
+so two copies never take one. The test's mutants are ordered by where it
+stands in each one's candidates (the likeliest killer's mutants first), then
+the plan's order. A test gets one copy for each mutant that may take it, one
+for each control a kill may call for (below), and its first run; the generated
+config sets `repeatEach` to 1, `retries: 0` and no failure limit, and keeps the
+project's workers.
 
-Playwright gives every repetition index its own worker (worker fixtures are
-per repetition), so each row of a file starts a worker and, for page tests,
-a browser. That is the price of rows; the server is not restarted.
+This replaces rows of repetitions (`repeatEach`). Playwright gives every
+repetition index a worker of its own, so each row started a worker and a
+browser, and each later stage (the survivors' other candidates, the kills to
+confirm) started the command again. On a large application's e2e suite
+(Next.js production build, a harness that starts a server and a database for
+each of several `playwright test` processes) a mutant took about 50 s, and an
+area of 1,688 mutants decided none in a CI job's ten minutes: every kill there
+ran beside another process's attempt and waited for a confirmation the budget
+never reached, and verdicts were decided only once the command had ended.
 
-**Memory: rows in invocations of a bounded size.** Playwright makes every
-repetition of every test of each file it loads before the first test runs,
-in the runner, whether a row names the test or not: tests × `repeatEach`
-test cases, and `repeatEach` grows with the mutants of the busiest file. A
-large application's e2e suite, 77 tests and 15,603 mutants to run, ran out
-of a 4 GB heap that way before its first test. So an invocation holds at most
-about 20,000 such test cases (`repeatEach` at most 20,000 / the plan's
-Playwright tests, never under 4; `SUPERCOV_PLAYWRIGHT_REPETITIONS` sets it):
-the main pass takes each file's first rows, cheapest first, and asks for
-another invocation (a `restart` record of kind `main`) for the rest, which
-runs them as the main pass would, and so on; a later pass's job that has more
-rows than an invocation holds goes on the same way. Each process reads only
-what it needs: the runner reads the plan once and writes the rows; a worker
-reads `worker.json` (the pass's shape: `repeatEach`, the tests, how they run
-side by side) and `rows/<index>.json`, the rows of the one repetition index
-it serves, and finds a repetition's test by its project and title path in
-`originals/` (one small file a test), never the plan or the other rows. On a
-fixture of 30 tests and 15,603 mutants each with 38 candidates (a 25 MB plan),
-`playwright test --list` peaked at 1.16 GB resident before and 200 MB after,
-and the runner ran under `--max-old-space-size=256`.
+**A mutant from candidate to candidate in one invocation.** A copy that
+takes a mutant runs it; a test that passes moves the mutant on, and the next
+copy of another candidate that starts takes it there, in whichever worker or
+invocation runs that test; a kill marks the mutant, and no copy takes it
+again. A mutant every candidate let live has survived. Since every copy of a
+test takes whatever its queue holds, a test's mutants are all tried by the
+time its copies are spent, whatever order the tests run in, so a mutant
+never waits for a stage. Where every mutant left in a test's queue runs
+elsewhere at that moment, the copy takes one of those too rather than leave
+the test's copies unused: its verdict is the same either way.
+
+**Controls: a run with no mutant first in each worker.** The first run of a
+test in a worker, and its first run there after it failed, has no mutant.
+The first such run of a test in a main round is its baseline: a test that
+fails without a mutant is no candidate (a second control that passes makes it
+one again). A test runs with a mutant only in a worker where it passed without
+one, so a test that leans on what an earlier test of its file left in the
+worker (a serial describe, a `beforeAll`) runs with its mutants as it ran
+without them. A failed test gives Playwright's next test a new worker, so the
+test after a kill is a control: passing, it confirms the kills before it on
+the same server (the invocation's); failing, it puts them in doubt, and they
+run again one test at a time. A test whose control fails twice in an
+invocation is not run there again. Controls stand in for the canaries rows
+had (rows with no mutant, planted among the mutated ones): each kill is now
+followed by one, at the cost of a run of the test.
+
+**Serial describes run in order but go on.** A `describe.serial` (or
+`describe.configure({ mode: 'serial' })`) runs as a default describe: in
+order, in one worker, but a failed test (a kill) does not skip the rest of
+the describe, which would leave their mutants for another invocation.
+
+**A worker a mutant ran in is not used again.** Requests carry their
+attempt's mutant to the server, which serves many attempts at once; the
+Playwright worker's own process runs a mutant only where it serves a request
+itself. An attempt whose mutant ran in the worker's process fails as it ends
+(after its outcome is kept), so that the next test gets a new worker.
+
+**Verdicts as they come.** A kill confirmed by its control, a survivor's last
+candidate, and a page's hit limit write the mutant's verdict into the results
+as they happen (a mark per mutant, so once), and the progress line counts
+them. Once the command has ended, with every invocation it started, the
+engine runs the strong reporter's `judge`, which gives the rest theirs: a kill
+no control came after (the round ended first) stands, as any kill did before;
+a candidate that failed without the mutant is left out; what did not run is
+unfinished, and runs in a `rest` round. A pass the budget stopped is judged
+too, and keeps what it finished.
+
+**What the pass says as it goes.** Each invocation's runner writes a status
+file (its round, the baselines, attempts and controls so far, the tests
+running and since when), and prints a line on the command's output for each
+attempt with a mutant (`<mutant>: "<test>" lives (1.4s)`), so a harness that
+watches its processes' last lines sees them work. `mutants test` adds to its
+progress line what the round does, what runs and for how long, and where
+nothing has ended for two minutes what it waits on: a test running up to its
+time, or, with no test running, the command's last line. Before any Playwright
+invocation began, it says the command's last line. The estimate of the time
+left is the plan's cost of the mutants left at the pace since the first
+mutant ran, not since the command started, so the start-up (a production
+build, a server) does not stretch it. The command's process tree is listed
+after ten minutes, not every minute.
+
+**Memory: copies in invocations of a bounded size.** Playwright makes every
+test case of every file it loads before the first test runs, in the runner.
+A large application's e2e suite, 77 tests and 15,603 mutants to run, ran out of
+a 4 GB heap that way before its first test, with rows. So an invocation holds
+at most about 20,000 copies (`SUPERCOV_PLAYWRIGHT_COPIES` sets it): the main
+round takes the mutants in the plan's order while they fit, and asks for
+another invocation (a `restart` record of kind `main`) for the rest. Each
+process reads only what it needs: the runner reads the plan once and writes
+the round's work; a worker reads `worker.json` (the tests, their copies, how
+they run side by side), the queue of each test it runs and each mutant it
+takes, and finds a copy's test by its project and title path in `originals/`
+(one small file a test), never the plan.
 
 **`--list` reads no plan.** A harness that shares tests out across processes
 lists them first (`playwright test --list --reporter=json`). The generated
-config sees `--list` and returns the project's own config: the list shows each
-test once, and nothing of the pass is read or written. It used to work out
-the rows, clear the pass's directory and list every repetition.
+config sees `--list` and returns the project's own config, and the test
+declaration adds no copies: the list shows each test once, and nothing of the
+pass is read or written.
 
 **Several invocations at once.** A harness may start several `playwright test`
 processes in one command (slots, each with a share of the tests and a server
-of its own), a few seconds apart. They share the pass's directory: each
-works out the same rows from the same plan and writes them alike, and none
-removes what another wrote (the directory is new with the pass; a runner
-used to clear it as it started, so a slot started later removed the
-baselines, attempts and maps of the slots before it, which then waited out
-the baseline wait on every row). A test's baseline and a mutant's kill are
-the pass's; a file's lock (one test of the file at a time) is the
-invocation's, as its server is. Each attempt records its outcome on disk (the
-fixture's attempt, the reporter's outcome), and the verdicts are decided once,
-after the command has ended with every process it started: the engine runs
-the strong reporter's `judge`, which reads every invocation's attempts. A
-pass the budget stopped is judged too: what finished keeps its verdict, and
-a row that never ran (its test's baseline never ended) is unfinished, never
-"its candidate tests fail without any mutant", which only a baseline that
-failed says.
+of its own), a few seconds apart. They share the round's directory: each
+works out the same work from the same plan and writes it alike, and none
+removes what another wrote. A test's baseline, a mutant's claims and its kill
+are the pass's; a file's lock (one test of the file at a time), a kill's
+control and what ran beside what are the invocation's, as its server is.
 
 **A process that runs out of heap is named.** Every Node process of a strong
 pass runs with `--report-on-fatalerror` into the pass's directory. A process
@@ -774,35 +828,32 @@ for a test runner's process, that the plan was too large for its heap; each
 mutant left without a verdict says so in its reason. The reports, which hold
 the process's environment, are removed once read.
 
-**Concurrency as the project runs it.** Repetitions of one file are separate
-groups, which Playwright runs side by side where the project ran the file's
-tests one after another. A suite whose tests share a server's state (a
-harness's fault rules for one server slot, rewritten by each test) then
-fails for reasons no mutant made. So a file runs one test at a time here
-when its tests are known not to run at once: two or more of them ran in the
-measured run and their spans never overlapped, or, where the spans tell
-nothing (one test, none spanned), the project does not run files
-`fullyParallel`. Each such attempt holds the file's lock from its start to
-its end, across workers. A file whose tests overlapped runs side by side.
-(Each Playwright attempt has two records, the reporter's, with its status,
-and the fixture's, with its span; the plan takes the span from whichever
-carries it.) The workers are the project's own.
+**Concurrency as the project runs it.** Copies of a file's tests in a
+`fullyParallel` project are separate groups, which Playwright runs side by
+side. A suite whose tests share a server's state (a harness's fault rules for
+one server slot, rewritten by each test) then fails for reasons no mutant
+made. So a file runs one test at a time here when its tests are known not to
+run at once: two or more of them ran in the measured run and their spans
+never overlapped, or, where the spans tell nothing (one test, none spanned),
+the project does not run files `fullyParallel`. Each such attempt holds the
+file's lock from its start to its end, across workers. A file whose tests
+overlapped runs side by side. The workers are the project's own.
 
-**Kills are confirmed.** A test that fails beside another mutant's attempt
-(their times overlap) may have failed for the other's doing. Such a kill is
-not recorded: the mutant goes to a **serial pass** (one worker, one test at
-a time), which runs its killing test alone first and its other candidates
-only if that test lets it live. What a serial pass kills, nothing beside it
-did. On the fixture of the CLI test, 14 of 15 per-request kills ran beside
-another mutant and were confirmed: the serial pass took about as long as
-the main pass (30 s against 33 s), most of it two page kills waiting out an
-8 s `expect`; a project with one worker confirms nothing. A failing
-attempt's error (its first line, ANSI stripped) is the verdict's reason.
+**Kills beside another mutant are confirmed.** A test that fails while
+another mutant's attempt runs on the same server (the same invocation) may
+have failed for the other's doing. Each attempt, as it starts, looks at the
+invocation's attempts running and marks those with another mutant, and
+itself; so of two that overlap one sees the other. Such a kill goes to a
+**serial round** (one worker, one test at a time), which runs its killing
+test first and its other candidates only if that test lets it live. An
+invocation with one worker (a harness's slot) confirms nothing this way.
+Attempts in different invocations are not beside one another: each drives a
+server of its own, as the file locks already assume. A failing attempt's
+error (its first line, ANSI stripped) is the verdict's reason.
 
-**Likeliest killer first.** The main pass runs each mutant against one test:
-its candidate whose own evidence infected it, cheapest first (the plan's
-order). A mutant it lets live goes to a **stage pass** with its other
-candidates, side by side; a kill stops a mutant at its first test.
+**Projects others start from run as they are.** The tests of a project
+another project depends on (`dependencies`, `teardown`: a login that stores
+the session the others start from) run in every invocation with no mutant.
 
 **Time.** A mutant's test gets `1.5 × its measured duration + 5 s` (the
 duration from the attempt's span), plus the project's `expect` timeout
@@ -813,7 +864,7 @@ first (a spec's `{ timeout: 15_000 }`), Playwright ends the test at its own
 timeout anyway, and the budget must not cut either short. A mutant that
 makes a test hang costs up to the test's timeout. A test that fails
 on an assertion or an action, even as its time runs out, is a kill; one
-that only ran out of time is run again in a serial pass with twice the
+that only ran out of time is run again in a serial round with twice the
 budget before it counts as `timeout`.
 
 **Run alone, the server started with the mutant.** That per-request
@@ -822,30 +873,20 @@ a server keeps what its top level made. So the plan marks a mutant
 `serverWide` where a server ran its code in work no request named (start-up,
 timers: `background`), at a server module's top level (`module-level`), or
 for a request that named no test, credited by time (`by-time`). Such a
-mutant gets no row: the engine starts the command again for it, alone, with
-`SUPERCOV_ACTIVE_MUTANT` set in every process and only its candidate tests,
-and its verdict's reason says so; a mutant that keeps the server from
-starting is `killed`. Work for a request that named no test while no test
-ran (a web server's readiness check) is not such work: it ran with no mutant,
-as every request runs with its own, and leaving it out keeps every handler's
-mutant from running alone. That is the one place the pass trusts that a
-request's work does not reach the tests' through shared state without a
-canary to check it.
+mutant is not queued: the engine starts the command again for it, alone, with
+`SUPERCOV_ACTIVE_MUTANT` set in every process, and its verdict's reason says
+so; a mutant that keeps the server from starting is `killed`. Work for a
+request that named no test while no test ran (a web server's readiness
+check) is not such work: it ran with no mutant, as every request runs with
+its own, and leaving it out keeps every handler's mutant from running alone.
+That is the one place the pass trusts that a request's work does not reach
+the tests' through shared state; the controls after each kill check the rest.
 
-Each further pass a driver asks for (a `restart` record in the results: one
-mutant alone, a stage pass, a serial pass, the main pass's rows past one
-invocation's) is a new invocation of the command, its output in a log beside the results, run in turn until none
-asks for more. A serial pass also takes every mutant whose rows did not all
-run or ended after an error outside any test (a shared server that exited).
-
-**Canaries.** Every pass puts rows with no mutant among the mutated ones (in
-the middle and at the end of the busiest files' rows). A canary is a test
-that passed its baseline, run again after other attempts' mutants used the
-server: one that fails means state leaked between attempts (or the test is
-flaky), and every mutant that started before it ended is run again, one
-mutant per server start. (A planted mutant no test can reach would tell the
-same, at the cost of a switch.) The pass's summary line says how many ran
-and which failed.
+Each further round a driver asks for (a `restart` record in the results: one
+mutant alone, a serial round, the rest of what did not finish, the main
+round's mutants past one invocation's copies) is a new invocation of the
+command, its output in a log beside the results, run in turn until none asks
+for more. A `rest` round that decides nothing makes what it left an `error`.
 
 A mutant's candidates are the attempts its weak verdict names, as in Vitest.
 Candidates under another runner (a Vitest test of the same run) are not run

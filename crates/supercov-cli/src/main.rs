@@ -4287,6 +4287,7 @@ fn instrument_js() -> ExitCode {
 // Below the lines tests name by number (main.rs:2482).
 mod mutants_export;
 mod mutants_test_command;
+mod strong_status;
 
 #[cfg(test)]
 mod docs_command_tests {

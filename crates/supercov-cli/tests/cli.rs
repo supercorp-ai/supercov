@@ -23143,8 +23143,8 @@ fn a_web_server_started_in_the_config_s_folder_can_import_playwright() {
 /// of one Playwright invocation each test their own mutant against one
 /// server, the mutant carried with each attempt's requests and switched on
 /// in its pages; a mutant of the server's top level runs alone, with the
-/// server started with it switched on; canaries, repetitions with no
-/// mutant, pass.
+/// server started with it switched on; the controls, runs with no mutant
+/// after a kill, pass; and the pass says as it goes what it does.
 #[cfg(unix)]
 #[test]
 fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
@@ -23228,7 +23228,10 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         )
         .succeeds();
     let _ = std::fs::remove_file(&served);
-    let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &roots);
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[roots[0], ("SUPERCOV_PROGRESS_INTERVAL_MS", "300")],
+    );
     let said = ran.stderr();
     let reply = ran.json();
     let listed = project
@@ -23308,7 +23311,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
             .is_some_and(|reason| reason.contains("Expected")),
         "{context}"
     );
-    // Killed by its likeliest killer alone: its other candidates never ran.
+    // Killed by the first test that took it: its other candidates never ran.
     let route = strong("server/app.js", 9, ":EqualityOperator:!==");
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
@@ -23344,7 +23347,7 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
             .is_some_and(|reason| reason.contains("ran alone")),
         "{context}"
     );
-    // Canaries ran, and none failed.
+    // Controls ran after the kills, and none failed.
     let main = reply["passes"]
         .as_array()
         .unwrap()
@@ -23353,12 +23356,19 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
         .unwrap_or_else(|| panic!("no main pass\n{context}"))
         .clone();
     assert!(
-        main["canaries"]["ran"].as_u64() > Some(0),
+        main["controls"]["ran"].as_u64() > Some(0),
         "{main}\n{context}"
     );
     assert_eq!(
-        main["canaries"]["failed"],
+        main["controls"]["failed"],
         serde_json::json!([]),
+        "{context}"
+    );
+    // The pass said what it did as it went: the round, its attempts and
+    // what ran.
+    assert!(
+        said.contains("[supercov]   main round, 1 invocation(s): ")
+            && said.contains(" mutant attempt(s), "),
         "{context}"
     );
     // The files the measured run ran one test at a time run so here too.
@@ -23478,14 +23488,14 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
 /// first (`playwright test --list --reporter=json`) and then runs a
 /// Playwright process a spec file at once, each with a server of its own,
 /// started a second apart. The list reads no plan and lists each test once;
-/// the main pass holds only as many repetitions as an invocation may, and the
-/// rest of its rows run in further invocations; each process runs its first
-/// test within seconds, none undoes another's work, and each mutant gets one
-/// verdict from whichever process ran it. Before, the list and the runner each
-/// made every repetition of every test, as many as the busiest file had
-/// mutants, and ran out of heap; and each process cleared the pass's files
-/// as it started, so the others waited on baselines that were gone. A
-/// process that does run out of heap is named.
+/// the main pass holds only as many copies of the tests as an invocation
+/// may, and the mutants past them run in further invocations; each process
+/// runs its first test within seconds, none undoes another's work, and each
+/// mutant gets one verdict from whichever process ran it. Before, the list
+/// and the runner each made every repetition of every test, as many as the
+/// busiest file had mutants, and ran out of heap; and each process cleared
+/// the pass's files as it started, so the others waited on baselines that
+/// were gone. A process that does run out of heap is named.
 #[cfg(unix)]
 #[test]
 fn a_large_playwright_plan_runs_in_a_small_heap() {
@@ -23589,8 +23599,8 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .filter(|mutant| mutant["decided"].is_null())
         .count();
     assert!(planned > 5_000, "{planned} mutants to run");
-    // Every process of the pass in a 256 MB heap; eight repetitions of
-    // each test an invocation, so that a minute sees several.
+    // Every process of the pass in a 256 MB heap; six hundred copies of
+    // the tests an invocation, so that a minute sees several.
     let ran = project.supercov_with(
         &[
             "runs", "latest", "mutants", "test", "--json", "--budget", "60",
@@ -23599,7 +23609,7 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
             roots[0],
             roots[1],
             ("NODE_OPTIONS", "--max-old-space-size=256"),
-            ("SUPERCOV_PLAYWRIGHT_REPETITIONS", "8"),
+            ("SUPERCOV_PLAYWRIGHT_COPIES", "600"),
             // Its attempts, kept to time them.
             ("SUPERCOV_STRONG_KEEP", "1"),
         ],
@@ -23662,7 +23672,7 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .count();
     assert!(mains >= 2, "{context}");
     assert!(
-        said.contains("main (more rows than one invocation holds)"),
+        said.contains("main (more copies than one invocation holds)"),
         "{context}"
     );
     assert!(reply["summary"]["killed"].as_u64() > Some(5), "{context}");

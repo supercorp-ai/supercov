@@ -98,29 +98,34 @@ impl Pass {
 
 /// What the command writes when the driver asks for restarts, and what each
 /// restart writes: the mutant it was started with switched on, if any.
-const ASKS_TWICE: &str = r#"
+const ASKS_THRICE: &str = r#"
 if [ -n "$SUPERCOV_STRONG_RESTART" ]; then
   printf '{"ran":"%s"}\n' "$SUPERCOV_ACTIVE_MUTANT" >> "$SUPERCOV_STRONG_RESULTS"
   exit 0
 fi
 printf '%s\n' \
   '{"restart":{"everywhere":true,"mutants":[{"mutant":"m1"}],"kind":"alone","reason":"server"}}' \
-  '{"restart":{"everywhere":true}}' >> "$SUPERCOV_STRONG_RESULTS"
+  '{"restart":{"everywhere":true}}' \
+  '{"restart":{"everywhere":true,"batch":true,"mutants":[{"mutant":"m2"},{"mutant":"m3"}],"kind":"alone"}}' >> "$SUPERCOV_STRONG_RESULTS"
 "#;
 
 /// Each restart the driver asks for runs once, in its order, with the
 /// mutant it names switched on in every process where it says everywhere;
-/// one that names none starts with none. A plan that does not read
-/// switches every file.
+/// one that names none starts with none, and so does a round of one mutant
+/// an invocation (`batch`), whose Playwright runners each switch their own
+/// on. A plan that does not read switches every file.
 #[test]
 fn each_restart_the_driver_asks_for_runs_once_with_its_mutant() {
     let _one = one_at_a_time();
     let pass = Pass::new("restarts");
-    assert_eq!(pass.run(ASKS_TWICE), Ok(0));
+    assert_eq!(pass.run(ASKS_THRICE), Ok(0));
     let results = pass.results();
-    assert_eq!(results[2..], [r#"{"ran":"m1"}"#, r#"{"ran":""}"#]);
-    assert!(pass.restart(1).exists());
-    assert!(!pass.restart(2).exists());
+    assert_eq!(
+        results[3..],
+        [r#"{"ran":"m1"}"#, r#"{"ran":""}"#, r#"{"ran":""}"#]
+    );
+    assert!(pass.restart(2).exists());
+    assert!(!pass.restart(3).exists());
 }
 
 /// A driver that asks again in every restart is stopped at a thousand.
@@ -176,7 +181,7 @@ fn a_pass_that_cannot_write_or_start_what_it_needs_fails() {
     for (fault, says) in cases {
         let pass = Pass::new("faults");
         std::fs::write(&pass.strong.plan, r#"{"mutants": [{"file": "src/a.js"}]}"#).unwrap();
-        let failed = supercov_engine::fault::during(fault, || pass.run(ASKS_TWICE));
+        let failed = supercov_engine::fault::during(fault, || pass.run(ASKS_THRICE));
         assert!(
             failed.as_ref().is_err_and(|message| message.contains(says)),
             "{fault}: {failed:?}"
