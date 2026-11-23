@@ -2637,6 +2637,21 @@ mod tests {
         );
         assert_eq!(kept_statuses(&root), None);
         assert!(root.join(".supercov/runs/merged/run.json").is_file());
+        // The store cannot be listed again to find the merged run (the
+        // second listing: the merge's own, then this one): the same.
+        fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
+        let notes = crate::fault::during("fs.read_dir#run_store.rs:681@2", || {
+            merge_noted(&root, &["run-a", "run-b"])
+        });
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with(
+                "the runs' strong verdicts are not kept: the merged run's mutants could not be planned ("
+            ),
+            "{notes:?}"
+        );
+        assert_eq!(kept_statuses(&root), None);
+        assert!(root.join(".supercov/runs/merged/run.json").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
