@@ -672,9 +672,26 @@ function settled(pass, id) {
     return existsSync(`${pass.shared}/verdicts/${at}`) || existsSync(`${pass.round}/killed/${at}`) || existsSync(`${pass.round}/held/${at}`);
 }
 
-/** Whether another attempt runs the mutant now. */
-function inFlight(pass, id) {
-    return entries(`${pass.round}/inflight/${key(id)}`).some((entry) => alive(Number(entry.split("-")[0])));
+/**
+ * Whether another attempt runs the mutant now, and since when: the earliest
+ * start of those running, or `undefined` where none does.
+ */
+function inFlightSince(pass, id) {
+    let since;
+    for (const entry of entries(`${pass.round}/inflight/${key(id)}`)) {
+        if (!alive(Number(entry.split("-")[0])))
+            continue;
+        let started;
+        try {
+            started = Number(readFileSync(`${pass.round}/inflight/${key(id)}/${entry}`, "utf8")) || 0;
+        }
+        catch {
+            // It ended as this looked.
+            continue;
+        }
+        since = since === undefined ? started : Math.min(since, started);
+    }
+    return since;
 }
 
 /**
@@ -682,7 +699,7 @@ function inFlight(pass, id) {
  * and not yet tried against it, one no other attempt runs first. Taken by
  * making its mark, which only one copy can.
  */
-function takeJob(pass, test, only) {
+function takeJob(pass, test, only, budgetMs) {
     const queue = queueOf(pass, test);
     const busy = [];
     for (let at = queue.done; at < queue.ids.length; at++) {
@@ -696,8 +713,12 @@ function takeJob(pass, test, only) {
                 queue.done += 1;
             continue;
         }
-        if (inFlight(pass, id)) {
-            busy.push(id);
+        const since = inFlightSince(pass, id);
+        if (since !== undefined) {
+            // One that has run longer than this test would take may hang:
+            // a second attempt would only wait as long.
+            if (Date.now() - since < budgetMs)
+                busy.push(id);
             continue;
         }
         if (mark(tried))
@@ -777,24 +798,23 @@ export async function strongClaim(testInfo) {
     if (!shape.everywhere && !passedHere.has(original)) {
         // The test's first run in this worker, or the first since it failed
         // here: without a mutant, the round's baseline or a kill's control.
-        if (shape.baselines && baselineOf(pass, original) === undefined)
-            attempt = { kind: "baseline", id: null, mutant: "-" };
-        else if (workLeft(pass, original))
-            attempt = { kind: "control", id: null, mutant: "-" };
-        else
+        if (!workLeft(pass, original))
             return null;
+        attempt = shape.baselines && baselineOf(pass, original) === undefined
+            ? { kind: "baseline", id: null, mutant: "-" }
+            : { kind: "control", id: null, mutant: "-" };
     }
     else {
         // A later round's test that failed without any mutant in the main one.
         if (baselineOf(pass, original) === "failed")
             return null;
-        const id = takeJob(pass, original, shape.batch ? invocationMutant(pass) ?? null : undefined);
+        const id = takeJob(pass, original, shape.batch ? invocationMutant(pass) ?? null : undefined, budgetOf([test.durationMs]));
         if (!id)
             return null;
         const entry = mutantOf(pass, id);
         attempt = { kind: "mutant", id, mutant: entry.mutant, budgetMs: budgetOf([test.durationMs], entry.budgetFactor ?? 1) };
         mark(`${pass.round}/inflight/${key(id)}`);
-        writeFileSync(`${pass.round}/inflight/${key(id)}/${process.pid}-${key(testInfo.testId)}`, "");
+        writeFileSync(`${pass.round}/inflight/${key(id)}/${process.pid}-${key(testInfo.testId)}`, String(Date.now()));
     }
     const lock = shape.concurrency.workers !== 1 && shape.concurrency.serialFiles.includes(test.file)
         ? await lockFile(pass, test.file)
