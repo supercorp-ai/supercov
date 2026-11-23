@@ -1,11 +1,16 @@
 // Strong mutation's reporter for Playwright (playwrightStrong.mjs explains the
-// pass). In the runner process it maps each repetition of a test to the test
-// the plan names, marks each test's baseline and each killed mutant as
-// results come (the fixture reads them: a repetition after a failed baseline
-// or a kill skips), and at the end turns the repetitions' outcomes into each
-// mutant's verdict, in the results file `mutants test` reads.
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { baselineOf, key, loadRows, strongPass, writeJson } from "./playwrightStrong.mjs";
+// pass). In each invocation's runner process it maps each repetition of a
+// test to the test the plan names, marks each test's baseline and each killed
+// mutant as results come (the fixture reads them: a repetition after a failed
+// baseline or a kill skips), and keeps each repetition's outcome on disk.
+// Once the command has ended, with every invocation it started (a harness may
+// start several at once, each with a share of the tests), the engine runs
+// this module (`judge`), which turns the outcomes into each mutant's verdict,
+// in the results file `mutants test` reads: one verdict a mutant, from
+// whichever invocations ran its rows, and what was cut short is unfinished.
+import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { baselineOf, key, loadRows, placeOf, readJson, strongPass, writeJson } from "./playwrightStrong.mjs";
 
 const WHY = {
     "background": "its code ran in server work no request named",
@@ -21,6 +26,25 @@ const WHY = {
 // Outcomes that ended this long before a pass's first error outside any
 // test (a server that exited) are trusted; later ones may be its doing.
 const ERROR_MARGIN_MS = 1_000;
+
+/** Each JSON file in a directory of the pass, or none. */
+function readAll(directory) {
+    let names;
+    try {
+        names = readdirSync(directory);
+    }
+    catch {
+        return [];
+    }
+    return names.sort().flatMap((name) => {
+        try {
+            return [readJson(`${directory}/${name}`)];
+        }
+        catch {
+            return [];
+        }
+    });
+}
 
 function readLines(path) {
     if (!existsSync(path))
@@ -41,10 +65,7 @@ function readLines(path) {
 export default class SupercovPlaywrightStrongReporter {
     constructor() {
         this.pass = strongPass();
-        this.started = Date.now();
-        this.statuses = new Map();
-        this.repetitions = {};
-        this.byOriginal = new Map();
+        this.originals = new Map();
     }
     // It prints nothing, and says it prints: Playwright adds a reporter of
     // its own where none does, and `mutants test --json` owns stdout.
@@ -56,42 +77,28 @@ export default class SupercovPlaywrightStrongReporter {
             return;
         this.rows = loadRows(this.pass);
         // A repetition of a test has an id of its own; the plan names the
-        // first. Repetitions share the test's project, file and titles.
-        const where = (test) => JSON.stringify(test.titlePath());
-        const firsts = new Map();
-        const all = suite.allTests();
-        for (const test of all) {
-            if (!test.repeatEachIndex)
-                firsts.set(where(test), test.id);
-        }
-        for (const test of all) {
-            const original = test.repeatEachIndex ? firsts.get(where(test)) : test.id;
-            if (!original)
+        // first. Repetitions share the test's project, file and titles: a
+        // worker finds the first's id by them, one small file a test.
+        for (const test of suite.allTests()) {
+            if (test.repeatEachIndex)
                 continue;
-            this.repetitions[test.id] = original;
-            this.byOriginal.set(`${original}\0${test.repeatEachIndex}`, test.id);
+            this.originals.set(placeOf(test), test.id);
+            writeJson(`${this.pass.round}/originals/${key(placeOf(test))}`, test.id);
         }
-        writeJson(`${this.pass.round}/repetitions.json`, this.repetitions);
     }
     rowOf(test) {
-        const original = this.repetitions[test.id];
+        const original = test.repeatEachIndex ? this.originals.get(placeOf(test)) : test.id;
         const file = original && this.rows.tests[original]?.file;
         const row = file && this.rows.files[file]?.[test.repeatEachIndex];
         return row && row.tests.includes(original) ? { row, original } : undefined;
     }
-    attempt(repetition) {
-        const path = `${this.pass.round}/attempts/${key(repetition)}.json`;
-        try {
-            return JSON.parse(readFileSync(path, "utf8"));
-        }
-        catch {
-            return undefined;
-        }
-    }
     onError(error) {
         // Outside any test: a web server that exited, a global setup that
-        // threw. The first one's time and words.
-        this.globalError ??= { at: Date.now(), message: firstWords(error?.message ?? error) };
+        // threw. Each invocation's first one's time and words.
+        if (!this.pass || this.erred)
+            return;
+        this.erred = true;
+        writeJson(`${this.pass.round}/errors/${process.pid}.json`, { at: Date.now(), message: firstWords(error?.message ?? error) });
     }
     onTestEnd(test, result) {
         if (!this.pass)
@@ -102,34 +109,58 @@ export default class SupercovPlaywrightStrongReporter {
         const errors = result.errors ?? [];
         const timeoutOnly = errors.length > 0 && errors.every((error) => TEST_TIMEOUT.test(stripAnsi(error?.message ?? "")));
         const reported = errors.find((error) => !TEST_TIMEOUT.test(stripAnsi(error?.message ?? ""))) ?? errors[0];
-        this.statuses.set(test.id, {
-            status: result.status,
-            timeoutOnly,
-            message: reported ? firstWords(reported.message ?? reported.value) : undefined,
-        });
         const found = this.rowOf(test);
+        if (found) {
+            writeJson(`${this.pass.round}/outcomes/${key(test.id)}.json`, {
+                status: result.status,
+                timeoutOnly,
+                message: reported ? firstWords(reported.message ?? reported.value) : undefined,
+            });
+        }
         if (!found)
             return;
         const { row, original } = found;
         if (row.kind === "baseline" && !this.rows.job) {
-            writeJson(`${this.pass.round}/baseline/${key(original)}`, result.status === "passed" ? "passed" : "failed");
+            // A test stopped (the command was) or skipped did not fail: its
+            // rows skip, and their mutants are unfinished, not decided.
+            const said = result.status === "passed" ? "passed" : result.status === "failed" || result.status === "timedOut" ? "failed" : "unfinished";
+            writeJson(`${this.pass.round}/baseline/${key(original)}`, said);
             return;
         }
         // The rest of the mutant's repetitions skip.
-        if (row.kind === "mutant" && result.status === "failed" && this.attempt(test.id))
+        if (row.kind === "mutant" && result.status === "failed" && existsSync(`${this.pass.round}/attempts/${key(test.id)}.json`))
             writeJson(`${this.pass.round}/killed/${key(row.id)}`, original);
     }
     onEnd() {
         if (!this.pass)
             return;
-        this.finish();
         // A killed mutant fails its test, and that is the point: the
-        // command's outcome is the pass's, not the tests'.
+        // command's outcome is the pass's, not the tests'. The verdicts are
+        // the judge's, once every invocation has ended.
         return { status: "passed" };
     }
+    /**
+     * The pass's verdicts, from what its invocations left on disk: each
+     * repetition's attempt (the fixture's) and outcome (the reporter's), the
+     * baselines, and the errors outside any test.
+     */
     finish() {
-        const { pass, rows } = this;
+        const { pass } = this;
+        const rows = (this.rows = loadRows(pass));
         const kind = rows.kind;
+        const attempts = readAll(`${pass.round}/attempts`);
+        const byOriginal = new Map(attempts.map((attempt) => [`${attempt.original}\0${attempt.index}`, attempt]));
+        const outcomeFile = (attempt) => {
+            try {
+                return readJson(`${pass.round}/outcomes/${key(attempt.testId)}.json`);
+            }
+            catch {
+                return undefined;
+            }
+        };
+        const errors = readAll(`${pass.round}/errors`).sort((a, b) => a.at - b.at);
+        const globalError = errors[0];
+        const started = Math.min(statSync(`${pass.round}/rows.json`).mtimeMs, ...attempts.map((attempt) => attempt.startedAt));
         const write = (record) => appendFileSync(pass.resultsPath, `${JSON.stringify(record)}\n`);
         for (const record of rows.immediate)
             write(record);
@@ -148,8 +179,11 @@ export default class SupercovPlaywrightStrongReporter {
         const baselineFailed = new Set();
         if (!rows.job) {
             for (const fileRows of Object.values(rows.files)) {
+                // A baseline that never ended (the command was stopped, or
+                // ran out of time) says nothing of the test: its rows did not
+                // run, and the mutants are unfinished.
                 for (const original of fileRows[0].tests) {
-                    if (baselineOf(pass, original) !== "passed")
+                    if (baselineOf(pass, original) === "failed")
                         baselineFailed.add(original);
                 }
             }
@@ -157,10 +191,9 @@ export default class SupercovPlaywrightStrongReporter {
         // Every attempt that ran with a mutant: a kill beside another's is
         // confirmed alone before it counts.
         const mutated = [];
-        for (const repetition of Object.keys(this.repetitions)) {
-            const attempt = this.attempt(repetition);
-            if (attempt && attempt.mutant !== "-")
-                mutated.push({ ...attempt, repetition, endedAt: attempt.endedAt ?? Date.now() });
+        for (const attempt of attempts) {
+            if (attempt.mutant !== "-")
+                mutated.push({ ...attempt, repetition: attempt.testId, endedAt: attempt.endedAt ?? Date.now() });
         }
         const beside = (repetition, attempt) => mutated.some((other) => other.repetition !== repetition &&
             other.mutant !== attempt.mutant &&
@@ -168,9 +201,9 @@ export default class SupercovPlaywrightStrongReporter {
             attempt.startedAt < other.endedAt);
         // Each repetition's outcome.
         const outcomeOf = (original, index, mutant) => {
-            const repetition = this.byOriginal.get(`${original}\0${index}`);
-            const ended = repetition && this.statuses.get(repetition);
-            const attempt = repetition && this.attempt(repetition);
+            const attempt = byOriginal.get(`${original}\0${index}`);
+            const ended = attempt && outcomeFile(attempt);
+            const repetition = attempt?.testId;
             if (!attempt) {
                 if (baselineFailed.has(original))
                     return { kind: "baseline-failed" };
@@ -246,7 +279,8 @@ export default class SupercovPlaywrightStrongReporter {
             : -Infinity;
         // After an error outside any test (the shared server exited), what
         // ended later may be its doing.
-        const trustedUntil = this.globalError ? this.globalError.at - ERROR_MARGIN_MS : Infinity;
+        const trustedUntil = globalError ? globalError.at - ERROR_MARGIN_MS : Infinity;
+        this.globalError = globalError;
         let decided = 0;
         let confirming = 0;
         for (const [id, entry] of Object.entries(rows.entries)) {
@@ -257,7 +291,7 @@ export default class SupercovPlaywrightStrongReporter {
                 next(entry, "canary", all);
                 continue;
             }
-            const verdict = this.verdict(entry, own, all, trustedUntil, next);
+            const verdict = this.verdict(rows, entry, own, all, trustedUntil, next);
             if (verdict === "confirm")
                 confirming += 1;
             if (!verdict || verdict === "confirm")
@@ -277,6 +311,13 @@ export default class SupercovPlaywrightStrongReporter {
                 write({ id: job.id, status: "error", reason: "its tests did not finish, run one at a time", tests: 0, durationMs: 0 });
             serial.splice(0, serial.length, ...serial.filter((job) => job.reason !== "unfinished"));
         }
+        // What this invocation had no room for runs in the next, as this
+        // one would have run it.
+        if (rows.deferred.length) {
+            write({ restart: rows.job
+                    ? { ...rows.job, mutants: rows.deferred }
+                    : { kind: "main", reason: "more rows than one invocation holds", mutants: rows.deferred } });
+        }
         for (const job of alone)
             write({ restart: { kind: "alone", everywhere: EVERYWHERE.includes(job.reason), reason: job.reason, mutants: [job], otherRunners: rows.otherRunners } });
         if (stage.length)
@@ -290,8 +331,9 @@ export default class SupercovPlaywrightStrongReporter {
             kind,
             ...(rows.concurrency.workers ? { workers: rows.concurrency.workers } : {}),
             serialFiles: rows.concurrency.serialFiles.length,
-            ...(this.globalError ? { error: this.globalError.message } : {}),
-            durationMs: Date.now() - this.started,
+            ...(globalError ? { error: globalError.message } : {}),
+            invocations: new Set(attempts.map((attempt) => attempt.invocation)).size,
+            durationMs: Date.now() - started,
             decided,
             confirming,
             next: { alone: alone.length, stage: stage.length, serial: serial.length },
@@ -306,8 +348,7 @@ export default class SupercovPlaywrightStrongReporter {
      * it was sent on to another pass, `"confirm"` when a kill beside other
      * mutants' attempts is to be confirmed one test at a time.
      */
-    verdict(entry, outcomes, all, trustedUntil, next) {
-        const { rows } = this;
+    verdict(rows, entry, outcomes, all, trustedUntil, next) {
         const kind = rows.kind;
         const shared = kind === "main" || kind === "stage";
         const reason = entry.reason ?? (kind === "main" ? undefined : rows.job?.reason);
@@ -375,3 +416,14 @@ function firstWords(message) {
     const text = stripAnsi(message ?? "").replace(/\s+/g, " ").trim();
     return text.length > 300 ? `${text.slice(0, 299)}…` : text;
 }
+
+/** Decides the pass's verdicts: run by the engine once the command has ended. */
+export function judge() {
+    const reporter = new SupercovPlaywrightStrongReporter();
+    if (!reporter.pass || !existsSync(`${reporter.pass.round}/rows.json`))
+        return;
+    reporter.finish();
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href)
+    judge();

@@ -721,6 +721,59 @@ Playwright gives every repetition index its own worker (worker fixtures are
 per repetition), so each row of a file starts a worker and, for page tests,
 a browser. That is the price of rows; the server is not restarted.
 
+**Memory: rows in invocations of a bounded size.** Playwright makes every
+repetition of every test of each file it loads before the first test runs,
+in the runner, whether a row names the test or not: tests × `repeatEach`
+test cases, and `repeatEach` grows with the mutants of the busiest file. A
+large application's e2e suite, 77 tests and 15,603 mutants to run, ran out
+of a 4 GB heap that way before its first test. So an invocation holds at most
+about 20,000 such test cases (`repeatEach` at most 20,000 / the plan's
+Playwright tests, never under 4; `SUPERCOV_PLAYWRIGHT_REPETITIONS` sets it):
+the main pass takes each file's first rows, cheapest first, and asks for
+another invocation (a `restart` record of kind `main`) for the rest, which
+runs them as the main pass would, and so on; a later pass's job that has more
+rows than an invocation holds goes on the same way. Each process reads only
+what it needs: the runner reads the plan once and writes the rows; a worker
+reads `worker.json` (the pass's shape: `repeatEach`, the tests, how they run
+side by side) and `rows/<index>.json`, the rows of the one repetition index
+it serves, and finds a repetition's test by its project and title path in
+`originals/` (one small file a test), never the plan or the other rows. On a
+fixture of 30 tests and 15,603 mutants each with 38 candidates (a 25 MB plan),
+`playwright test --list` peaked at 1.16 GB resident before and 200 MB after,
+and the runner ran under `--max-old-space-size=256`.
+
+**`--list` reads no plan.** A harness that shares tests out across processes
+lists them first (`playwright test --list --reporter=json`). The generated
+config sees `--list` and returns the project's own config: the list shows each
+test once, and nothing of the pass is read or written. It used to work out
+the rows, clear the pass's directory and list every repetition.
+
+**Several invocations at once.** A harness may start several `playwright test`
+processes in one command (slots, each with a share of the tests and a server
+of its own), a few seconds apart. They share the pass's directory: each
+works out the same rows from the same plan and writes them alike, and none
+removes what another wrote (the directory is new with the pass; a runner
+used to clear it as it started, so a slot started later removed the
+baselines, attempts and maps of the slots before it, which then waited out
+the baseline wait on every row). A test's baseline and a mutant's kill are
+the pass's; a file's lock (one test of the file at a time) is the
+invocation's, as its server is. Each attempt records its outcome on disk (the
+fixture's attempt, the reporter's outcome), and the verdicts are decided once,
+after the command has ended with every process it started: the engine runs
+the strong reporter's `judge`, which reads every invocation's attempts. A
+pass the budget stopped is judged too: what finished keeps its verdict, and
+a row that never ran (its test's baseline never ended) is unfinished, never
+"its candidate tests fail without any mutant", which only a baseline that
+failed says.
+
+**A process that runs out of heap is named.** Every Node process of a strong
+pass runs with `--report-on-fatalerror` into the pass's directory. A process
+that dies out of heap writes Node's diagnostic report first; the pass reads
+it, says which process it was (its command line and pid) and its heap, and,
+for a test runner's process, that the plan was too large for its heap; each
+mutant left without a verdict says so in its reason. The reports, which hold
+the process's environment, are removed once read.
+
 **Concurrency as the project runs it.** Repetitions of one file are separate
 groups, which Playwright runs side by side where the project ran the file's
 tests one after another. A suite whose tests share a server's state (a
@@ -780,8 +833,8 @@ request's work does not reach the tests' through shared state without a
 canary to check it.
 
 Each further pass a driver asks for (a `restart` record in the results: one
-mutant alone, a stage pass, a serial pass) is a new invocation of the
-command, its output in a log beside the results, run in turn until none
+mutant alone, a stage pass, a serial pass, the main pass's rows past one
+invocation's) is a new invocation of the command, its output in a log beside the results, run in turn until none
 asks for more. A serial pass also takes every mutant whose rows did not all
 run or ended after an error outside any test (a shared server that exited).
 

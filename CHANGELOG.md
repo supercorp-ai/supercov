@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Playwright strong pass over a large plan ran out of memory before its first test. Playwright makes every repetition of every test before it runs one, and the pass repeated each test as often as its busiest file had mutants: on a large application's e2e suite, 77 tests and 15,603 mutants to run, a Node process died out of a 4 GB heap and every mutant was an `error`. An invocation of Playwright now holds at most about 20,000 test repetitions, and the main pass runs the rest of its mutants in further invocations. Each test worker reads only the rows of the repetition it runs, not the plan. On a plan of 15,603 mutants, `playwright test --list` used 200 MB where it used 1.16 GB, and the whole pass runs with a 256 MB heap.
+- `playwright test --list` in a strong pass, as a harness runs it to share the tests out, lists each test once and reads nothing of the pass. It used to list every repetition of every test and clear the pass's files.
+- A harness that starts several Playwright processes at once in a strong pass, each with a share of the tests, no longer stalls. Each process cleared the pass's files as it started, so the processes started before it waited out every baseline, and a pass of 1,688 mutants decided 25 in 8 jobs. They now share the pass's files, and each mutant's verdict is decided once from whichever processes ran its tests, after the command has ended. A pass stopped by its budget keeps the verdicts of what it finished.
+- A mutant whose candidate test's run without a mutant was stopped before it ended, rather than failed, is no longer an `error` saying its candidate tests fail without any mutant. It is left for the next pass.
+- When a Node process of a strong pass runs out of heap, the pass names it, by its command line and pid, with its heap size, and says where the plan was too large for it. Each mutant left without a verdict says the same in its reason.
+
 ## 4.29.2
 
 **Added**

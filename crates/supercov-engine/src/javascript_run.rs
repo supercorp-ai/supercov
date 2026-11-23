@@ -991,6 +991,13 @@ fn run_javascript(
             "SUPERCOV_STRONG_RESULTS".into(),
             strong.results.display().to_string(),
         );
+        // A process that runs out of heap says which it was, in a report.
+        let options = format!(
+            "{} {}",
+            overrides["NODE_OPTIONS"],
+            strong.node_report_options()
+        );
+        overrides.insert("NODE_OPTIONS".into(), options);
         overrides.extend(wasm_strong.clone().unwrap_or_default());
         if let Some(files) = strong.switched_files() {
             let mut files = files.into_iter().collect::<Vec<_>>();
@@ -1228,6 +1235,10 @@ fn run_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
+    // A stopped pass keeps the verdicts of what it finished.
+    if let Some(strong) = &request.strong {
+        judge_playwright_pass(strong, None, &workspace);
+    }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal.name())
             .map_err(|error| error.to_string())?;
@@ -3042,6 +3053,7 @@ fn run_strong_restarts(
                 |_, _| Ok(()),
             )
             .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+            judge_playwright_pass(strong, Some(&path), workspace);
             // An interrupted pass ends here; the mutants left have no verdict.
             if execution.interrupted_signal.is_some() {
                 return Ok(());
@@ -3051,6 +3063,30 @@ fn run_strong_restarts(
             return Ok(());
         }
     }
+}
+
+/// Decides a Playwright pass's verdicts once its command has ended, with
+/// every invocation of Playwright it started (`judge` in
+/// `playwrightStrongReporter.mjs`): a harness may start several at once, each
+/// with a share of the tests, and a mutant's rows may be in any of them. A
+/// pass that started no Playwright left no rows, and has nothing to judge.
+fn judge_playwright_pass(strong: &StrongRun, restart: Option<&Path>, workspace: &Path) {
+    let name = restart
+        .and_then(Path::file_stem)
+        .map_or_else(|| "main".into(), |stem| stem.to_string_lossy().into_owned());
+    let round = strong.results.with_file_name("playwright").join(name);
+    if !round.join("rows.json").is_file() {
+        return;
+    }
+    let _ = std::process::Command::new("node")
+        .arg(workspace.join(".supercov/node_modules/playwrightStrongReporter.mjs"))
+        .current_dir(workspace)
+        .env_remove("NODE_OPTIONS")
+        .env("SUPERCOV_STRONG_PLAN", &strong.plan)
+        .env("SUPERCOV_STRONG_RESULTS", &strong.results)
+        .envs(restart.map(|path| ("SUPERCOV_STRONG_RESTART", path)))
+        .stdout(std::process::Stdio::null())
+        .status();
 }
 
 /// What a strong pass starts: the command itself, which Vitest's and

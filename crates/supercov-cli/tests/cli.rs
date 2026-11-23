@@ -23473,6 +23473,244 @@ fn a_playwright_plan_has_spans_and_overlapping_tests_stay_parallel() {
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
 }
 
+/// A Playwright plan of thousands of mutants, each with every test a
+/// candidate, run under a 256 MB heap by a harness that lists the tests
+/// first (`playwright test --list --reporter=json`) and then runs a
+/// Playwright process a spec file at once, each with a server of its own,
+/// started a second apart. The list reads no plan and lists each test once;
+/// the main pass holds only as many repetitions as an invocation may, and the
+/// rest of its rows run in further invocations; each process runs its first
+/// test within seconds, none undoes another's work, and each mutant gets one
+/// verdict from whichever process ran it. Before, the list and the runner each
+/// made every repetition of every test, as many as the busiest file had
+/// mutants, and ran out of heap; and each process cleared the pass's files
+/// as it started, so the others waited on baselines that were gone. A
+/// process that does run out of heap is named.
+#[cfg(unix)]
+#[test]
+fn a_large_playwright_plan_runs_in_a_small_heap() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let listeners = (0..3)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect::<Vec<_>>();
+    let ports = listeners
+        .iter()
+        .map(|listener| listener.local_addr().unwrap().port().to_string())
+        .collect::<Vec<_>>();
+    drop(listeners);
+    let project = Project::empty("strong-playwright-heap");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-heap", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    // About ten thousand mutants, every one reached by every test.
+    const FUNCTIONS: usize = 1500;
+    let mut app = String::new();
+    for index in 0..FUNCTIONS {
+        app.push_str(&format!(
+            "function f{index}(n) {{\n  return n > {index} ? n + {index} : n - 1;\n}}\n"
+        ));
+    }
+    app.push_str(&format!(
+        "const all = [{}];\nexport function total(n) {{\n  let sum = 0;\n  for (const f of all) sum += f(n);\n  return sum;\n}}\n",
+        (0..FUNCTIONS)
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    project.write("server/app.js", &app);
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { total } from \"../server/app.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  response.end(String(total(Number(url.searchParams.get(\"n\")))));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "const port = process.env.SLOT_PORT ?? \"{}\";\nexport default {{\n  testDir: \"tests\",\n  workers: 4,\n  reporter: \"line\",\n  use: {{ baseURL: `http://127.0.0.1:${{port}}` }},\n  webServer: {{ command: \"node support/server.js\", url: `http://127.0.0.1:${{port}}/?n=1`, reuseExistingServer: false, timeout: 20000, env: {{ PORT: port }} }},\n}};\n",
+            ports[0]
+        ),
+    );
+    // Three files of ten tests, each asking for a total of its own.
+    for file in 0..3 {
+        project.write(
+            &format!("tests/total{file}.spec.js"),
+            &format!(
+                "import {{ test, expect }} from \"@playwright/test\";\nconst expected = (n) => {{\n  let sum = 0;\n  for (let i = 0; i < {FUNCTIONS}; i++) sum += n > i ? n + i : n - 1;\n  return sum;\n}};\nfor (const n of [{}]) {{\n  test(`totals ${{n}}`, async ({{ request }}) => {{\n    expect(await (await request.get(`/?n=${{n}}`)).text()).toBe(String(expected(n)));\n  }});\n}}\n",
+                (0..10)
+                    .map(|test| (file * 10 + test) * 53 % FUNCTIONS)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+    // The harness: Playwright's list of the tests, then a process a file,
+    // each with its own server, started a second apart, as a harness that
+    // copies a build for each slot starts them. It notes when it listed.
+    let listed = project.root.with_extension("listed.txt");
+    project.write(
+        "e2e.mjs",
+        &format!(
+            "import {{ execFileSync, spawn }} from \"node:child_process\";\nimport {{ appendFileSync }} from \"node:fs\";\nconst listed = JSON.parse(execFileSync(\"npx\", [\"playwright\", \"test\", \"--list\", \"--reporter=json\"], {{ maxBuffer: 1 << 30 }}).toString());\nlet count = 0;\nconst visit = (suite) => {{\n  for (const spec of suite.specs ?? []) count += spec.tests.length;\n  (suite.suites ?? []).forEach(visit);\n}};\nlisted.suites.forEach(visit);\nappendFileSync(process.env.LISTED, `${{count}} ${{Date.now()}}\\n`);\nconst ports = {ports:?};\nconst codes = await Promise.all(ports.map((port, slot) => new Promise((done) => setTimeout(() => {{\n  const child = spawn(\"npx\", [\"playwright\", \"test\", `tests/total${{slot}}.spec.js`], {{ stdio: \"inherit\", env: {{ ...process.env, SLOT_PORT: port }} }});\n  child.on(\"close\", done);\n}}, slot * 1000))));\nprocess.exit(codes.every((code) => code === 0) ? 0 : 1);\n"
+        ),
+    );
+    // A process that runs out of heap however large its heap.
+    project.write(
+        "support/hog.js",
+        "const kept = [];\nfor (;;) kept.push({ at: kept.length });\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("a large plan");
+    let listed_env = listed.display().to_string();
+    let roots = [
+        ("SUPERCOV_SOURCE_ROOTS", "server"),
+        ("LISTED", listed_env.as_str()),
+    ];
+    project
+        .supercov_with(&["--", "node", "e2e.mjs"], &roots)
+        .succeeds();
+    let _ = std::fs::remove_file(&listed);
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &roots,
+        )
+        .json();
+    let planned = plan["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["decided"].is_null())
+        .count();
+    assert!(planned > 5_000, "{planned} mutants to run");
+    // Every process of the pass in a 256 MB heap; eight repetitions of
+    // each test an invocation, so that a minute sees several.
+    let ran = project.supercov_with(
+        &[
+            "runs", "latest", "mutants", "test", "--json", "--budget", "60",
+        ],
+        &[
+            roots[0],
+            roots[1],
+            ("NODE_OPTIONS", "--max-old-space-size=256"),
+            ("SUPERCOV_PLAYWRIGHT_REPETITIONS", "8"),
+            // Its attempts, kept to time them.
+            ("SUPERCOV_STRONG_KEEP", "1"),
+        ],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let context = format!("{reply}\n{said}");
+    assert!(!said.contains("ran out of memory"), "{context}");
+    assert!(!said.contains("heap out of memory"), "{context}");
+    // The list saw the project's thirty tests, once each, every time.
+    let counts = std::fs::read_to_string(&listed).unwrap_or_default();
+    let _ = std::fs::remove_file(&listed);
+    let listings = counts
+        .lines()
+        .map(|line| line.split_once(' ').unwrap())
+        .collect::<Vec<_>>();
+    assert!(listings.len() >= 2, "{counts}\n{context}");
+    assert!(
+        listings.iter().all(|(count, _)| *count == "30"),
+        "{counts}\n{context}"
+    );
+    // The main pass's three processes each ran a test within seconds of
+    // being started (a second apart, after the list), whatever the plan's
+    // size.
+    let listed_at = listings[0].1.parse::<i64>().unwrap();
+    let main = std::fs::read_dir(project.root.join(".supercov/strong"))
+        .unwrap()
+        .flatten()
+        .map(|work| work.path().join("playwright/main/attempts"))
+        .find(|attempts| attempts.is_dir())
+        .unwrap_or_else(|| panic!("no attempts kept\n{context}"));
+    let mut first = std::collections::BTreeMap::new();
+    for attempt in std::fs::read_dir(&main).unwrap().flatten() {
+        let attempt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(attempt.path()).unwrap()).unwrap();
+        let started = attempt["startedAt"].as_i64().unwrap();
+        let invocation = attempt["invocation"].as_str().unwrap().to_owned();
+        let earliest = first.entry(invocation).or_insert(started);
+        *earliest = started.min(*earliest);
+    }
+    assert_eq!(first.len(), 3, "{first:?}\n{context}");
+    let waits = first
+        .values()
+        .map(|started| started - listed_at)
+        .collect::<Vec<_>>();
+    eprintln!("first test of each process, ms after the list: {waits:?}");
+    assert!(
+        waits.iter().all(|wait| *wait < 20_000),
+        "{waits:?}\n{context}"
+    );
+    // One verdict a mutant, and none an error: no baseline went missing.
+    assert_eq!(reply["summary"]["error"], 0, "{context}");
+    // The main pass went on in further invocations, and killed mutants in
+    // them.
+    let mains = reply["passes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pass| pass["kind"] == "main")
+        .count();
+    assert!(mains >= 2, "{context}");
+    assert!(
+        said.contains("main (more rows than one invocation holds)"),
+        "{context}"
+    );
+    assert!(reply["summary"]["killed"].as_u64() > Some(5), "{context}");
+    // A command that runs out of heap: the process is named, and so is
+    // why each mutant has no verdict.
+    let ran = project.supercov_with(
+        &[
+            "runs",
+            "latest",
+            "mutants",
+            "test",
+            "--json",
+            "--",
+            "node",
+            "--max-old-space-size=64",
+            "support/hog.js",
+        ],
+        &roots,
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let context = format!("{reply}\n{said}");
+    assert!(
+        said.contains("[supercov] a Node process ran out of memory at its")
+            && said.contains("support/hog.js (pid "),
+        "{context}"
+    );
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let reasons = listed["data"]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|mutant| mutant["strong"]["reason"].as_str())
+        .filter(|reason| {
+            reason.contains("before this mutant's verdict: a Node process ran out of memory")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !reasons.is_empty()
+            && reasons
+                .iter()
+                .all(|reason| reason.contains("support/hog.js")),
+        "{reasons:?}\n{context}"
+    );
+}
+
 /// A test that passes only after an earlier test of its file ran: its file
 /// runs whole for the mutants it can kill, so the mutant it kills is killed,
 /// as StrykerJS (which runs the file's tests in order) kills it.
