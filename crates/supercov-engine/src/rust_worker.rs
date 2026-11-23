@@ -2830,7 +2830,20 @@ mod tests {
             assert_eq!(receive(socket)["method"], "Runtime.enable");
             answer(
                 socket,
+                json!({"method": "Runtime.executionContextCreated", "params": {"context": {"id": 7}}}),
+            );
+            answer(
+                socket,
                 json!({"method": "Runtime.executionContextsCleared"}),
+            );
+            // The session reads the clearing before this answer, so once
+            // told to stop it has no context left to take from: a final take
+            // here would mean the clearing was missed.
+            let take = receive(socket);
+            assert_eq!(take["params"]["contextId"], 7);
+            answer(
+                socket,
+                json!({"id": take["id"], "result": {"result": {"value": []}}}),
             );
             stop.store(true, Ordering::Release);
             while let Ok(message) = socket.read() {
