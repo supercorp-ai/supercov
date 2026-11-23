@@ -59,33 +59,35 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
         round,
         ..DriverStatus::default()
     };
-    for file in files
+    // The latest's round has one file at least, the latest.
+    files
         .iter()
         .filter(|file| file["round"].as_str().unwrap_or("main") == status.round)
-    {
-        let counts = &file["counts"];
-        status.invocations += 1;
-        status.baselines += number(&counts["baselines"]);
-        status.controls += number(&counts["controls"]);
-        status.failed_controls += number(&counts["failedControls"]);
-        status.attempts += number(&counts["attempts"]);
-        if let Some(at) = file["firstMutantAt"].as_u64() {
-            status.first_mutant_at = Some(status.first_mutant_at.map_or(at, |first| first.min(at)));
-        }
-        let event = number(&file["lastEndedAt"]).max(number(&file["startedAt"]));
-        status.last_event_at = status.last_event_at.max(event);
-        for test in file["running"].as_array().into_iter().flatten() {
-            status.running.push(Running {
-                title: test["title"].as_str().unwrap_or("?").to_owned(),
-                what: test["mutant"]
-                    .as_str()
-                    .or_else(|| test["kind"].as_str())
-                    .unwrap_or("starting")
-                    .to_owned(),
-                since: number(&test["startedAt"]).max(number(&test["begunAt"])),
-            });
-        }
-    }
+        .for_each(|file| {
+            let counts = &file["counts"];
+            status.invocations += 1;
+            status.baselines += number(&counts["baselines"]);
+            status.controls += number(&counts["controls"]);
+            status.failed_controls += number(&counts["failedControls"]);
+            status.attempts += number(&counts["attempts"]);
+            if let Some(at) = file["firstMutantAt"].as_u64() {
+                status.first_mutant_at =
+                    Some(status.first_mutant_at.map_or(at, |first| first.min(at)));
+            }
+            let event = number(&file["lastEndedAt"]).max(number(&file["startedAt"]));
+            status.last_event_at = status.last_event_at.max(event);
+            for test in file["running"].as_array().into_iter().flatten() {
+                status.running.push(Running {
+                    title: test["title"].as_str().unwrap_or("?").to_owned(),
+                    what: test["mutant"]
+                        .as_str()
+                        .or_else(|| test["kind"].as_str())
+                        .unwrap_or("starting")
+                        .to_owned(),
+                    since: number(&test["startedAt"]).max(number(&test["begunAt"])),
+                });
+            }
+        });
     status.running.sort_by_key(|test| test.since);
     Some(status)
 }
@@ -166,8 +168,10 @@ pub(crate) fn last_output_line(work: &Path) -> Option<String> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
         .filter_map(|path| {
-            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-            Some((modified, path))
+            std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .map(|modified| (modified, path))
         })
         .max()?
         .1;
@@ -371,6 +375,12 @@ mod tests {
         assert!(long.ends_with('…'));
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(work.join("restart-2.log"), "\n\n").unwrap();
+        assert_eq!(last_output_line(&work), None);
+        // A colour code cut short at the line's end; a log that cannot be
+        // read (a directory).
+        assert_eq!(strip_ansi("ready\u{1b}"), "ready");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir(work.join("restart-3.log")).unwrap();
         assert_eq!(last_output_line(&work), None);
         let _ = std::fs::remove_dir_all(&work);
     }

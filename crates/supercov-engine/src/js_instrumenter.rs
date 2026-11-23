@@ -16075,6 +16075,7 @@ export function shapes(n: number): unknown {
             "(c) => (c.a ? f() : 2)",
             "(c) => (c.a ? 1 : f())",
             "(c) => !f()",
+            "(c) => c.a === f()",
         ] {
             assert!(!pure(text), "{text} is not pure");
         }
