@@ -24601,12 +24601,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1407",
+            "fs.write#mutants_test_command.rs:1408",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1407"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1408"),
         "{}",
         unwritten.stderr()
     );
