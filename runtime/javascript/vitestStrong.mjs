@@ -72,6 +72,10 @@ function claim() {
     };
 }
 
+// What a file before this one in the same worker reported to is not this
+// file's copy.
+if (globalThis.__vitest_worker__)
+    globalThis.__vitest_worker__.supercovReport = undefined;
 const claimed = claim();
 // A copy with nothing to run -- beyond its file's assignments, or one whose
 // mutant another copy has decided -- ends here, before its test file loads.
@@ -117,6 +121,53 @@ function outsideTests(error) {
         /SUPERCOV_MUTANT_TIMEOUT|MutantTimeout/.test(`${error?.name} ${error?.code} ${error?.message}`);
     report({ outside: true, timeout, message: `${error?.message ?? error}`.slice(0, 300), hits: hitsNow() });
 }
+// A test file that does not load or set up -- a setup file after this one
+// throws, or one of its imports does -- runs none of its tests and none of
+// its hooks: Vitest tells its collection, and the copy reports what failed
+// with how often its mutant had run by then. Reported once per worker: a
+// worker that runs files one after another reports each to its own copy.
+const workerState = globalThis.__vitest_worker__;
+if (workerState)
+    workerState.supercovReport = assignment ? (record) => report({ ...record, hits: hitsNow() }) : undefined;
+if (workerState?.rpc && !workerState.supercovCollected) {
+    workerState.supercovCollected = true;
+    const rpc = workerState.rpc;
+    workerState.rpc = new Proxy(rpc, {
+        get(target, name) {
+            const value = Reflect.get(target, name);
+            if (name !== "onCollected" || typeof value !== "function")
+                return value;
+            return (files, ...rest) => {
+                const error = files?.find?.((file) => file?.result?.state === "fail")?.result?.errors?.[0];
+                if (error)
+                    workerState.supercovReport?.({ loadError: true, message: messageOf(error) });
+                return value.call(target, files, ...rest);
+            };
+        },
+    });
+}
+
+// An error as a verdict's reason says it.
+function messageOf(error) {
+    return `${error?.message ?? error}`.slice(0, 300);
+}
+
+// The first hook of `suite` or a suite in it that failed (a `beforeAll`
+// that threw): Vitest records it on its suite and skips the suite's tests.
+function failedHook(suite) {
+    if (!suite || suite.type === "test")
+        return undefined;
+    const own = suite.result?.errors?.[0];
+    if (own)
+        return own;
+    for (const child of suite.tasks ?? []) {
+        const error = failedHook(child);
+        if (error)
+            return error;
+    }
+    return undefined;
+}
+
 if (assignment) {
     process.on("uncaughtException", outsideTests);
     process.on("unhandledRejection", outsideTests);
@@ -206,9 +257,16 @@ const LEFT_RUNNING_PROBE_EVALUATIONS = Math.ceil(LEFT_RUNNING_EVALUATIONS * LEFT
 // clock (vi.useFakeTimers) and leaves it faked must not hold the look up.
 const realSetTimeout = globalThis.setTimeout;
 const pause = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
-afterAll(async () => {
+// No parameter is declared: Vitest 4 reads a suite hook's first one as the
+// fixtures it asks for, and passes the suite second (Vitest 1-3, first).
+afterAll(async function () {
     if (!assignment)
         return;
+    // A hook that failed skipped its suite's tests: what failed, and how
+    // often the mutant had run by the file's end.
+    const hook = failedHook([...arguments].find((value) => value?.type === "suite"));
+    if (hook)
+        report({ hook: true, message: messageOf(hook), hits: hitsNow() });
     if (assignment.mutant && runtime.mutantHitCount) {
         const before = runtime.mutantHitCount();
         await pause(LEFT_RUNNING_PROBE_MS);

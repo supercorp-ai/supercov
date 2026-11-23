@@ -1102,9 +1102,97 @@ static SIGNAL_HANDLER_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(unix)]
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
+/// The last of SIGHUP, SIGINT and SIGTERM the process was sent while a
+/// supervisor or an [`InterruptionRecorder`] listened, kept for good: a
+/// supervisor's own record ends with it, and a strong pass reads this to end
+/// in time whatever it is waiting on.
+#[cfg(unix)]
+static INTERRUPTION: AtomicI32 = AtomicI32::new(0);
+
 #[cfg(unix)]
 extern "C" fn record_signal(signal: i32) {
     RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
+    INTERRUPTION.store(signal, Ordering::SeqCst);
+}
+
+/// SIGHUP, SIGINT and SIGTERM recorded ([`interruption`]) for as long as it
+/// lives, instead of ending the process at once or, where the parent left
+/// them ignored, not at all. A supervisor listens in its stead while it
+/// runs a command, and puts it back.
+#[cfg(unix)]
+pub struct InterruptionRecorder {
+    previous: Vec<(i32, libc::sigaction)>,
+}
+
+#[cfg(unix)]
+impl InterruptionRecorder {
+    pub fn install() -> Self {
+        let mut previous = Vec::new();
+        for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+            // SAFETY: zero is a valid initial state for `sigaction`; the
+            // fields the kernel reads are set below.
+            let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+            action.sa_sigaction = record_signal as *const () as usize;
+            // SAFETY: `action.sa_mask` is a valid, writable signal set.
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            // SAFETY: `old` is written by the call; these three signals take
+            // a handler, so the call does not fail.
+            let mut old = unsafe { std::mem::zeroed::<libc::sigaction>() };
+            // SAFETY: both pointers are to live `sigaction` values.
+            unsafe { libc::sigaction(signal, &action, &mut old) };
+            previous.push((signal, old));
+        }
+        Self { previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InterruptionRecorder {
+    fn drop(&mut self) {
+        for (signal, previous) in self.previous.drain(..).rev() {
+            // SAFETY: `previous` came from `sigaction` for the same signal.
+            unsafe { libc::sigaction(signal, &previous, std::ptr::null_mut()) };
+        }
+    }
+}
+
+/// The signal the process was last sent while it listened (see
+/// [`INTERRUPTION`]), if any.
+#[cfg(unix)]
+pub fn interruption() -> Option<ForwardedSignal> {
+    match INTERRUPTION.load(Ordering::SeqCst) {
+        libc::SIGHUP => Some(ForwardedSignal::Sighup),
+        libc::SIGINT => Some(ForwardedSignal::Sigint),
+        libc::SIGTERM => Some(ForwardedSignal::Sigterm),
+        _ => None,
+    }
+}
+
+/// Sends `signal` to this process, for whatever listens for it now: a
+/// supervisor, which stops its command, or an [`InterruptionRecorder`].
+#[cfg(unix)]
+pub fn signal_self(signal: ForwardedSignal) {
+    // SAFETY: a signal to this process, which a handler takes.
+    unsafe { libc::kill(std::process::id() as i32, signal.raw()) };
+}
+
+/// Windows: a console's Ctrl-C reaches the supervisor's own handler alone.
+#[cfg(not(unix))]
+pub struct InterruptionRecorder;
+
+#[cfg(not(unix))]
+pub fn signal_self(_signal: ForwardedSignal) {}
+
+#[cfg(not(unix))]
+impl InterruptionRecorder {
+    pub fn install() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(unix))]
+pub fn interruption() -> Option<ForwardedSignal> {
+    None
 }
 
 #[cfg(windows)]
@@ -3049,6 +3137,44 @@ mod tests {
         assert_eq!(none.received(), Some(ForwardedSignal::Sighup));
         drop(none);
         assert_eq!(RECEIVED_SIGNAL.load(Ordering::SeqCst), 0);
+    }
+
+    /// While a recorder lives, a hangup, an interrupt or a termination is
+    /// recorded, and kept once it is gone; the signal's earlier handling
+    /// comes back with its end.
+    #[cfg(unix)]
+    #[test]
+    fn an_interruption_recorder_keeps_the_signal_the_process_was_sent() {
+        // No supervisor listens meanwhile: the signal is this test's alone.
+        let _exclusive = SIGNAL_HANDLER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let disposition = || {
+            // SAFETY: a null new action only reads the current one.
+            unsafe {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current);
+                current.sa_sigaction
+            }
+        };
+        let before = disposition();
+        INTERRUPTION.store(0, Ordering::SeqCst);
+        assert_eq!(interruption(), None);
+        let recorder = InterruptionRecorder::install();
+        // SAFETY: the recorder's handler takes the signal.
+        unsafe { libc::raise(libc::SIGHUP) };
+        drop(recorder);
+        assert_eq!(disposition(), before);
+        assert_eq!(interruption(), Some(ForwardedSignal::Sighup));
+        for (raw, signal) in [
+            (libc::SIGINT, ForwardedSignal::Sigint),
+            (libc::SIGTERM, ForwardedSignal::Sigterm),
+        ] {
+            INTERRUPTION.store(raw, Ordering::SeqCst);
+            assert_eq!(interruption(), Some(signal));
+        }
+        INTERRUPTION.store(0, Ordering::SeqCst);
+        RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
     }
 
     #[test]

@@ -681,12 +681,12 @@ fn a_terminal_supercov_cannot_open_is_not_lent() {
         &["--", "node", "ask.mjs"],
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.open_with#process_supervision.rs:1615",
+            "fs.open_with#process_supervision.rs:1703",
         )],
     );
     terminal.wait_for("asking");
     terminal.press("first\n");
-    terminal.wait_for("test fault at fs (process_supervision.rs:1615");
+    terminal.wait_for("test fault at fs (process_supervision.rs:1703");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_eq!(code, 130, "{seen}");
@@ -15507,7 +15507,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         ("watchdog-orphaned", watchdog),
         ("watchdog-setsid", watchdog),
         // Its descriptors not listed, to close.
-        ("fs.read_dir#process_supervision.rs:1527", watchdog),
+        ("fs.read_dir#process_supervision.rs:1615", watchdog),
         // A readiness read that fails other than by being interrupted.
         (&format!("ready-read:{}", libc::EIO), watchdog),
     ] {
@@ -17676,7 +17676,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#lifecycle.rs:1369",
         "fs.create_dir_all#javascript_run.rs:752",
         "fs.write#javascript_run.rs:1097",
-        "fs.canonicalize#process_supervision.rs:1796",
+        "fs.canonicalize#process_supervision.rs:1884",
         "fs.create_dir_all#javascript_run.rs:1180",
         "fs.create_dir_all#javascript_run.rs:1370",
         "fs.read_dir#evidence_archive.rs:263",
@@ -23844,10 +23844,15 @@ fn a_mutant_runs_its_later_files_in_batches_likeliest_killer_first() {
         "{listed}"
     );
     // One more copy for each kill a confirmation overturned (the mutant
-    // runs its file whole).
+    // runs its file whole), and each a worker took beside its mutant's
+    // running copy, no other mutant waiting: the cheapest run first, so
+    // `inc`'s chains come last, with the one worker otherwise idle.
     assert!(
         passes[0]["profile"]["mutantCopies"].as_u64().unwrap_or(0)
-            <= ran + killed + passes[0]["overturned"].as_u64().unwrap_or(0),
+            <= ran
+                + killed
+                + passes[0]["overturned"].as_u64().unwrap_or(0)
+                + passes[0]["profile"]["besideCopies"].as_u64().unwrap_or(0),
         "{reply}"
     );
     assert!(
@@ -24833,12 +24838,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1389",
+            "fs.write#mutants_test_command.rs:1504",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1389"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1504"),
         "{}",
         unwritten.stderr()
     );
@@ -25086,7 +25091,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:286")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:303")],
         )
         .exits(2);
     assert!(
@@ -26453,6 +26458,344 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
             .root
             .join(format!(".supercov/runs/{run}/strong-mutation.json"))
             .is_file()
+    );
+}
+
+/// A Vitest project for passes cut short: `src/cart.js`'s mutants are
+/// decided at once, while each of `src/slow.js`'s holds its test for five
+/// minutes, past its limit, the test's process id written to
+/// `SUPERCOV_TEST_MARKER` first.
+#[cfg(unix)]
+fn vitest_slow_project(label: &str) -> Project {
+    let project = vitest_mutants_project(label);
+    project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    project.write(
+        "test/slow.test.js",
+        "import { renameSync, writeFileSync } from \"node:fs\";\nimport { expect, it } from \"vitest\";\nimport { twice } from \"../src/slow.js\";\nit(\"doubles\", async () => {\n  if (twice(2) !== 4) {\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {\n      writeFileSync(`${marker}.tmp`, String(process.pid));\n      renameSync(`${marker}.tmp`, marker);\n    }\n    await new Promise((done) => setTimeout(done, 300000));\n  }\n  expect(twice(2)).toBe(4);\n}, 300000);\n",
+    );
+    project.commit("slow");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    project
+}
+
+/// The saved verdicts of `project`'s latest run, by mutant id.
+#[cfg(unix)]
+fn saved_statuses(project: &Project) -> std::collections::BTreeMap<String, String> {
+    let run = project.latest();
+    std::fs::read(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    .and_then(|saved| saved["mutants"].as_object().cloned())
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, verdict)| (id, verdict["status"].as_str().unwrap_or("").to_owned()))
+    .collect()
+}
+
+/// A Vitest pass sent a signal -- only Supercov, as `timeout` signals the
+/// command it runs, the tests' processes being in a group of their own --
+/// stops its workers and ends within seconds, as the signal ends it, with
+/// the verdicts it reached saved. A pass that does not end once told to
+/// (a test makes one linger) is ended `STOP_PATIENCE` (8 s) after the
+/// signal, what it decided saved first.
+#[cfg(unix)]
+#[test]
+fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
+    let project = vitest_slow_project("strong-signalled");
+    let run = project.latest();
+    let marker = project.root.with_extension("marker");
+    let stop = |signal: i32, faults: &str| {
+        let _ = std::fs::remove_file(
+            project
+                .root
+                .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+        );
+        let _ = std::fs::remove_file(&marker);
+        let mut supercov = project
+            .supercov_command(&["runs", "latest", "mutants", "test"])
+            .env("SUPERCOV_TEST_MARKER", &marker)
+            .env("SUPERCOV_TEST_FAULT", faults)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The slow copy is running, and cart.js's mutants are decided.
+        let started = std::time::Instant::now();
+        while !marker.exists()
+            || saved_statuses(&project)
+                .values()
+                .all(|status| status != "killed")
+        {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "the pass never got under way"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let test = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: a signal to the process this test started.
+        unsafe { libc::kill(supercov.id() as i32, signal) };
+        let told = std::time::Instant::now();
+        let mut said = String::new();
+        std::io::Read::read_to_string(supercov.stderr.as_mut().unwrap(), &mut said).unwrap();
+        let status = supercov.wait().unwrap();
+        let took = told.elapsed();
+        // SAFETY: signal 0 only asks whether the process is there.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            unsafe { libc::kill(test, 0) != 0 }
+        });
+        if !gone {
+            // SAFETY: cleaning up a process this test's pass left.
+            unsafe { libc::kill(test, libc::SIGKILL) };
+        }
+        assert!(gone, "the slow copy's worker outlived the pass\n{said}");
+        let killed = saved_statuses(&project)
+            .values()
+            .filter(|status| *status == "killed")
+            .count();
+        assert!(killed > 0, "{said}");
+        (status.code(), took, said)
+    };
+    let (code, took, said) = stop(libc::SIGTERM, "");
+    assert_eq!(code, Some(143), "{said}");
+    assert!(took < std::time::Duration::from_secs(8), "{took:?}\n{said}");
+    assert!(
+        said.contains(
+            "[supercov] interrupted: the verdicts the pass reached are saved into the run"
+        ),
+        "{said}"
+    );
+    let (code, took, said) = stop(libc::SIGINT, "strong-pass-lingers");
+    assert_eq!(code, Some(130), "{said}");
+    assert!(
+        took >= std::time::Duration::from_secs(8) && took < std::time::Duration::from_secs(14),
+        "{took:?}\n{said}"
+    );
+    assert!(
+        said.contains("[supercov] the strong pass did not end within 8 s of being told to stop (sent SIGINT), so it is ended: the verdicts it reached are saved into the run"),
+        "{said}"
+    );
+}
+
+/// `--budget <seconds>`: once it is spent the pass stops and ends as one
+/// that finished, the verdicts it reached saved, the mutants left without
+/// one for the next pass -- not errors, and not a pass that ran nothing.
+/// A pass that does not end once its budget is spent is ended in time.
+#[cfg(unix)]
+#[test]
+fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
+    let project = vitest_slow_project("strong-budget");
+    let slow_ids = || {
+        saved_statuses(&project)
+            .into_iter()
+            .filter(|(id, _)| id.starts_with("src/slow.js:"))
+            .collect::<Vec<_>>()
+    };
+    // Spent before any slow mutant could end.
+    let first = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/slow.js",
+        "--budget",
+        "1",
+        "--json",
+    ]);
+    let reply = first.json();
+    assert_eq!(first.code(), 0, "{reply}\n{}", first.stderr());
+    let left = reply["budget"]["left"].as_u64().unwrap();
+    assert!(left > 0, "{reply}");
+    assert_eq!(reply["budget"]["seconds"], 1, "{reply}");
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["result"].is_null(), "{reply}");
+    assert!(slow_ids().is_empty(), "{:?}", slow_ids());
+    // Long enough for cart.js's mutants, not for slow.js's.
+    let second = project.supercov(&[
+        "runs", "latest", "mutants", "test", "--budget", "12", "--json",
+    ]);
+    let reply = second.json();
+    assert_eq!(second.code(), 0, "{reply}\n{}", second.stderr());
+    assert!(reply["summary"]["killed"].as_u64() > Some(0), "{reply}");
+    assert_eq!(reply["budget"]["left"].as_u64(), Some(left), "{reply}");
+    assert!(slow_ids().is_empty(), "{:?}", slow_ids());
+    // A pass that lingers once its budget is spent.
+    let lingering = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--budget", "1"],
+        &[("SUPERCOV_TEST_FAULT", "strong-pass-lingers")],
+    );
+    let said = lingering.stderr();
+    assert_eq!(lingering.code(), 143, "{said}");
+    assert!(
+        said.contains(
+            "did not end within 8 s of being told to stop (its budget spent), so it is ended"
+        ),
+        "{said}"
+    );
+}
+
+/// Copies run within the project's own worker limit, each with a pool id
+/// Vitest gave it (1 to `maxWorkers`) that no copy running beside it has: a
+/// setup file that gives each worker its own database by `VITEST_POOL_ID`,
+/// and throws where the id is past the databases it made or another
+/// copy's still in use, lets every copy run, and every mutant gets a
+/// verdict.
+#[cfg(unix)]
+#[test]
+fn copies_keep_to_the_project_s_workers_and_their_pool_ids() {
+    let project = vitest_mutants_project("strong-pool-ids");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { maxWorkers: 2, setupFiles: [\"./test/database.js\"] } };\n",
+    );
+    project.write(
+        "test/database.js",
+        "import { mkdirSync, readFileSync, rmSync, writeFileSync } from \"node:fs\";\nimport { afterAll } from \"vitest\";\nconst worker = Number(process.env.VITEST_POOL_ID);\nif (!(worker >= 1 && worker <= 2)) throw new Error(`Worker ${worker} has no database: 2 were made`);\nconst locks = new URL(\"../.databases/\", import.meta.url);\nmkdirSync(locks, { recursive: true });\nconst lock = new URL(String(worker), locks);\nlet holder;\ntry { holder = Number(readFileSync(lock, \"utf8\")); } catch {}\nif (holder && holder !== process.pid) {\n  let running = true;\n  try { process.kill(holder, 0); } catch { running = false; }\n  if (running) throw new Error(`Worker ${worker}'s database is in use by process ${holder}`);\n}\nwriteFileSync(lock, String(process.pid));\nafterAll(() => rmSync(lock, { force: true }));\n",
+    );
+    for file in ["a", "b", "c"] {
+        project.write(
+            &format!("test/{file}.test.js"),
+            "import { describe, expect, it } from \"vitest\";\nimport { shipping, label, refund } from \"../src/cart.js\";\nconst nap = () => new Promise((done) => setTimeout(done, 50));\ndescribe(\"cart\", () => {\n  it(\"ships big orders free\", async () => { await nap(); expect(shipping(80)).toBe(0); });\n  it(\"charges small orders\", async () => { await nap(); expect(shipping(10)).toBe(5); });\n  it(\"labels\", async () => { await nap(); expect(label(\" a \")).toBe(\"A\"); });\n  it(\"refunds\", async () => { await nap(); expect(refund(200)).toBe(180); });\n});\n",
+        );
+    }
+    project.write(".gitignore", "node_modules\n.supercov\n.databases\n");
+    project.commit("a database per worker");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let reply = project
+        .supercov(&["runs", "latest", "mutants", "test", "--json"])
+        .json();
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    assert!(reply["summary"]["killed"].as_u64() >= Some(5), "{reply}");
+    assert_eq!(
+        reply["passes"][0]["profile"]["unevaluatedReruns"], 0,
+        "{reply}"
+    );
+}
+
+/// A mutant that makes a hook fail (a `beforeAll` seeding through a schema
+/// the mutant broke) is killed: Vitest skips the hook's tests and fails the
+/// run, and the reason is the hook's error. A copy whose file does not load
+/// or set up before its mutant ran runs again; where that repeats, the
+/// mutant is an error that says the file's error. A copy that ran none of
+/// its tests says why. The staged pass judges a hook alike.
+#[cfg(unix)]
+#[test]
+fn a_hook_or_a_load_that_fails_says_its_error() {
+    let project = vitest_mutants_project("strong-hooks");
+    project.write(
+        "vitest.config.js",
+        "export default { test: { setupFiles: [\"./test/setup.js\"] } };\n",
+    );
+    // Fails where `SETUP_FAILS` names a count file: the first load after
+    // the first, or (`always`) every load after the first.
+    project.write(
+        "test/setup.js",
+        "import { readFileSync, writeFileSync } from \"node:fs\";\nconst counter = process.env.SETUP_FAILS_COUNTER;\nif (counter) {\n  let count = 0;\n  try { count = Number(readFileSync(counter, \"utf8\")); } catch {}\n  writeFileSync(counter, String(count + 1));\n  if (count === 1 || (count > 1 && process.env.SETUP_FAILS === \"always\")) throw new Error(\"the test database is gone\");\n}\n",
+    );
+    project.write(
+        "src/schema.js",
+        "export const users = { name: \"users\" };\n",
+    );
+    project.write(
+        "src/store.js",
+        "const tables = new Map([[\"users\", []]]);\nexport function insert(table, row) {\n  const rows = tables.get(table.name);\n  if (!rows) throw new Error(`relation \"${table.name}\" does not exist`);\n  rows.push(row);\n  return rows.length;\n}\n",
+    );
+    project.write(
+        "test/store.test.js",
+        "import { beforeAll, describe, expect, it } from \"vitest\";\nimport { users } from \"../src/schema.js\";\nimport { insert } from \"../src/store.js\";\ndescribe(\"store\", () => {\n  beforeAll(() => {\n    if (process.env.HOOK_FAILS) throw new Error(\"the seed did not load\");\n    insert(users, { id: 1 });\n  });\n  it(\"inserts\", () => expect(insert(users, { id: 2 })).toBe(2));\n});\n",
+    );
+    project.commit("hooks");
+    project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
+    let schema = "src/schema.js:1:30-1:37:StringLiteral:empty";
+    let counter = project.root.with_extension("counter");
+    let counter_path = counter.to_str().unwrap();
+    let pass = |env: &[(&str, &str)]| {
+        let _ = std::fs::remove_file(&counter);
+        let run = project.latest();
+        let _ = std::fs::remove_file(
+            project
+                .root
+                .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+        );
+        let reply = project
+            .supercov_with(
+                &[
+                    "runs",
+                    "latest",
+                    "mutants",
+                    "test",
+                    "--file",
+                    "src/schema.js",
+                    "--json",
+                ],
+                env,
+            )
+            .json();
+        let listed = project
+            .supercov(&[
+                "runs",
+                "latest",
+                "mutants",
+                "src/schema.js",
+                "--json",
+                "--limit",
+                "0",
+            ])
+            .json();
+        let mutant = listed["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"] == schema)
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone();
+        (reply, mutant["strong"].clone())
+    };
+    for stages in ["", "1"] {
+        let (_, strong) = pass(&[("SUPERCOV_STRONG_STAGES", stages)]);
+        assert_eq!(strong["status"], "killed", "{strong}");
+        assert_eq!(
+            strong["reason"], "a hook failed: relation \"\" does not exist",
+            "{strong}"
+        );
+        assert_eq!(strong["killedBy"], "test/store.test.js", "{strong}");
+    }
+    // Fails once: the copy runs again, and the mutant is killed.
+    let (reply, strong) = pass(&[("SETUP_FAILS_COUNTER", counter_path)]);
+    assert_eq!(strong["status"], "killed", "{strong}");
+    assert!(
+        reply["passes"][0]["profile"]["unevaluatedReruns"].as_u64() >= Some(1),
+        "{reply}"
+    );
+    // Fails every time: an error with the file's own.
+    let (_, strong) = pass(&[
+        ("SETUP_FAILS_COUNTER", counter_path),
+        ("SETUP_FAILS", "always"),
+    ]);
+    assert_eq!(strong["status"], "error", "{strong}");
+    assert_eq!(
+        strong["reason"],
+        "its copy of test/store.test.js did not load before the mutant ran, twice: the test database is gone",
+        "{strong}"
+    );
+    // The hook fails without the mutant too: the copy ran none of its tests,
+    // and says why.
+    let (_, strong) = pass(&[("HOOK_FAILS", "1")]);
+    assert_eq!(strong["status"], "error", "{strong}");
+    assert_eq!(
+        strong["reason"],
+        "its copy of test/store.test.js ran none of the tests it was to run: the seed did not load",
+        "{strong}"
     );
 }
 

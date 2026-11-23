@@ -29,8 +29,11 @@ Options:
   --plan            print what would run, and run nothing
   --file <path>     only this source file's mutants (repeatable)
   --diff <base>     only the mutants on lines the change since <base> touched
-  --shard <k>/<n>   only the k-th of n even shares of the mutants to run (for
-                    parallel jobs; decided mutants go to shard 1)
+  --shard <k>/<n>   only the k-th of n shares of the mutants to run, of about
+                    the same cost (for parallel jobs; decided mutants go to
+                    shard 1)
+  --budget <s>      stop after s seconds, the verdicts reached saved; the
+                    next pass runs the rest (the cheapest mutants run first)
   --fail-on <s,...> exit 1 when an asked mutant ends survived, timeout,
                     no-coverage or error (accepted mutants excepted)
   --critical <glob> source files where every mutant must be killed or
@@ -67,6 +70,8 @@ struct Options {
     fail_on: Vec<String>,
     critical: Vec<String>,
     shard: Option<(usize, usize)>,
+    /// `--budget <seconds>`: how long the pass may run.
+    budget: Option<std::time::Duration>,
     command: Option<Vec<String>>,
 }
 
@@ -137,6 +142,18 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .filter(|(k, n)| *n > 0 && (1..=*n).contains(k))
                     .ok_or_else(|| format!("--shard takes k/n with 1 <= k <= n, not {value}"))?;
                 options.shard = Some(parsed);
+            }
+            "--budget" => {
+                index += 1;
+                let value = args.get(index).ok_or("--budget needs seconds")?;
+                let seconds = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|seconds| *seconds > 0)
+                    .ok_or_else(|| {
+                        format!("--budget takes a whole number of seconds, not {value}")
+                    })?;
+                options.budget = Some(std::time::Duration::from_secs(seconds));
             }
             "--critical" => {
                 index += 1;
@@ -419,18 +436,13 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // A second pass over the same run runs only what has no verdict.
     plan.mutants
         .retain(|mutant| !saved.contains_key(&mutant.id));
-    // A shard: every n-th mutant to run, from the k-th; the decided ones
-    // with the first shard.
+    // A shard: the k-th of n shares of about the same cost; the decided
+    // ones with the first shard.
     if let Some((k, n)) = options.shard {
-        let mut position = 0usize;
-        plan.mutants.retain(|mutant| {
-            if mutant.decided.is_some() {
-                return k == 1;
-            }
-            position += 1;
-            (position - 1) % n == k - 1
-        });
+        plan.keep_share(k, n);
     }
+    // The cheapest first: a pass cut short has decided as many as it could.
+    plan.cheapest_first();
     if options.plan {
         return Ok(plan_json(run, &plan));
     }
@@ -452,6 +464,9 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         "mutants": asked.len(),
         "of": total,
     });
+    if let (Some(left), Some(budget)) = (executed.budget_left, options.budget) {
+        data["budget"] = json!({"seconds": budget.as_secs(), "left": left});
+    }
     if !carried.is_empty() {
         data["carried"] = json!({
             "from": carried.iter().map(|(from, _)| from).collect::<Vec<_>>(),
@@ -466,13 +481,14 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     if let Some(failed) = failed_command(&run.id, run.metadata.test_exit_code, &narrowed) {
         reasons.push(failed);
     }
-    // A pass that had mutants to run and ran none of them.
+    // A pass that had mutants to run and ran none of them (where it had the
+    // time to: a budget spent first leaves them for the next pass).
     let ran_any = running.iter().any(|id| {
         verdicts
             .get(id)
             .is_some_and(|verdict| verdict.status != "error")
     });
-    if to_run > 0 && !ran_any {
+    if to_run > 0 && !ran_any && executed.budget_left.is_none() {
         reasons.push(format!(
             "no mutant of the {to_run} this pass had to run could be run: each is an error, said above"
         ));
@@ -735,6 +751,12 @@ fn plan_text(data: &Value) -> String {
         } else {
             format!(" ({asked} of its {of} mutants, {})", narrowed.join(" and "))
         };
+        if let Some(left) = data["budget"]["left"].as_u64() {
+            extra.push_str(&format!(
+                "  budget of {} s spent: {left} mutant(s) left without a verdict, for the next pass\n",
+                data["budget"]["seconds"]
+            ));
+        }
         if let Some(carried) = data["carried"]["mutants"].as_u64().filter(|n| *n > 0) {
             let from = data["carried"]["from"]
                 .as_array()
@@ -1077,16 +1099,25 @@ struct Saving {
 
 /// While a pass runs: every second, the verdicts its driver wrote so far
 /// saved into the run, so a pass that is interrupted or killed keeps them
-/// and the next runs the rest; and every `PROGRESS_INTERVAL` (or
+/// and the next runs the rest; every `PROGRESS_INTERVAL` (or
 /// `SUPERCOV_PROGRESS_INTERVAL_MS`), a line on stderr with the verdicts so
-/// far and the time left at this pace. Whatever the driver.
+/// far and the time left; and once the pass must stop -- the process was
+/// sent a signal, or its budget is spent -- the signal sent on to whatever
+/// listens for it now, and the process ended should the pass not end within
+/// `STOP_PATIENCE`. Whatever the driver.
 struct Progress {
     stop: std::sync::mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Progress {
-    fn start(results: PathBuf, total: usize, saving: Saving) -> Self {
+    /// `costs`: the pass's mutants' estimated costs, by id.
+    fn start(
+        results: PathBuf,
+        costs: std::collections::BTreeMap<String, u64>,
+        saving: Saving,
+        budget_at: Option<std::time::Instant>,
+    ) -> Self {
         let interval = std::env::var("SUPERCOV_PROGRESS_INTERVAL_MS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -1096,6 +1127,7 @@ impl Progress {
         let thread = std::thread::spawn(move || {
             let mut said = std::time::Instant::now();
             let mut seen = 0;
+            let mut stopping = None;
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
@@ -1103,14 +1135,24 @@ impl Progress {
                 if verdicts.len() > seen {
                     seen = verdicts.len();
                     let mut all = saving.before.clone();
-                    all.extend(verdicts);
+                    all.extend(verdicts.clone());
                     // A save that fails here is made again when the pass ends.
                     let _ = save_to(&saving.path, &saving.run, &saving.mutant_set, &all);
                 }
                 if said.elapsed() >= interval {
                     said = std::time::Instant::now();
-                    eprintln!("{}", progress_line(&results, total, started.elapsed()));
+                    eprintln!("{}", progress_line(&verdicts, &costs, started.elapsed()));
                 }
+                let Some(signal) = stop_signal(budget_at) else {
+                    continue;
+                };
+                let since = *stopping.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= STOP_PATIENCE {
+                    end_now(&results, &saving, signal);
+                }
+                // Sent again each time: a supervisor that started its
+                // command after the signal came has not heard it.
+                supercov_engine::process_supervision::signal_self(signal);
             }
         });
         Self {
@@ -1125,6 +1167,52 @@ impl Drop for Progress {
         let _ = self.stop.send(());
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
+}
+
+/// How long a pass told to stop has to end before this process ends it.
+/// The supervisor stops the command's processes within its own grace of
+/// the signal (5 s); what a pass waits on after that does not hold it.
+const STOP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Set once the pass's budget is spent: the termination that stops the
+/// pass is the budget's, and the pass ends as one that finished.
+static BUDGET_SPENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Why a running pass must stop, as the signal that stops it: its budget
+/// spent (a termination), or the signal the process was sent.
+fn stop_signal(
+    budget_at: Option<std::time::Instant>,
+) -> Option<supercov_engine::process_supervision::ForwardedSignal> {
+    use std::sync::atomic::Ordering;
+    if BUDGET_SPENT.load(Ordering::SeqCst)
+        || budget_at.is_some_and(|at| std::time::Instant::now() >= at)
+    {
+        BUDGET_SPENT.store(true, Ordering::SeqCst);
+        return Some(supercov_engine::process_supervision::ForwardedSignal::Sigterm);
+    }
+    supercov_engine::process_supervision::interruption()
+}
+
+/// Ends this process now: a pass told to stop did not end in time. What it
+/// decided is saved into the run first.
+fn end_now(
+    results: &Path,
+    saving: &Saving,
+    signal: supercov_engine::process_supervision::ForwardedSignal,
+) -> ! {
+    let mut all = saving.before.clone();
+    all.extend(read_results(results).0);
+    let _ = save_to(&saving.path, &saving.run, &saving.mutant_set, &all);
+    let why = if BUDGET_SPENT.load(std::sync::atomic::Ordering::SeqCst) {
+        "its budget spent".to_owned()
+    } else {
+        format!("sent {}", signal.name())
+    };
+    eprintln!(
+        "[supercov] the strong pass did not end within {} s of being told to stop ({why}), so it is ended: the verdicts it reached are saved into the run, and the next pass runs the rest",
+        STOP_PATIENCE.as_secs()
+    );
+    std::process::exit(signal.exit_code())
 }
 
 /// A pass's results so far: each mutant's verdict, and what its driver said
@@ -1152,19 +1240,20 @@ fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>,
     (verdicts, passes)
 }
 
-/// How far a pass got: its verdicts so far of the `total` it runs.
-fn progress_line(results: &Path, total: usize, elapsed: std::time::Duration) -> String {
-    let text = std::fs::read_to_string(results).unwrap_or_default();
-    let statuses = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| record["id"].is_string())
-        .map(|record| record["status"].as_str().unwrap_or_default().to_owned())
-        .collect::<Vec<_>>();
-    let count = |status: &str| statuses.iter().filter(|seen| *seen == status).count();
-    let done = statuses.len();
-    let left = if done > 0 {
-        let rest = elapsed.as_millis() * total.saturating_sub(done) as u128 / done as u128;
+/// How far a pass got: its verdicts so far of the mutants it runs, and the
+/// time left at the pace so far. The pace is the plan's: the estimated cost
+/// of the mutants decided over the time they took, which a few costly
+/// mutants do not swing as a count of mutants did (the cheapest run first).
+fn progress_line(
+    verdicts: &std::collections::BTreeMap<String, Verdict>,
+    costs: &std::collections::BTreeMap<String, u64>,
+    elapsed: std::time::Duration,
+) -> String {
+    let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
+    let spent = verdicts.keys().filter_map(|id| costs.get(id)).sum::<u64>();
+    let left = if spent > 0 {
+        let all = costs.values().sum::<u64>();
+        let rest = elapsed.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
         format!(
             "; about {} left",
             supercov_engine::process_supervision::format_duration(rest)
@@ -1173,7 +1262,9 @@ fn progress_line(results: &Path, total: usize, elapsed: std::time::Duration) -> 
         String::new()
     };
     format!(
-        "[supercov] strong pass: {done} of {total} mutants ({} killed, {} timed out, {} survived, {} errors), {}{left}",
+        "[supercov] strong pass: {} of {} mutants ({} killed, {} timed out, {} survived, {} errors), {}{left}",
+        verdicts.len(),
+        costs.len(),
         count("killed"),
         count("timeout"),
         count("survived"),
@@ -1219,6 +1310,14 @@ struct Executed {
     command_exit: Option<i32>,
     /// What each invocation's driver said of itself.
     passes: Vec<Value>,
+    /// Where the budget was spent: how many mutants it left without a
+    /// verdict, for the next pass.
+    budget_left: Option<usize>,
+}
+
+/// Whether the pass's budget is spent.
+fn budget_spent() -> bool {
+    BUDGET_SPENT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// A pass's exit codes that mean a signal ended it: Ctrl-C, a hang-up, a
@@ -1247,6 +1346,7 @@ fn execute(
     let mut executed = Executed {
         command_exit: None,
         passes: Vec::new(),
+        budget_left: None,
     };
     if to_run > 0 {
         let command = options
@@ -1293,6 +1393,13 @@ fn execute(
                 "[supercov] no strong mutation driver for {language} yet: its mutants are errors"
             );
         }
+        // A signal is recorded rather than obeyed at once: the pass sends it
+        // on to its command's supervisor, saves what it decided and ends in
+        // time (`Progress`), wherever it is when the signal comes.
+        let _recorder = supercov_engine::process_supervision::InterruptionRecorder::install();
+        let budget_at = options
+            .budget
+            .map(|budget| std::time::Instant::now() + budget);
         // A pass that stops before its end (a test worker that would not
         // stop even when forced) leaves its verdicts; the next pass runs
         // what has none, while each pass gets further.
@@ -1320,7 +1427,7 @@ fn execute(
                         .map_err(|e| format!("{}: {e}", work.display()))?;
                     let results = work.join("results.jsonl");
                     let ran = run_language(
-                        root, run, &plan, &remaining, &language, &command, &work, saved,
+                        root, run, &plan, &remaining, &language, &command, &work, saved, budget_at,
                     );
                     let (verdicts, passes) = read_results(&results);
                     // Success or failure, the pass keeps only its logs.
@@ -1335,14 +1442,21 @@ fn execute(
                     save(run, &plan.mutant_set, saved)?;
                     exit = ran?;
                     executed.command_exit = Some(exit);
-                    if interrupted(exit) {
+                    // The budget's termination ends the pass as a finished
+                    // one; any other signal as an interrupted one.
+                    if interrupted(exit) && !budget_spent() {
                         return Err(Stop::Interrupted(exit));
                     }
                     Ok(())
                 })?;
-            if remaining.len() == before {
+            if budget_spent() || remaining.len() == before {
                 break;
             }
+        }
+        // Out of time: what is left has no verdict, for the next pass.
+        if budget_spent() {
+            executed.budget_left = Some(remaining.len());
+            remaining.clear();
         }
         // A mutant no pass gave a verdict did not run to its end.
         for mutant in &remaining {
@@ -1373,6 +1487,7 @@ fn run_language(
     command: &[String],
     work: &Path,
     saved: &std::collections::BTreeMap<String, Verdict>,
+    budget_at: Option<std::time::Instant>,
 ) -> Result<i32, String> {
     let plan_path = work.join("plan.json");
     let results = work.join("results.jsonl");
@@ -1411,15 +1526,21 @@ fn run_language(
     let mut diagnostics = std::io::stderr();
     let progress = Progress::start(
         results,
-        pass_plan.mutants.len(),
+        pass_plan.estimated_ms(),
         Saving {
             path: results_path(run),
             run: run.id.clone(),
             mutant_set: plan.mutant_set.clone(),
             before: saved.clone(),
         },
+        budget_at,
     );
     let exit = supercov_engine::strong_driver::run_strong_pass(language, &pass, &mut diagnostics);
+    // A pass that does not end once told to stop (a test makes one): the
+    // progress thread ends the process in time.
+    while supercov_engine::fault::injected("strong-pass-lingers") {
+        std::thread::sleep(SAVE_INTERVAL);
+    }
     drop(progress);
     exit
 }
@@ -1863,6 +1984,14 @@ mod tests {
             ),
             "{shards}"
         );
+        let spent = plan_text(&json!({"run": "r1", "summary": summary,
+            "budget": {"seconds": 450, "left": 2423}}));
+        assert!(
+            spent.contains(
+                "  budget of 450 s spent: 2423 mutant(s) left without a verdict, for the next pass\n"
+            ),
+            "{spent}"
+        );
         let whole = plan_text(&json!({"run": "r1", "summary": summary, "carried": {"mutants": 0}}));
         assert!(whole.starts_with("Strong mutation for r1: "), "{whole}");
         assert!(!whole.contains("kept from"), "{whole}");
@@ -1975,6 +2104,47 @@ mod tests {
         assert_eq!(survivors_text("r1", &json!({"total": 0, "shown": []})), "");
     }
 
+    /// The time left is the plan's estimate of the mutants left at the pace
+    /// so far, by cost: a few costly mutants do not swing it.
+    #[test]
+    fn a_pass_s_time_left_is_its_cost_left_at_its_pace() {
+        let verdict = |status: &str| Verdict {
+            status: status.into(),
+            killed_by: None,
+            tests: 1,
+            duration_ms: 1,
+            reason: None,
+        };
+        let costs = [("cheap", 100), ("also-cheap", 100), ("costly", 9_800)]
+            .map(|(id, cost)| (id.to_owned(), cost))
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let elapsed = std::time::Duration::from_secs(20);
+        let none = progress_line(&Default::default(), &costs, elapsed);
+        assert_eq!(
+            none,
+            "[supercov] strong pass: 0 of 3 mutants (0 killed, 0 timed out, 0 survived, 0 errors), 20s"
+        );
+        let decided = [
+            ("cheap", verdict("killed")),
+            ("also-cheap", verdict("survived")),
+        ]
+        .map(|(id, verdict)| (id.to_owned(), verdict))
+        .into_iter()
+        .collect();
+        let line = progress_line(&decided, &costs, elapsed);
+        assert!(
+            line.starts_with(
+                "[supercov] strong pass: 2 of 3 mutants (1 killed, 0 timed out, 1 survived, 0 errors), 20s; about "
+            ),
+            "{line}"
+        );
+        assert!(line.ends_with(&format!(
+            "about {} left",
+            supercov_engine::process_supervision::format_duration(980_000)
+        )));
+    }
+
     #[test]
     fn a_signal_s_exit_code_is_an_interruption() {
         assert!([129, 130, 143].into_iter().all(interrupted));
@@ -1996,6 +2166,10 @@ mod tests {
         assert!(parse(&["--nope".into()]).is_err());
         let parsed =
             |words: &[&str]| parse(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            parsed(&["--budget", "450"]).unwrap().budget,
+            Some(std::time::Duration::from_secs(450))
+        );
         let markdown =
             parsed(&["--format", "markdown", "--output", "m.md", "--file", "a"]).unwrap();
         assert!(markdown.markdown && markdown.output == Some(PathBuf::from("m.md")));
@@ -2006,6 +2180,12 @@ mod tests {
             ),
             (&["--format"], "--format takes markdown, not nothing"),
             (&["--output"], "--output needs a file"),
+            (&["--budget"], "--budget needs seconds"),
+            (
+                &["--budget", "0"],
+                "--budget takes a whole number of seconds, not 0",
+            ),
+            (&["--budget", "1.5"], "not 1.5"),
             (
                 &["--output", "m.md"],
                 "--output writes the --format markdown table",

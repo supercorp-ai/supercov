@@ -123,8 +123,10 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
 - **A mutant's files one after another**, the likeliest killer first (a
   file's kills over its runs so far, over its cost), and its chain stops at
   its first kill, as StrykerJS runs a mutant's covering files with `bail`.
-  Parallelism comes from many mutants at once; of the mutants ready, the one
-  with the most work left goes first, so long chains do not end the pass.
+  Parallelism comes from many mutants at once; of the mutants ready, the
+  cheapest goes first (see "The order of a pass, its shares and its
+  budget"). A worker no ready mutant takes goes to the one with the most
+  work left (below), so long chains do not end the pass.
 - **Confirmations only for left-out tests.** A kill is certain where the
   copy ran every test its file's baseline ran before the failing one (a
   copy of the whole file always does, against the whole baseline). Any
@@ -144,6 +146,25 @@ isolated, `SUPERCOV_STRONG_STAGES` unset) the pass has no stages:
   once in a run that way, and stood as kills the ground truth does not
   have). Such a copy runs again, once; a failure that repeats counts, since
   the mutant may have run in a process the copy started.
+- **A hook that fails is the run failing.** A `beforeAll` (or `aroundAll`)
+  that throws makes Vitest skip its suite's tests and fail the run. The copy
+  reports the hook's error with its mutant's evaluations by the file's end,
+  and where the file's baseline ran the hook without that error and the
+  mutant ran, the mutant is killed, the error its reason (`a hook failed:
+  relation "" does not exist`). Before, such a copy had run none of its
+  tests, and its mutant was an `error`: a mutant of a database schema module
+  that a test file's `beforeAll` seeds through breaks every such file's hook.
+  A kill from a copy that left out tests is confirmed as any other.
+- **A file that does not load before its mutant ran is not the mutant's.**
+  A setup file that throws (a database that does not answer) or an import
+  that does leaves the copy's file unfinished, which counts as a kill where
+  the mutant had run. Vitest's collection of the file carries the error; the
+  copy reports it with its mutant's evaluations so far. With none, the copy
+  runs again, once, as a test that failed before the mutant ran does, and a
+  second such failure makes the mutant an `error` that says the file's error
+  (`its copy of test/a.test.ts did not load before the mutant ran, twice:
+  ...`). A copy that ran none of its tests, or fewer, says why where it can:
+  the hook's error, or the file's.
 - **A worker that lost its channel to Vitest did not finish its file.** A
   mutant that disconnects the worker (`process.disconnect()`) leaves Vitest
   unable to hear the file end, as a plain run would fail it: the copy's
@@ -180,6 +201,53 @@ StrykerJS"), with the runs bounded as above:
 Sharding cost Supercov more than its repeated baselines: hono's pass takes
 168.5 s in one job and 298.7 s over 6 (28 s of it repeated baselines), as
 each job starts and ends with workers idle.
+
+## The order of a pass, its shares and its budget
+
+A mutant's cost is estimated from the plan: each test file it would run, a
+copy's start (300 ms, the Vitest driver's guess before it has timed one)
+and the measured time of each test it runs there (its candidates, or every
+test of a file it runs whole; a test with no time, a second). It is what the
+mutant costs if it survives; a kill ends its copies sooner.
+
+**Cheapest first.** The pass runs the mutants in order of that cost, the
+plan's order between equals, and the continuous Vitest pass takes the
+cheapest ready mutant first. A pass that is cut short -- a CI job's time
+limit, `--budget` -- has then decided as many mutants as it could. On a
+large application's integration suite (2,288 tests in 168 files, 41 s to
+measure on 64 CPUs) the mutants' candidates were 7 at the median and 83 on
+average: the top 5% of mutants held 83% of the candidate runs, about 1,100
+of them with more than 500 candidates each, mostly module-level code of the
+database schema module every test loads. The pass took the mutants with the
+most work left first, so each 450 s shard of 2,460 mutants decided 29 to 40
+of them, one mutant running 760 tests for 284 s. A worker no ready mutant
+takes still goes to the mutant with the most work left, beside its copy
+running, so that the costliest chains do not start last and end the pass
+alone.
+
+**Shares.** `--shard k/n` deals the mutants to run among n shares, most
+costly first and back and forth (1, 2, ..., n, n, ..., 1, ...), and keeps the
+k-th; the decided mutants go to the first. Each share gets its part of the
+costly mutants, and their sum is about the same. Every job computes the same
+split from the same plan. The cost the split reads is the plan's alone --
+how many copies a mutant starts and how many tests they run, a copy counting
+as one test -- not the tests' times: a sharded pass's jobs each measure the
+suite (see `docs/mutation.md`, a pass split across jobs), their times differ,
+and a split that read them would leave some mutants in no share and put some
+in two. What each job's plan lists is the same where the jobs measure the
+same commit, as a merge requires.
+
+**Budget.** `--budget <seconds>` stops the pass once the time is spent, as a
+termination stops it (below), and ends it as a finished pass: the mutants it
+left have no verdict, for the next pass, and the summary says how many. A
+pass that spent its budget before deciding any mutant is not one that could
+run none.
+
+**The time left.** The progress line's estimate is the plan's: the estimated
+cost of the mutants left, at the pace of the cost decided so far over the
+time it took. Counting mutants, the pass above said "37 of 2460 ... about
+458m left", the estimate swinging from 158 to 1,229 minutes as a few costly
+mutants ended.
 
 ## Order and early exit
 
@@ -1016,6 +1084,19 @@ verdicts were then made again from nothing (all 567 run): every one of the
 682 is the same, status for status.
 
 ## Saving, interrupting and cleaning up
+
+A pass sent SIGINT, SIGTERM or SIGHUP stops its command's processes and ends
+within seconds, as the signal ends a command (130, 143, 129). The signal is
+recorded for the whole pass rather than obeyed at once, wherever the pass is
+when it comes: while the command runs, its supervisor sends it on to the
+command's process group and stops the group 5 s later; while the pass
+prepares its copy, or between passes, the progress thread sends it again
+each second until a supervisor hears it. Whatever the pass waits on after
+that, it is ended 8 s after the signal, the verdicts its driver wrote saved
+first. On a large application's integration suite every job's pass, sent
+SIGINT by `timeout` 450 s in, was still running 25 s later and was killed;
+the verdicts saved survived, but the jobs failed. A parent that left the
+signals ignored no longer keeps the pass from hearing them.
 
 The CLI saves each verdict a driver writes into the run within a second of it
 (`strong-mutation.json`, written whole and renamed into place), so a pass

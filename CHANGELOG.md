@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `mutants test --budget <seconds>` (and `supercov mutants --budget`): once the time is spent the strong pass stops, saves its verdicts and ends as a finished pass, saying how many mutants it left without a verdict for the next pass. A sharded CI job needs no `timeout` around it.
+
+**Changed**
+
+- A strong pass runs the cheapest mutants first, by the recorded times of the tests each runs against, so a pass cut short by a time limit has decided as many mutants as it could. On a large application's integration suite each 450 s shard had decided only 29 to 40 of its 2,460 mutants, its time spent on a few that ran hundreds of tests each.
+- `--shard k/n` splits the mutants into shares of about the same cost rather than the same count, so every job gets its part of the costly ones. Every job computes the same split from its own run.
+- The strong pass's "about ... left" is the plan's estimated cost of the mutants left at the pace so far, and no longer swings as a few costly mutants end.
+
+**Fixed**
+
+- A Vitest mutant that made a hook fail, such as a `beforeAll` that seeds a database through a schema module the mutant broke, was an `error` ("its copy of ... ran none of the tests it was to run"), though Vitest's own run fails. It is now `killed`, the hook's error its reason.
+- A Vitest test file that did not load or set up before its mutant ran, such as a setup file whose database did not answer, killed the mutant ("the test file did not finish"). Its copy now runs again, and where it fails again the mutant is an `error` that names the file's own error. A copy that ran none of its tests says why where it can.
+- Sent SIGINT or SIGTERM, a strong pass stops every process it started and ends within seconds, its verdicts saved: one still running 8 s after the signal is ended. Passes stopped by `timeout --signal=INT` were still running 25 s later and were killed. A signal that comes while the pass prepares its copy, or that the parent process left ignored, now stops it too.
+
 ## 4.29.1
 
 **Changed**
