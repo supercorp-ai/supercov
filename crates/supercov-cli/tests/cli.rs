@@ -23631,27 +23631,30 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         listings.iter().all(|(count, _)| *count == "30"),
         "{counts}\n{context}"
     );
-    // The main pass's three processes each ran a test within seconds of
-    // being started (a second apart, after the list), whatever the plan's
-    // size.
+    // The main pass's three processes each began its tests within seconds
+    // of being started (a second apart, after the list), whatever the
+    // plan's size: each runner's status says when (one whose tests' mutants
+    // were all decided by then runs none of them).
     let listed_at = listings[0].1.parse::<i64>().unwrap();
-    let main = std::fs::read_dir(project.root.join(".supercov/strong"))
+    let status = std::fs::read_dir(project.root.join(".supercov/strong"))
         .unwrap()
         .flatten()
-        .map(|work| work.path().join("playwright/main/attempts"))
-        .find(|attempts| attempts.is_dir())
-        .unwrap_or_else(|| panic!("no attempts kept\n{context}"));
-    let mut first = std::collections::BTreeMap::new();
-    for attempt in std::fs::read_dir(&main).unwrap().flatten() {
-        let attempt: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(attempt.path()).unwrap()).unwrap();
-        let started = attempt["startedAt"].as_i64().unwrap();
-        let invocation = attempt["invocation"].as_str().unwrap().to_owned();
-        let earliest = first.entry(invocation).or_insert(started);
-        *earliest = started.min(*earliest);
+        .map(|work| work.path().join("playwright/status"))
+        .find(|status| status.is_dir())
+        .unwrap_or_else(|| panic!("no status kept\n{context}"));
+    let mut began = std::collections::BTreeMap::new();
+    for runner in std::fs::read_dir(&status).unwrap().flatten() {
+        let runner: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(runner.path()).unwrap()).unwrap();
+        if runner["round"] == "main" {
+            began.insert(
+                runner["pid"].to_string(),
+                runner["startedAt"].as_i64().unwrap(),
+            );
+        }
     }
-    assert_eq!(first.len(), 3, "{first:?}\n{context}");
-    let waits = first
+    assert_eq!(began.len(), 3, "{began:?}\n{context}");
+    let waits = began
         .values()
         .map(|started| started - listed_at)
         .collect::<Vec<_>>();
