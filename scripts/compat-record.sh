@@ -45,11 +45,13 @@ build_checkout() {
       -e CARGO_HOME=/cache/home \
       -e CARGO_TARGET_DIR=/cache/target \
       -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
+      -e HOST_IDS="$(id -u):$(id -g)" \
       "$rust_image" bash -euo pipefail -c '
         # ruby-prism generates its bindings with libclang.
         apt-get update -qq && apt-get install -y -qq libclang-dev >/dev/null
         cargo build --locked --profile measure -p supercov --manifest-path /src/Cargo.toml
         cp /cache/target/measure/supercov /out/supercov
+        chown "$HOST_IDS" /out/supercov
       '
   fi
   chmod +x "$built/supercov"
@@ -73,6 +75,7 @@ for version in "$@"; do
     -v supercov-compat-npm:/root/.npm \
     ${local_mounts[@]+"${local_mounts[@]}"} \
     -e VERSION="$version" \
+    -e HOST_IDS="$(id -u):$(id -g)" \
     "$image" bash -euo pipefail -c '
       apt_python() { command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 python3-pip >/dev/null; }; }
       apt_python
@@ -125,6 +128,9 @@ for version in "$@"; do
       merged=$(grep -oE "merged run run_[0-9a-f]+" /out/answers/merge/merge.txt | cut -d" " -f3 || true)
       [ -z "$merged" ] || supercov runs "$merged" >/out/answers/merge/summary.txt 2>&1 || true
       supercov --version >/out/version.txt 2>&1 || true
+      # Written as root: handed back to whoever runs the script, who copies
+      # and removes them (Linux runners keep the container'"'"'s owner).
+      chown -R "$HOST_IDS" /out
     '
   rm -rf "$out"
   mkdir -p "$out"
