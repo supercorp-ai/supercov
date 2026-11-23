@@ -731,6 +731,11 @@ each of several `playwright test` processes) a mutant took about 50 s, and an
 area of 1,688 mutants decided none in a CI job's ten minutes: every kill there
 ran beside another process's attempt and waited for a confirmation the budget
 never reached, and verdicts were decided only once the command had ended.
+With copies, on the same suite and machines (8 jobs of 32 CPUs, 6 slots each,
+about 6 minutes of each job's 10 for the pass): the area decided 440 mutants
+(417 killed) where it decided no kill, about 3 s of a slot a test run, and one
+file's 12 mutants took 4 minutes where they took more than 5 for 6 of them,
+the rest of the 4 one mutant that holds each test until its own timeout.
 
 **A mutant from candidate to candidate in one invocation.** A copy that
 takes a mutant runs it; a test that passes moves the mutant on, and the next
