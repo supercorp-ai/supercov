@@ -1,11 +1,11 @@
-run run_0524aa0ca175a570
+run run_46a77bf8c46c5868
 command: npm test
 
 Coverage
   Lines      69.23% (9/13)
   Branches   50.00% (5/10)
   MC/DC      40.00% (2/5)
-Assertions   not assessed — npx supercov runs run_0524aa0ca175a570 assertions assess
+Assertions   not assessed — npx supercov runs run_46a77bf8c46c5868 assertions assess
 
 By test kind
   unit            3 test(s)  lines  69.23%  branches  50.00%  MC/DC  40.00%
@@ -27,9 +27,9 @@ Remaining
   Files with measurement limits     0
 
 Commands
-  npx supercov runs 'run_0524aa0ca175a570' files
-  npx supercov runs 'run_0524aa0ca175a570' gaps
-  npx supercov runs 'run_0524aa0ca175a570' kinds
-  npx supercov runs 'run_0524aa0ca175a570' runners
-  npx supercov runs 'run_0524aa0ca175a570' scope
-  npx supercov runs run_0524aa0ca175a570 --help
+  npx supercov runs 'run_46a77bf8c46c5868' files
+  npx supercov runs 'run_46a77bf8c46c5868' gaps
+  npx supercov runs 'run_46a77bf8c46c5868' kinds
+  npx supercov runs 'run_46a77bf8c46c5868' runners
+  npx supercov runs 'run_46a77bf8c46c5868' scope
+  npx supercov runs run_46a77bf8c46c5868 --help
