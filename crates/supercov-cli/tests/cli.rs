@@ -23599,8 +23599,10 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .filter(|mutant| mutant["decided"].is_null())
         .count();
     assert!(planned > 5_000, "{planned} mutants to run");
-    // Every process of the pass in a 256 MB heap; six hundred copies of
-    // the tests an invocation, so that a minute sees several.
+    // Every process of the pass in a 256 MB heap; a hundred and twenty
+    // copies of the tests an invocation (about thirty mutants), so that a
+    // minute sees several even on a slow runner: with six hundred, an ARM
+    // runner's first invocation used the whole minute.
     let ran = project.supercov_with(
         &[
             "runs", "latest", "mutants", "test", "--json", "--budget", "60",
@@ -23609,7 +23611,7 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
             roots[0],
             roots[1],
             ("NODE_OPTIONS", "--max-old-space-size=256"),
-            ("SUPERCOV_PLAYWRIGHT_COPIES", "600"),
+            ("SUPERCOV_PLAYWRIGHT_COPIES", "120"),
             // Its attempts, kept to time them.
             ("SUPERCOV_STRONG_KEEP", "1"),
         ],
