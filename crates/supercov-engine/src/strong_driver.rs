@@ -439,6 +439,9 @@ mod tests {
         assert!(drives("go", "go-test") && !drives("javascript", "go-test"));
         assert!(!drives("javascript", "minitest"));
         assert!(!drives("cobol", "jest"));
+        // A runner no driver knows; another language's runner.
+        assert!(!drives(javascript, "phpunit"));
+        assert!(!drives("ruby", "pytest"));
     }
 
     #[test]

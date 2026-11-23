@@ -16597,6 +16597,8 @@ fn a_go_run_whose_own_step_fails_says_so() {
             "fs.read_dir#go_project.rs:142@2 => go_project.rs:142",
             // The harness a test package is given.
             "fs.write#go_run.rs:527 => go_run.rs:527",
+            // The run's evidence archive.
+            "fs.create_dir_all#evidence_archive.rs:484 => evidence_archive.rs:484",
             // The report the run built, refused as one Supercov got wrong.
             "report-request",
             "spawn",
@@ -25846,6 +25848,35 @@ fn mutants_options_and_stryker_reports_that_cannot_be_read_are_refused() {
             "{fault}: {unlisted}"
         );
     }
+    // A report that is not UTF-8, and a directory's `.json.gz` file read as
+    // the mutant gem's session results, which these bytes are not.
+    std::fs::write(project.root.join("reports/bytes.json"), [0xff, 0xfe]).unwrap();
+    let bytes = project
+        .supercov(&[
+            "runs",
+            "latest",
+            "mutants",
+            "--stryker",
+            "reports/bytes.json",
+        ])
+        .exits(2);
+    assert!(
+        bytes.contains("Could not read reports/bytes.json: "),
+        "{bytes}"
+    );
+    std::fs::create_dir_all(project.root.join("reports/ruby")).unwrap();
+    std::fs::write(
+        project.root.join("reports/ruby/session.json.gz"),
+        [0x1f, 0x8b, 0],
+    )
+    .unwrap();
+    let session = project
+        .supercov(&["runs", "latest", "mutants", "--stryker", "reports/ruby"])
+        .exits(2);
+    assert!(
+        session.contains("Could not read reports/ruby/session.json.gz as mutant's session results"),
+        "{session}"
+    );
 }
 
 /// A Ruby method's mutants are the mutant gem's, listed from a plain run,

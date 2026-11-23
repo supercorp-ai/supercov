@@ -747,11 +747,13 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "a\n").unwrap();
         std::fs::write(root.join("src/empty.rs"), "// nothing to mutate\n").unwrap();
         std::fs::write(root.join("src/a.cob"), "DISPLAY 'A'.\n").unwrap();
+        std::fs::write(root.join("src/A.java"), "class A {}\n").unwrap();
         let recorded = [
             "src/a.js",
             "src/a.py",
             "src/a.rs",
             "src/a.cob",
+            "src/A.java",
             "src/empty.rs",
             "src/gone.rs",
             "notes.txt",
@@ -761,8 +763,8 @@ mod tests {
         .collect::<BTreeMap<_, _>>();
         // The JavaScript and Python files went to their enumerators, which
         // say neither is the file the run measured (no point of it was
-        // recorded); a file of a language with no enumerator, and the text
-        // file, to none.
+        // recorded); a file of a language with no enumerator (COBOL, and
+        // Java, which lists no mutants yet), and the text file, to none.
         let listed = list_from_sources(&root, &recorded);
         // A Rust file that is gone changed; one with no mutant lists none.
         assert_eq!(listed.changed, ["src/a.js", "src/a.py", "src/gone.rs"]);
