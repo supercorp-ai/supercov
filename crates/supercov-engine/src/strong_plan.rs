@@ -1741,4 +1741,22 @@ mod tests {
         whole.keep_share(1, 1);
         assert_eq!(whole.mutants.len(), plan.mutants.len());
     }
+
+    /// A plan with no test and every mutant decided (a run that measured
+    /// nothing runnable) deals nothing: the decided mutants stay with the
+    /// first share and the others are empty.
+    #[test]
+    fn a_plan_with_nothing_to_run_keeps_its_decided_mutants_in_the_first_share() {
+        let plan = costed(&[], &[("decided", None, &[])]);
+        let share = |k: usize| {
+            let mut part = plan.clone();
+            part.keep_share(k, 2);
+            part.mutants
+                .iter()
+                .map(|mutant| mutant.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(share(1), ["decided"]);
+        assert!(share(2).is_empty());
+    }
 }

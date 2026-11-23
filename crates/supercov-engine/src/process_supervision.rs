@@ -1121,14 +1121,14 @@ extern "C" fn record_signal(signal: i32) {
 /// runs a command, and puts it back.
 #[cfg(unix)]
 pub struct InterruptionRecorder {
-    previous: Vec<(i32, libc::sigaction)>,
+    /// SIGHUP's, SIGINT's and SIGTERM's handlers before, in that order.
+    previous: [(i32, libc::sigaction); 3],
 }
 
 #[cfg(unix)]
 impl InterruptionRecorder {
     pub fn install() -> Self {
-        let mut previous = Vec::new();
-        for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+        let previous = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM].map(|signal| {
             // SAFETY: zero is a valid initial state for `sigaction`; the
             // fields the kernel reads are set below.
             let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
@@ -1140,8 +1140,8 @@ impl InterruptionRecorder {
             let mut old = unsafe { std::mem::zeroed::<libc::sigaction>() };
             // SAFETY: both pointers are to live `sigaction` values.
             unsafe { libc::sigaction(signal, &action, &mut old) };
-            previous.push((signal, old));
-        }
+            (signal, old)
+        });
         Self { previous }
     }
 }
@@ -1149,10 +1149,15 @@ impl InterruptionRecorder {
 #[cfg(unix)]
 impl Drop for InterruptionRecorder {
     fn drop(&mut self) {
-        for (signal, previous) in self.previous.drain(..).rev() {
+        // Always the three signals `install` took, put back in reverse.
+        let restore = |(signal, previous): (i32, libc::sigaction)| {
             // SAFETY: `previous` came from `sigaction` for the same signal.
             unsafe { libc::sigaction(signal, &previous, std::ptr::null_mut()) };
-        }
+        };
+        let [hangup, interrupt, terminate] = self.previous;
+        restore(terminate);
+        restore(interrupt);
+        restore(hangup);
     }
 }
 
