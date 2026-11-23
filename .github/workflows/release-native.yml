@@ -1,0 +1,51 @@
+name: Release native builds
+
+# A pull request that changes the version Supercov carries is a release: its
+# native target matrix is built and verified here while the pull request's CI
+# runs, instead of after the merge. publish.yml then finds this run by the
+# tree it built -- a squash merge leaves main with the pull request's tree --
+# and publishes its artifacts without building them again.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-native-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: A release?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          carried=$(node -p 'require("./package.json").version')
+          before=$(git show "$BASE:package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
+          if [ "$carried" != "$before" ]; then
+            echo "A release of $carried (main carries $before): its native builds start now."
+            echo "version=$carried" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not a release: the version stays $carried."
+          fi
+
+  native-artifacts:
+    needs: release
+    if: needs.release.outputs.version != ''
+    uses: ./.github/workflows/native-artifacts.yml
+    permissions:
+      actions: read
+      contents: read
