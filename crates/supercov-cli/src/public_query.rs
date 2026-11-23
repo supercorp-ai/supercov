@@ -1104,9 +1104,12 @@ mod tests {
     #[test]
     fn mutant_sessions_are_read_beside_stryker_reports() {
         let directory = std::env::temp_dir().join(format!(
-            "supercov-mutant-sessions-{}-{:?}",
+            "supercov-mutant-sessions-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&directory).unwrap();
         let session = serde_json::json!({

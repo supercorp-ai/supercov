@@ -430,7 +430,10 @@ mod tests {
         assert_eq!(variables["SUPERCOV_STRONG_RESULTS"], "/work/results.jsonl");
         assert_eq!(
             variables["SUPERCOV_STRONG_FILES"],
-            "/work/strong-files.json"
+            // Beside the results, joined with the platform's separator.
+            Path::new("/work/results.jsonl")
+                .with_file_name("strong-files.json")
+                .to_string_lossy()
         );
         assert_eq!(variables[SCHEMATA_ENV], "/work/schemata.json");
         assert_eq!(variables["HOME"], "/home");
