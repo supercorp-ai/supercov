@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1243")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1260")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1243"),
+        seen.contains("test fault at fs (javascript_run.rs:1260"),
         "{seen}"
     );
 }
@@ -17674,18 +17674,18 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     // and with the query index, which is written beside the publication.
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1369",
-        "fs.create_dir_all#javascript_run.rs:752",
-        "fs.write#javascript_run.rs:1104",
+        "fs.create_dir_all#javascript_run.rs:764",
+        "fs.write#javascript_run.rs:1116",
         "fs.canonicalize#process_supervision.rs:1889",
-        "fs.create_dir_all#javascript_run.rs:1187",
-        "fs.create_dir_all#javascript_run.rs:1381",
+        "fs.create_dir_all#javascript_run.rs:1199",
+        "fs.create_dir_all#javascript_run.rs:1398",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
-        "fs.create_dir_all#javascript_run.rs:1659",
-        "fs.create_dir_all#javascript_run.rs:1661",
+        "fs.create_dir_all#javascript_run.rs:1676",
+        "fs.create_dir_all#javascript_run.rs:1678",
         "fs.create_dir_all#lifecycle.rs:1060",
-        "fs.create_dir_all#javascript_run.rs:1761",
-        "fs.create_dir_all#javascript_run.rs:1763",
+        "fs.create_dir_all#javascript_run.rs:1778",
+        "fs.create_dir_all#javascript_run.rs:1780",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -25086,12 +25086,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1514",
+            "fs.write#mutants_test_command.rs:1545",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1514"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1545"),
         "{}",
         unwritten.stderr()
     );
