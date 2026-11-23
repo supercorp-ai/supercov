@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A process Playwright starts as a `webServer` from its config's folder, such as a mock server in `tests/e2e` that imports `@playwright/test`, failed to start under Supercov ("ENOENT ... tests/e2e/.supercov/node_modules/playwright.mjs"), and the run recorded no test. Playwright is now found from the project's root, whatever folder the process starts in.
+
 ## 4.29.0
 
 **Added**

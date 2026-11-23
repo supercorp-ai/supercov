@@ -22909,6 +22909,87 @@ fn inline_snapshots_and_faked_clocks_measure_and_mutate_as_the_suite_runs() {
     assert!(reply["summary"]["killed"].as_u64().unwrap() >= 8, "{reply}");
 }
 
+/// A server Playwright starts from its config's folder, which is not the
+/// project's root, and which imports `@playwright/test` itself (a mock
+/// server that drives a browser): it is given the same Playwright the tests
+/// are, found from the project's root, so it starts and the tests are
+/// recorded.
+#[cfg(unix)]
+#[test]
+fn a_web_server_started_in_the_config_s_folder_can_import_playwright() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            "await import('@playwright/test')",
+        ])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright is required"
+        );
+        eprintln!("skipping: Playwright is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("playwright-server-in-config-folder");
+    project.write(
+        "package.json",
+        r#"{ "name": "server-in-config-folder", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "src/greeting.js",
+        "export function greeting(name) {\n  return name ? `hello ${name}` : \"hello\";\n}\n",
+    );
+    // Started with the config's folder as its working directory.
+    project.write(
+        "tests/e2e/mocks/server.mjs",
+        "import http from \"node:http\";\nimport { chromium } from \"@playwright/test\";\nimport { greeting } from \"../../../src/greeting.js\";\nif (typeof chromium.launch !== \"function\") throw new Error(\"no chromium\");\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  response.end(greeting(url.searchParams.get(\"name\")));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "tests/e2e/playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"specs\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node mocks/server.mjs\", url: \"http://127.0.0.1:{port}/\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/e2e/specs/greeting.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"greets\", async ({ request }) => {\n  expect(await (await request.get(\"/?name=ada\")).text()).toBe(\"hello ada\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("server in the config's folder");
+    let measured = project.supercov(&[
+        "--",
+        "npx",
+        "playwright",
+        "test",
+        "-c",
+        "tests/e2e/playwright.config.js",
+    ]);
+    assert!(
+        !measured.stderr().contains("was not able to start"),
+        "{}",
+        measured.stderr()
+    );
+    measured.succeeds();
+    let summary = project.supercov(&["runs", "latest"]).succeeds();
+    contains_all(&summary, &["Total       1", "Passed      1"]);
+}
+
 /// `mutants test` over a Playwright run against a Node server: the workers
 /// of one Playwright invocation each test their own mutant against one
 /// server, the mutant carried with each attempt's requests and switched on

@@ -157,9 +157,12 @@ function redirected(specifier, context) {
         if (REPLACEMENT.startsWith("file:")) {
             return { url: REPLACEMENT, shortCircuit: true };
         }
+        // Relative to the project's root, not the process's directory: a
+        // server Playwright starts from its config's folder imports
+        // Playwright too.
         if (REPLACEMENT.startsWith(".")) {
             return {
-                url: pathToFileURL(resolvePath(process.cwd(), REPLACEMENT)).href,
+                url: pathToFileURL(resolvePath(PROJECT_ROOT ?? process.cwd(), REPLACEMENT)).href,
                 shortCircuit: true,
             };
         }
