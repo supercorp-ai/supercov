@@ -128,6 +128,7 @@ mod stable_ids;
 mod store_shapes;
 pub mod strong_driver;
 pub mod strong_plan;
+pub mod strong_verdicts;
 pub mod support_reach;
 #[cfg(test)]
 mod test_directory;

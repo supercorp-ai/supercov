@@ -537,7 +537,11 @@ many in a line per runner (`12 mutant(s) not run: no strong driver for
 phpunit`). See `docs/design/strong-mutation.md`,
 `docs/design/python-mutants.md` and `docs/design/mutation-drivers.md`.
 
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs.
+- `--shard k/n` runs one of n shares of the mutants, for parallel jobs; each
+  job's run holds its share's verdicts, `merge` keeps them all in the merged
+  run, and a later `supercov mutants` keeps each verdict nothing changed could
+  move from whichever earlier run holds it (see
+  [Combine shards](#combine-shards)).
 - `--critical <glob>` (repeatable): every mutant there must be killed or
   accepted, or the command fails.
 - `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with
@@ -1200,6 +1204,18 @@ A merged run lists the mutants of every file a run listed (see
 recorded with the same bytes are not merged. A run that listed no mutants
 adds none, and where its tests ran a mutant, a verdict that needs values they
 did not record is `unknown`.
+
+The merged run keeps the strong verdicts the runs saved (`mutants test`,
+`--shard` among them), by mutant, and `merge` prints how many and from which
+runs. A kill in any run is a kill. A survival stands only where the run that
+let the mutant survive measured every test of the merged suite that could
+kill it; where another run's tests could, and it has no verdict, the mutant is
+left for a pass over the merged run to run. An error stands only where no run
+holds anything else. A run whose verdicts are of another mutant set than the
+merged run lists lends none, and `merge` names it; a run some of whose tests
+another measured again lends none either. Split a strong pass across jobs this
+way: each job measures and runs `supercov mutants --shard k/n -- <command>`,
+and the last merges (see `docs/mutation.md`, A pass split across jobs).
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a

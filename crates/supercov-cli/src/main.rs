@@ -607,7 +607,7 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
     };
     for run_ids in groups {
         let (run_id, started_at) = public_run_identity();
-        match supercov_engine::run_merge::merge_coverage_runs(
+        match supercov_engine::run_merge::merge_runs(
             &root,
             &run_ids,
             &run_id,
@@ -615,8 +615,11 @@ fn merge_command(arguments: Vec<String>) -> ExitCode {
             allow_changed,
         ) {
             Ok(merged) => {
-                println!("[supercov] merged run {merged}");
-                println!("{} runs {merged}", launcher_command());
+                println!("[supercov] merged run {}", merged.id);
+                for note in merged.notes {
+                    println!("[supercov] {note}");
+                }
+                println!("{} runs {}", launcher_command(), merged.id);
             }
             Err(error) => {
                 eprintln!("[supercov] {error}");

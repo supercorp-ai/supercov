@@ -980,9 +980,14 @@ tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 ## After an edit: verdicts no change could move
 
 `supercov mutants` measures the checkout again once it changed, and that
-run has no verdicts. It keeps those of the latest earlier run of the same
-command, dependencies and configuration (and mutant set), mutant by mutant,
-where nothing the verdict depends on changed; the rest run. `tests affected`
+run has no verdicts. It keeps those of the earlier runs of the same command,
+dependencies and configuration (and mutant set), mutant by mutant, where
+nothing the verdict depends on changed; the rest run. The earlier runs are
+read newest first, and each gives the mutants still without a verdict the ones
+it can keep, each judged against that run's own `tests affected`: a pass split
+across machines leaves each share's verdicts in its own run, and they are kept
+together. Reading stops once every mutant has one. A run whose record of what
+each test ran is gone lends nothing, and the next older run is read. `tests affected`
 (`source_manifest::affected_tests`) says, from each test's recorded
 execution, which tests a change since that run could have reached: a test
 file's edit reaches its tests, a source edit the tests that ran the changed
