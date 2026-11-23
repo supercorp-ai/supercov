@@ -117,8 +117,15 @@ mutants the tests let survive.
   from runs r2, r1`).
 - **Interrupted.** Each verdict is saved as it is made. A pass stopped by
   Ctrl-C, a killed job or a test worker that never ended keeps what it
-  decided, Ctrl-C stops every process the pass started, and the next pass runs
-  only the rest.
+  decided, and the next pass runs only the rest. Sent SIGINT or SIGTERM, the
+  pass stops every process it started and ends within seconds: one that has
+  not ended 8 s after the signal is ended, what it decided saved first.
+- **Order and budget.** The cheapest mutants run first, by the recorded times
+  of the tests each runs against, so a pass cut short has decided as many as
+  it could. `--budget <seconds>` stops the pass once it is spent and ends it
+  as a finished one, its verdicts saved; the summary says how many mutants it
+  left for the next pass (`budget of 2400 s spent: 812 mutant(s) left without
+  a verdict, for the next pass`).
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
@@ -212,8 +219,11 @@ npx supercov runs latest mutants test --plan --json
 
 - `--critical <glob>` (repeatable): every mutant in those files must be killed
   or accepted, or the command fails.
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs (see
+- `--shard k/n` runs one of n shares of the mutants, of about the same cost,
+  for parallel jobs (see
   [A pass split across jobs](#a-pass-split-across-jobs)).
+- `--budget <seconds>` stops the pass once that time is spent, its verdicts
+  saved, and leaves the rest for the next pass.
 - `--plan` prints what would run, and runs nothing.
 
 Some mutants no test can tell apart from the original. Accept them in
@@ -240,7 +250,7 @@ merges the runs, and the merged run holds every job's verdicts:
 # Each of four jobs (matrix.shard 1 to 4):
 - uses: actions/cache/restore@v4
   with: { path: .supercov/runs, key: "mutants-${{ github.sha }}", restore-keys: "mutants-" }
-- run: npx supercov mutants --shard ${{ matrix.shard }}/4 -- npm test
+- run: npx supercov mutants --shard ${{ matrix.shard }}/4 --budget 2400 -- npm test
 - uses: actions/upload-artifact@v4
   with: { name: "mutants-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
 # Then one job:
@@ -259,6 +269,18 @@ earlier verdicts as after an edit. Name the command after `--`: without it,
 `supercov mutants` takes the latest run's, which after a merge is the merge.
 Every job must measure the same commit with the same dependencies, as for any
 merge ([CLI reference](cli.md#combine-shards)).
+
+- **The shares.** Each job computes the same split from its own run: the
+  mutants to run are dealt in turn, back and forth, most costly first, so
+  every share gets its part of the costly ones. A mutant's cost there is what
+  the plan lists of it, the copies of test files it starts and the tests they
+  run, not the tests' times, which differ between jobs.
+- **The budget.** `--budget <seconds>` ends a job's pass in time without a
+  `timeout` around it: past the budget the pass stops, saves what it
+  decided, and exits as a finished pass. Within a pass the cheapest mutants
+  run first, so a job cut short has decided as many as it could, and the
+  mutants it left run in the next commit's pass, where the restored runs lend
+  the rest of their verdicts.
 
 - **The merge.** `supercov merge` keeps the strong verdicts of the runs it
   merges, mutant by mutant, and says how many and from which runs. A kill in

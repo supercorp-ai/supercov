@@ -148,6 +148,12 @@ function readOutcome(out) {
             outcome.doneAt = record.at;
             outcome.channelLost = Boolean(record.channelLost);
         }
+        // Its test file did not load or set up, or a hook failed and its
+        // suite's tests were skipped: the first such error.
+        else if (record.loadError)
+            outcome.loadError ??= record;
+        else if (record.hook)
+            outcome.hook ??= record;
         else if (record.test)
             outcome.tests.push(record);
         else if (record.outside)
@@ -1138,7 +1144,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         entry.state = "waiting";
         if (outcome.cancelled && !outcome.claimed && !stalled && ++entry.tries < 3)
             return;
-        const failed = outcome.tests.some((test) => test.failed);
+        const failed = outcome.tests.some((test) => test.failed) || Boolean(outcome.hook);
         if ((failed || !outcome.done) && !entry.whole) {
             entry.whole = true;
             entry.tests = new Set();
@@ -1166,6 +1172,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             wholeBaseline.add(entry.file);
         if (outcome.outside.length)
             baselineFailed.add(`${entry.file}#outside`);
+        if (outcome.hook)
+            baselineFailed.add(`${entry.file}#hook`);
         if (!outcome.done)
             baselineFailed.add(`${entry.file}#file`);
         for (const test of outcome.tests)
@@ -1285,7 +1293,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             job.confirming.splice(job.confirming.indexOf(waiting), 1);
             const alsoWithout = evidence.test ? result.failed.has(evidence.test)
                 : evidence.outside ? result.outside
-                    : !result.done;
+                    : evidence.hook ? result.hook
+                        : !result.done;
             if (!alsoWithout) {
                 finish(job, verdict);
                 return;
@@ -1394,6 +1403,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             // the same way without the mutant.
             kill({ unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
         }
+        // Its file did not load or set up before the mutant ran: not the
+        // mutant's doing.
+        else if (outcome.loadError?.hits === 0)
+            finish(job, { status: "error", reason: `its copy of ${group.file} did not load before the mutant ran: ${outcome.loadError.message}` });
         else if (!outcome.done) {
             // The copy started and its file did not finish: the mutant
             // broke it while it loaded or ran.
@@ -1402,6 +1415,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             else
                 kill({ unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
         }
+        // A hook failed with the mutant, as it does not without it.
+        else if (outcome.hook?.hits > 0 && !baselineFailed.has(`${group.file}#hook`))
+            kill({ hook: true }, { status: "killed", killedBy: group.file, reason: `a hook failed: ${outcome.hook.message}` });
         else {
             const short = ranNone(claim, outcome, { order: baselineOrder.get(group.file) }, group.file);
             if (short)
@@ -1420,6 +1436,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         check.result = {
             failed: new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test)),
             outside: outcome.outside.length > 0,
+            hook: Boolean(outcome.hook),
             // A copy no worker took cannot say the tests fail without the
             // mutant: the kill stands.
             done: outcome.done || !outcome.claimed,
@@ -1463,9 +1480,13 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         const missing = expected.filter((id) => !ran.has(id));
         if (!missing.length && (ran.size || !claim.wholeFile))
             return undefined;
+        // What kept them from running, where the copy said: a hook that
+        // failed, or its file not loading.
+        const why = outcome.hook ?? outcome.loadError;
+        const said = why ? `: ${why.message}` : "";
         if (!ran.size)
-            return `its copy of ${file} ran none of the tests it was to run`;
-        return `its copy of ${file} ran ${expected.length - missing.length} of the ${expected.length} tests it was to run`;
+            return `its copy of ${file} ran none of the tests it was to run${said}`;
+        return `its copy of ${file} ran ${expected.length - missing.length} of the ${expected.length} tests it was to run${said}`;
     }
     async function runContinuous() {
         // Each file's baselines: `union` (its mutants' candidates together)
@@ -1510,7 +1531,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                 entry.state = "waiting";
                 return;
             }
-            if (shape === "union" && (!outcome.done || outcome.tests.some((test) => test.failed))) {
+            if (shape === "union" && (!outcome.done || outcome.hook || outcome.tests.some((test) => test.failed))) {
                 // Recorded, and the file's copies run whole from now on.
                 entry.state = "known";
                 entry.done = false;
@@ -1523,6 +1544,9 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             entry.order = outcome.tests.map((test) => test.test);
             entry.failed = new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test));
             entry.outside = outcome.outside.length > 0;
+            // A hook of the file fails without a mutant too: one that fails
+            // with a mutant says nothing of it.
+            entry.hook = Boolean(outcome.hook);
             if (outcome.done) {
                 entry.copyMs = outcome.doneAt - outcome.claimedAt;
                 let testsMs = 0;
@@ -1568,8 +1592,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
         provide(vitest, { root, stage: directory });
         const fileKeyOf = new Map();
         const nextIndex = new Map();
-        // Every mutant's files, in the order it would take them; the most
-        // work left first (long chains do not end the pass).
+        // Every mutant's files, in the order it would take them.
         // A copy of the whole file costs what its tests took in the measured
         // run (its whole baseline may never run).
         const estimateC = (group) => shapeOf(group) === "whole"
@@ -1584,7 +1607,14 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             job.confirmingKills = 0;
         }
         const idle = (job) => !job.done && !job.open && !job.confirmingKills;
-        const order = [...pending].sort((a, b) => remainingOf(b) - remainingOf(a));
+        // The cheapest mutants first, the plan's order (its estimate)
+        // between equals: a pass cut short -- a budget, a job's time limit --
+        // has decided as many as it could, where the costliest first spent a
+        // large suite's whole budget on a few dozen of them. A worker with
+        // no mutant waiting takes the next file of the one with the most
+        // work left (`besides`), so that long chains do not end the pass.
+        const order = [...pending].sort((a, b) => remainingOf(a) - remainingOf(b));
+        const besides = [...order].reverse();
         const rankOf = new Map(order.map((job, rank) => [job, rank]));
         const checks = [];
         const waiters = [];
@@ -1685,7 +1715,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             // next file beside it (the most work left first). Its verdict
             // is the same either way; a copy its mutant's kill makes moot is
             // stopped.
-            for (const job of order) {
+            for (const job of besides) {
                 if (job.done || job.confirmingKills || !job.open)
                     continue;
                 const group = nextOf(job);
@@ -1820,7 +1850,10 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             // once; a failure that repeats counts (the mutant may have run in
             // a process the copy started).
             const unevaluated = (evidence) => evidence?.hits === 0;
-            if (!group.rerunUnevaluated && (unevaluated(failed) || (!failed && unevaluated(outside)))) {
+            // A hook that failed (its suite's tests skipped), or a file that
+            // did not load or set up, where the file's baseline had neither.
+            const broke = failed || outside ? undefined : outcome.loadError ?? (entry.hook ? undefined : outcome.hook);
+            if (!group.rerunUnevaluated && (unevaluated(failed) || (!failed && unevaluated(outside)) || unevaluated(broke))) {
                 group.rerunUnevaluated = true;
                 profile.unevaluatedReruns += 1;
                 job.ran -= outcome.tests.length;
@@ -1836,8 +1869,16 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
                     : { status: "killed", killedBy: group.file, reason: `an error outside any test: ${outside.message}` });
             else if (outcome.hung)
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "timeout", killedBy: group.file, reason: "its test file stopped before its end, past its limit" });
+            // It broke again before the mutant ran, as it did the first
+            // time: not the mutant's doing, and its tests did not run.
+            else if (unevaluated(broke))
+                finishC(job, { status: "error", reason: `its copy of ${group.file} ${broke.loadError ? "did not load" : "ran no test: a hook failed"} before the mutant ran, twice: ${broke.message}` });
             else if (!outcome.done)
                 kill(job, group, claim, outcome, { unfinished: true }, { status: "killed", killedBy: group.file, reason: "the test file did not finish" });
+            // A hook failed with the mutant, as it does not without it: the
+            // run fails, as Vitest's own does where a hook fails.
+            else if (broke)
+                kill(job, group, claim, outcome, { hook: true }, { status: "killed", killedBy: group.file, reason: `a hook failed: ${broke.message}` });
             else if (ranNone(claim, outcome, entry, group.file))
                 finishC(job, { status: "error", reason: ranNone(claim, outcome, entry, group.file) });
             else
@@ -1858,7 +1899,8 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             }
             const alsoWithout = evidence.test ? result.failed.has(evidence.test)
                 : evidence.outside ? result.outside
-                    : !result.done;
+                    : evidence.hook ? result.hook
+                        : !result.done;
             if (!alsoWithout) {
                 finishC(job, verdict);
                 return;
@@ -1879,6 +1921,7 @@ async function drive(vitest, runFiles, specs, plan, resultsPath) {
             check.result = {
                 failed: new Set(outcome.tests.filter((test) => test.failed).map((test) => test.test)),
                 outside: outcome.outside.length > 0,
+                hook: Boolean(outcome.hook),
                 done: outcome.done || !outcome.claimed,
             };
             // A run of the whole file with no mutant is its whole baseline.

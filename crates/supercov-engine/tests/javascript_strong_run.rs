@@ -171,7 +171,7 @@ fn a_pass_that_cannot_write_or_start_what_it_needs_fails() {
         // The run's state, read back to say it is complete.
         ("fs.read#javascript_run.rs:1261", "state.json"),
         // The first restart's command, after the pass's own.
-        ("spawn#process_supervision.rs:1490@2", "/bin/sh"),
+        ("spawn#process_supervision.rs:1578@2", "/bin/sh"),
     ];
     for (fault, says) in cases {
         let pass = Pass::new("faults");

@@ -537,7 +537,8 @@ many in a line per runner (`12 mutant(s) not run: no strong driver for
 phpunit`). See `docs/design/strong-mutation.md`,
 `docs/design/python-mutants.md` and `docs/design/mutation-drivers.md`.
 
-- `--shard k/n` runs one of n shares of the mutants, for parallel jobs; each
+- `--shard k/n` runs one of n shares of the mutants, of about the same cost
+  (the copies and tests each mutant runs), for parallel jobs; each
   job's run holds its share's verdicts, `merge` keeps them all in the merged
   run, and a later `supercov mutants` keeps each verdict nothing changed could
   move from whichever earlier run holds it (see
@@ -553,7 +554,11 @@ phpunit`). See `docs/design/strong-mutation.md`,
 - A second `mutants test` over the same run runs only what has no verdict yet.
   The pass saves each verdict as it comes: one that stops early (a test worker
   that never ended, Ctrl-C, a killed job) keeps what it decided, and the next
-  pass runs the rest. Ctrl-C stops every process the pass started.
+  pass runs the rest. Ctrl-C or SIGTERM stops every process the pass started,
+  and the pass ends within seconds: 8 s after the signal at the latest.
+- `--budget <seconds>` stops the pass once it is spent: it ends as a finished
+  pass, its verdicts saved, and says how many mutants it left for the next.
+  The cheapest mutants run first, by their tests' recorded times.
 - After an edit, `supercov mutants` measures the checkout again and keeps an
   earlier run's verdict for each mutant whose file is as it was and whose
   candidate tests, and their test files, nothing changed could reach (as

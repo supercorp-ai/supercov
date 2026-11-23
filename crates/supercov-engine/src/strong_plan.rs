@@ -799,6 +799,138 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     })
 }
 
+/// What a copy of a test file costs beside its tests' own time, in
+/// milliseconds: a worker starting and the file loading. The Vitest driver
+/// guesses the same before it has timed a copy.
+pub const COPY_START_MS: u64 = 300;
+
+/// A test the measured run gave no duration.
+pub const UNTIMED_TEST_MS: u64 = 1_000;
+
+impl StrongPlan {
+    /// The tests of each test file, by index, in the plan's order.
+    fn tests_by_file(&self) -> HashMap<&str, Vec<usize>> {
+        let mut by_file = HashMap::<&str, Vec<usize>>::new();
+        for (index, test) in self.tests.iter().enumerate() {
+            if let Some(file) = &test.file {
+                by_file.entry(file.as_str()).or_default().push(index);
+            }
+        }
+        by_file
+    }
+
+    /// The copies a mutant runs if none kills it: for each test file, the
+    /// tests it runs there (its candidates, or every test of a file it runs
+    /// whole). Candidates with no file make one copy of their own.
+    fn copies_of<'a>(
+        &'a self,
+        mutant: &'a PlannedMutant,
+        by_file: &HashMap<&str, Vec<usize>>,
+    ) -> BTreeMap<Option<&'a str>, Vec<usize>> {
+        let mut copies = BTreeMap::<Option<&str>, Vec<usize>>::new();
+        for candidate in &mutant.candidates {
+            let file = self
+                .tests
+                .get(candidate.test)
+                .and_then(|test| test.file.as_deref());
+            copies.entry(file).or_default().push(candidate.test);
+        }
+        for file in &mutant.whole_files {
+            copies.insert(
+                Some(file.as_str()),
+                by_file.get(file.as_str()).cloned().unwrap_or_default(),
+            );
+        }
+        copies
+    }
+
+    /// A mutant's cost if it survives, in milliseconds: each copy's start
+    /// and its tests' measured durations. A kill ends its mutant's copies
+    /// early, so a killed mutant costs less than this.
+    fn estimated_ms_with(
+        &self,
+        mutant: &PlannedMutant,
+        by_file: &HashMap<&str, Vec<usize>>,
+    ) -> u64 {
+        self.copies_of(mutant, by_file)
+            .values()
+            .map(|tests| {
+                COPY_START_MS
+                    + tests
+                        .iter()
+                        .map(|test| {
+                            self.tests
+                                .get(*test)
+                                .and_then(|test| test.duration_ms)
+                                .unwrap_or(UNTIMED_TEST_MS)
+                        })
+                        .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Each mutant's estimated cost (`estimated_ms_with`), by id: what
+    /// orders a pass and says how far it got.
+    pub fn estimated_ms(&self) -> BTreeMap<String, u64> {
+        let by_file = self.tests_by_file();
+        self.mutants
+            .iter()
+            .map(|mutant| (mutant.id.clone(), self.estimated_ms_with(mutant, &by_file)))
+            .collect()
+    }
+
+    /// Orders the mutants cheapest first, by their estimated cost, the
+    /// plan's order between equals: a pass cut short (a budget, a job's time
+    /// limit) has then decided as many as it could.
+    pub fn cheapest_first(&mut self) {
+        let costs = self.estimated_ms();
+        self.mutants
+            .sort_by_key(|mutant| costs.get(&mutant.id).copied().unwrap_or(0));
+    }
+
+    /// Keeps the k-th of n shares of the mutants to run, the decided ones in
+    /// the first. The shares have about the same cost: the mutants are dealt
+    /// in turn, back and forth, most costly first, so every share gets its
+    /// part of the costly ones. The cost read here is what the plan lists --
+    /// how many copies a mutant starts and how many tests they run -- not
+    /// the tests' times: each job of a sharded pass measures the suite
+    /// itself, the times differ between jobs, and a split that read them
+    /// would put some mutants in no share and some in two.
+    pub fn keep_share(&mut self, k: usize, n: usize) {
+        let by_file = self.tests_by_file();
+        let mut undecided = self
+            .mutants
+            .iter()
+            .enumerate()
+            .filter(|(_, mutant)| mutant.decided.is_none())
+            .map(|(position, mutant)| {
+                let weight = self
+                    .copies_of(mutant, &by_file)
+                    .values()
+                    .map(|tests| 1 + tests.len())
+                    .sum::<usize>();
+                (std::cmp::Reverse(weight), position)
+            })
+            .collect::<Vec<_>>();
+        undecided.sort_unstable();
+        let mut shares = vec![0usize; self.mutants.len()];
+        for (dealt, (_, position)) in undecided.into_iter().enumerate() {
+            let (round, seat) = (dealt / n, dealt % n);
+            shares[position] = if round % 2 == 0 { seat } else { n - 1 - seat };
+        }
+        let mut position = 0;
+        self.mutants.retain(|mutant| {
+            let share = shares[position];
+            position += 1;
+            if mutant.decided.is_some() {
+                k == 1
+            } else {
+                share == k - 1
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,5 +1586,159 @@ mod tests {
         std::fs::write(beside(&request), b"not json").unwrap();
         assert!(run_recorded_mutant_values(&request.archive_path));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A mutant of `costed`: its id, its candidates (`None`: decided) and the
+    /// files it runs whole.
+    type Costed<'a> = (&'a str, Option<&'a [usize]>, &'a [&'a str]);
+
+    /// A plan of `tests` (file, duration) whose mutants are as given.
+    fn costed(tests: &[(Option<&str>, Option<u64>)], mutants: &[Costed]) -> StrongPlan {
+        StrongPlan {
+            mutant_set: "set".into(),
+            tests: tests
+                .iter()
+                .enumerate()
+                .map(|(index, (file, duration))| PlannedTest {
+                    id: format!("t{index}"),
+                    file: file.map(str::to_owned),
+                    name: format!("t{index}"),
+                    title: None,
+                    runner: "vitest".into(),
+                    duration_ms: *duration,
+                    span: None,
+                    runnable: true,
+                })
+                .collect(),
+            mutants: mutants
+                .iter()
+                .map(|(id, candidates, whole)| PlannedMutant {
+                    id: (*id).into(),
+                    file: "src/a.js".into(),
+                    language: "javascript".into(),
+                    index: 0,
+                    mutator: "M".into(),
+                    weak: if candidates.is_some() {
+                        "infected"
+                    } else {
+                        "not-infected"
+                    },
+                    decided: candidates.is_none().then_some(Decided::Survived),
+                    reason: None,
+                    candidates: candidates
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|test| Candidate {
+                            test: *test,
+                            reason: CandidateReason::Infected,
+                        })
+                        .collect(),
+                    whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
+                    server_wide: None,
+                    covering: 0,
+                    statement: None,
+                    function: None,
+                    function_hit_by: BTreeMap::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A mutant costs what its copies would if it survived: each file's
+    /// start and its tests' measured times, an untimed test a second, every
+    /// test of a file it runs whole, and a copy for candidates with no
+    /// file. The cheapest run first, the plan's order between equals.
+    #[test]
+    fn a_mutant_costs_its_copies_and_the_cheapest_run_first() {
+        let mut plan = costed(
+            &[
+                (Some("a.test.js"), Some(10)),
+                (Some("a.test.js"), Some(20)),
+                (Some("b.test.js"), None),
+                (None, Some(5)),
+            ],
+            &[
+                ("whole", Some(&[0]), &["a.test.js"]),
+                ("two-files", Some(&[0, 2]), &[]),
+                ("decided", None, &[]),
+                ("one", Some(&[1]), &[]),
+                ("fileless", Some(&[3]), &[]),
+                ("also-one", Some(&[1]), &[]),
+                ("gone-file", Some(&[]), &["c.test.js"]),
+            ],
+        );
+        let costs = plan.estimated_ms();
+        assert_eq!(costs["whole"], COPY_START_MS + 30);
+        assert_eq!(costs["two-files"], 2 * COPY_START_MS + 10 + UNTIMED_TEST_MS);
+        assert_eq!(costs["decided"], 0);
+        assert_eq!(costs["fileless"], COPY_START_MS + 5);
+        assert_eq!(costs["gone-file"], COPY_START_MS);
+        plan.cheapest_first();
+        let order = plan
+            .mutants
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                "decided",
+                "gone-file",
+                "fileless",
+                "one",
+                "also-one",
+                "whole",
+                "two-files"
+            ]
+        );
+    }
+
+    /// The shares split what runs by what each mutant runs, dealt back and
+    /// forth from the costliest: every share gets its costly mutants, each
+    /// mutant is in one share, and the decided ones are the first share's.
+    #[test]
+    fn shares_split_the_mutants_by_what_they_run() {
+        let tests = (0..8)
+            .map(|index| {
+                (
+                    Some(if index < 4 { "a.test.js" } else { "b.test.js" }),
+                    Some(1),
+                )
+            })
+            .collect::<Vec<_>>();
+        let all: [&[usize]; 7] = [
+            &[0],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            &[1],
+            &[0, 1, 2, 3],
+            &[2],
+            &[0, 4],
+            &[3],
+        ];
+        let ids = ["m0", "m1", "m2", "m3", "m4", "m5", "m6"];
+        let mut mutants = ids
+            .iter()
+            .zip(all)
+            .map(|(id, candidates)| (*id, Some(candidates), &[] as &[&str]))
+            .collect::<Vec<_>>();
+        mutants.insert(2, ("decided", None, &[]));
+        let plan = costed(&tests, &mutants);
+        let share = |k: usize| {
+            let mut part = plan.clone();
+            part.keep_share(k, 3);
+            part.mutants
+                .iter()
+                .map(|mutant| mutant.id.clone())
+                .collect::<Vec<_>>()
+        };
+        // Weights (copies and tests): m1 10, m3 5, m5 4, then 2 each. Dealt
+        // m1 m3 m5 to shares 1 2 3, then m0 m2 m4 to 3 2 1, then m6 to 1.
+        assert_eq!(share(1), ["m1", "decided", "m4", "m6"]);
+        assert_eq!(share(2), ["m2", "m3"]);
+        assert_eq!(share(3), ["m0", "m5"]);
+        // One share is the whole plan.
+        let mut whole = plan.clone();
+        whole.keep_share(1, 1);
+        assert_eq!(whole.mutants.len(), plan.mutants.len());
     }
 }
