@@ -444,8 +444,20 @@ fn rounded_millisecond(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-fn supervision_options() -> Result<SupervisionOptions, String> {
-    let defaults = SupervisionOptions::default();
+/// A strong pass's progress lines say what its command does every few
+/// seconds (`mutants test`): its process tree is listed only once it has
+/// run this long, not every minute.
+const STRONG_DIAGNOSTIC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn supervision_options(strong: bool) -> Result<SupervisionOptions, String> {
+    let defaults = SupervisionOptions {
+        diagnostic_interval: if strong {
+            STRONG_DIAGNOSTIC_INTERVAL
+        } else {
+            SupervisionOptions::default().diagnostic_interval
+        },
+        ..SupervisionOptions::default()
+    };
     Ok(SupervisionOptions {
         diagnostic_interval: positive_milliseconds(
             std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
@@ -1137,7 +1149,7 @@ fn run_javascript(
             },
         },
     };
-    let options = supervision_options()?;
+    let options = supervision_options(request.strong.is_some())?;
     let watchdog_program = request.watchdog_program.as_ref().ok_or_else(|| {
         DirectJavascriptRunError::Failed(
             "the JavaScript run is missing its crash-containment executable".into(),
@@ -1237,7 +1249,12 @@ fn run_javascript(
         .map_or(0.0, |phase| phase.duration_ms as f64);
     // A stopped pass keeps the verdicts of what it finished.
     if let Some(strong) = &request.strong {
-        judge_playwright_pass(strong, None, &workspace);
+        judge_playwright_pass(
+            strong,
+            None,
+            &workspace,
+            execution.interrupted_signal.is_some(),
+        );
     }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal.name())
@@ -3010,7 +3027,10 @@ fn run_strong_restarts(
                 serde_json::to_vec(&job).expect("plain data serializes"),
             )
             .map_err(|error| format!("{}: {error}", path.display()))?;
-            let everywhere = job["everywhere"] == true;
+            // One mutant a Playwright invocation: each runner switches its
+            // own on for the processes it starts.
+            let batch = job["batch"] == true;
+            let everywhere = job["everywhere"] == true && !batch;
             let mutants = job["mutants"].as_array().map_or(0, Vec::len);
             let _ = writeln!(
                 diagnostics,
@@ -3018,7 +3038,9 @@ fn run_strong_restarts(
                 path.file_stem().unwrap_or_default().to_string_lossy(),
                 mutants,
                 job["kind"].as_str().unwrap_or("alone"),
-                if everywhere {
+                if batch {
+                    ", one an invocation of Playwright, its server started with it switched on"
+                } else if everywhere {
                     ", every process started with it switched on"
                 } else {
                     ""
@@ -3053,7 +3075,12 @@ fn run_strong_restarts(
                 |_, _| Ok(()),
             )
             .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
-            judge_playwright_pass(strong, Some(&path), workspace);
+            judge_playwright_pass(
+                strong,
+                Some(&path),
+                workspace,
+                execution.interrupted_signal.is_some(),
+            );
             // An interrupted pass ends here; the mutants left have no verdict.
             if execution.interrupted_signal.is_some() {
                 return Ok(());
@@ -3069,13 +3096,21 @@ fn run_strong_restarts(
 /// every invocation of Playwright it started (`judge` in
 /// `playwrightStrongReporter.mjs`): a harness may start several at once, each
 /// with a share of the tests, and a mutant's rows may be in any of them. A
-/// pass that started no Playwright left no rows, and has nothing to judge.
-fn judge_playwright_pass(strong: &StrongRun, restart: Option<&Path>, workspace: &Path) {
+/// pass that started no Playwright left no work, and has nothing to judge.
+/// A round a signal or the budget stopped (`stopped`) leaves what it did not
+/// finish without a verdict, for the next pass: it is not a round whose
+/// tests ran to their end and decided nothing.
+fn judge_playwright_pass(
+    strong: &StrongRun,
+    restart: Option<&Path>,
+    workspace: &Path,
+    stopped: bool,
+) {
     let name = restart
         .and_then(Path::file_stem)
         .map_or_else(|| "main".into(), |stem| stem.to_string_lossy().into_owned());
     let round = strong.results.with_file_name("playwright").join(name);
-    if !round.join("rows.json").is_file() {
+    if !round.join("pass.json").is_file() {
         return;
     }
     let _ = std::process::Command::new("node")
@@ -3085,6 +3120,7 @@ fn judge_playwright_pass(strong: &StrongRun, restart: Option<&Path>, workspace: 
         .env("SUPERCOV_STRONG_PLAN", &strong.plan)
         .env("SUPERCOV_STRONG_RESULTS", &strong.results)
         .envs(restart.map(|path| ("SUPERCOV_STRONG_RESTART", path)))
+        .envs(stopped.then_some(("SUPERCOV_STRONG_STOPPED", "1")))
         .stdout(std::process::Stdio::null())
         .status();
 }

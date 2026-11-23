@@ -20,7 +20,7 @@ import { inferTestProvenance, testTags } from "./provenance.mjs";
 import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 import { expandSnapshot, mergeSnapshots, columnarEvents } from "./snapshots.mjs";
 import { COVERAGE_DOCUMENT_PHASE_COOKIE, COVERAGE_DOCUMENT_PHASE_SITE_COOKIE, COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_PHASE_SITE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_SCOPE_SITE_COOKIE, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, startDocumentInPhase, } from "./transport.mjs";
-import { PAGE_TIMEOUT_MARKER, activatePageMutant, strongClaim, strongFinish } from "./playwrightStrong.mjs";
+import { PAGE_TIMEOUT_MARKER, activatePageMutant, installCopies, ranInWorker, strongClaim, strongFinish } from "./playwrightStrong.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??
@@ -1905,6 +1905,9 @@ const instrumentedFixtures = {
             // test is running for all of this, not only during its actions.
             const startedAtMs = Date.now();
             timingCount("fixture.testSetup", performance.now() - setupStarted);
+            // A mutant that ran in this worker's own process may have left
+            // state in it: the next test gets a new worker.
+            let restartWorker = false;
             try {
                 await use();
             }
@@ -1944,6 +1947,7 @@ const instrumentedFixtures = {
                 }
                 finally {
                     strongFinish(testInfo, strong, { attemptId: scope.attemptId, pageTimeout: controller.mutantRanAway === true });
+                    restartWorker = ranInWorker(strong, scope.attemptId) && testInfo.status === "passed";
                     await timed("controller.dispose", () => controller.dispose());
                     timingCount("fixture.testTeardown", performance.now() - teardownStarted);
                     timingReport(testInfo.title);
@@ -1953,10 +1957,16 @@ const instrumentedFixtures = {
                     controllers.delete(scope.attemptId);
                 }
             }
+            if (restartWorker)
+                throw new Error("Supercov strong mutation: the mutant ran in this worker's process, so the next test runs in a new worker");
         },
         { auto: true },
     ],
 };
+// A strong pass declares each test it needs as many times as it may run it
+// (playwrightStrong.mjs): on Playwright's test type, before the test object
+// every spec uses is made.
+installCopies(base);
 const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
 // `export *` passes no default on, and `import test from "@playwright/test"`
