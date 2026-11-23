@@ -1128,6 +1128,9 @@ impl Progress {
             let mut said = std::time::Instant::now();
             let mut seen = 0;
             let mut stopping = None;
+            // When the pass's first attempt with a mutant began: its pace is
+            // measured from there, not from the command's start.
+            let mut first_mutant_at = None;
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(SAVE_INTERVAL.min(interval))
             {
@@ -1141,7 +1144,32 @@ impl Progress {
                 }
                 if said.elapsed() >= interval {
                     said = std::time::Instant::now();
-                    eprintln!("{}", progress_line(&verdicts, &costs, started.elapsed()));
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_millis() as u64);
+                    let status = crate::strong_status::read(
+                        &results.with_file_name("playwright").join("status"),
+                    );
+                    first_mutant_at = first_mutant_at
+                        .or(status.as_ref().and_then(|status| status.first_mutant_at));
+                    let pace = first_mutant_at.map_or(started.elapsed(), |first| {
+                        std::time::Duration::from_millis(now.saturating_sub(first))
+                    });
+                    eprintln!(
+                        "{}",
+                        progress_line(&verdicts, &costs, started.elapsed(), pace)
+                    );
+                    let last = results
+                        .parent()
+                        .and_then(crate::strong_status::last_output_line);
+                    for line in crate::strong_status::lines(
+                        status.as_ref(),
+                        now,
+                        verdicts.len(),
+                        last.as_deref(),
+                    ) {
+                        eprintln!("{line}");
+                    }
                 }
                 let Some(signal) = stop_signal(budget_at) else {
                     continue;
@@ -1242,18 +1270,21 @@ fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>,
 
 /// How far a pass got: its verdicts so far of the mutants it runs, and the
 /// time left at the pace so far. The pace is the plan's: the estimated cost
-/// of the mutants decided over the time they took, which a few costly
-/// mutants do not swing as a count of mutants did (the cheapest run first).
+/// of the mutants decided over the time they took (`pace`: since the first
+/// mutant began, where the driver says when; the command's start-up and
+/// baselines are not the mutants' pace), which a few costly mutants do not
+/// swing as a count of mutants did (the cheapest run first).
 fn progress_line(
     verdicts: &std::collections::BTreeMap<String, Verdict>,
     costs: &std::collections::BTreeMap<String, u64>,
     elapsed: std::time::Duration,
+    pace: std::time::Duration,
 ) -> String {
     let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
     let spent = verdicts.keys().filter_map(|id| costs.get(id)).sum::<u64>();
     let left = if spent > 0 {
         let all = costs.values().sum::<u64>();
-        let rest = elapsed.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
+        let rest = pace.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
         format!(
             "; about {} left",
             supercov_engine::process_supervision::format_duration(rest)
@@ -2130,7 +2161,7 @@ mod tests {
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
         let elapsed = std::time::Duration::from_secs(20);
-        let none = progress_line(&Default::default(), &costs, elapsed);
+        let none = progress_line(&Default::default(), &costs, elapsed, elapsed);
         assert_eq!(
             none,
             "[supercov] strong pass: 0 of 3 mutants (0 killed, 0 timed out, 0 survived, 0 errors), 20s"
@@ -2142,7 +2173,7 @@ mod tests {
         .map(|(id, verdict)| (id.to_owned(), verdict))
         .into_iter()
         .collect();
-        let line = progress_line(&decided, &costs, elapsed);
+        let line = progress_line(&decided, &costs, elapsed, elapsed);
         assert!(
             line.starts_with(
                 "[supercov] strong pass: 2 of 3 mutants (1 killed, 0 timed out, 1 survived, 0 errors), 20s; about "
@@ -2152,6 +2183,13 @@ mod tests {
         assert!(line.ends_with(&format!(
             "about {} left",
             supercov_engine::process_supervision::format_duration(980_000)
+        )));
+        // Paced from the first mutant, 10 s in: the start-up is not the
+        // mutants' pace.
+        let paced = progress_line(&decided, &costs, elapsed, elapsed / 2);
+        assert!(paced.ends_with(&format!(
+            "about {} left",
+            supercov_engine::process_supervision::format_duration(490_000)
         )));
     }
 

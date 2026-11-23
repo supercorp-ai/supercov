@@ -2888,6 +2888,31 @@ function strongHit() {
     noteMutantTimeout(strong.file, strong.index);
     throw new MutantTimeoutError(strong.file, strong.index, strong.hits);
   }
+  if (strong.hits === 1)
+    noteEverywhereHit(strong);
+}
+// A process started with a mutant switched on everywhere, in a round where
+// each Playwright invocation runs one mutant of its own (its runner set
+// SUPERCOV_ACTIVE_MUTANT for the processes it starts, the app's server among
+// them): the mutant ran here, in a process that is neither the runner nor
+// one of its workers. The round trusts a survivor only where its own server
+// ran it.
+function noteEverywhereHit(strong) {
+  try {
+    if (isBrowser || typeof process === "undefined" || !process.env)
+      return;
+    const env = process.env;
+    const invocation = env["SUPERCOV_PLAYWRIGHT_INVOCATION"];
+    const results = env["SUPERCOV_STRONG_RESULTS"];
+    if (!invocation || !results || env["TEST_WORKER_INDEX"] !== void 0 || String(process.pid) === invocation)
+      return;
+    if (env["SUPERCOV_ACTIVE_MUTANT"] !== `${strong.file}#${strong.index}`)
+      return;
+    const fs = getFs();
+    if (fs)
+      fs.appendFileSync(`${results}.everywhere.jsonl`, JSON.stringify({ pid: process.pid, invocation, mutant: env["SUPERCOV_ACTIVE_MUTANT"] }) + "\n");
+  } catch (e) {
+  }
 }
 function strongSlot(file) {
   const strong = strongState();
