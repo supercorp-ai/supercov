@@ -964,12 +964,17 @@ A file that sets its serial mode some other way (a helper of its own) is not
 seen as serial. It stays where the harness put it, and the line below says
 what that costs.
 
-Measured on the same area, with its harness changed by hand to give the
-serial files to every slot: the files ran in every slot and the line below no
-longer appeared. But a harness is code every e2e test runs through, so
-carry-over rightly treated that edit as reaching every test and kept none of
-the earlier rounds' verdicts. Spreading from the preload leaves the harness
-and the command as they are.
+Measured on the same area, from the state the partial-progress rounds below
+left (1,866 of 2,160 decided, 294 open), with the harness unchanged and the
+same 8 jobs of 32 CPUs: each job's six slots ran the serial files, and two
+rounds took it to 2,078 and then 2,156, 4 open, where the rounds before had
+added 50 and 52 without spreading. Counting no `error` as decided, 1,863
+became 2,051 and 2,124. The errors grew from 3 to 32: with the serial files
+spread, a job's main round now ends before its budget, and its `rest` round
+runs, where a mutant whose last candidates fail without it (each job had 4 to
+22 such runs, as before) decides nothing and is an `error` ("its tests did
+not finish, in two rounds") rather than left open by the budget. A later
+round runs an `error` again, keeping its progress.
 
 Where it does not, the progress lines say so. The runner records the spec
 files it loaded with a serial describe (in `playwright test`'s runner
