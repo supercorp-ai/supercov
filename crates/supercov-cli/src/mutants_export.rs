@@ -494,6 +494,7 @@ mod tests {
     ) -> supercov_engine::mutants_query::MutantEntry {
         use supercov_engine::mutants_query::{MutantEntry, MutantSpan, WeakResult};
         MutantEntry {
+            log_only: false,
             id: format!("src/a.py:{line}:3-{line}:9:ArithmeticOperator:-"),
             file: "src/a.py".into(),
             span: MutantSpan {

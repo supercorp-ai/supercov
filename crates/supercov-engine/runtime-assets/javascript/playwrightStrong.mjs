@@ -31,7 +31,8 @@
 // with every request (header, cookies, child processes) and the page through
 // an init script. A mutant the server must start with (its code ran in work
 // no request named, or is a server module's top level, or ran for a request
-// that named no test) is run alone afterwards, in an invocation of its own
+// that named no test, or its switch is evaluated as a server module loads)
+// is run alone afterwards, in an invocation of its own
 // with SUPERCOV_ACTIVE_MUTANT set, which the engine starts for each `restart`
 // record the judge writes (javascript_run.rs). So do a kill (or a timeout)
 // that ran beside another mutant's attempt or whose control failed (one test
@@ -384,8 +385,13 @@ function buildPass(pass, root, config) {
             const infected = [...new Set(own.filter((test) => test.infected).map((test) => test.id))];
             const ordered = [...new Set(own.map((test) => test.id))];
             const switched = `${mutant.file}#${found.index}`;
-            if (mutant.serverWide) {
-                restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide });
+            // A switch the copy evaluates as its module loads (an arrow
+            // mutated whole at a module's top level), in a module a server
+            // ran: the server made the original once, for every request,
+            // whatever mutant a request names.
+            const serverWide = mutant.serverWide ?? (found.entry.static && mutant.serverRan ? "module-level" : undefined);
+            if (serverWide) {
+                restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: serverWide });
                 continue;
             }
             mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected });

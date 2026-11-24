@@ -1344,6 +1344,7 @@ pub(crate) fn results(
                         let kind = Untestable::parse(&note.rule)?;
                         Some((kind, note.reason.clone()))
                     }),
+                    log_only: mutant.log_only,
                 }
             })
             .collect::<Vec<_>>();
@@ -1877,6 +1878,7 @@ mod tests {
     fn mutant(mutator: &str, replacement: &str, original: &str) -> CandidateMutant {
         let end = original.len() as u32 + 1;
         CandidateMutant {
+            log_only: false,
             id: format!("a.ts:1:1-1:{end}:{mutator}:{replacement}"),
             mutator: mutator.into(),
             replacement: replacement.into(),

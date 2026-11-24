@@ -1853,6 +1853,7 @@ fn listed_with(
         .mutants
         .iter()
         .map(|mutant| crate::mutant_list::CandidateMutant {
+            log_only: false,
             id: String::new(),
             mutator: mutant.mutator.to_owned(),
             replacement: mutant.descriptor.clone(),
