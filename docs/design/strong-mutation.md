@@ -1264,7 +1264,12 @@ candidates all passing proved nothing: before 4.29.10 such a mutant was
 `survived`. The run keeps, for work no test was credited with, whether a
 test was running when its request came (from each test's span, its first to
 its last moment, or its phases where it has none), and the plan marks the
-mutant `by-time`, so it runs alone with the server started with it.
+mutant `by-time`, so it runs alone with the server started with it. The
+tests that count are those the server served a request of, and those no
+server did (a test that only sends what carries no name): a harness that
+starts a server a slot checks each new one for readiness while the earlier
+slots' tests run, and counting those tests sent 9,002 of a 10,503-mutant
+plan to run alone, where its own server's tests send none.
 
 So does a mutant whose switch a server evaluates as it loads a module,
 though its code is in a function: an arrow mutated whole (`() => undefined`)

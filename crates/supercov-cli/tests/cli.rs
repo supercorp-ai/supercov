@@ -25437,6 +25437,20 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     let context = format!("{reply}\n{said}");
     assert!(!said.contains("ran out of memory"), "{context}");
     assert!(!said.contains("heap out of memory"), "{context}");
+    // Each slot's server is checked for readiness while the slots before it
+    // run their tests: such a request names no test, but none of those
+    // tests is this server's, so the mutants it ran are not taken for ones
+    // a test reached without its name. Taken so, 6,351 of them went to run
+    // alone, and that round ran out of heap.
+    let main_pass = reply["passes"]
+        .as_array()
+        .and_then(|passes| passes.iter().find(|pass| pass["pass"] == "main"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        main_pass["next"]["alone"].as_u64() < Some(10),
+        "{main_pass}\n{context}"
+    );
     // The list saw the project's thirty tests, once each, every time it
     // finished: the budget ends the invocation it falls in, which may be
     // listing. That the pass went on to further invocations is asserted
