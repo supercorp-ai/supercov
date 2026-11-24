@@ -22870,7 +22870,11 @@ fn a_shard_s_run_that_cannot_be_made_from_a_restored_one_stops_the_command() {
             .count();
         assert_eq!(
             runs,
-            if fault.ends_with(":1282") { 2 } else { 1 },
+            if fault.ends_with("sync-directory") {
+                2
+            } else {
+                1
+            },
             "{fault}"
         );
         if runs == 2 {
