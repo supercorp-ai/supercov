@@ -16006,7 +16006,22 @@ fn exact_attribution_runs_the_command_after_it() {
 /// run leaves behind would change which call the next one's fault names.
 /// A fault written `fault => place` must fail the call made there.
 fn each_step_of_a_run_fails(label: &str, write: fn(&Project), command: &[&str], faults: &[&str]) {
+    each_step_of_a_run_fails_in((0, 1), label, write, command, faults);
+}
+
+/// `each_step_of_a_run_fails` for one share of the faults, every `parts`th
+/// from `part`: a sweep too long for one test runs as several side by side.
+fn each_step_of_a_run_fails_in(
+    (part, parts): (usize, usize),
+    label: &str,
+    write: fn(&Project),
+    command: &[&str],
+    faults: &[&str],
+) {
     for (number, entry) in faults.iter().enumerate() {
+        if number % parts != part {
+            continue;
+        }
         let (fault, place) = entry.split_once(" => ").unwrap_or((entry, ""));
         let project = Project::empty(&format!("{label}-{number}"));
         write(&project);
@@ -16139,9 +16154,27 @@ fn a_rust_run_that_cannot_write_its_tests_reports_says_so() {
     }
 }
 
+/// A Rust run each of whose own steps fails says so, in three shares side
+/// by side: as one test the sweep took up to nine of the ten minutes a
+/// Windows runner gives a test, and a slow one ran past them.
 #[test]
 fn a_rust_run_whose_own_step_fails_says_so() {
-    each_step_of_a_run_fails(
+    a_rust_run_whose_own_step_fails((0, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_second_share() {
+    a_rust_run_whose_own_step_fails((1, 3));
+}
+
+#[test]
+fn a_rust_run_whose_own_step_fails_says_so_third_share() {
+    a_rust_run_whose_own_step_fails((2, 3));
+}
+
+fn a_rust_run_whose_own_step_fails(share: (usize, usize)) {
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs",
         small_crate,
         &["--", "cargo", "test", "-q"],
@@ -16216,7 +16249,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
     );
     // A binary none of whose tests were asked for is listed again for how
     // many it has.
-    each_step_of_a_run_fails(
+    each_step_of_a_run_fails_in(
+        share,
         "own-step-rs-unasked",
         small_crate,
         &["--", "cargo", "test", "-q", "--lib", "--", "none"],
@@ -16224,7 +16258,8 @@ fn a_rust_run_whose_own_step_fails_says_so() {
     );
     if nextest_installed() {
         // Nextest's runner fails the attempt, and nextest exits 100.
-        each_step_of_a_run_fails(
+        each_step_of_a_run_fails_in(
+            share,
             "own-step-nextest",
             small_crate,
             &["--", "cargo", "nextest", "run"],
@@ -24299,9 +24334,12 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         ("SUPERCOV_SOURCE_ROOTS", "server"),
         ("LISTED", listed_env.as_str()),
     ];
+    // How long the suite takes on this machine, list and all.
+    let measuring = std::time::Instant::now();
     project
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
+    let measuring = measuring.elapsed().as_secs();
     let _ = std::fs::remove_file(&listed);
     let planning = std::time::Instant::now();
     let plan = project
@@ -24323,8 +24361,11 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     // even on a slow runner: with six hundred an ARM runner's first
     // invocation used the whole minute, and with a hundred and twenty a
     // macOS runner's. The budget counts planning too, which takes a slow
-    // runner most of a minute here: the pass gets its minute after it.
-    let budget = (60 + 2 * planning).to_string();
+    // runner most of a minute here: the pass gets its minute after it, or
+    // four times the suite's own run where that is longer. A fixed minute
+    // was spent by the first round on a slow arm64 or macOS runner, and the
+    // budget ended the second invocation before it had listed the tests.
+    let budget = (60.max(4 * measuring) + 2 * planning).to_string();
     let ran = project.supercov_with(
         &[
             "runs", "latest", "mutants", "test", "--json", "--budget", &budget,
@@ -24343,14 +24384,17 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     let context = format!("{reply}\n{said}");
     assert!(!said.contains("ran out of memory"), "{context}");
     assert!(!said.contains("heap out of memory"), "{context}");
-    // The list saw the project's thirty tests, once each, every time.
+    // The list saw the project's thirty tests, once each, every time it
+    // finished: the budget ends the invocation it falls in, which may be
+    // listing. That the pass went on to further invocations is asserted
+    // below from its own record.
     let counts = std::fs::read_to_string(&listed).unwrap_or_default();
     let _ = std::fs::remove_file(&listed);
     let listings = counts
         .lines()
         .map(|line| line.split_once(' ').unwrap())
         .collect::<Vec<_>>();
-    assert!(listings.len() >= 2, "{counts}\n{context}");
+    assert!(!listings.is_empty(), "{counts}\n{context}");
     assert!(
         listings.iter().all(|(count, _)| *count == "30"),
         "{counts}\n{context}"
