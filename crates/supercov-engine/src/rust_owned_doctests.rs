@@ -286,9 +286,11 @@ pub(crate) fn run_doctests(
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("json") => {
                 let package: PackageDoctests =
+                    // fault-site: rust-owned-doctests.run-doctests.read-file
                     serde_json::from_slice(&fs::read(&path).map_err(io_error)?)?;
                 packages.push(package);
             }
+            // fault-site: rust-owned-doctests.run-doctests.read-to-string
             Some("error") => errors.push(fs::read_to_string(&path).map_err(io_error)?),
             _ => {}
         }
@@ -363,6 +365,7 @@ pub(crate) fn run_doctests(
                 Some(directory) => directory.clone(),
                 None => {
                     let directory = root.join("none").join(format!("{index:08}"));
+                    // fault-site: rust-owned-doctests.run-doctests.create-dir-all
                     fs::create_dir_all(&directory).map_err(io_error)?;
                     directory
                 }
@@ -817,6 +820,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
             command.env(key, value);
         }
         command
+            // fault-site: rust-owned-doctests.rustdoc-wrapper-inner.launch-output
             .launch_output()
             .map_err(|error| RustTestRunnerError::Launch(error.to_string()))
     };
@@ -928,6 +932,7 @@ fn rustdoc_wrapper_inner(root: PathBuf, arguments: &[String]) -> Result<i32, Rus
                 .symmetric_difference(&reported)
                 .cloned()
                 .collect::<Vec<_>>();
+            // fault-site: rust-owned-doctests.rustdoc-wrapper-inner.fail-package
             return fail_package(
                 &package_dir,
                 format!(
@@ -1101,6 +1106,7 @@ fn read_invocations(package_dir: &Path) -> Result<Vec<(usize, Invocation)>, Rust
                 .and_then(|stem| stem.parse::<usize>().ok())
                 .unwrap_or(usize::MAX);
             let invocation: Invocation =
+                // fault-site: rust-owned-doctests.read-invocations
                 serde_json::from_slice(&fs::read(&path).map_err(io_error)?)?;
             records.push((index, invocation));
         }
@@ -1155,6 +1161,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
     };
     let package_dir = PathBuf::from(package_dir);
     let binary = PathBuf::from(binary);
+    // fault-site: rust-owned-doctests.doctest-runtool-inner.next-sequence
     let index = next_sequence(&package_dir.join("invocations"), "")?;
     let directory = package_dir.join("invocations").join(format!("{index:08}"));
     fs::create_dir_all(&directory).map_err(io_error)?;
@@ -1168,6 +1175,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // its doctest, but the list pass never reaches one: rustdoc lists
             // standalone cases itself and does not invoke the runtool.
             let output = Command::new(&binary)
+                // fault-site: rust-owned-doctests.doctest-runtool-inner.launch-output-1
                 .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1186,11 +1194,13 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                 .and_then(fs::canonicalize)
                 .map_err(io_error)?;
             let children = directory.join("children");
+            // fault-site: rust-owned-doctests.doctest-runtool-inner.create-dir-all
             fs::create_dir_all(&children).map_err(io_error)?;
             let output = Command::new(&binary)
                 .env(RUSTDOC_BIN_PATH_ENV, &program)
                 .env(CHILD_DIR_ENV, &children)
                 .env(CHILD_BINARY_ENV, &binary)
+                // fault-site: rust-owned-doctests.doctest-runtool-inner.launch-output-2
                 .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1199,6 +1209,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // child's index is its position in that order; the order itself
             // was written by the wrapper from the list pass.
             let order: Vec<String> = serde_json::from_slice(
+                // fault-site: rust-owned-doctests.doctest-runtool-inner.read-1
                 &fs::read(package_dir.join("merged-order.json")).map_err(io_error)?,
             )?;
             let mut by_index = BTreeMap::new();
@@ -1210,6 +1221,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                         .is_some_and(|extension| extension == "json")
                     {
                         let child: ChildRecord =
+                            // fault-site: rust-owned-doctests.doctest-runtool-inner.read-2
                             serde_json::from_slice(&fs::read(&path).map_err(io_error)?)?;
                         by_index.insert(child.index, child);
                     }
@@ -1245,6 +1257,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
                     "merged doctest child {index} ran for a case the harness did not report"
                 )));
             }
+            // fault-site: rust-owned-doctests.doctest-runtool-inner.write-record-1
             write_record(&record_path, &Invocation::Merged { cases })?;
             relay(&output);
             Ok(output.status.code().unwrap_or(1))
@@ -1255,6 +1268,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             let output = Command::new(&binary)
                 .envs(instrumented_stack_environment())
                 .envs(evidence_environment(probe_token(), &evidence)?)
+                // fault-site: rust-owned-doctests.doctest-runtool-inner.launch-output-3
                 .launch_output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -1262,6 +1276,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             // A merged harness that the per-name filter matched nothing in
             // announces itself; anything else is the named doctest.
             if text.contains("running 0 tests") {
+                // fault-site: rust-owned-doctests.doctest-runtool-inner.write-record-2
                 write_record(&record_path, &Invocation::EmptyHarness)?;
             } else {
                 let name = std::env::var(NAME_ENV).map_err(|_| {
@@ -2013,8 +2028,9 @@ mod tests {
             "{diagnostics}"
         );
         // The empty evidence of a case that never ran, not made.
-        let (results, _, _) =
-            crate::fault::during("fs.create_dir_all#rust_owned_doctests.rs:366", || {
+        let (results, _, _) = crate::fault::during(
+            "fs.create_dir_all#rust-owned-doctests.run-doctests.create-dir-all",
+            || {
                 doctests_through(
                     &["test", "--doc"],
                     &format!("printf '%s' '{record}' > 00000000.json"),
@@ -2022,7 +2038,8 @@ mod tests {
                     "",
                     101,
                 )
-            });
+            },
+        );
         assert!(
             matches!(results, Err(RustTestRunnerError::Io(_))),
             "{results:?}"
@@ -2037,8 +2054,9 @@ mod tests {
             101,
         );
         assert!(results.is_err(), "{results:?}");
-        let (results, _, _) =
-            crate::fault::during("fs.read_to_string#rust_owned_doctests.rs:292", || {
+        let (results, _, _) = crate::fault::during(
+            "fs.read_to_string#rust-owned-doctests.run-doctests.read-to-string",
+            || {
                 doctests_through(
                     &["test", "--doc"],
                     "printf 'x' > 00000000.error",
@@ -2046,7 +2064,8 @@ mod tests {
                     "",
                     101,
                 )
-            });
+            },
+        );
         assert!(
             matches!(results, Err(RustTestRunnerError::Io(_))),
             "{results:?}"

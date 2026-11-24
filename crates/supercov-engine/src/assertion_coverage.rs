@@ -2306,6 +2306,7 @@ pub fn save_snapshot(path: &Path, files: &BTreeMap<String, String>) -> Result<()
     encoder.write_all(&bytes).expect(MEMORY);
     let compressed = encoder.finish().expect(MEMORY);
     let temp = path.with_extension("tmp");
+    // fault-site: assertion-coverage.save-snapshot
     crate::fault_fs::write(&temp, compressed).map_err(|e| e.to_string())?;
     crate::fault_fs::rename(&temp, path).map_err(|e| e.to_string())
 }

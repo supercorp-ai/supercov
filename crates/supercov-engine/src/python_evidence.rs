@@ -371,6 +371,7 @@ fn read_evidence_directory_with(
     shared: SharedSlots<'_>,
 ) -> Result<Evidence, PythonEvidenceError> {
     let mut evidence = Evidence::default();
+    // fault-site: python-evidence.read-evidence-directory-with.read-dir
     let mut files = match fs::read_dir(directory) {
         Ok(entries) => entries
             .collect::<Result<Vec<_>, _>>()
@@ -394,6 +395,7 @@ fn read_evidence_directory_with(
         if name.starts_with(SLOT_LAYOUT_NAME) && name.ends_with(".partial") {
             continue;
         }
+        // fault-site: python-evidence.read-evidence-directory-with.entry-metadata
         let Some(metadata) = entry_metadata(&name, &entry.path())? else {
             continue;
         };
@@ -449,6 +451,7 @@ fn read_evidence_directory_with(
         let contents = map_evidence(path)?;
         let slot_contents = owned
             .iter()
+            // fault-site: python-evidence.read-evidence-directory-with.map-slot
             .filter_map(|(slot, path)| match map_slot(path) {
                 Ok(Some(contents)) => Some(Ok((slot.clone(), contents))),
                 Ok(None) => None,
@@ -3306,20 +3309,23 @@ pub(crate) mod tests {
     fn a_slot_gone_while_read_is_skipped_and_one_without_a_layout_refused() {
         let directory = killed_process("py-slot-race", &slot_bytes(1, Some(SLOT_DIGEST), &[16]));
         // Listed: layout.json, the slot, the transport.
-        let read = crate::fault::during("fs.symlink_metadata:2#python_evidence.rs:397@2", || {
-            read_evidence_directory(&directory, "run-1")
-        });
+        let read = crate::fault::during(
+            "fs.symlink_metadata:2#python-evidence.read-evidence-directory-with.entry-metadata@2",
+            || read_evidence_directory(&directory, "run-1"),
+        );
         assert!(read.is_ok(), "{:?}", read.err());
         // Gone by the time it is opened: harvested by a process that closed.
-        let opened = crate::fault::during("fs.open:2#python_evidence.rs:452", || {
-            read_evidence_directory(&directory, "run-1")
-        });
+        let opened = crate::fault::during(
+            "fs.open:2#python-evidence.read-evidence-directory-with.map-slot",
+            || read_evidence_directory(&directory, "run-1"),
+        );
         assert!(opened.is_ok(), "{:?}", opened.err());
         // Opened but no longer readable is refused.
         assert!(
-            crate::fault::during("fs.open:13#python_evidence.rs:452", || {
-                read_evidence_directory(&directory, "run-1")
-            })
+            crate::fault::during(
+                "fs.open:13#python-evidence.read-evidence-directory-with.map-slot",
+                || { read_evidence_directory(&directory, "run-1") }
+            )
             .is_err()
         );
         fs::remove_file(directory.join("layout.json")).unwrap();

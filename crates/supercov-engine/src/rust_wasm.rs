@@ -52,6 +52,7 @@ fn wasm_crates_under(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         ".supercov",
         ".wrangler",
     ];
+    // fault-site: rust-wasm.wasm-crates-under
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -182,6 +183,7 @@ impl RustWasmServer {
                 .join(".supercov/work")
                 .join(run_id)
                 .join(format!("rust-wasm-{index}"));
+            // fault-site: rust-wasm.prepare
             fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
             servers.push(Self {
                 project,
@@ -306,6 +308,7 @@ fn read_records(directory: &Path) -> Result<Vec<WasmRecord>, String> {
     let mut records = Vec::new();
     for file in &files {
         let text =
+            // fault-site: rust-wasm.read-records
             fs::read_to_string(file).map_err(|error| format!("{}: {error}", file.display()))?;
         // A line cut short by a process killed mid-write is skipped.
         for line in text.lines() {
@@ -509,7 +512,7 @@ mod tests {
         // A directory that cannot be listed, an entry whose kind cannot be
         // read and a manifest that cannot be read each hold none.
         for fault in [
-            "fs.read_dir#rust_wasm.rs:55",
+            "fs.read_dir#rust-wasm.wasm-crates-under",
             "fs.file_type",
             "fs.read_to_string",
         ] {

@@ -472,6 +472,7 @@ fn existing_roots(
     // Every caller names a root at least: the project itself, when nothing
     // else.
     candidates.into_iter().try_for_each(|path| {
+        // fault-site: source-discovery.existing-roots
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
                 existing.insert(path);

@@ -256,6 +256,8 @@ fn hydrate_line_source_from_working_tree(
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // The CLI's own fault sites, named before any fault is read.
+    supercov_engine::fault::name_sites(include!(concat!(env!("OUT_DIR"), "/fault_sites.rs")));
     let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     // nextest's target runner for the owned frontend: test arguments pass
     // through untouched, so dispatch before anything reads them as UTF-8.
@@ -2676,6 +2678,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     }
     let watchdog_program = std::env::current_exe()
         .ok()
+        // fault-site: main.public-coverage-run
         .and_then(|path| fs::canonicalize(path).ok());
     let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
@@ -4285,7 +4288,6 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2482).
 mod mutants_export;
 mod mutants_test_command;
 mod strong_status;

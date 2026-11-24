@@ -360,6 +360,7 @@ pub fn load_cached_javascript_frontend(
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     for artifact in &cache.artifacts {
         let cache_path = workspace.join(&artifact.cache_file);
+        // fault-site: javascript-frontend.load-cached-javascript-frontend.read-1
         let contents = fs::read(&cache_path).map_err(|source| io_error(&cache_path, source))?;
         if format!("{:x}", Sha256::digest(&contents)) != artifact.sha256 {
             return Err(JavascriptFrontendError::UnsafeSourcePath(format!(
@@ -372,6 +373,7 @@ pub fn load_cached_javascript_frontend(
     let generated = workspace.join(".supercov");
     let manifest_path = generated.join("manifest.json");
     let manifest = serde_json::from_slice(
+        // fault-site: javascript-frontend.load-cached-javascript-frontend.read-2
         &fs::read(&manifest_path).map_err(|source| io_error(&manifest_path, source))?,
     )
     .map_err(JavascriptFrontendError::Serialize)?;
@@ -476,6 +478,7 @@ fn write_authored(
     file: &str,
     source: &str,
 ) -> Result<(), JavascriptFrontendError> {
+    // fault-site: javascript-frontend.write-authored
     let path = checked_source_path(&workspace.join(AUTHORED_DIRECTORY), file)?;
     create_directory_all(
         path.parent()
@@ -520,6 +523,7 @@ fn configure_bun_preloads(
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "bunfig.toml"))
     {
+        // fault-site: javascript-frontend.configure-bun-preloads
         let source = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
         // Leave malformed configs to the runner: a Node-only command may
         // share a project with Bun without ever reading its config.
@@ -1834,8 +1838,10 @@ fn track_assertions(
     kept: &BTreeSet<String>,
     entry: &crate::source_discovery::SourceScopeEntry,
 ) -> Result<Option<usize>, JavascriptFrontendError> {
+    // fault-site: javascript-frontend.track-assertions.project-relative
     let relative = project_relative(&entry.file)?;
     let path = workspace.join(relative);
+    // fault-site: javascript-frontend.track-assertions.read-to-string
     let Ok(source) = fs::read_to_string(&path) else {
         return Ok(None);
     };
@@ -1905,6 +1911,7 @@ fn instrument_source(
         images,
         next_bundled,
     } = *options;
+    // fault-site: javascript-frontend.instrument-source
     let relative = project_relative(file)?;
     let path = workspace.join(relative);
     let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
@@ -2054,6 +2061,7 @@ pub fn prepare_javascript_frontend(
 
     let runtime_path = runtime_directory.join("runtime.mjs");
     let standalone_runtime = compact_runtime(
+        // fault-site: javascript-frontend.prepare-javascript-frontend
         &fs::read_to_string(&runtime_path).map_err(|source| io_error(&runtime_path, source))?,
     );
     // debug's karma bundles its sources with browserify and runs them in
@@ -2333,9 +2341,9 @@ mod tests {
             "fs.rename@36",
             // A path the project does not hold: an authored copy's, a
             // source's, a test file's.
-            "javascript-source-path#javascript_frontend.rs:479",
-            "javascript-source-path#javascript_frontend.rs:1908",
-            "javascript-source-path#javascript_frontend.rs:1837",
+            "javascript-source-path#javascript-frontend.write-authored",
+            "javascript-source-path#javascript-frontend.instrument-source",
+            "javascript-source-path#javascript-frontend.track-assertions.project-relative",
         ] {
             let (source_root, workspace, project) = frontend_fixture();
             let prepared = crate::fault::during(fault, || prepare_and_reload(&workspace, &project));
@@ -2445,9 +2453,9 @@ mod tests {
         // looked for, one read, its authored copy kept or the rewritten text
         // published.
         for fault in [
-            "fs.read_dir#integrity.rs:508",
-            "fs.read_to_string#javascript_frontend.rs:523",
-            "javascript-source-path#javascript_frontend.rs:479",
+            "fs.read_dir#integrity.walk-files",
+            "fs.read_to_string#javascript-frontend.configure-bun-preloads",
+            "javascript-source-path#javascript-frontend.write-authored",
             // Package and types, two Playwright adapters, two configurations
             // and the bunfig's authored copy precede its rewrite's.
             &format!("fs.rename@{}", RUNTIME_FILES.len() + 8),

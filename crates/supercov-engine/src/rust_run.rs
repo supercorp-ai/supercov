@@ -85,6 +85,7 @@ fn collect_project_inputs(
     regular: &mut Vec<PathBuf>,
     links: &mut Vec<String>,
 ) -> Result<(), String> {
+    // fault-site: rust-run.collect-project-inputs
     let mut entries = fs::read_dir(directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -241,6 +242,7 @@ pub fn current_rust_integrity(
     command: &[String],
     source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
+    // fault-site: rust-run.current-rust-integrity
     let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
     let mut inputs = collect_integrity_inputs(&root, command)?;
     crate::source_discovery::fold_roots_into_configuration(

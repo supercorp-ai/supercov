@@ -594,6 +594,7 @@ impl<'a> PythonObligationCollector<'a> {
                     .try_into()
                     .unwrap_or_default(),
             );
+            // fault-site: python-instrumenter.decision-over.text
             self.locations.text(leaf_range).map(|text| {
                 if leaf.not % 2 == 1 {
                     format!("not {text}")
@@ -609,6 +610,7 @@ impl<'a> PythonObligationCollector<'a> {
             }
         };
         for (boolop_range, groups) in boolops {
+            // fault-site: python-instrumenter.decision-over.range
             let (start, end) = match self.locations.range(boolop_range) {
                 Ok(bounds) => bounds,
                 Err(error) => {
@@ -635,6 +637,7 @@ impl<'a> PythonObligationCollector<'a> {
             source,
             [("true", "true"), ("false", "false")],
         );
+        // fault-site: python-instrumenter.decision-over.span
         let span = self.span(range)?;
         self.plan.decisions.push(DecisionPlan {
             id: id.clone(),
@@ -750,6 +753,7 @@ impl<'a> PythonObligationCollector<'a> {
         if !self.branch_ids.insert(id.clone()) {
             return None;
         }
+        // fault-site: python-instrumenter.branch-with-id
         let (line, column, _) = self.location_source(range)?;
         self.manifest.branches.push(BranchMeta {
             id: id.clone(),
@@ -803,12 +807,14 @@ impl<'a> PythonObligationCollector<'a> {
             statement.body.first().expect(BODY).start(),
             statement.body.last().expect(BODY).end(),
         );
+        // fault-site: python-instrumenter.try-statement.span
         let Some(body) = self.span(body_range) else {
             return;
         };
         let block_span = |collector: &mut Self, block: &[Stmt]| -> Option<Option<PlanSpan>> {
             match (block.first(), block.last()) {
                 (Some(first), Some(last)) => collector
+                    // fault-site: python-instrumenter.try-statement.start
                     .span(TextRange::new(first.start(), last.end()))
                     .map(Some),
                 _ => Some(None),
@@ -848,6 +854,7 @@ impl<'a> PythonObligationCollector<'a> {
         let Some(boolop_span) = self.span(boolean.range) else {
             return;
         };
+        // fault-site: python-instrumenter.logical
         let bounds = match self.locations.range(boolean.range) {
             Ok(bounds) => bounds,
             Err(error) => {
@@ -931,6 +938,7 @@ impl<'a> PythonObligationCollector<'a> {
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
                 id,
+                // fault-site: python-instrumenter.match-statement
                 span: self.span(case.range)?,
                 irrefutable: case.guard.is_none() && case.pattern.is_irrefutable(),
             })
@@ -1193,17 +1201,17 @@ mod tests {
         let tried = "try:\n    g()\nexcept ValueError:\n    pass\nfinally:\n    h()\n";
         let matched = "match a:\n    case 1:\n        pass\n";
         for (source, place) in [
-            (decided, "597"),
-            (decided, "612"),
-            (decided, "638"),
-            (decided, "851"),
-            (tried, "806"),
-            (tried, "812"),
-            (tried, "753@2"),
-            (matched, "934"),
+            (decided, "python-instrumenter.decision-over.text"),
+            (decided, "python-instrumenter.decision-over.range"),
+            (decided, "python-instrumenter.decision-over.span"),
+            (decided, "python-instrumenter.logical"),
+            (tried, "python-instrumenter.try-statement.span"),
+            (tried, "python-instrumenter.try-statement.start"),
+            (tried, "python-instrumenter.branch-with-id@2"),
+            (matched, "python-instrumenter.match-statement"),
         ] {
             assert!(build_python_obligations("a.py", source).is_ok(), "{place}");
-            let fault = format!("python-range#python_instrumenter.rs:{place}");
+            let fault = format!("python-range#{place}");
             assert_eq!(
                 crate::fault::during(&fault, || build_python_obligations("a.py", source)),
                 Err(PythonInstrumenterError::InvalidRange),

@@ -43,12 +43,14 @@ const NESTED_EXCLUSIONS: &[&str] = &[".supercov", ".mcdc-pool"];
 /// service's `api/.venv`.
 pub fn links_a_virtual_environment(workspace: &Path) -> bool {
     fn search(directory: &Path, depth: usize) -> bool {
+        // fault-site: workspace.search.read-dir
         let Ok(entries) = fs::read_dir(directory) else {
             return false;
         };
         entries.filter_map(Result::ok).any(|entry| {
             let path = entry.path();
             let name = entry.file_name();
+            // fault-site: workspace.search.symlink-metadata
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 return false;
             };
@@ -283,6 +285,7 @@ fn link_repository_around(root: &Path, workspace: &Path) {
             const UNDER: &str = "a level below the repository has a parent";
             let (real_parent, copy_parent) =
                 (real.parent().expect(UNDER), copy.parent().expect(UNDER));
+            // fault-site: workspace.link-repository-around
             let Ok(entries) = fs::read_dir(real_parent) else {
                 return;
             };
@@ -442,6 +445,7 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let store = container.parent().expect("container parent");
+            // fault-site: workspace.ensure-container
             fs::create_dir_all(store).map_err(|source| io_error(store, source))?;
             // One directory covers everything Supercov writes; make Git
             // ignore it without the user touching their own .gitignore.
@@ -548,6 +552,7 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
             .map_err(|source_error| io_error(source, source_error))?
             .len();
         if bytes < REFLINK_MINIMUM_BYTES {
+            // fault-site: workspace.copy-file
             fs::copy(source, destination)
                 .map(|_| ())
                 .map_err(|source_error| io_error(destination, source_error))
@@ -559,6 +564,7 @@ impl WorkspaceOperations for SystemWorkspaceOperations {
     }
 
     fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+        // fault-site: workspace.rename
         atomic_rename(source, destination).map_err(WorkspaceError::from)
     }
 }
@@ -657,7 +663,9 @@ fn linked_directory(source: &Path, destination: &Path) -> bool {
 #[cfg(unix)]
 fn hard_link_tree(source: &Path, destination: &Path) -> bool {
     fn link(source: &Path, destination: &Path) -> io::Result<()> {
+        // fault-site: workspace.link.create-dir
         fs::create_dir(destination)?;
+        // fault-site: workspace.link.read-dir
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             let from = entry.path();
@@ -702,7 +710,9 @@ fn copy_tree<Operations: WorkspaceOperations>(
     root_level: bool,
     operations: &mut Operations,
 ) -> Result<(), WorkspaceError> {
+    // fault-site: workspace.copy-tree.create-dir-all-1
     fs::create_dir_all(destination).map_err(|source| io_error(destination, source))?;
+    // fault-site: workspace.copy-tree.read-dir-1
     let mut entries = fs::read_dir(source)
         .map_err(|error| io_error(source, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -765,7 +775,9 @@ fn copy_tree<Operations: WorkspaceOperations>(
                         .map_err(|error| io_error(&to, error))?;
                     continue;
                 }
+                // fault-site: workspace.copy-tree.create-dir-all-2
                 fs::create_dir_all(&to).map_err(|error| io_error(&to, error))?;
+                // fault-site: workspace.copy-tree.read-dir-2
                 let mut packages = fs::read_dir(&from)
                     .map_err(|error| io_error(&from, error))?
                     .collect::<Result<Vec<_>, _>>()
@@ -777,6 +789,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
                         link_tools(&package.path(), &link_destination, operations)?;
                         continue;
                     }
+                    // fault-site: workspace.copy-tree.create-link
                     create_link(&package.path(), &link_destination, false)
                         .map_err(|error| io_error(&link_destination, error))?;
                 }
@@ -933,7 +946,9 @@ fn link_package(
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with('@'));
     if scope && metadata.file_type().is_dir() {
+        // fault-site: workspace.link-package.create-dir-all
         fs::create_dir_all(to).map_err(|error| io_error(to, error))?;
+        // fault-site: workspace.link-package.read-dir
         let mut packages = fs::read_dir(target)
             .map_err(|error| io_error(target, error))?
             .collect::<Result<Vec<_>, _>>()
@@ -965,10 +980,12 @@ fn link_package(
     {
         let copy = workspace.join(local);
         if fs::symlink_metadata(&copy).is_ok() {
+            // fault-site: workspace.link-package.create-link-1
             return create_link(&pathdiff(to, &copy), to, true)
                 .map_err(|error| io_error(to, error));
         }
     }
+    // fault-site: workspace.link-package.create-link-2
     create_link(target, to, false).map_err(|error| io_error(to, error))
 }
 
@@ -984,9 +1001,11 @@ fn link_tools<Operations: WorkspaceOperations>(
 ) -> Result<(), WorkspaceError> {
     #[cfg(unix)]
     let _ = &operations;
+    // fault-site: workspace.link-tools.create-dir-all
     fs::create_dir_all(to).map_err(|error| io_error(to, error))?;
     let judges = crate::source_tools::source_tools();
     let binary = crate::source_tools::launching_binary();
+    // fault-site: workspace.link-tools.read-dir
     let mut entries = fs::read_dir(tools)
         .map_err(|error| io_error(tools, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -998,6 +1017,7 @@ fn link_tools<Operations: WorkspaceOperations>(
             crate::source_tools::launcher_for(&judges, binary, tools, &entry.file_name())
         });
         if let Some(launcher) = launcher {
+            // fault-site: workspace.link-tools.write-launcher
             crate::source_tools::write_launcher(&link, &launcher)
                 .map_err(|error| io_error(&link, error))?;
             continue;
@@ -1006,6 +1026,7 @@ fn link_tools<Operations: WorkspaceOperations>(
         // small files that find their package from where they are, which
         // the workspace's `node_modules` has a link for.
         #[cfg(unix)]
+        // fault-site: workspace.link-tools.create-link
         create_link(&tool, &link, false).map_err(|error| io_error(&link, error))?;
         #[cfg(windows)]
         if fs::metadata(&tool).is_ok_and(|metadata| metadata.is_file()) {
@@ -1049,7 +1070,9 @@ fn link_node_modules<Operations: WorkspaceOperations>(
         return Err(WorkspaceError::UnsafePath(source));
     };
     let destination = workspace.join("node_modules");
+    // fault-site: workspace.link-node-modules.create-dir-all
     fs::create_dir_all(&destination).map_err(|error| io_error(&destination, error))?;
+    // fault-site: workspace.link-node-modules.read-dir
     let mut entries = fs::read_dir(&source)
         .map_err(|error| io_error(&source, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -1154,6 +1177,7 @@ pub fn recover_cached_workspace(
 ) -> Result<CacheRecoveryResult, WorkspaceError> {
     let workspace = require_lock(root, lock)?;
     let parent = workspace.parent().expect("workspace parent");
+    // fault-site: workspace.recover-cached-workspace
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1281,8 +1305,10 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
                 }
                 Err(_) => {}
             }
+            // fault-site: workspace.prepare-cached-workspace-with-operations.symlink-metadata
             let metadata = fs::symlink_metadata(&from).map_err(|error| io_error(&from, error))?;
             if metadata.file_type().is_dir() {
+                // fault-site: workspace.prepare-cached-workspace-with-operations.canonicalize-simplified
                 let canonical_workspace = canonicalize_simplified(&workspace)
                     .map_err(|error| io_error(&workspace, error))?;
                 copy_tree(
@@ -1298,6 +1324,7 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
                     operations,
                 )?;
             } else if metadata.file_type().is_file() {
+                // fault-site: workspace.prepare-cached-workspace-with-operations.create-dir-all
                 fs::create_dir_all(to.parent().expect("reuse parent"))
                     .map_err(|error| io_error(&to, error))?;
                 operations.copy_file(&from, &to)?;
@@ -1317,12 +1344,14 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
             return Err(error);
         }
         if fs::symlink_metadata(&previous).is_ok() {
+            // fault-site: workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-1
             remove_stored_tree_deferred(root, &previous)?;
         }
         link_repository_around(root, &workspace);
         Ok(workspace.clone())
     })();
     if fs::symlink_metadata(&staging).is_ok() {
+        // fault-site: workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-2
         remove_stored_tree_deferred(root, &staging)?;
     }
     result
@@ -1355,6 +1384,7 @@ fn walk_output_files(
     directory: &Path,
     entries: &mut BTreeMap<PathBuf, (u64, SystemTime)>,
 ) -> Result<(), WorkspaceError> {
+    // fault-site: workspace.walk-output-files.read-dir
     let mut listed = fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -1377,6 +1407,7 @@ fn walk_output_files(
         {
             continue;
         }
+        // fault-site: workspace.walk-output-files.symlink-metadata
         let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
         // Dependencies are never command outputs. Nested node_modules may be
         // materialised clones (see copy_tree), and a tool's cache inside any
@@ -1639,10 +1670,12 @@ fn naming_the_project(
     file: &Path,
     places: &[(String, String)],
 ) -> Result<Option<String>, WorkspaceError> {
+    // fault-site: workspace.naming-the-project.metadata
     let metadata = fs::metadata(file).map_err(|error| io_error(file, error))?;
     if !metadata.is_file() || metadata.len() > NAMED_FILE_LIMIT {
         return Ok(None);
     }
+    // fault-site: workspace.naming-the-project.read
     let bytes = fs::read(file).map_err(|error| io_error(file, error))?;
     if bytes.contains(&0) {
         return Ok(None);
@@ -1745,6 +1778,7 @@ pub enum CommandOutputs {
 /// is in it.
 fn links_the_go_runtime(path: &Path) -> Result<bool, WorkspaceError> {
     const MARKER: &[u8] = b"_supercov_runtime";
+    // fault-site: workspace.links-the-go-runtime
     let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
     Ok(bytes.contains(&0) && memchr::memmem::find(&bytes, MARKER).is_some())
 }
@@ -2045,6 +2079,7 @@ pub fn mirror_git_repository(root: &Path, workspace: &Path) -> Result<(), String
     };
     let result = (|| {
         if fs::symlink_metadata(&target).is_ok() {
+            // fault-site: workspace.mirror-git-repository
             fs::remove_dir_all(&target).map_err(|error| error.to_string())?;
         }
         let source = root.to_string_lossy();
@@ -2193,6 +2228,7 @@ fn built_from_instrumented_source(path: &Path, compiled: bool) -> Result<bool, W
     const RUNTIME: &[u8] = b".supercov/node_modules/";
     const PROBE: &[u8] = b"__supercov";
     const GLOBAL: &[u8] = b"__SUPERCOV_DIRECT_RUNTIME__";
+    // fault-site: workspace.built-from-instrumented-source
     let contents = match fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -2214,6 +2250,7 @@ pub fn prune_cached_workspace_sources(
     }
     let keep = BTreeSet::from(["node_modules".to_owned(), ".supercov".to_owned()]);
     let mut removed = Vec::new();
+    // fault-site: workspace.prune-cached-workspace-sources.read-dir
     for entry in fs::read_dir(&workspace).map_err(|error| io_error(&workspace, error))? {
         let entry = entry.map_err(|error| io_error(&workspace, error))?;
         let name = entry
@@ -2223,6 +2260,7 @@ pub fn prune_cached_workspace_sources(
         if keep.contains(&name) {
             continue;
         }
+        // fault-site: workspace.prune-cached-workspace-sources.remove-scratch-tree-deferred
         crate::lifecycle::remove_scratch_tree_deferred(root, &entry.path())?;
         removed.push(name);
     }
@@ -2266,11 +2304,13 @@ fn clear_around(workspace: &Path) {
         .take_while(|directory| *directory != copy)
         .collect::<Vec<_>>();
     for level in path_down.iter().skip(1) {
+        // fault-site: workspace.clear-around.read-dir
         for entry in fs::read_dir(level).into_iter().flatten().flatten() {
             let path = entry.path();
             if path_down.contains(&path.as_path()) {
                 continue;
             }
+            // fault-site: workspace.clear-around.symlink-metadata
             let _ = if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
                 fs::remove_dir_all(&path)
             } else {
@@ -2351,16 +2391,21 @@ pub fn unfold_links_to(tree: &Path, file: &Path) -> io::Result<()> {
     let components = relative.components().collect::<Vec<_>>();
     for component in &components[..components.len().saturating_sub(1)] {
         directory.push(component);
+        // fault-site: workspace.unfold-links-to.symlink-metadata
         let metadata = fs::symlink_metadata(&directory)?;
         if !metadata.file_type().is_symlink() {
             continue;
         }
+        // fault-site: workspace.unfold-links-to.canonicalize
         let target = fs::canonicalize(&directory)?;
+        // fault-site: workspace.unfold-links-to.remove-file-1
         fs::remove_file(&directory).or_else(|_| fs::remove_dir(&directory))?;
+        // fault-site: workspace.unfold-links-to.create-dir
         fs::create_dir(&directory)?;
         // Written down as soon as it is real, so a failure part way still
         // leaves it to be made a link again (`relink_unfolded`).
         record_unfolded(tree, directory.strip_prefix(tree).unwrap_or(&directory))?;
+        // fault-site: workspace.unfold-links-to.read-dir
         for entry in fs::read_dir(&target)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -2372,11 +2417,13 @@ pub fn unfold_links_to(tree: &Path, file: &Path) -> io::Result<()> {
             let is_directory = fs::metadata(&linked).is_ok_and(|metadata| metadata.is_dir());
             let destination = directory.join(&name);
             if create_link(&linked, &destination, is_directory).is_err() && !is_directory {
+                // fault-site: workspace.unfold-links-to.copy
                 fs::copy(&linked, &destination)?;
             }
         }
     }
     if fs::symlink_metadata(file).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        // fault-site: workspace.unfold-links-to.remove-file-2
         fs::remove_file(file)?;
     }
     record_unfolded(tree, relative)
@@ -2387,6 +2434,7 @@ fn record_unfolded(tree: &Path, relative: &Path) -> io::Result<()> {
     let mut listed = fs::read_to_string(&record).unwrap_or_default();
     listed.push_str(&relative.to_string_lossy());
     listed.push('\n');
+    // fault-site: workspace.record-unfolded
     fs::write(record, listed)
 }
 
@@ -2466,15 +2514,19 @@ pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io:
     let between = path_down.len().saturating_sub(2);
     for level in path_down.iter().skip(1).take(between) {
         // Never empty: each level holds the next one down.
+        // fault-site: workspace.copy-small-links-around.read-dir
         fs::read_dir(level)?.try_for_each(|entry| {
             let path = entry?.path();
+            // fault-site: workspace.copy-small-links-around.symlink-metadata
             if path_down.contains(&path) || !fs::symlink_metadata(&path)?.file_type().is_symlink() {
                 return Ok(());
             }
+            // fault-site: workspace.copy-small-links-around.canonicalize
             let target = fs::canonicalize(&path)?;
             if !fits_within(&target, limit) {
                 return Ok(());
             }
+            // fault-site: workspace.copy-small-links-around.remove-file
             fs::remove_file(&path).or_else(|_| fs::remove_dir(&path))?;
             record_unfolded(copy, path.strip_prefix(copy).unwrap_or(&path))?;
             copy_plain_tree(&target, &path)
@@ -2487,6 +2539,7 @@ pub fn copy_small_links_around(copy: &Path, workspace: &Path, limit: u64) -> io:
 /// files reached through no link; stops counting once past it.
 fn fits_within(path: &Path, limit: u64) -> bool {
     fn within(path: &Path, limit: u64, total: &mut u64) -> bool {
+        // fault-site: workspace.within.symlink-metadata
         let Ok(metadata) = fs::symlink_metadata(path) else {
             return false;
         };
@@ -2494,6 +2547,7 @@ fn fits_within(path: &Path, limit: u64) -> bool {
             return true;
         }
         if metadata.is_dir() {
+            // fault-site: workspace.within.read-dir
             let Ok(entries) = fs::read_dir(path) else {
                 return false;
             };
@@ -2509,17 +2563,22 @@ fn fits_within(path: &Path, limit: u64) -> bool {
 
 /// A directory or file copied as it is, links inside it kept as links.
 fn copy_plain_tree(from: &Path, to: &Path) -> io::Result<()> {
+    // fault-site: workspace.copy-plain-tree.symlink-metadata
     let metadata = fs::symlink_metadata(from)?;
     if metadata.file_type().is_symlink() {
+        // fault-site: workspace.copy-plain-tree.read-link
         let target = fs::read_link(from)?;
         let directory = fs::metadata(from).is_ok_and(|metadata| metadata.is_dir());
         return create_link(&target, to, directory);
     }
     if !metadata.is_dir() {
+        // fault-site: workspace.copy-plain-tree.copy
         fs::copy(from, to)?;
         return Ok(());
     }
+    // fault-site: workspace.copy-plain-tree.create-dir
     fs::create_dir(to)?;
+    // fault-site: workspace.copy-plain-tree.read-dir
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         copy_plain_tree(&entry.path(), &to.join(entry.file_name()))?;
@@ -2690,18 +2749,18 @@ mod tests {
         assert!(!symlink(&copy.join("tree/scratch")));
         fs::remove_dir_all(top).unwrap();
         for fault in [
-            "fs.read_dir#workspace.rs:2469",
-            "fs.read_dir entry#workspace.rs:2469",
-            "fs.symlink_metadata#workspace.rs:2471",
-            "fs.canonicalize#workspace.rs:2474",
-            "fs.remove_file#workspace.rs:2478,fs.remove_dir#workspace.rs:2478",
-            "fs.write#workspace.rs:2390",
-            "fs.symlink_metadata#workspace.rs:2512",
-            "fs.read_link#workspace.rs:2514",
-            "fs.copy#workspace.rs:2519",
-            "fs.create_dir#workspace.rs:2522",
-            "fs.read_dir#workspace.rs:2523",
-            "fs.read_dir entry#workspace.rs:2523",
+            "fs.read_dir#workspace.copy-small-links-around.read-dir",
+            "fs.read_dir entry#workspace.copy-small-links-around.read-dir",
+            "fs.symlink_metadata#workspace.copy-small-links-around.symlink-metadata",
+            "fs.canonicalize#workspace.copy-small-links-around.canonicalize",
+            "fs.remove_file#workspace.copy-small-links-around.remove-file,fs.remove_dir#workspace.copy-small-links-around.remove-file",
+            "fs.write#workspace.record-unfolded",
+            "fs.symlink_metadata#workspace.copy-plain-tree.symlink-metadata",
+            "fs.read_link#workspace.copy-plain-tree.read-link",
+            "fs.copy#workspace.copy-plain-tree.copy",
+            "fs.create_dir#workspace.copy-plain-tree.create-dir",
+            "fs.read_dir#workspace.copy-plain-tree.read-dir",
+            "fs.read_dir entry#workspace.copy-plain-tree.read-dir",
         ] {
             let (top, copy, workspace) = fresh("small-fault");
             let failed =
@@ -2710,8 +2769,8 @@ mod tests {
             fs::remove_dir_all(top).unwrap();
         }
         for fault in [
-            "fs.symlink_metadata#workspace.rs:2490",
-            "fs.read_dir#workspace.rs:2497",
+            "fs.symlink_metadata#workspace.within.symlink-metadata",
+            "fs.read_dir#workspace.within.read-dir",
         ] {
             let (top, copy, workspace) = fresh("unsized");
             crate::fault::during(fault, || copy_small_links_around(&copy, &workspace, 1024))
@@ -2729,15 +2788,15 @@ mod tests {
         assert!(!symlink(&copy.join("tools/build")) && !file.exists());
         fs::remove_dir_all(top).unwrap();
         for fault in [
-            "fs.symlink_metadata#workspace.rs:2354",
-            "fs.canonicalize#workspace.rs:2358",
-            "fs.remove_file#workspace.rs:2359,fs.remove_dir#workspace.rs:2359",
-            "fs.create_dir#workspace.rs:2360",
-            "fs.write#workspace.rs:2390",
-            "fs.read_dir#workspace.rs:2364",
-            "fs.read_dir entry#workspace.rs:2364",
-            "fs.symlink=9,fs.copy#workspace.rs:2375",
-            "fs.remove_file#workspace.rs:2380",
+            "fs.symlink_metadata#workspace.unfold-links-to.symlink-metadata",
+            "fs.canonicalize#workspace.unfold-links-to.canonicalize",
+            "fs.remove_file#workspace.unfold-links-to.remove-file-1,fs.remove_dir#workspace.unfold-links-to.remove-file-1",
+            "fs.create_dir#workspace.unfold-links-to.create-dir",
+            "fs.write#workspace.record-unfolded",
+            "fs.read_dir#workspace.unfold-links-to.read-dir",
+            "fs.read_dir entry#workspace.unfold-links-to.read-dir",
+            "fs.symlink=9,fs.copy#workspace.unfold-links-to.copy",
+            "fs.remove_file#workspace.unfold-links-to.remove-file-2",
         ] {
             let (top, copy, _) = fresh("unfold-fault");
             let failed = crate::fault::during(fault, || {
@@ -5494,8 +5553,8 @@ mod tests {
         std::os::unix::fs::symlink(&venv, workspace.join(".venv")).unwrap();
         assert!(links_a_virtual_environment(&workspace));
         for fault in [
-            "fs.read_dir#workspace.rs:46",
-            "fs.symlink_metadata#workspace.rs:52",
+            "fs.read_dir#workspace.search.read-dir",
+            "fs.symlink_metadata#workspace.search.symlink-metadata",
         ] {
             assert!(
                 !crate::fault::during(fault, || links_a_virtual_environment(&workspace)),
@@ -5519,7 +5578,7 @@ mod tests {
         let workspace = elsewhere.join("repository/packages/web");
         fs::create_dir_all(&workspace).unwrap();
         crate::fault::during(
-            "fs.read_dir#workspace.rs:286@1,fs.read_dir#workspace.rs:286@2",
+            "fs.read_dir#workspace.link-repository-around@1,fs.read_dir#workspace.link-repository-around@2",
             || {
                 link_repository_around(&root, &workspace);
             },
@@ -5576,7 +5635,7 @@ mod tests {
             lock.release().unwrap();
             (root, prepared)
         };
-        let (root, prepared) = prepare("fs.read_dir entry#workspace.rs:661", true);
+        let (root, prepared) = prepare("fs.read_dir entry#workspace.link.read-dir", true);
         let copied = prepared.unwrap().join("packages/a/node_modules");
         assert_eq!(
             fs::read_link(copied.join("left-pad")).unwrap(),
@@ -5584,14 +5643,14 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
 
-        let (root, prepared) = prepare("fs.create_dir#workspace.rs:660", false);
+        let (root, prepared) = prepare("fs.create_dir#workspace.link.create-dir", false);
         let copied = prepared.unwrap().join("packages/a/node_modules");
         assert_eq!(fs::read_dir(copied).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
 
         for fault in [
-            "fs.read_dir entry#source_tools.rs:186",
-            "fs.create_dir#workspace.rs:660,fs.write#workspace.rs:1001",
+            "fs.read_dir entry#source-tools.place-launchers",
+            "fs.create_dir#workspace.link.create-dir,fs.write#workspace.link-tools.write-launcher",
         ] {
             let (root, prepared) = prepare(fault, true);
             assert!(
@@ -5641,9 +5700,10 @@ mod tests {
                 .unwrap()
                 .is_relative()
         );
-        let failed = crate::fault::during("fs.symlink#workspace.rs:968", || {
-            prepare_isolated_workspace(&root, "run", &lock)
-        });
+        let failed =
+            crate::fault::during("fs.symlink#workspace.link-package.create-link-1", || {
+                prepare_isolated_workspace(&root, "run", &lock)
+            });
         assert!(
             matches!(&failed, Err(WorkspaceError::Io { path, .. }) if path.ends_with("node_modules/app")),
             "{failed:?}"
@@ -5658,9 +5718,10 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let recovered = crate::fault::during("fs.read_dir entry#workspace.rs:1157", || {
-            recover_cached_workspace(&root, &lock)
-        });
+        let recovered = crate::fault::during(
+            "fs.read_dir entry#workspace.recover-cached-workspace",
+            || recover_cached_workspace(&root, &lock),
+        );
         assert!(
             matches!(recovered, Err(WorkspaceError::Io { .. })),
             "{recovered:?}"
@@ -5677,7 +5738,10 @@ mod tests {
         for (reused, clear) in [
             ("out.js", ""),
             ("build", ""),
-            ("out.js", "fs.create_dir_all#workspace.rs:1326"),
+            (
+                "out.js",
+                "fs.create_dir_all#workspace.prepare-cached-workspace-with-operations.remove-stored-tree-deferred-2",
+            ),
         ] {
             let root = project();
             let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
@@ -5721,11 +5785,23 @@ mod tests {
     #[test]
     fn writeback_stops_at_a_file_it_cannot_read() {
         for (kind, fault) in [
-            (CommandOutputs::Go, "fs.symlink_metadata#workspace.rs:1380"),
-            (CommandOutputs::Go, "fs.metadata#workspace.rs:1642"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1646"),
-            (CommandOutputs::Go, "fs.read#workspace.rs:1748"),
-            (CommandOutputs::JavaScript, "fs.read#workspace.rs:2196"),
+            (
+                CommandOutputs::Go,
+                "fs.symlink_metadata#workspace.walk-output-files.symlink-metadata",
+            ),
+            (
+                CommandOutputs::Go,
+                "fs.metadata#workspace.naming-the-project.metadata",
+            ),
+            (
+                CommandOutputs::Go,
+                "fs.read#workspace.naming-the-project.read",
+            ),
+            (CommandOutputs::Go, "fs.read#workspace.links-the-go-runtime"),
+            (
+                CommandOutputs::JavaScript,
+                "fs.read#workspace.built-from-instrumented-source",
+            ),
         ] {
             let (root, workspace) = writeback_fixture("unreadable");
             let baseline = workspace_output_baseline(&workspace).unwrap();
@@ -5773,9 +5849,10 @@ mod tests {
             hide_rewritten_files(&workspace, &["src/app.ts".to_owned()]);
         });
         fs::create_dir_all(root.join(".git")).unwrap();
-        let mirrored = crate::fault::during("fs.remove_dir_all#workspace.rs:2048", || {
-            mirror_git_repository(&root, &workspace)
-        });
+        let mirrored =
+            crate::fault::during("fs.remove_dir_all#workspace.mirror-git-repository", || {
+                mirror_git_repository(&root, &workspace)
+            });
         assert!(mirrored.is_err());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
@@ -5816,9 +5893,10 @@ mod tests {
         let root = project();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
         prepare_cached_workspace(&root, &lock, &[]).unwrap();
-        let pruned = crate::fault::during("fs.read_dir entry#workspace.rs:2217", || {
-            prune_cached_workspace_sources(&root, &lock)
-        });
+        let pruned = crate::fault::during(
+            "fs.read_dir entry#workspace.prune-cached-workspace-sources.read-dir",
+            || prune_cached_workspace_sources(&root, &lock),
+        );
         assert!(
             matches!(pruned, Err(WorkspaceError::Io { .. })),
             "{pruned:?}"

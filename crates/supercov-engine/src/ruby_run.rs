@@ -90,21 +90,26 @@ fn write_runtime(directory: &Path) -> Result<(), String> {
         .into_iter()
         .try_for_each(|(name, contents)| {
             let path = directory.join(name);
+            // fault-site: ruby-run.write-runtime
             fs::write(&path, contents).map_err(|error| format!("{}: {error}", path.display()))
         })
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    // fault-site: ruby-run.copy-tree.read-dir
     for entry in fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))? {
         let entry = entry.map_err(|error| error.to_string())?;
         let target = destination.join(entry.file_name());
+        // fault-site: ruby-run.copy-tree.file-type
         if fs::file_type(&entry)
             .map_err(|error| error.to_string())?
             .is_dir()
         {
+            // fault-site: ruby-run.copy-tree.create-dir-all
             fs::create_dir_all(&target).map_err(|error| error.to_string())?;
             copy_tree(&entry.path(), &target)?;
         } else {
+            // fault-site: ruby-run.copy-tree.copy
             fs::copy(entry.path(), &target).map_err(|error| error.to_string())?;
         }
     }
@@ -179,6 +184,7 @@ pub fn current_ruby_integrity(
     command: &[String],
     source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
+    // fault-site: ruby-run.current-ruby-integrity
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let mut files = crate::ruby_project::discover_ruby_files(&root)?;
     // The roots the run was measured under, not this shell's: the run
@@ -332,6 +338,7 @@ fn run_direct_ruby_in(
         {
             // Kept before the join so a rejected evidence file stays inspectable.
             let debug_directory = root.join(".supercov/ruby-debug").join(&request.run_id);
+            // fault-site: ruby-run.run-direct-ruby-in
             fs::create_dir_all(&debug_directory).map_err(|error| error.to_string())?;
             copy_tree(&ruby_directory, &debug_directory)?;
         }
@@ -512,11 +519,14 @@ impl RubyServer {
             ruby_integrity_inputs(&project.files, command).assertion_paths(),
         )?;
         let directory = root.join(".supercov/work").join(run_id).join("ruby");
+        // fault-site: ruby-run.prepare.write-runtime
         write_runtime(&directory.join("runtime"))?;
+        // fault-site: ruby-run.prepare.create-dir-all
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         let mut plan = serde_json::to_value(&project.plan).expect("plain data serializes");
         plan["root"] = workspace.display().to_string().into();
         let plan_path = directory.join("plan.rb");
+        // fault-site: ruby-run.prepare.write-file
         fs::write(&plan_path, ruby_literal(&plan).into_bytes())
             .map_err(|error| format!("{}: {error}", plan_path.display()))?;
         Ok(Some(Self {
@@ -647,6 +657,7 @@ impl RubyServer {
                         .filter_map(|raw| raw.scope.as_mut())
                         .for_each(|scope| scope.run_id = metadata.id.clone());
                     let work = root.join(".supercov/work").join(&metadata.id);
+                    // fault-site: ruby-run.build-run
                     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
                     let archive_path = work.join("ruby-evidence.raw.gz");
                     let entries = run.archive_entries();
