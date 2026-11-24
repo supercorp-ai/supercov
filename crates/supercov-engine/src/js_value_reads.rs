@@ -102,11 +102,23 @@ fn peeled<'p, 'a>(expression: &'p Expression<'a>) -> &'p Expression<'a> {
     }
 }
 
-fn is_literal(expression: &Expression<'_>) -> bool {
-    matches!(
-        peeled(expression),
-        Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
-    )
+/// An object or array literal, as `add` takes one.
+enum Literal<'p, 'a> {
+    Object(&'p oxc_ast::ast::ObjectExpression<'a>),
+    Array(&'p oxc_ast::ast::ArrayExpression<'a>),
+}
+
+/// The literal an expression is, through parentheses and type assertions,
+/// with the expression it is; `None` where it is no object or array literal.
+fn literal_of<'p, 'a>(
+    expression: &'p Expression<'a>,
+) -> Option<(&'p Expression<'a>, Literal<'p, 'a>)> {
+    let peeled = peeled(expression);
+    match peeled {
+        Expression::ObjectExpression(object) => Some((peeled, Literal::Object(object))),
+        Expression::ArrayExpression(array) => Some((peeled, Literal::Array(array))),
+        _ => None,
+    }
 }
 
 /// A number key as JavaScript names it, where that is plain: a whole number
@@ -327,10 +339,8 @@ fn literals<'p, 'a>(program: &'p Program<'a>, file: &str) -> (Vec<Node<'p, 'a>>,
             {
                 continue;
             }
-            if let Some(init) = &declarator.init
-                && is_literal(init)
-            {
-                roots.push(add(&mut nodes, peeled(init)));
+            if let Some((expression, literal)) = declarator.init.as_ref().and_then(literal_of) {
+                roots.push(add(&mut nodes, expression, literal));
             }
         }
     }
@@ -338,16 +348,20 @@ fn literals<'p, 'a>(program: &'p Program<'a>, file: &str) -> (Vec<Node<'p, 'a>>,
 }
 
 /// Adds `literal` and the literals it holds, and returns its place.
-fn add<'p, 'a>(nodes: &mut Vec<Node<'p, 'a>>, literal: &'p Expression<'a>) -> usize {
+fn add<'p, 'a>(
+    nodes: &mut Vec<Node<'p, 'a>>,
+    expression: &'p Expression<'a>,
+    literal: Literal<'p, 'a>,
+) -> usize {
     let at = nodes.len();
     nodes.push(Node {
-        expression: literal,
-        span: literal.span(),
+        expression,
+        span: expression.span(),
         slots: Vec::new(),
     });
     let mut slots = Vec::new();
     match literal {
-        Expression::ObjectExpression(object) => {
+        Literal::Object(object) => {
             for property in &object.properties {
                 let ObjectPropertyKind::ObjectProperty(property) = property else {
                     continue;
@@ -367,7 +381,7 @@ fn add<'p, 'a>(nodes: &mut Vec<Node<'p, 'a>>, literal: &'p Expression<'a>) -> us
                 });
             }
         }
-        Expression::ArrayExpression(array) => {
+        Literal::Array(array) => {
             let mut index = Some(0usize);
             for element in &array.elements {
                 match element {
@@ -385,11 +399,10 @@ fn add<'p, 'a>(nodes: &mut Vec<Node<'p, 'a>>, literal: &'p Expression<'a>) -> us
                 }
             }
         }
-        _ => unreachable!("only literals are added"),
     }
     for slot in &mut slots {
-        if is_literal(slot.value) {
-            slot.child = Some(add(nodes, peeled(slot.value)));
+        if let Some((expression, literal)) = literal_of(slot.value) {
+            slot.child = Some(add(nodes, expression, literal));
         }
     }
     nodes[at].slots = slots;
@@ -732,6 +745,74 @@ mod tests {
                 (points[base].clone(), keys)
             })
             .collect()
+    }
+
+    /// The first declaration's value in `source` (TypeScript), given to
+    /// `check`.
+    fn with_value<R>(source: &str, check: impl FnOnce(&Expression<'_>) -> R) -> R {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let Statement::VariableDeclaration(declaration) = &parsed.program.body[0] else {
+            panic!("{source} declares nothing first");
+        };
+        check(declaration.declarations[0].init.as_ref().unwrap())
+    }
+
+    /// What a value may do when evaluated, or left out: literals, a key
+    /// known before it is evaluated, holes, parentheses and type assertions
+    /// do nothing but make it; a key worked out from a name, or a spread,
+    /// runs the program's code. A literal is dropped whole only where it
+    /// holds no such part.
+    #[test]
+    fn a_value_s_parts_say_whether_it_runs_code() {
+        for (source, inert, droppable) in [
+            ("const a = {};", true, true),
+            ("const a = [];", true, true),
+            ("const a = { [\"key\"]: 1 };", true, true),
+            ("const a = { [key]: 1 };", false, false),
+            ("const a = { ...rest };", false, false),
+            ("const a = [...rest];", false, false),
+            ("const a = [, 1];", true, true),
+            ("const a = (1);", true, true),
+            ("const a = 1 as number;", true, true),
+            ("const a = 1 satisfies number;", true, true),
+        ] {
+            with_value(source, |value| {
+                assert_eq!(Inert::of(value), inert, "{source}");
+                assert_eq!(Inert::droppable(value), droppable, "{source}");
+            });
+        }
+    }
+
+    /// The literals of a module's top-level declarations, each with its
+    /// slots: an empty literal holds none, and a declaration with no
+    /// declarator (none the parser makes, but the walk does not assume
+    /// one) adds none.
+    #[test]
+    fn the_top_level_literals_are_each_declaration_s() {
+        let allocator = Allocator::default();
+        let source = "const empty = {}, list = [1, { inner: 2 }];\nlet none = 1;";
+        let mut parsed = Parser::new(&allocator, source, oxc_span::SourceType::mjs()).parse();
+        assert!(parsed.errors.is_empty());
+        let (nodes, roots) = literals(&parsed.program, "src/a.js");
+        assert_eq!(roots.len(), 2);
+        assert!(nodes[roots[0]].slots.is_empty());
+        let list = &nodes[roots[1]];
+        assert_eq!(
+            list.slots
+                .iter()
+                .map(|slot| slot.key.clone())
+                .collect::<Vec<_>>(),
+            [Some("0".to_owned()), Some("1".to_owned())]
+        );
+        assert!(list.slots[1].child.is_some());
+        let Statement::VariableDeclaration(declaration) = &mut parsed.program.body[0] else {
+            unreachable!("the source's first statement is a declaration");
+        };
+        declaration.declarations.clear();
+        let (nodes, roots) = literals(&parsed.program, "src/a.js");
+        assert!(nodes.is_empty() && roots.is_empty());
     }
 
     /// A table's mutants are read through its literals: each string under

@@ -1237,7 +1237,12 @@ mod tests {
             raw
         };
         let mut started = record("bg", "background", None, &[]);
-        started.server = vec![server_hit("s", None)];
+        // A hit that names no point says nothing of any mutant.
+        let unnamed = ServerRecord {
+            id: None,
+            ..server_hit("s", None)
+        };
+        started.server = vec![server_hit("s", None), unnamed];
         let raw_results = vec![
             started,
             browser("reader", "t/a.spec.js", &["r"]),
@@ -1370,6 +1375,21 @@ mod tests {
             ]
         );
         assert_eq!(planned(&plan, "m").whole_files, ["t/a.spec.js"]);
+        // A file's module setup that loaded the module, in the runner's
+        // process: the file's tests, as without reads.
+        let mut setup = in_process.clone();
+        setup.push(record("setup", "setup", Some("t/b.spec.js"), &["s"]));
+        let plan = super::plan(&setup, listed(vec![module_level.clone()], &[])).unwrap();
+        assert!(
+            planned(&plan, "m")
+                .whole_files
+                .contains(&"t/b.spec.js".to_owned())
+        );
+        assert!(
+            candidates(&plan, "m")
+                .iter()
+                .any(|(test, _)| test == "other")
+        );
         let in_function = mutant(serde_json::json!({
             "id": "f", "statement": "s", "function": "fn",
             "reads": {"read": "r", "escape": "e"}
