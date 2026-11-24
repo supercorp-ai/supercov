@@ -542,7 +542,9 @@ phpunit`). See `docs/design/strong-mutation.md`,
   job's run holds its share's verdicts, `merge` keeps them all in the merged
   run, and a later `supercov mutants` keeps each verdict nothing changed could
   move from whichever earlier run holds it (see
-  [Combine shards](#combine-shards)).
+  [Combine shards](#combine-shards)). `supercov mutants --shard` measures a
+  run of its own even on an unchanged checkout, so a job never saves into a
+  run it restored, which every job of its round holds a copy of.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
   accepted, or the command fails.
 - `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with
@@ -1215,8 +1217,11 @@ adds none, and where its tests ran a mutant, a verdict that needs values they
 did not record is `unknown`.
 
 The merged run keeps the strong verdicts the runs saved (`mutants test`,
-`--shard` among them), by mutant, and `merge` prints how many and from which
-runs. A kill in any run is a kill. A survival stands only where the run that
+`--shard` among them), by mutant, and `merge` prints how many, how many came
+from each run, and how many the merged run's plan decides without running
+them (`1265 strong verdict(s) kept from runs r8, r7: 1103 from r8, 150 from
+r7, 12 the merged run's plan decides`). A verdict two runs hold alike counts
+for the first run named. A kill in any run is a kill. A survival stands only where the run that
 let the mutant survive measured every test of the merged suite that could
 kill it; where another run's tests could, and it has no verdict, the mutant is
 left for a pass over the merged run to run. An error stands only where no run
@@ -1224,7 +1229,16 @@ holds anything else. A run whose verdicts are of another mutant set than the
 merged run lists lends none, and `merge` names it; a run some of whose tests
 another measured again lends none either. Split a strong pass across jobs this
 way: each job measures and runs `supercov mutants --shard k/n -- <command>`,
-and the last merges (see `docs/mutation.md`, A pass split across jobs).
+and the last merges (see `docs/mutation.md`, A pass split across jobs). A
+second round on the same commit restores the first round's runs and does the
+same: each job measures a run of its own, which keeps the restored runs'
+verdicts and replaces them, and the last job's `merge` takes the new runs.
+
+A run named twice is refused (`Each merged run must be unique: r1 is named
+more than once`): copies of one run that several jobs saved verdicts into
+share its id, and `.supercov/runs` holds one of them. Up to 4.29.5,
+`supercov mutants --shard` on a checkout unchanged since the runs it restored
+saved into the latest of them; run such a round again.
 
 `assertions assess` assesses a merged run across every suite merged into it,
 reusing the answers saved when its parts were assessed. `tests affected` of a

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A strong pass split across jobs can go on in a second round on the same commit. `supercov mutants --shard k/n -- <command>` now measures a run of its own even when the checkout is unchanged since the runs a job restored, keeps their verdicts, and runs its share of the rest; the last job's `supercov merge` takes the round's runs, which replace the restored ones. Before, every job of a second round saved its share into a copy of the latest restored run: on a large application's e2e suite eight jobs wrote eight copies of one run id, the merge refused them, and the 1,265 decided mutants they held could only be added up by hand. `docs/mutation.md`'s sharded CI example shows a continuation round.
+- `supercov merge` says how many strong verdicts came from each run and how many the merged run's plan decides (`1265 strong verdict(s) kept from runs r8, r7: 1103 from r8, 150 from r7, 12 the merged run's plan decides`). A verdict two runs hold alike counts for the first run named.
+- A run named twice in `supercov merge` is refused with why (copies of one run share its id, and the store holds one of them) and what to do, instead of `Each merged run must be unique` alone.
+
 ## 4.29.5
 
 **Changed**

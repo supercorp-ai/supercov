@@ -771,8 +771,14 @@ pub fn merge_runs(
     if run_ids.len() < 2 {
         return Err("Usage: supercov merge <run-id> <run-id> [...]".into());
     }
-    if run_ids.iter().collect::<BTreeSet<_>>().len() != run_ids.len() {
-        return Err("Each merged run must be unique".into());
+    // Copies of one run, each with verdicts another job saved into it, are
+    // one directory here: the store holds the copy written last, and the
+    // others' verdicts are not in it to add up.
+    let mut named = BTreeSet::new();
+    if let Some(twice) = run_ids.iter().find(|id| !named.insert(*id)) {
+        return Err(format!(
+            "Each merged run must be unique: {twice} is named more than once. Copies of one run that several jobs saved verdicts into share its id, and .supercov/runs holds one of them, so they cannot be added up. Each job of a split strong pass needs a run of its own: `supercov mutants --shard k/n -- <command>` measures one (up to 4.29.5, on a checkout unchanged since the runs it restored, it saved into the latest of them instead). Run that round again and merge its jobs' runs"
+        ));
     }
     let inventory =
         discover_runs(root).map_err(|error| format!("Cannot read local coverage runs: {error}"))?;
@@ -1239,10 +1245,11 @@ fn kept_verdicts(
             },
         )
         .collect::<Vec<_>>();
+    let (mutants, taken) = crate::strong_verdicts::merged_verdicts(&plan, &lent);
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
-        mutants: crate::strong_verdicts::merged_verdicts(&plan, &lent),
+        mutants,
         mutant_set: plan.mutant_set,
     };
     let from = lending
@@ -1250,14 +1257,26 @@ fn kept_verdicts(
         .map(|(id, ..)| id.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    // What each run added: shards of one pass that each carried the earlier
+    // rounds' verdicts hold those alike, and they count for the first.
+    let mut each = lending
+        .iter()
+        .zip(&taken)
+        .map(|((id, ..), taken)| format!("{taken} from {id}"))
+        .collect::<Vec<_>>();
+    let planned = document.mutants.len() - taken.iter().sum::<usize>();
+    if planned > 0 {
+        each.push(format!("{planned} the merged run's plan decides"));
+    }
     notes.push(
         match crate::strong_verdicts::save(
             &directory.join(crate::strong_plan::STRONG_VERDICTS_FILE),
             &document,
         ) {
             Ok(()) => format!(
-                "{} strong verdict(s) kept from runs {from}",
-                document.mutants.len()
+                "{} strong verdict(s) kept from runs {from}: {}",
+                document.mutants.len(),
+                each.join(", ")
             ),
             Err(error) => format!("the runs' strong verdicts are not kept: {error}"),
         },
@@ -1376,7 +1395,8 @@ mod tests {
                 "2026-01-01T00:00:00.000Z",
                 false,
             ),
-            Err(error) if error == "Each merged run must be unique"
+            Err(error) if error.starts_with("Each merged run must be unique: run-a is named more than once.")
+                && error.contains("`supercov mutants --shard k/n -- <command>` measures one")
         ));
         fs::remove_dir_all(root).unwrap();
     }
@@ -2582,7 +2602,7 @@ mod tests {
             notes,
             [
                 "run run-c's strong verdicts are not kept: they are of the mutants of stryker-js@9.0.0, which the merged run does not list",
-                "2 strong verdict(s) kept from runs run-a, run-b",
+                "2 strong verdict(s) kept from runs run-a, run-b: 1 from run-a, 1 from run-b",
             ]
         );
         assert_eq!(
