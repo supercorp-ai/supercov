@@ -146,15 +146,13 @@ jobs:
           distribution: temurin
           java-version: "21"
       # What the Maven and Gradle tests resolve, kept: fetched each run, they
-      # took nine minutes of one slice.
-      - uses: actions/cache@v4
+      # took nine minutes of one slice. Restored only: CI's check and
+      # engine-integrations jobs run the same tests and scripts, and keep
+      # what they fetch; ten slices saving would crowd the cache. Maven's
+      # and Gradle's own retries are turned up for the rest.
+      - uses: ./.github/actions/jvm-dependencies
         with:
-          path: |
-            ~/.m2/repository
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: jvm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/supercov-engine/tests/jvm_*.rs', 'scripts/*jvm*.mjs', 'scripts/java-*.mjs') }}
-          restore-keys: jvm-${{ runner.os }}-${{ runner.arch }}-
+          step: restore
       # The Ant tests skip without it, and the Ant support then shows as
       # gaps the local measurement does not have. After the cache: a key
       # restored from before these jars still gets them.
@@ -165,7 +163,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      # A version, not the latest: asking GitHub's API for the latest
+      # release timed out on 2026-11-24 and failed the job before its tests.
       - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.9"
       # The versions CI's wasm and worker jobs use.
       - uses: taiki-e/install-action@v2
         with:
@@ -186,7 +188,8 @@ jobs:
             macOS-ARM64) build=aarch64-macos ;;
             macOS-X64) build=x86_64-macos ;;
           esac
-          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          curl -q -sSfL --retry 6 --retry-all-errors --retry-delay 10 "https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-$build.tar.xz" -o "$RUNNER_TEMP/wasmtime.tar.xz"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-$build" >> "$GITHUB_PATH"
       - run: npm ci
       # The browsers of every pinned Playwright, kept while no lockfile

@@ -1,0 +1,82 @@
+name: JVM dependencies
+description: >
+  What the tests' Maven and Gradle builds fetch, kept in the Actions cache, and
+  Maven's and Gradle's own retries turned up for what is still fetched. Use it
+  twice: `step: restore` before the tests, `step: save` after them, before the
+  stop-on-failure step (a cancelled job saves nothing). Maven Central refused
+  a plugin with HTTP 429 and failed whole rounds of runs on 2026-11-23.
+inputs:
+  step:
+    description: "`restore` or `save`."
+    required: true
+runs:
+  using: composite
+  steps:
+    # The key names what pins the contents -- the test sources and scripts
+    # that write the builds -- and ends in this run's own suffix: a run that
+    # fetched something new saves a cache of its own, which holds everything
+    # it restored as well, and the next run restores the newest. One with the
+    # same pins first; failing that, the newest for this platform.
+    - if: inputs.step == 'restore'
+      id: key
+      shell: bash
+      env:
+        PINS: ${{ hashFiles('crates/*/tests/**/*.rs', 'scripts/*.mjs', 'scripts/*.py', '.github/actions/jvm-dependencies/action.yml') }}
+      run: |
+        prefix="jvm-deps-1-$RUNNER_OS-$RUNNER_ARCH-"
+        {
+          echo "JVM_DEPENDENCIES_PREFIX=$prefix"
+          echo "JVM_DEPENDENCIES_KEY=$prefix$PINS-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM$RANDOM"
+        } >> "$GITHUB_ENV"
+        echo "pins=$prefix$PINS-" >> "$GITHUB_OUTPUT"
+    - if: inputs.step == 'restore'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper/dists
+        key: ${{ steps.key.outputs.pins }}
+        restore-keys: |
+          ${{ steps.key.outputs.pins }}
+          ${{ env.JVM_DEPENDENCIES_PREFIX }}
+    - if: inputs.step == 'restore'
+      shell: bash
+      run: |
+        # A download Maven gave up on leaves a `.lastUpdated` marker, and
+        # Maven then refuses to try again for a day: a marker kept by the
+        # cache would turn one refusal into a failure in every later run.
+        find ~/.m2/repository -name '*.lastUpdated' -delete 2> /dev/null || true
+        # What was restored, counted to tell later whether anything was added.
+        echo "JVM_DEPENDENCIES_FILES=$(bash "$GITHUB_ACTION_PATH/count.sh")" >> "$GITHUB_ENV"
+        # Maven's resolver tries a refused (429, 503) or failed request again,
+        # waiting as long as the server asks; eight times rather than three.
+        # Connections are not kept past 25 s, before Azure's network drops
+        # an idle one. MAVEN_ARGS reaches every `mvn` (Maven 3.9 and later),
+        # including those the tests start.
+        echo "MAVEN_ARGS=-Daether.connector.http.retryHandler.count=8 -Daether.connector.http.retryHandler.serviceUnavailable=429,500,502,503,504 -Daether.connector.http.connectionMaxTtl=25 -Dmaven.wagon.http.retryHandler.count=8 -Dmaven.wagon.httpconnectionManager.ttlSeconds=25" >> "$GITHUB_ENV"
+        # Gradle's retries of a transient failure, with a longer first wait;
+        # it doubles from there.
+        mkdir -p ~/.gradle
+        cat >> ~/.gradle/gradle.properties <<'EOF'
+        systemProp.org.gradle.internal.repository.max.retries=8
+        systemProp.org.gradle.internal.repository.initial.backoff=2000
+        systemProp.org.gradle.internal.http.connectionTimeout=60000
+        systemProp.org.gradle.internal.http.socketTimeout=60000
+        EOF
+    - if: inputs.step == 'save'
+      id: grew
+      shell: bash
+      run: |
+        find ~/.m2/repository -name '*.lastUpdated' -delete 2> /dev/null || true
+        now=$(bash "$GITHUB_ACTION_PATH/count.sh")
+        echo "dependency files: ${JVM_DEPENDENCIES_FILES:-0} restored, $now now"
+        [ "$now" -gt "${JVM_DEPENDENCIES_FILES:-0}" ] && echo "grew=true" >> "$GITHUB_OUTPUT" || true
+    - if: inputs.step == 'save' && steps.grew.outputs.grew == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper/dists
+        key: ${{ env.JVM_DEPENDENCIES_KEY }}
