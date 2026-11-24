@@ -134,30 +134,8 @@ impl Imports {
     /// A test that cannot be read -- a file that does not parse -- is open:
     /// it may load anything.
     pub fn rust_test(&self, file: &str, test: &str, siblings: &BTreeSet<String>) -> Loads {
+        let (current, own_path) = rust_test_place(&self.root, file, test);
         let segments = test.split("::").collect::<Vec<_>>();
-        // The module file the test sits in, and its path inside that file.
-        let mut current = file.to_owned();
-        let mut inner = Vec::new();
-        for segment in &segments[..segments.len() - 1] {
-            let directory = module_directory(&current);
-            let declared = inner
-                .is_empty()
-                .then(|| {
-                    [
-                        format!("{directory}{segment}.rs"),
-                        format!("{directory}{segment}/mod.rs"),
-                    ]
-                    .into_iter()
-                    .find(|candidate| self.root.join(candidate).is_file())
-                })
-                .flatten();
-            match declared {
-                Some(next) => current = next,
-                None => inner.push(*segment),
-            }
-        }
-        inner.push(segments[segments.len() - 1]);
-        let own_path = inner.join("::");
         let last = segments[segments.len() - 1];
         let siblings = siblings
             .iter()
@@ -197,35 +175,20 @@ impl Imports {
         let mut entries = vec![file.to_owned(), current.clone()];
         // An integration test's module files are its helpers.
         if current.split('/').any(|part| part == "tests") {
-            let mut modules = VecDeque::from([current.clone()]);
-            while let Some(module) = modules.pop_front() {
-                let directory = module_directory(&module);
-                for name in self
-                    .rust_outline(&module)
-                    .map(|o| o.modules)
-                    .unwrap_or_default()
-                {
-                    let found = [
-                        format!("{directory}{name}.rs"),
-                        format!("{directory}{name}/mod.rs"),
-                    ]
-                    .into_iter()
-                    .find(|candidate| self.root.join(candidate).is_file());
-                    if let Some(found) = found.filter(|found| !entries.contains(found)) {
-                        texts.extend(
-                            self.rust_outline(&found)
-                                .map(|o| {
-                                    o.strings
-                                        .into_iter()
-                                        .map(|(_, text)| text)
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default(),
-                        );
-                        entries.push(found.clone());
-                        modules.push_back(found);
-                    }
-                }
+            let mut modules = Vec::new();
+            self.rust_module_files(&current, &mut modules);
+            for module in modules {
+                texts.extend(
+                    self.rust_outline(&module)
+                        .map(|o| {
+                            o.strings
+                                .into_iter()
+                                .map(|(_, text)| text)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                );
+                entries.push(module);
             }
         }
         let directory = parent(&current);
@@ -246,6 +209,27 @@ impl Imports {
         loads.directories.extend(followed.directories);
         loads.open = loads.open.or(followed.open);
         loads
+    }
+
+    /// The files of the modules a Rust file declares, and theirs in turn.
+    fn rust_module_files(&self, file: &str, found: &mut Vec<String>) {
+        let directory = module_directory(file);
+        self.rust_outline(file)
+            .map(|o| o.modules)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| {
+                [
+                    format!("{directory}{name}.rs"),
+                    format!("{directory}{name}/mod.rs"),
+                ]
+                .into_iter()
+                .find(|candidate| self.root.join(candidate).is_file())
+            })
+            .for_each(|module| {
+                found.push(module.clone());
+                self.rust_module_files(&module, found);
+            });
     }
 
     fn rust_outline(&self, file: &str) -> Option<crate::rust_reads::Outline> {
@@ -274,6 +258,7 @@ impl Imports {
         container: &str,
         loads: &mut Loads,
     ) -> Vec<String> {
+        let holds = format!("{}/", container.trim_end_matches('/'));
         let mut files = Vec::new();
         for word in text.split_whitespace() {
             let mut path =
@@ -283,33 +268,31 @@ impl Imports {
                     .rsplit_once('/')
                     .map_or("", |(directory, _)| directory);
             }
-            if path.is_empty()
-                || path.starts_with(['/', '-'])
-                || path.contains("://")
-                || path.len() > 400
-            {
+            if path.is_empty() || path.starts_with(['/', '-']) || path.contains("://") {
                 continue;
             }
-            for base in bases {
-                let Some(named) = normal(&Path::new(base).join(path)) else {
-                    continue;
-                };
+            // The first base where the path is a file or a directory.
+            let found = bases.iter().find_map(|base| {
+                let named = normal(&Path::new(base).join(path))?;
                 let full = self.root.join(&named);
-                if full.is_file() {
-                    files.push(named);
-                } else if full.is_dir() {
+                (full.is_file() || full.is_dir()).then(|| (full.is_file(), named))
+            });
+            match found {
+                Some((true, file)) => files.push(file),
+                Some((false, directory)) => {
+                    // The root, or a directory the test sits in, is where
+                    // paths start; what a build or a package manager makes
+                    // is no input.
                     let holds_container =
-                        container == named || container.starts_with(&format!("{named}/"));
-                    let generated = named
+                        directory.is_empty() || holds.starts_with(&format!("{directory}/"));
+                    let generated = directory
                         .split('/')
                         .any(|part| matches!(part, "node_modules" | ".git" | "target"));
-                    if !named.is_empty() && !holds_container && !generated {
-                        loads.directories.insert(named);
+                    if !holds_container && !generated {
+                        loads.directories.insert(directory);
                     }
-                } else {
-                    continue;
                 }
-                break;
+                None => {}
             }
         }
         files
@@ -800,6 +783,35 @@ fn package_name(specifier: &str) -> &str {
     first
 }
 
+/// Where a Rust test is written: the module file its path leads to from the
+/// file its record names (the crate root, for a unit test), and its path
+/// inside that file.
+pub fn rust_test_place(root: &Path, file: &str, test: &str) -> (String, String) {
+    let segments = test.split("::").collect::<Vec<_>>();
+    let mut current = file.to_owned();
+    let mut inner = Vec::new();
+    for segment in &segments[..segments.len() - 1] {
+        let directory = module_directory(&current);
+        let declared = inner
+            .is_empty()
+            .then(|| {
+                [
+                    format!("{directory}{segment}.rs"),
+                    format!("{directory}{segment}/mod.rs"),
+                ]
+                .into_iter()
+                .find(|candidate| root.join(candidate).is_file())
+            })
+            .flatten();
+        match declared {
+            Some(next) => current = next,
+            None => inner.push(*segment),
+        }
+    }
+    inner.push(segments[segments.len() - 1]);
+    (current, inner.join("::"))
+}
+
 /// The directory a file sits in, as a prefix: `a/b/` for `a/b/c.rs`, empty
 /// at the root.
 fn parent(file: &str) -> String {
@@ -833,9 +845,10 @@ fn path_strings(file: &str, source: &str) -> Vec<String> {
     use oxc_ast::ast::*;
     use oxc_ast_visit::{Visit, walk};
     use oxc_span::GetSpan;
-    let Ok(source_type) = crate::js_instrumenter::project_source_type(Path::new(file)) else {
-        return Vec::new();
-    };
+    // Only a JavaScript or TypeScript file is read for them, whose type is
+    // known.
+    let source_type =
+        crate::js_instrumenter::project_source_type(Path::new(file)).unwrap_or_default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     #[derive(Default)]
@@ -881,16 +894,16 @@ fn path_strings(file: &str, source: &str) -> Vec<String> {
             }
         }
         fn visit_template_literal(&mut self, it: &TemplateLiteral<'a>) {
-            for (index, quasi) in it.quasis.iter().enumerate() {
-                let text = quasi.value.raw.as_str();
-                // After an expression, a leading slash joins it to that path.
-                let text = if index > 0 {
-                    text.trim_start_matches('/')
-                } else {
-                    text
-                };
-                self.texts.push(text.to_owned());
-            }
+            // After an expression, a leading slash joins it to that path.
+            self.texts
+                .extend(it.quasis.iter().enumerate().map(|(index, quasi)| {
+                    let text = quasi.value.raw.as_str();
+                    if index > 0 {
+                        text.trim_start_matches('/').to_owned()
+                    } else {
+                        text.to_owned()
+                    }
+                }));
             walk::walk_template_literal(self, it);
         }
     }
@@ -900,7 +913,7 @@ fn path_strings(file: &str, source: &str) -> Vec<String> {
 }
 
 /// `a/./b/../c` as `a/c`, refusing a path that climbs out of the root.
-fn normal(path: &Path) -> Option<String> {
+pub(crate) fn normal(path: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for component in path.components() {
         match component {
@@ -1349,20 +1362,27 @@ gates! {
     second => "scripts/second.mjs",
 }
 #[test]
-fn copies() { gate("tests/fixtures/{name} npm --prefix tests/fixtures/app ci"); let _ = "https://x/y"; }
+fn copies() { gate("tests/fixtures/{name} npm --prefix tests/fixtures/app ci"); let _ = ("https://x/y", "{name}.json", "-v", "/abs", "(tests/pages/index.html),", "node_modules/x", "../../..", "../../../crates/cli/tests", "nowhere/at/all"); m!(other => "data.json"); }
+fn plain() { let _ = "tests/pages"; }
+macro_rules! m { ($($t:tt)*) => {} }
 #[test]
 fn reads() { let _ = "data.json"; }
 "#,
             ),
             (
                 "crates/cli/tests/common/mod.rs",
-                "pub fn root() -> &'static str { \"crates/cli/tests/shared.txt\" }\n",
+                "mod gone;\nmod deeper;\npub fn root() -> &'static str { \"crates/cli/tests/shared.txt\" }\n",
             ),
+            (
+                "crates/cli/tests/common/deeper.rs",
+                "pub const DEEP: &str = \"tests/deep.txt\";\n",
+            ),
+            ("tests/deep.txt", ""),
             ("crates/cli/tests/shared.txt", ""),
             ("crates/cli/tests/data.json", "{}"),
             (
                 "scripts/first.mjs",
-                "import './lib.mjs';\nimport { join } from 'node:path';\nconst dir = join(process.cwd(), 'tests', 'fixtures', 'one');\nconst more = `${dir}/../two`;\n",
+                "import './lib.mjs';\nimport path, { join } from 'node:path';\nconst dir = join(process.cwd(), 'tests', 'fixtures', 'one');\nconst more = `${dir}/../two`;\nconst pages = path.resolve('tests', 'pages');\nconst other = run('x');\nconst computed = table['k']('y');\nconst named = path.basename('z');\n",
             ),
             (
                 "scripts/lib.mjs",
@@ -1381,6 +1401,10 @@ fn reads() { let _ = "data.json"; }
             ("crates/engine/assets/a.bin", ""),
             ("crates/engine/tests/fixtures/x/y.txt", ""),
             ("crates/engine/src/broken.rs", "fn ("),
+            (
+                "crates/cli/tests/lonely.rs",
+                "#[test]\nfn alone() { let _ = \"data.json\"; }\n",
+            ),
         ]);
         let imports = Imports::new(&root);
         let siblings = ["first", "second", "copies", "reads"]
@@ -1413,7 +1437,28 @@ fn reads() { let _ = "data.json"; }
             copies.includes("tests/fixtures/one/a.txt"),
             "the directory before a placeholder"
         );
+        assert!(
+            copies.includes("tests/pages/index.html"),
+            "a path inside punctuation"
+        );
+        assert!(copies.includes("tests/deep.txt"), "a module file's module");
         assert!(!copies.includes("scripts/first.mjs"));
+        assert!(
+            !copies.includes("node_modules/x/index.js"),
+            "a package's files"
+        );
+        assert!(
+            !copies
+                .directories
+                .iter()
+                .any(|d| d.is_empty() || d == "crates/cli/tests"),
+            "{copies:?}"
+        );
+        // A function that is no test, named as one: what it names is its own.
+        let plain = imports.rust_test("crates/cli/tests/gates.rs", "plain", &siblings);
+        assert!(plain.includes("tests/pages/index.html"));
+        let alone = imports.rust_test("crates/cli/tests/lonely.rs", "alone", &BTreeSet::new());
+        assert!(alone.includes("crates/cli/tests/data.json"));
         let reads = imports.rust_test("crates/cli/tests/gates.rs", "reads", &siblings);
         assert!(reads.includes("crates/cli/tests/data.json"));
         // A unit test, in the module file its path leads to.

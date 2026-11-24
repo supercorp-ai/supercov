@@ -10884,6 +10884,38 @@ fn a_changed_helper_reaches_the_tests_that_load_it_and_an_unplaced_one_reaches_a
     );
 }
 
+/// In a Rust run every project file that is neither source nor a manifest is
+/// configuration to the fingerprint; `tests affected` reads such a file as a
+/// helper, and only Cargo's own configuration as a change to every test.
+#[test]
+fn a_rust_run_reads_a_data_file_as_a_helper_and_cargo_configuration_as_every_test() {
+    let project = Project::empty("rust-helpers");
+    small_crate(&project);
+    project.write("notes/plan.txt", "plan\n");
+    project.git(&["init", "-q"]);
+    project.supercov(&["--", "cargo", "test"]).succeeds();
+    let run_wide = |project: &Project| {
+        project
+            .supercov(&["runs", "latest", "tests", "affected", "--json"])
+            .json()["data"]["workingTree"]["runWide"]
+            .clone()
+    };
+    project.write("notes/plan.txt", "another plan\n");
+    assert_eq!(run_wide(&project), serde_json::json!([]));
+    let names = project
+        .supercov(&["runs", "latest", "tests", "affected", "--names"])
+        .succeeds();
+    assert!(
+        names.lines().any(|line| line == "tests::doubles"),
+        "{names}"
+    );
+    project.write(".cargo/config.toml", "[build]\n");
+    assert_eq!(
+        run_wide(&project),
+        serde_json::json!(["test/build configuration changed"])
+    );
+}
+
 #[test]
 fn tests_affected_reads_formatting_other_runners_and_dependencies_apart() {
     let project = Project::cart("affected-shapes");

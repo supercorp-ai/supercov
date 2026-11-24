@@ -88,52 +88,56 @@ pub fn outline(source: &str) -> Option<Outline> {
         return None;
     }
     let mut outline = Outline::default();
-    for element in parsed.tree().syntax().descendants_with_tokens() {
-        match element {
-            NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IDENT
-                    && matches!(token.text(), "include_str" | "include_bytes" | "include")
-                {
-                    outline.embeds.extend(embed(&token));
-                }
-                // A literal inside a macro's tokens is a bare token too.
-                if let Some(text) = ast::String::cast(token.clone())
-                    .and_then(|string| string.value().ok().map(|value| value.into_owned()))
-                {
-                    outline
-                        .strings
-                        .push((u32::from(token.text_range().start()) as usize, text));
-                }
-            }
-            NodeOrToken::Node(node) => {
-                if let Some(function) = ast::Fn::cast(node.clone()) {
-                    outline.functions.push(Function {
-                        path: module_path(&node),
-                        range: span(&node),
-                        test: function.attrs().any(|attribute| {
-                            attribute
-                                .path()
-                                .and_then(|path| path.segment())
-                                .is_some_and(|segment| segment.to_string() == "test")
-                        }),
-                    });
-                } else if let Some(module) = ast::Module::cast(node.clone()) {
-                    if module.attrs().any(|attribute| {
-                        attribute.syntax().text().to_string().replace(' ', "") == "#[cfg(test)]"
-                    }) {
-                        outline.test_modules.push(module_path(&node));
+    parsed
+        .tree()
+        .syntax()
+        .descendants_with_tokens()
+        .for_each(|element| {
+            match element {
+                NodeOrToken::Token(token) => {
+                    if token.kind() == SyntaxKind::IDENT
+                        && matches!(token.text(), "include_str" | "include_bytes" | "include")
+                    {
+                        outline.embeds.extend(embed(&token));
                     }
-                    if module.item_list().is_none() {
+                    // A literal inside a macro's tokens is a bare token too.
+                    if let Some(text) = ast::String::cast(token.clone())
+                        .and_then(|string| string.value().ok().map(|value| value.into_owned()))
+                    {
                         outline
-                            .modules
-                            .extend(module.name().map(|name| name.text().to_string()));
+                            .strings
+                            .push((u32::from(token.text_range().start()) as usize, text));
                     }
-                } else if let Some(call) = ast::MacroCall::cast(node.clone()) {
-                    read_macro(&call, &mut outline);
+                }
+                NodeOrToken::Node(node) => {
+                    if let Some(function) = ast::Fn::cast(node.clone()) {
+                        outline.functions.push(Function {
+                            path: module_path(&node),
+                            range: span(&node),
+                            test: function.attrs().any(|attribute| {
+                                attribute
+                                    .path()
+                                    .and_then(|path| path.segment())
+                                    .is_some_and(|segment| segment.to_string() == "test")
+                            }),
+                        });
+                    } else if let Some(module) = ast::Module::cast(node.clone()) {
+                        if module.attrs().any(|attribute| {
+                            attribute.syntax().text().to_string().replace(' ', "") == "#[cfg(test)]"
+                        }) {
+                            outline.test_modules.push(module_path(&node));
+                        }
+                        if module.item_list().is_none() {
+                            outline
+                                .modules
+                                .extend(module.name().map(|name| name.text().to_string()));
+                        }
+                    } else if let Some(call) = ast::MacroCall::cast(node.clone()) {
+                        read_macro(&call, &mut outline);
+                    }
                 }
             }
-        }
-    }
+        });
     Some(outline)
 }
 
@@ -153,27 +157,27 @@ fn literal(element: &NodeOrToken<SyntaxNode, SyntaxToken>) -> Option<String> {
 fn embed(name: &SyntaxToken) -> Option<Embed> {
     // Parsed, the name sits in the path of a macro call; in a macro's own
     // tokens, it is followed by `!` and the arguments.
-    let tree = match name.parent_ancestors().find_map(ast::MacroCall::cast) {
-        Some(call)
-            if call.path().is_some_and(|path| {
-                path.syntax().text_range().contains_range(name.text_range())
-            }) =>
-        {
-            call.token_tree()?.syntax().clone()
-        }
-        _ => {
+    let call = name
+        .parent_ancestors()
+        .find_map(ast::MacroCall::cast)
+        .filter(|call| {
+            call.path()
+                .is_some_and(|path| path.syntax().text_range().contains_range(name.text_range()))
+        });
+    let tree = match call {
+        Some(call) => call.token_tree().map(|tree| tree.syntax().clone()),
+        None => {
             let mut after =
                 std::iter::successors(name.next_sibling_or_token(), |e| e.next_sibling_or_token())
                     .filter(|e| !matches!(e.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT));
-            let (Some(bang), Some(NodeOrToken::Node(tree))) = (after.next(), after.next()) else {
-                return None;
-            };
-            if bang.kind() != SyntaxKind::BANG {
-                return None;
+            match (after.next(), after.next()) {
+                (Some(bang), Some(NodeOrToken::Node(tree))) if bang.kind() == SyntaxKind::BANG => {
+                    Some(tree)
+                }
+                _ => None,
             }
-            tree
         }
-    };
+    }?;
     let inside = tree
         .children_with_tokens()
         .filter(|e| {
@@ -184,13 +188,14 @@ fn embed(name: &SyntaxToken) -> Option<Embed> {
         })
         .collect::<Vec<_>>();
     let (path, prefix) = match inside.as_slice() {
-        [first, ..] if first.kind() == SyntaxKind::STRING => (literal(first)?, false),
+        [first, ..] if first.kind() == SyntaxKind::STRING => (literal(first), false),
         [first, _, NodeOrToken::Node(inner), ..] if first.to_string() == "concat" => (
-            inner.descendants_with_tokens().find_map(|e| literal(&e))?,
+            inner.descendants_with_tokens().find_map(|e| literal(&e)),
             true,
         ),
-        _ => return None,
+        _ => (None, false),
     };
+    let path = path?;
     Some(Embed {
         offset: u32::from(name.text_range().start()) as usize,
         path,
@@ -200,12 +205,10 @@ fn embed(name: &SyntaxToken) -> Option<Embed> {
 
 /// The entries of a macro invocation.
 fn read_macro(call: &ast::MacroCall, outline: &mut Outline) {
-    let Some(tree) = call.token_tree() else {
-        return;
-    };
-    let children = tree
-        .syntax()
-        .children_with_tokens()
+    let children = call
+        .token_tree()
+        .into_iter()
+        .flat_map(|tree| tree.syntax().children_with_tokens())
         .filter(|child| {
             !matches!(
                 child.kind(),
@@ -215,12 +218,11 @@ fn read_macro(call: &ast::MacroCall, outline: &mut Outline) {
                     | SyntaxKind::L_CURLY
                     | SyntaxKind::L_BRACK
             )
-        })
-        .collect::<Vec<_>>();
+        });
     // Entries split at the separators of the macro's own token tree: each
     // that starts with an identifier, and where it starts.
     let mut entry: Option<(Option<String>, usize)> = None;
-    for child in &children {
+    children.for_each(|child| {
         let from = u32::from(child.text_range().start()) as usize;
         if matches!(
             child.kind(),
@@ -233,7 +235,7 @@ fn read_macro(call: &ast::MacroCall, outline: &mut Outline) {
             if let Some((Some(name), start)) = entry.take() {
                 outline.entries.push((name, (start, from)));
             }
-            continue;
+            return;
         }
         entry.get_or_insert_with(|| {
             (
@@ -241,7 +243,7 @@ fn read_macro(call: &ast::MacroCall, outline: &mut Outline) {
                 from,
             )
         });
-    }
+    });
 }
 
 #[cfg(test)]
@@ -258,6 +260,8 @@ mod checks {}
 const PAGE: &str = include_str!("../assets/page.html");
 macro_rules! gates { ($($name:ident => $script:literal),*) => {} }
 macro_rules! files { ($($name:literal),*) => { &[$(include_bytes!(concat!("../runtime/", $name))),*] } }
+macro_rules! wrap { ($e:expr) => { $e } }
+const WRAPPED: &str = wrap!(include_str ! ("../assets/wrapped.txt"));
 gates! {
     first => "scripts/first.mjs",
     second => "scripts/second.mjs"
@@ -290,6 +294,7 @@ async fn awaits() {}
             [
                 ("../assets/page.html", false),
                 ("../runtime/", true),
+                ("../assets/wrapped.txt", false),
                 ("../assets/", true)
             ]
         );
@@ -319,7 +324,7 @@ async fn awaits() {}
         assert!(read.entries.iter().any(|(name, _)| name == "second"));
         // An embed whose path is computed names nothing, and neither does a
         // macro with nothing in it; separators side by side end no entry.
-        let computed = outline("const X: &str = include_str!(env!(\"OUT\"));\nfn include() {}\nfn g() { include(); }\nfn f() { m!(a,, b); n!(); }\nmacro_rules! n { () => {} }\nmacro_rules! m { ($($t:tt)*) => {} }").unwrap();
+        let computed = outline("const X: &str = include_str!(env!(\"OUT\"));\nfn include() {}\nfn g() { include(); o!(include_str ; (\"x\")); o!(include_str); }\nmacro_rules! o { ($($t:tt)*) => {} }\nfn f() { m!(a,, b); n!(); }\nmacro_rules! n { () => {} }\nmacro_rules! m { ($($t:tt)*) => {} }").unwrap();
         assert!(computed.embeds.is_empty());
         assert_eq!(
             computed
@@ -327,7 +332,7 @@ async fn awaits() {}
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            ["env", "a", "b"]
+            ["env", "include_str", "include_str", "a", "b"]
         );
         assert!(outline("fn (").is_none());
     }

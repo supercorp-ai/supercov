@@ -990,7 +990,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // reaches.
     let unmeasured = changes
         .iter()
-        .filter(|(file, _)| !helper(file) && !known_tests.contains(**file) && file.ends_with(".rs"))
+        .filter(|(file, _)| !helper(file) && file.ends_with(".rs"))
         .flat_map(|(file, change)| {
             let probed = executions.probed.get(*file);
             match change {
@@ -1016,7 +1016,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     // a unit test's record names it.
     let test_only = changes
         .iter()
-        .filter(|(file, _)| file.ends_with(".rs") && !helper(file) && !known_tests.contains(**file))
+        .filter(|(file, _)| file.ends_with(".rs") && !helper(file))
         .filter_map(|(file, change)| {
             let FileChange::Code {
                 before,
@@ -1029,7 +1029,8 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             };
             let outline = fs::read_to_string(root.join(file))
                 .ok()
-                .and_then(|source| crate::rust_reads::outline(&source))?;
+                .and_then(|source| crate::rust_reads::outline(&source))
+                .unwrap_or_default();
             let tests = outline
                 .test_modules
                 .iter()
@@ -1056,12 +1057,29 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     .added
                     .iter()
                     .all(|unit| is_test(&after.units[*unit].path));
-            let module = rust_module_path(file)?;
+            let module = rust_module_path(file);
+            // The test code the change is in: each module or test it touched.
+            let moved = diff
+                .changed
+                .iter()
+                .chain(&diff.removed)
+                .map(|unit| before.units[*unit].path.as_str())
+                .chain(
+                    diff.added
+                        .iter()
+                        .map(|unit| after.units[*unit].path.as_str()),
+                )
+                .collect::<Vec<_>>();
             confined.then(|| {
                 (
                     *file,
                     tests
                         .iter()
+                        .filter(|test| {
+                            moved
+                                .iter()
+                                .any(|path| path == test || path.starts_with(&format!("{test}::")))
+                        })
                         .map(|test| {
                             if module.is_empty() {
                                 test.clone()
@@ -1133,8 +1151,11 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
     }
     let mut rust_placed = crate::test_loads::Loads::default();
     if let Some(checkout) = &checkout {
-        for record in &executions.tests {
-            if let Some(name) = rust_test_name(record) {
+        executions
+            .tests
+            .iter()
+            .filter_map(|record| rust_test_name(record).map(|name| (record, name)))
+            .for_each(|(record, name)| {
                 let loads = checkout.rust_test_loads(
                     &record.test.file,
                     name,
@@ -1145,8 +1166,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
                     .directories
                     .extend(loads.directories.iter().cloned());
                 loads_of.insert(rust_key(record), Some(loads));
-            }
-        }
+            });
     }
     let places = |checkout: &crate::run_currency::Checkout<'_>, file: &str| {
         checkout.places(file) || rust_placed.includes(file)
@@ -1167,34 +1187,30 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         if !record.passed {
             reasons.push(DID_NOT_PASS.to_owned());
         }
-        match changes.get(record.test.file.as_str()) {
-            None | Some(FileChange::Same | FileChange::CommentsOnly | FileChange::Added) => {}
-            Some(FileChange::Removed) => reasons.push("test file removed".to_owned()),
-            Some(FileChange::Bytes) => reasons.push("test file changed".to_owned()),
-            Some(FileChange::Code {
-                before,
-                after,
-                diff,
-                ..
-            }) => reasons.push(format!(
-                "test file changed: {}",
-                describe(before, after, diff)
+        // A Rust unit test is recorded under its crate's root, and written in
+        // the module file its path leads to: that file is its own.
+        let own_file = rust_test_name(record).map_or_else(
+            || record.test.file.clone(),
+            |name| crate::test_loads::rust_test_place(&root, &record.test.file, name).0,
+        );
+        let in_test_code = test_only.get(own_file.as_str()).map(|module| {
+            rust_test_name(record).is_some_and(|name| {
+                module
+                    .iter()
+                    .any(|path| name == path || name.starts_with(&format!("{path}::")))
+            })
+        });
+        match in_test_code {
+            Some(true) => reasons.push(format!(
+                "{own_file}: its test code changed (this test is in it)"
             )),
+            Some(false) => {}
+            None => test_file_reasons(changes.get(own_file.as_str()), &mut reasons),
         }
         for (file, units) in &record.files {
             // A change to a Rust file's test code alone reaches the tests in
-            // that code, and no test that only ran the file's other code.
-            if let Some(module) = test_only.get(file.as_str()) {
-                let own = rust_test_name(record).is_some_and(|name| {
-                    module
-                        .iter()
-                        .any(|path| name == path || name.starts_with(&format!("{path}::")))
-                });
-                if own {
-                    reasons.push(format!(
-                        "{file}: its test code changed (this test is in it)"
-                    ));
-                }
+            // it, said above, and no test that only ran the file's other code.
+            if test_only.contains_key(file.as_str()) {
                 continue;
             }
             let code = manifest.files.get(file).and_then(|f| f.code.as_ref());
@@ -1416,34 +1432,51 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
 /// Whether a Rust declaration is test code -- a `#[test]` function or one
 /// inside a `#[cfg(test)]` module -- which no probe measures.
 fn test_code(root: &Path, file: &str, path: &str) -> bool {
-    let Some(outline) = fs::read_to_string(root.join(file))
+    let outline = fs::read_to_string(root.join(file))
         .ok()
         .and_then(|source| crate::rust_reads::outline(&source))
-    else {
-        return false;
-    };
+        .unwrap_or_default();
+    // A module is no code of its own: what is inside one is.
     outline
         .test_modules
         .iter()
-        .any(|module| path == module || path.starts_with(&format!("{module}::")))
+        .any(|module| path.starts_with(&format!("{module}::")))
         || outline
             .functions
             .iter()
             .any(|function| function.test && function.path == path)
 }
 
+/// Why a test is affected by a change to its own file.
+fn test_file_reasons(change: Option<&FileChange<'_>>, reasons: &mut Vec<String>) {
+    match change {
+        None | Some(FileChange::Same | FileChange::CommentsOnly | FileChange::Added) => {}
+        Some(FileChange::Removed) => reasons.push("test file removed".to_owned()),
+        Some(FileChange::Bytes) => reasons.push("test file changed".to_owned()),
+        Some(FileChange::Code {
+            before,
+            after,
+            diff,
+            ..
+        }) => reasons.push(format!(
+            "test file changed: {}",
+            describe(before, after, diff)
+        )),
+    }
+}
+
 /// A Rust source file's module path in its crate: `run::tests` for
-/// `src/run/tests.rs`, empty for the crate root; `None` outside `src/`.
-fn rust_module_path(file: &str) -> Option<String> {
-    let (_, inside) = file
-        .split_once("/src/")
-        .or_else(|| file.strip_prefix("src/").map(|rest| ("", rest)))?;
-    let inside = inside.strip_suffix(".rs")?;
-    let mut parts = inside.split('/').collect::<Vec<_>>();
+/// `src/run/tests.rs`, empty for the crate root.
+fn rust_module_path(file: &str) -> String {
+    let inside = file.rsplit_once("src/").map_or(file, |(_, inside)| inside);
+    let mut parts = inside
+        .trim_end_matches(".rs")
+        .split('/')
+        .collect::<Vec<_>>();
     if matches!(parts.last(), Some(&"lib" | &"main" | &"mod")) {
         parts.pop();
     }
-    Some(parts.join("::"))
+    parts.join("::")
 }
 
 /// A Rust test's name within its crate, for reading what it names: the
@@ -1506,10 +1539,11 @@ fn embedded_files(
             continue;
         };
         let directory = Path::new(file).parent().unwrap_or(Path::new(""));
-        for embed in outline.embeds {
-            let Some(path) = normal_path(&directory.join(&embed.path)) else {
-                continue;
-            };
+        // A path that climbs out of the checkout names nothing in it.
+        let embeds = outline.embeds.into_iter().filter_map(|embed| {
+            crate::test_loads::normal(&directory.join(&embed.path)).map(|path| (embed, path))
+        });
+        embeds.for_each(|(embed, path)| {
             let line = source[..embed.offset].matches('\n').count() + 1;
             let column = embed.offset - source[..embed.offset].rfind('\n').map_or(0, |n| n + 1) + 1;
             let now_unit = now
@@ -1525,36 +1559,18 @@ fn embedded_files(
                 || "top level".to_owned(),
                 |code| code.units[unit].describe(),
             );
-            for asset in changed.iter().filter(|asset| {
-                if embed.prefix {
-                    asset.starts_with(&format!("{}/", path.trim_end_matches('/')))
-                } else {
-                    **asset == path
-                }
-            }) {
-                embedded
-                    .entry((*asset).to_owned())
-                    .or_insert_with(|| (file.clone(), unit, what.clone()));
-            }
-        }
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            changed
+                .iter()
+                .filter(|asset| embed.prefix && asset.starts_with(&prefix) || **asset == path)
+                .for_each(|asset| {
+                    embedded
+                        .entry((*asset).to_owned())
+                        .or_insert_with(|| (file.clone(), unit, what.clone()));
+                });
+        });
     }
     embedded
-}
-
-/// `a/./b/../c` as `a/c`, refusing a path that climbs out of the root.
-fn normal_path(path: &Path) -> Option<String> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => parts.push(part.to_str()?.to_owned()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                parts.pop()?;
-            }
-            _ => return None,
-        }
-    }
-    Some(parts.join("/"))
 }
 
 /// For each changed JVM file whose declarations changed, the names a test
@@ -2778,19 +2794,31 @@ mod tests {
     #[test]
     fn a_rust_test_reaches_what_it_names_and_what_its_code_embeds() {
         let project = Project::new("rust");
-        let lib = "pub fn page() -> &'static str {\n    include_str!(\"../assets/page.html\")\n}\npub fn other() -> u8 {\n    1\n}\n#[cfg(windows)]\npub fn windows() -> u8 {\n    2\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn checks() {}\n}\n";
-        fs::create_dir_all(project.root.join("assets")).unwrap();
+        let lib = "pub fn page() -> &'static str {\n    include_str!(\"../assets/page.html\")\n}\npub fn other() -> u8 {\n    1\n}\n#[cfg(windows)]\npub fn windows() -> u8 {\n    2\n}\nconst NOTE: &str = include_str!(\"../assets/note.txt\");\npub fn bytes() -> &'static [u8] {\n    include_bytes!(concat!(\"../assets/dir/\", \"a.bin\"))\n}\nconst OUT: &str = include_str!(\"../../outside.txt\");\n#[test]\nfn standalone() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn checks() {}\n}\n";
+        let run_rs = "pub fn run() -> u8 {\n    1\n}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn runs() {}\n}\n";
+        fs::create_dir_all(project.root.join("assets/dir")).unwrap();
         fs::create_dir_all(project.root.join("tests/fixtures/one")).unwrap();
         project.write("src/lib.rs", lib);
+        project.write("src/run.rs", run_rs);
+        project.write("src/win.rs", "pub fn only_here() {}\n");
         project.write("assets/page.html", "<p>");
-        project.write("tests/cli.rs", "#[test]\nfn reads_one() { let _ = \"tests/fixtures/one\"; }\n#[test]\nfn reads_none() {}\n");
+        project.write("assets/note.txt", "note");
+        project.write("assets/dir/a.bin", "a");
+        project.write(
+            "tests/cli.rs",
+            "#[test]\nfn reads_one() { let _ = \"tests/fixtures/one\"; }\n#[test]\nfn reads_none() {}\n",
+        );
         project.write("tests/fixtures/one/data.txt", "1");
         project.write("tests/fixtures/two.txt", "2");
         let files = [
             "src/app.js",
             "tests/app.test.js",
             "src/lib.rs",
+            "src/run.rs",
+            "src/win.rs",
             "assets/page.html",
+            "assets/note.txt",
+            "assets/dir/a.bin",
             "tests/cli.rs",
             "tests/fixtures/one/data.txt",
             "tests/fixtures/two.txt",
@@ -2800,25 +2828,47 @@ mod tests {
             crate::run_store::create_analyzable_test_run,
             &files,
         );
-        let code = load_manifest(&run).unwrap().manifest.files["src/lib.rs"]
-            .code
-            .clone()
-            .unwrap();
-        let unit = |path: &str| code.units.iter().position(|u| u.path == path).unwrap();
-        let (page, other) = (unit("page"), unit("other"));
+        let stored = load_manifest(&run).unwrap().manifest;
+        let unit = |file: &str, path: &str| {
+            stored.files[file]
+                .code
+                .as_ref()
+                .unwrap()
+                .units
+                .iter()
+                .position(|u| u.path == path)
+                .unwrap()
+        };
+        let (page, other, ran) = (
+            unit("src/lib.rs", "page"),
+            unit("src/lib.rs", "other"),
+            unit("src/run.rs", "run"),
+        );
         edit_record(&run, |executions| {
-            let mut record = executions.tests[0].clone();
-            record.test.file = "tests/cli.rs".into();
-            record.test.name = "tests/cli.rs::reads_one".into();
-            record.files = BTreeMap::from([("src/lib.rs".to_owned(), vec![page])]);
-            let mut none = record.clone();
-            none.test.name = "tests/cli.rs::reads_none".into();
-            none.files = BTreeMap::from([("src/lib.rs".to_owned(), vec![other])]);
-            executions.tests = vec![record, none];
+            let template = executions.tests[0].clone();
+            let record = |file: &str, name: &str, ran: Vec<(&str, usize)>| {
+                let mut record = template.clone();
+                record.test.file = file.into();
+                record.test.name = format!("{file}::{name}");
+                record.files = ran
+                    .into_iter()
+                    .map(|(file, unit)| (file.to_owned(), vec![unit]))
+                    .collect();
+                record
+            };
+            executions.tests = vec![
+                record("tests/cli.rs", "reads_one", vec![("src/lib.rs", page)]),
+                record("tests/cli.rs", "reads_none", vec![("src/lib.rs", other)]),
+                record("src/lib.rs", "tests::checks", vec![("src/lib.rs", other)]),
+                record("src/lib.rs", "standalone", vec![("src/lib.rs", other)]),
+                record("src/lib.rs", "run::tests::runs", vec![("src/run.rs", ran)]),
+            ];
             executions
                 .probed
                 .insert("src/lib.rs".into(), vec![page, other]);
+            executions.probed.insert("src/run.rs".into(), vec![ran]);
         });
+        let affected = |project: &Project| bucket(&project.affected(&run), "affected");
         // The embedded page reaches the test that ran `page` alone.
         project.write("assets/page.html", "<p>changed");
         let report = project.affected(&run);
@@ -2834,22 +2884,26 @@ mod tests {
                 .contains("embedded by src/lib.rs: page (line 1)")
         );
         project.write("assets/page.html", "<p>");
+        // Embedded in a constant, no probe says who read it: every test that
+        // ran code in the file.
+        project.write("assets/note.txt", "changed");
+        assert_eq!(affected(&project).len(), 4);
+        project.write("assets/note.txt", "note");
+        // Embedded by a directory, in a function no test ran: none.
+        project.write("assets/dir/a.bin", "b");
+        assert!(affected(&project).is_empty());
+        project.write("assets/dir/a.bin", "a");
         // The fixture one test names reaches it alone; one no test names
         // reaches every test.
         project.write("tests/fixtures/one/data.txt", "changed");
-        let report = project.affected(&run);
-        assert_eq!(
-            bucket(&report, "affected"),
-            ["tests/cli.rs::reads_one"],
-            "{report}"
-        );
+        assert!(affected(&project).contains(&"tests/cli.rs::reads_one".to_owned()));
+        assert!(!affected(&project).contains(&"tests/cli.rs::reads_none".to_owned()));
         project.write("tests/fixtures/one/data.txt", "1");
         project.write("tests/fixtures/two.txt", "changed");
-        let report = project.affected(&run);
-        assert_eq!(bucket(&report, "affected").len(), 2, "{report}");
+        assert_eq!(affected(&project).len(), 5);
         project.write("tests/fixtures/two.txt", "2");
-        // A change to test code alone reaches no test that only ran the
-        // file's other code.
+        // A change to test code alone reaches the tests in it, and no test
+        // that only ran the file's other code.
         project.write(
             "src/lib.rs",
             &lib.replace(
@@ -2858,12 +2912,39 @@ mod tests {
             ),
         );
         let report = project.affected(&run);
-        assert!(bucket(&report, "affected").is_empty(), "{report}");
-        // Code the run never compiled is named; test code is not.
+        assert_eq!(
+            bucket(&report, "affected"),
+            ["src/lib.rs::tests::checks"],
+            "{report}"
+        );
+        project.write(
+            "src/lib.rs",
+            &lib.replace("fn standalone() {}", "fn standalone() { let _ = 1; }"),
+        );
+        assert_eq!(affected(&project), ["src/lib.rs::standalone"]);
+        project.write("src/lib.rs", lib);
+        project.write(
+            "src/run.rs",
+            &run_rs.replace("fn runs() {}", "fn runs() { let _ = 1; }"),
+        );
+        assert_eq!(affected(&project), ["src/lib.rs::run::tests::runs"]);
+        // With code beside it, the change is the file's, as before.
+        project.write(
+            "src/run.rs",
+            &format!(
+                "{}pub fn added() {{}}\n",
+                run_rs.replace("fn runs() {}", "fn runs() { let _ = 1; }")
+            ),
+        );
+        assert_eq!(affected(&project), ["src/lib.rs::run::tests::runs"]);
+        project.write("src/run.rs", run_rs);
+        // Code the run never compiled is named; test code is not, nor is a
+        // file the run measured that is gone, where nothing probed it.
         project.write(
             "src/lib.rs",
             &lib.replace("    2\n", "    3\n")
-                .replace("fn checks() {}", "fn checks() { let _ = 1; }"),
+                .replace("fn checks() {}", "fn checks() { let _ = 1; }")
+                .replace("fn standalone() {}", "fn standalone() { let _ = 1; }"),
         );
         let report = project.affected(&run);
         assert_eq!(
@@ -2871,6 +2952,23 @@ mod tests {
             json!(["src/lib.rs: windows (line 7)"]),
             "{report}"
         );
+        project.write("src/lib.rs", lib);
+        fs::remove_file(project.root.join("src/win.rs")).unwrap();
+        fs::remove_file(project.root.join("src/run.rs")).unwrap();
+        let report = project.affected(&run);
+        assert_eq!(
+            report["unmeasured"],
+            json!(["src/win.rs (no probe of the run measured it)"]),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_rust_file_s_module_path_is_its_path_in_its_crate() {
+        assert_eq!(rust_module_path("crates/a/src/lib.rs"), "");
+        assert_eq!(rust_module_path("src/run/mod.rs"), "run");
+        assert_eq!(rust_module_path("crates/a/src/run/tests.rs"), "run::tests");
+        assert_eq!(rust_module_path("build.rs"), "build");
     }
 
     /// A JVM file whose declarations changed reaches a test whose file names
