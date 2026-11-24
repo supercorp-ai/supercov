@@ -24117,7 +24117,8 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
 /// candidates that already passed with it, and the next pass resumes there:
 /// in a spec file with a serial describe of six tests that each wait for
 /// the page to become active, a mutant no test detects (what the page logs)
-/// runs each candidate once over all the passes, never one it passed again,
+/// runs, in the pass to its end, exactly the candidates no pass before
+/// recorded, never one it passed again,
 /// and survives with all six (a test the stop itself failed, its server
 /// gone, kills nothing); one only the file's last test detects is killed by
 /// it, whichever pass got there.
@@ -24324,11 +24325,31 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
             assert!(!before.contains(title), "{title} ran again\n{log}");
         }
         if !before.is_empty() {
-            resumed_from = before;
+            resumed_from = before.clone();
             assert!(
                 said.contains("mutant(s) resume where earlier passes left them, with "),
                 "{log}"
             );
+        }
+        if !budget {
+            // The pass to its end runs exactly the candidates no pass
+            // before it recorded.
+            let mut left = [
+                "waits 1",
+                "waits 2",
+                "waits 3",
+                "waits 4",
+                "waits 5",
+                "waits 6 and is ready",
+            ]
+            .into_iter()
+            .filter(|title| !before.contains(*title))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let mut last = lived.clone();
+            last.sort();
+            left.sort();
+            assert_eq!(last, left, "{log}");
         }
         ran.extend(lived);
         if !budget {
@@ -24336,8 +24357,11 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
         }
     }
     assert!(!resumed_from.is_empty(), "no pass stopped part way\n{log}");
-    // Over all the passes, each candidate let it live once.
+    // Over all the passes, every candidate let it live. One a stopped pass
+    // ran may run again: what ended after the pass began to stop is not
+    // recorded.
     ran.sort();
+    ran.dedup();
     assert_eq!(
         ran,
         [
