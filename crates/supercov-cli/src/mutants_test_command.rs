@@ -392,6 +392,7 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
                 .args(&command)
                 .env("SUPERCOV_MUTANTS", "1")
                 .stdout(std::io::stderr())
+                // fault-site: mutants-test-command.mutants-command
                 .launch_status()
         });
         if let Err(error) = measured {
@@ -1786,6 +1787,7 @@ fn run_language(
     // The driver's time limit for an attempt goes with the plan it runs.
     let mut written = serde_json::to_value(&pass_plan).expect("plain data serializes");
     written["timeoutFactor"] = json!(factor);
+    // fault-site: mutants-test-command.run-language
     supercov_engine::fault_fs::write(
         &plan_path,
         serde_json::to_vec(&written).expect("plain data serializes"),

@@ -2678,6 +2678,7 @@ fn public_coverage_run(command: Vec<String>, options: RunOptions) -> ExitCode {
     }
     let watchdog_program = std::env::current_exe()
         .ok()
+        // fault-site: main.public-coverage-run
         .and_then(|path| fs::canonicalize(path).ok());
     let command_words = command.clone();
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
@@ -4287,7 +4288,6 @@ fn instrument_js() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// Below the lines tests name by number (main.rs:2482).
 mod mutants_export;
 mod mutants_test_command;
 mod strong_status;

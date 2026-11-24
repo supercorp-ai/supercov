@@ -385,6 +385,7 @@ fn safe_relative_source(root: &Path, relative: &str) -> Option<PathBuf> {
     {
         return None;
     }
+    // fault-site: html-report.safe-relative-source
     let root = fs::canonicalize(root).ok()?;
     let source = fs::canonicalize(root.join(relative)).ok()?;
     source.starts_with(&root).then_some(source)
@@ -407,6 +408,7 @@ fn collect_sources(
             omitted.push(file.file.clone());
             return;
         };
+        // fault-site: html-report.collect-sources.metadata
         let Ok(metadata) = fs::metadata(&path) else {
             omitted.push(file.file.clone());
             return;
@@ -420,6 +422,7 @@ fn collect_sources(
             omitted.push(file.file.clone());
             return;
         }
+        // fault-site: html-report.collect-sources.read-to-string
         let Ok(contents) = fs::read_to_string(&path) else {
             omitted.push(file.file.clone());
             return;
@@ -722,6 +725,7 @@ fn collect_quality_sources(
             omit(&mut omitted);
             continue;
         };
+        // fault-site: html-report.collect-quality-sources
         let Ok(metadata) = fs::metadata(&path) else {
             omit(&mut omitted);
             continue;

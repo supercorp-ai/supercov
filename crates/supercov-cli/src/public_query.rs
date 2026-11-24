@@ -959,6 +959,7 @@ fn json_files(directory: &std::path::Path) -> std::io::Result<Vec<String>> {
     // The directory given first, then each found below it.
     let mut directory = directory.to_path_buf();
     loop {
+        // fault-site: public-query.json-files
         for entry in supercov_engine::fault_fs::read_dir(&directory)? {
             let path = entry?.path();
             if path.is_dir() {
