@@ -122,6 +122,22 @@ function builtFromTag(version) {
   return binary;
 }
 
+/** The newest release tag's version (`v4.29.8` is `4.29.8`), or null. */
+function newestTag() {
+  const listed = spawnSync("git", ["ls-remote", "--tags", "--refs", "origin", "v*"], {
+    encoding: "utf8",
+  });
+  if (listed.status !== 0) return null;
+  const versions = listed.stdout
+    .split("\n")
+    .map((line) => /refs\/tags\/v(\d+)\.(\d+)\.(\d+)$/.exec(line.trim()))
+    .filter(Boolean)
+    .map((found) => found.slice(1, 4).map(Number));
+  versions.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  const newest = versions.at(-1);
+  return newest ? newest.join(".") : null;
+}
+
 function released() {
   if (process.env.SUPERCOV_BENCHMARK_REFERENCE)
     return {
@@ -141,8 +157,14 @@ function released() {
   });
   const version = viewed.stdout?.trim();
   if (viewed.status !== 0 || !/^\d+\.\d+\.\d+$/.test(version)) return null;
-  if (process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILD && process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILT)
-    return { version: `${version} built the same way`, binary: builtFromTag(version) };
+  if (process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILD && process.env.SUPERCOV_BENCHMARK_REFERENCE_BUILT) {
+    // Built from its source, the last release is the newest tag: a release
+    // reaches npm minutes before its publish pushes the tag, and a run in
+    // between asked for a tag that was not there yet.
+    const tagged = newestTag();
+    if (!tagged) return null;
+    return { version: `${tagged} built the same way`, binary: builtFromTag(tagged) };
+  }
   const directory = resolve("target/benchmark-reference", version);
   const binary = resolve(directory, "package/bin", executable);
   if (!existsSync(binary)) {
