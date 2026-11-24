@@ -17,8 +17,12 @@ on:
   # than the runners do. A draft gets CI only: some eighty jobs per draft,
   # ten drafts open, held every job at the runner limit for hours. Marking a
   # pull request ready starts the matrix.
+  # A pull request runs the Linux legs alone, of the jobs its change can
+  # affect; a release pull request, or the `full-ci` label, runs every
+  # platform (scripts/ci-affected.mjs). A change to the corpus alone runs
+  # none: CI's check job reads its records.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 permissions:
   contents: read
   # The stop-on-failure step cancels this commit's runs.
@@ -27,15 +31,33 @@ permissions:
 # A push to a pull request replaces the run of the commit before it. A run started by hand is left
 # to finish.
 concurrency:
-  group: compatibility-${{ github.ref }}
+  group: compatibility-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Each test step has a limit of its own, about twice its slowest run:
   # a hang fails there, in minutes, with the step named, instead of
   # running to its job's limit and saying only that it was cancelled.
+  # Which jobs this change can affect (scripts/ci-affected.mjs), as in CI:
+  # the step summary says why each runs in full, in part, or not at all.
+  plan:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: compatibility
+
   node:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',node,')) && fromJSON(needs.plan.outputs.jobs)['node'].run }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -63,7 +85,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   runners:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,')) && fromJSON(needs.plan.outputs.jobs)['runners'].run }}
     name: ${{ matrix.name }} runners
     # The oldest Playwright supported predates the Ubuntu 26.04 that
     # ubuntu-latest is now, and has no browser builds for it: the minimum leg
@@ -121,7 +144,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   browsers:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,')) && fromJSON(needs.plan.outputs.jobs)['browsers'].run }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -152,7 +176,8 @@ jobs:
   # Linux x64 is left out: CI's check job runs the workspace tests and clippy
   # there, and engine-integrations the supervision and crash scripts.
   filesystems:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,')) && fromJSON(needs.plan.outputs.jobs)['filesystems'].run }}
     name: Filesystem safety (${{ matrix.os }}, ${{ matrix.partition }})
     runs-on: ${{ matrix.os }}
     # Windows builds the workspace in about 7 minutes and ran its tests in
@@ -162,8 +187,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
-        partition: [1, 2, 3]
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).filesystems.os }}
+        # Three parts of every test, or one of the affected tests alone.
+        partition: ${{ fromJSON(needs.plan.outputs.jobs).filesystems.matrix.partition }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).filesystems.mode == 'partial' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -195,7 +223,19 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
-      - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.partition }}/3
+      # The affected tests and every test of a file the change touched, as
+      # in CI's check job.
+      - if: env.AFFECTED == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: affected-selection
+      - if: env.AFFECTED == 'true'
+        shell: bash
+        run: |
+          cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
+          node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "NEXTEST_PROFILE=affected" >> "$GITHUB_ENV"
+      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass --partition hash:${{ matrix.partition }}/${{ env.AFFECTED == 'true' && 1 || 3 }}
         timeout-minutes: 30
       - if: matrix.partition == 1
         run: cargo test --workspace --doc && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs
@@ -205,7 +245,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   python:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',python,')) && fromJSON(needs.plan.outputs.jobs)['python'].run }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     # 3.9 has no build for the Ubuntu 26.04 ubuntu-latest is now; it is
     # still measured on Linux, on the last Ubuntu that has one.
@@ -214,7 +255,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).python.os }}
         python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -267,14 +308,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   ruby:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,')) && fromJSON(needs.plan.outputs.jobs)['ruby'].run }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).ruby.os }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -311,14 +353,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   rust:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) && fromJSON(needs.plan.outputs.jobs)['rust'].run }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).rust.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -352,7 +395,8 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   go:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',go,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',go,')) && fromJSON(needs.plan.outputs.jobs)['go'].run }}
     # Go 1.22 on the newest macOS is not a thing that can work: its linker
     # writes no LC_UUID and macOS 26's dyld refuses to load a binary without
     # one, so every test binary the toolchain builds aborts before `main`.
@@ -366,7 +410,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).go.os }}
         # 1.22 is the oldest the generated harness targets; the rest is what
         # projects are actually on. 1.26 earns its place on its own: it is the
         # release that let `new` take a value, which the grammar Supercov
@@ -420,14 +464,15 @@ jobs:
         uses: ./.github/actions/stop-on-failure
 
   jvm:
-    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) }}
+    needs: plan
+    if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) && fromJSON(needs.plan.outputs.jobs)['jvm'].run }}
     name: JDK ${{ matrix.java }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
+        os: ${{ inputs.os && fromJSON(inputs.os) || fromJSON(needs.plan.outputs.jobs).jvm.os }}
         # 17 is the floor the documentation claims; 21 is the current LTS.
         java: ["17", "21"]
         exclude:

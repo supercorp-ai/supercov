@@ -32,7 +32,18 @@ jobs:
       - id: version
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BRANCH: ${{ github.head_ref }}
         run: |
+          # A release pull request alone: one titled `Release <v>` or on a
+          # `release/` branch. A feature branch that carries the next version
+          # held eight native builds, two of them on the five macOS runners the
+          # organisation has, on every push, while a release waited behind it.
+          # Published from elsewhere, publish.yml builds the natives itself.
+          if ! [[ "$TITLE" =~ ^Release\ [0-9]+\.[0-9]+\.[0-9]+ || "$BRANCH" == release/* ]]; then
+            echo "Not a release pull request: no native builds."
+            exit 0
+          fi
           carried=$(node -p 'require("./package.json").version')
           before=$(git show "$BASE:package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
           if [ "$carried" != "$before" ]; then

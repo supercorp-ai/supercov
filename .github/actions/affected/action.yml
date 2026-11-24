@@ -1,0 +1,95 @@
+name: Affected jobs
+description: >-
+  Which of this workflow's jobs a pull request's change can affect, from
+  Supercov's own `tests affected` over the Self Coverage run of the newest
+  commit the pull request descends from (the map, kept by self-coverage.yml
+  on every push to main and every full run by hand). Every job runs in full on a push,
+  a run by hand, a release pull request, a change to how CI runs, and
+  whenever there is no map or its answer cannot be trusted. Needs a checkout
+  with full history and `actions: read`. The reasons go to the step summary;
+  the tests a partial job runs to the `affected-selection` artifact.
+inputs:
+  workflow:
+    description: ci, compatibility, self-coverage, next or react
+    required: true
+outputs:
+  jobs:
+    description: Each job's {run, mode, matrix, why}, as JSON
+    value: ${{ steps.plan.outputs.jobs }}
+runs:
+  using: composite
+  steps:
+    - name: What the pull request changes
+      shell: bash
+      run: |
+        changed="$RUNNER_TEMP/changed.txt"
+        : > "$changed"
+        if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          # The checkout is the merge of the pull request into its base: its
+          # first parent is the base, so this is the pull request's change.
+          git diff --name-only HEAD^1 HEAD > "$changed" || rm -f "$changed"
+        fi
+        echo "CHANGED=$changed" >> "$GITHUB_ENV"
+    - name: Find the map
+      id: map
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        mode=$(node scripts/ci-affected.mjs triage "${{ inputs.workflow }}" | jq -r .mode)
+        echo "mode=$mode" >> "$GITHUB_OUTPUT"
+        [ "$mode" = map ] || exit 0
+        base=$(git rev-parse HEAD^1)
+        # The newest Self Coverage run whose commit the base holds, with its
+        # map kept (every push to main keeps one, and so does a full run by
+        # hand): the commits between are ones the map does not know, and
+        # `tests affected` reads them as changes.
+        found=""
+        while read -r id sha; do
+          [ -n "$id" ] || continue
+          git merge-base --is-ancestor "$sha" "$base" 2>/dev/null || continue
+          if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?name=affected-map" --jq '.artifacts[] | select(.expired | not) | .id' | grep -q .; then
+            found="$id $sha"
+            break
+          fi
+        done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow self-coverage.yml --limit 60 \
+          --json databaseId,headSha,status --jq '.[] | select(.status == "completed") | "\(.databaseId) \(.headSha)"')
+        if [ -z "$found" ]; then
+          echo "MAP_REASON=no Self Coverage map of a commit this pull request descends from" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        read -r id sha <<< "$found"
+        echo "The map: Self Coverage run $id of $sha ($(git rev-list --count "$sha..$base") commit(s) behind the base)."
+        mkdir -p "$RUNNER_TEMP/map"
+        if ! gh run download "$id" --repo "$GITHUB_REPOSITORY" -n affected-map -D "$RUNNER_TEMP/map"; then
+          echo "MAP_REASON=the map of run $id could not be fetched" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        tar -xzf "$RUNNER_TEMP/map/map.tar.gz" -C .
+        chmod +x "$RUNNER_TEMP/map/supercov"
+        echo "run=$(cat "$RUNNER_TEMP/map/merged-id")" >> "$GITHUB_OUTPUT"
+        echo "MAP_SHA=$sha" >> "$GITHUB_ENV"
+    - name: Ask the map
+      if: steps.map.outputs.run != ''
+      shell: bash
+      run: |
+        answer="$RUNNER_TEMP/answer"
+        mkdir -p "$answer"
+        started=$(date +%s)
+        run="${{ steps.map.outputs.run }}"
+        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --json > "$answer/affected.json" || true
+        # --names and --files list every test to run, where --json keeps to
+        # an agent's budget.
+        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --names > "$answer/names.txt" || rm -f "$answer/names.txt"
+        "$RUNNER_TEMP/map/supercov" runs "$run" tests affected --files > "$answer/files.txt" || rm -f "$answer/files.txt"
+        echo "tests affected answered in $(( $(date +%s) - started )) s"
+        jq -c '{summary: .data.summary, workingTree: .data.workingTree, unmeasured: .data.unmeasured, error: .error}' "$answer/affected.json" | head -c 3000; echo
+    - name: Plan the jobs
+      id: plan
+      shell: bash
+      run: node scripts/ci-affected.mjs plan "${{ inputs.workflow }}" "$RUNNER_TEMP/answer"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: affected-selection
+        path: selection.json
+        retention-days: 3

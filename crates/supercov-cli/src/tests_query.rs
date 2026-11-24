@@ -21,6 +21,14 @@ is not affected by a change confined to code it never ran, nor by comments,
 blank lines or trailing whitespace. A test that did not pass in the run is
 listed as affected: it has a result to establish.
 
+A Rust test is affected by a change to a file it names by path -- a fixture,
+a script and what that script imports or names in turn -- in its own function
+(or its entry of a macro that declares a test per entry), or anywhere in its
+file outside another test. A file measured Rust source embeds (`include_str!`,
+`include_bytes!`) counts as part of the declaration embedding it. Changed code
+no probe of the run measured -- another platform's, a feature left off -- is
+listed as unmeasured: no record says which tests it reaches.
+
 A dependency, lockfile, configuration or toolchain change affects every test.
 A source file added since the run is not seen by any test's record; the
 working-tree check names that case and the suite should run in full.
@@ -649,6 +657,13 @@ fn runner_filter_name(file: &str, name: &str) -> String {
         .any(|extension| file.ends_with(extension));
     if javascript {
         name.replace(" > ", " ")
+    } else if file.ends_with(".rs") {
+        // A Rust test is recorded under its file; libtest and nextest filter
+        // by its path in its crate (`cargo test -- --exact tests::it_works`).
+        name.strip_prefix(file)
+            .and_then(|rest| rest.strip_prefix("::"))
+            .unwrap_or(name)
+            .to_owned()
     } else {
         name.to_owned()
     }
@@ -657,6 +672,43 @@ fn runner_filter_name(file: &str, name: &str) -> String {
 /// A mistake and the guide to put it right, both on standard error: a
 /// script reading `--names` from standard output must not take the guide for
 /// test names.
+/// The files that configure how Cargo builds and runs a Rust run's tests.
+const RUST_CONFIGURATION: [&str; 5] = [
+    ".cargo/config",
+    ".cargo/config.toml",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".config/nextest.toml",
+];
+
+/// Whether a Rust run's configuration changed only in files that configure
+/// nothing Cargo does. A Rust run's fingerprint counts every project file that
+/// is neither source nor a manifest as configuration -- a fixture, a script, a
+/// page of documentation -- so any of them changing read as a change to every
+/// test. Each such file is a helper here, judged test by test by what each
+/// test names; only Cargo's own configuration reaches every test.
+fn rust_helpers_only(root: &Path, run: &StoredRun) -> bool {
+    if !run
+        .metadata
+        .integrity
+        .instrumenter_version
+        .starts_with("supercov-rust")
+    {
+        return false;
+    }
+    let Ok(files) = supercov_engine::source_manifest::load_manifest(run) else {
+        return false;
+    };
+    let recorded = &files.manifest.files;
+    let changed = RUST_CONFIGURATION.iter().any(|file| {
+        let now = supercov_engine::fault_fs::read_to_string(root.join(file))
+            .ok()
+            .map(|text| supercov_engine::source_manifest::FileFingerprint::of(&text).sha256);
+        now != recorded.get(*file).map(|was| was.sha256.clone())
+    });
+    !changed
+}
+
 /// Whether every configuration file that changed since the run, or was added
 /// since, belongs to a test runner its tests did not run under: the
 /// Playwright configuration changing changes nothing a Vitest run did, and
@@ -704,7 +756,8 @@ fn working_tree(root: &Path, run: &StoredRun, data: &mut Value) -> Value {
         .iter()
         .filter(|r| RUN_WIDE.contains(&r.as_str()))
         .filter(|r| {
-            r.as_str() != "test/build configuration changed" || !other_runners_only(root, run)
+            r.as_str() != "test/build configuration changed"
+                || !(other_runners_only(root, run) || rust_helpers_only(root, run))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -855,6 +908,17 @@ fn render(data: &Value) -> String {
                 ));
             }
         }
+    }
+    let unmeasured = data["unmeasured"].as_array().cloned().unwrap_or_default();
+    if !unmeasured.is_empty() {
+        out.push_str(&format!(
+            "Changed code the run measured nothing of (another platform's, or compiled out): {}. No test's record says what it reaches; run the suite in full where it is compiled.\n",
+            unmeasured
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     }
     entries(&mut out, &affected);
     if !undetermined.is_empty() {
@@ -1050,6 +1114,36 @@ mod tests {
         // The first `return 1` was edited; the second still stands.
         let run = ["if a:", "return 0", "x = 2", "return 1"];
         assert_eq!(aligned(&run, &lines), vec![true, false, true, true]);
+    }
+
+    #[test]
+    fn a_runner_filter_name_is_what_the_runner_matches() {
+        assert_eq!(
+            runner_filter_name("a.test.ts", "suite > case"),
+            "suite case"
+        );
+        assert_eq!(
+            runner_filter_name("tests/cli.rs", "tests/cli.rs::it_works"),
+            "it_works"
+        );
+        assert_eq!(runner_filter_name("src/lib.rs", "other::it"), "other::it");
+        assert_eq!(
+            runner_filter_name("test_a.py", "test_a.py::test_b"),
+            "test_a.py::test_b"
+        );
+    }
+
+    #[test]
+    fn the_text_view_says_what_changed_code_the_run_never_measured() {
+        let data = json!({
+            "run": "r", "summary": {"tests": 1}, "affected": [], "undetermined": [],
+            "unmeasured": ["src/lib.rs: windows (line 7)"],
+        });
+        assert!(
+            render(&data).contains("src/lib.rs: windows (line 7)"),
+            "{}",
+            render(&data)
+        );
     }
 
     #[test]

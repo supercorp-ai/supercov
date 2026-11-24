@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- `tests affected` reads what a Rust test loads: the files and directories it names by path, in its own function (or its entry of a macro that declares a test per entry) or anywhere in its file outside another test, the module files of an integration test, and what a script it names imports and names in turn (`tests/fixtures/{name}` names `tests/fixtures`). A change to a fixture or a script affects the tests that name it; before, any file outside the measured source affected every Rust test.
+- A file measured Rust source embeds with `include_str!`, `include_bytes!` or `include!` is part of the declaration that embeds it: a template or a script compiled into the binary affects the tests that ran that code, not every test.
+- In a Rust run, a change to a project file that is neither Rust source nor a manifest -- a fixture, a script, documentation -- no longer reads as a configuration change that affects every test: it is a helper, judged test by test as above. Only Cargo's own configuration (`.cargo/config.toml`, `rust-toolchain.toml`, `.config/nextest.toml`) still affects every test.
+- A change confined to a Rust file's test code (its `#[cfg(test)]` modules and `#[test]` functions) affects the tests in that code alone, not every test that ran the file's other code.
+- `tests affected --names` prints a Rust test as its path in its crate (`tests::it_works`), which `cargo test -- --exact` and nextest's `test(=...)` match, instead of the record's `file::name`.
+
+**Added**
+
+- `tests affected` names changed code no probe of the run measured -- another platform's, a feature the build left off, a `const fn` -- under `unmeasured` (`--json`) and in the text: no test's record can say what it reaches.
+
 ## 4.29.11
 
 **Changed**

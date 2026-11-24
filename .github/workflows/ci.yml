@@ -11,7 +11,11 @@ on:
   # only when someone remembered to ask for it, which meant a pull request's
   # green tick said the React jobs had passed and nothing
   # about `cargo fmt`, clippy, the workspace tests or the packaged assets.
+  # A pull request runs on Linux alone, the tests its change can affect; the
+  # `full-ci` label, or a release pull request, runs every job on every
+  # platform (scripts/ci-affected.mjs).
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -21,13 +25,35 @@ permissions:
 # A newer push to a pull request, or a newer run started by hand on the same
 # branch for the same jobs, replaces the one before: an iteration that asked
 # again no longer waits behind its own stale run.
+# A label other than `full-ci` is a run of its own that runs nothing, so it
+# cancels nothing.
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.only }}
+  group: ci-${{ github.ref }}-${{ inputs.only }}-${{ github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id || 'run' }}
   cancel-in-progress: true
 
 jobs:
+  # Which jobs this change can affect (scripts/ci-affected.mjs): on a pull
+  # request, the jobs whose tests Self Coverage's map of main says the change
+  # can reach, and only those tests; everything on a run by hand, a release
+  # pull request, a change to CI itself, or when the map cannot answer. The
+  # step summary says why each job runs in full, in part, or not at all.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      jobs: ${{ steps.affected.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: affected
+        uses: ./.github/actions/affected
+        with:
+          workflow: ci
+
   check:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',check,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',check,')) && fromJSON(needs.plan.outputs.jobs)['check'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -35,12 +61,16 @@ jobs:
       matrix:
         # Every supported Node, here only: the Compatibility workflow's Node
         # jobs ran the same check again on 22 and 24.
-        node: [22, 24, 25]
+        node: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.node }}
         # The workspace's tests in two halves, each a share of every test
         # binary by name, run under nextest with the binaries side by side:
         # `cargo test` ran them one after another, six of the job's seven
         # minutes.
-        part: [1, 2]
+        # One part of the affected tests alone (the plan's), or two halves of
+        # every test.
+        part: ${{ fromJSON(needs.plan.outputs.jobs).check.matrix.part }}
+    env:
+      AFFECTED: ${{ fromJSON(needs.plan.outputs.jobs).check.mode == 'partial' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -67,8 +97,19 @@ jobs:
         with:
           step: restore
       - run: npm ci
+      # The affected tests, and every test of a file the change touched (a
+      # test new since the map is in one): a nextest profile of them alone.
+      - if: env.AFFECTED == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: affected-selection
+      - if: env.AFFECTED == 'true'
+        run: |
+          cargo nextest list --workspace --message-format json > "$RUNNER_TEMP/tests.json"
+          node scripts/ci-affected.mjs nextest selection.json "$RUNNER_TEMP/tests.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "NEXTEST_PROFILE=affected" >> "$GITHUB_ENV"
       # Formatting and clippy are the same on every Node: the lint job's.
-      - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.part }}/2
+      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass --partition hash:${{ matrix.part }}/${{ env.AFFECTED == 'true' && 1 || 2 }}
       # Doctests, which nextest does not run, and the tooling checks: with
       # the first half.
       - if: matrix.part == 1
@@ -86,13 +127,15 @@ jobs:
   # Bun ignores the Node preload, so verify source bootstrapping with the
   # reported version and an older Bun release on both host platforms.
   bun-bootstrap:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',bun-bootstrap,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',bun-bootstrap,')) && fromJSON(needs.plan.outputs.jobs)['bun-bootstrap'].run }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux on a pull request; macOS too on a release, main and `full-ci`.
+        os: ${{ fromJSON(needs.plan.outputs.jobs)['bun-bootstrap'].os }}
         bun: [1.2.17, 1.4.4]
     steps:
       - uses: actions/checkout@v6
@@ -119,13 +162,16 @@ jobs:
   # and PowerShell each drop a `--` on the way (#209); real suites are
   # measured through them end to end.
   launch-arguments:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',launch-arguments,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',launch-arguments,')) && fromJSON(needs.plan.outputs.jobs)['launch-arguments'].run }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux on a pull request; every platform on a release, main and
+        # `full-ci`.
+        os: ${{ fromJSON(needs.plan.outputs.jobs)['launch-arguments'].os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -162,7 +208,8 @@ jobs:
 
   # `cargo fmt` and clippy, once: each Node's check job ran them again.
   lint:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',lint,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',lint,')) && fromJSON(needs.plan.outputs.jobs)['lint'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -190,14 +237,15 @@ jobs:
   # (scripts/engine-integrations-group.mjs): one after another they took
   # twelve minutes, the longest job of a run.
   engine-integrations:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',engine-integrations,') }}
-    name: engine-integrations (${{ matrix.group }}/4)
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',engine-integrations,')) && fromJSON(needs.plan.outputs.jobs)['engine-integrations'].run }}
+    name: engine-integrations (${{ matrix.group }}/${{ matrix.groups }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        group: [1, 2, 3, 4]
+      # Four groups of every script, or as few as hold the affected ones.
+      matrix: ${{ fromJSON(needs.plan.outputs.jobs)['engine-integrations'].matrix }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -244,12 +292,14 @@ jobs:
       - uses: ./.github/actions/jvm-dependencies
         with:
           step: restore
-      - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
+      - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} ${{ matrix.groups }}
         env:
+          # The affected scripts alone, where the plan picked some.
+          AFFECTED_SCRIPTS: ${{ fromJSON(needs.plan.outputs.jobs)['engine-integrations'].scripts }}
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
           # mutations.xml is read by PIT's own reader, with this job's Java.
           SUPERCOV_REQUIRE_PIT_READER: "1"
-      - if: matrix.group == 1
+      - if: matrix.group == 1 && (fromJSON(needs.plan.outputs.jobs)['engine-integrations'].mode == 'full' || fromJSON(needs.plan.outputs.jobs)['engine-integrations'].browser)
         run: cargo test -p supercov --test cli a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test
         env:
           SUPERCOV_REQUIRE_BROWSER: "1"
@@ -267,7 +317,8 @@ jobs:
   # machine, where the timing gates (the watchdog's timeout exit) and the
   # fixtures on fixed ports failed for reasons of their own.
   release-gates:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',release-gates,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',release-gates,')) && fromJSON(needs.plan.outputs.jobs)['release-gates'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -322,7 +373,8 @@ jobs:
   # clang's own MC/DC as the oracle for Supercov's: the golden file was made
   # with Apple's toolchain, which the script finds through `xcrun`.
   clang-mcdc-oracle:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',clang-mcdc-oracle,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',clang-mcdc-oracle,')) && fromJSON(needs.plan.outputs.jobs)['clang-mcdc-oracle'].run }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -341,7 +393,8 @@ jobs:
   # generates, and real projects' files parse with it, but for the ones
   # `scripts/kotlin-corpus-failures.txt` names.
   kotlin-grammar:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',kotlin-grammar,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',kotlin-grammar,')) && fromJSON(needs.plan.outputs.jobs)['kotlin-grammar'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -359,7 +412,8 @@ jobs:
 
   # A Rust Worker under `wrangler dev`, measured through wrangler's inspector.
   rust-worker:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-worker,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-worker,')) && fromJSON(needs.plan.outputs.jobs)['rust-worker'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -367,7 +421,7 @@ jobs:
       matrix:
         # One job per gate, side by side: one after another they were the
         # slowest job of the workflow.
-        gate: [rust-worker-playwright, rust-worker-cargo-test, rust-worker-durable-objects]
+        gate: ${{ fromJSON(needs.plan.outputs.jobs)['rust-worker'].matrix.gate }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -404,7 +458,8 @@ jobs:
   # Rust compiled to wasm that JavaScript tests load: node:test through the
   # nodejs glue, Playwright from a web page.
   rust-wasm-js:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm-js,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm-js,')) && fromJSON(needs.plan.outputs.jobs)['rust-wasm-js'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -442,7 +497,8 @@ jobs:
   # Rust tests compiled to wasm, run where Cargo runs them: Node through
   # wasm-bindgen-test-runner, WASI through wasmtime.
   rust-wasm:
-    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm,') }}
+    needs: plan
+    if: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust-wasm,')) && fromJSON(needs.plan.outputs.jobs)['rust-wasm'].run }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -104,6 +104,7 @@ mod rust_mutants;
 pub mod rust_owned_doctests;
 pub mod rust_owned_nextest;
 pub mod rust_project;
+pub mod rust_reads;
 pub mod rust_run;
 pub mod rust_runner_attempt;
 pub mod rust_runtime;

@@ -1,0 +1,130 @@
+name: Affected backtest
+
+# Replays the job selection (scripts/ci-affected.mjs) on past pushes: for each
+# pair, the Self Coverage run of an earlier commit is the map, the later
+# commit is checked out, and `tests affected` says what the change since the
+# map reaches. Each pair's answer and plans are kept as an artifact, to hold
+# against what failed when that push ran everything. Started by hand, or by
+# the `affected-backtest` label on a pull request, which replays the pairs
+# .github/affected-backtest-pairs.json lists. Self Coverage keeps a run's
+# slices for a week: a pair older than that has no map left to replay.
+on:
+  workflow_dispatch:
+    inputs:
+      pairs:
+        description: 'JSON list of [map Self Coverage run id, commit to check out, map commit]; empty for the listed pairs'
+        default: ''
+        type: string
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'affected-backtest'
+    runs-on: ubuntu-latest
+    outputs:
+      pairs: ${{ steps.pairs.outputs.pairs }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - id: pairs
+        env:
+          PAIRS: ${{ inputs.pairs }}
+        run: echo "pairs=${PAIRS:-$(jq -c . .github/affected-backtest-pairs.json)}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: affected-backtest
+      - run: cargo build --release -p supercov
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supercov
+          path: |
+            target/release/supercov
+            scripts/ci-affected.mjs
+          retention-days: 3
+
+  replay:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        pair: ${{ fromJSON(needs.build.outputs.pairs) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.pair[1] }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: supercov
+          path: ${{ runner.temp }}/tool
+      - name: Replay
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAP_RUN: ${{ matrix.pair[0] }}
+          MAP_SHA: ${{ matrix.pair[2] }}
+          TARGET: ${{ matrix.pair[1] }}
+        run: |
+          set -u
+          tool="$RUNNER_TEMP/tool"
+          supercov="$tool/target/release/supercov"
+          chmod +x "$supercov"
+          out="$RUNNER_TEMP/out/$TARGET"
+          mkdir -p "$out" .supercov/runs
+          echo "{\"map\":$MAP_RUN,\"mapSha\":\"$MAP_SHA\",\"target\":\"$TARGET\"}" > "$out/pair.json"
+          started=$(date +%s)
+          gh run download "$MAP_RUN" --repo "$GITHUB_REPOSITORY" -p 'run-ubuntu-latest-*' -D "$RUNNER_TEMP/slices"
+          echo "download=$(( $(date +%s) - started ))" >> "$out/timing.txt"
+          count=0
+          for slice in $(find "$RUNNER_TEMP/slices" -name run.tar.gz); do
+            tar -C .supercov/runs -xzf "$slice"; count=$((count + 1))
+          done
+          echo "slices=$count" >> "$out/timing.txt"
+          # What a map needs: the query index and the assessment input are
+          # left out, as the map artifact leaves them out.
+          du -sh .supercov/runs | tee -a "$out/timing.txt"
+          find .supercov/runs -name 'query-index.v1.bin*' -delete
+          find .supercov/runs -name 'assessment-input.json.gz' -delete
+          find .supercov/runs -name 'statement-spans.json' -delete
+          du -sh .supercov/runs | tee -a "$out/timing.txt"
+          ids=$(ls .supercov/runs)
+          started=$(date +%s)
+          "$supercov" merge $ids > "$out/merge.log" 2>&1 || true
+          echo "merge=$(( $(date +%s) - started ))" >> "$out/timing.txt"
+          merged=$(grep -oE 'merged run run_[0-9a-f]{16}' "$out/merge.log" | awk '{print $3}')
+          if [ -z "$merged" ]; then cat "$out/merge.log"; echo "no merge" > "$out/error.txt"; exit 0; fi
+          git diff --name-only "$MAP_SHA" "$TARGET" > "$out/changed.txt"
+          for kind in json names files; do
+            started=$(date +%s)
+            "$supercov" runs "$merged" tests affected --$kind > "$out/answer.$kind" 2> "$out/answer.$kind.err" || true
+            echo "$kind=$(( $(date +%s) - started ))" >> "$out/timing.txt"
+          done
+          mkdir -p "$out/answer"
+          cp "$out/answer.json" "$out/answer/affected.json"
+          cp "$out/answer.names" "$out/answer/names.txt"
+          cp "$out/answer.files" "$out/answer/files.txt"
+          echo '{"pull_request":{"title":"backtest","head":{"ref":"backtest"}}}' > "$RUNNER_TEMP/event.json"
+          for workflow in ci compatibility self-coverage next react; do
+            GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$RUNNER_TEMP/event.json" CHANGED="$out/changed.txt" \
+              node "$tool/scripts/ci-affected.mjs" plan "$workflow" "$out/answer" > "$out/plan-$workflow.json" 2> "$out/plan-$workflow.err" || true
+          done
+          cat "$out/timing.txt"
+          jq -c '{summary: .data.summary, workingTree: .data.workingTree, unmeasured: .data.unmeasured, error: .error}' "$out/answer.json" | head -c 3000; echo
+          wc -l "$out/answer.names" "$out/answer.files" "$out/changed.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: replay-${{ matrix.pair[1] }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7
