@@ -464,26 +464,48 @@ fn could_infect(
     }
 }
 
-/// Whether a server process ran the mutant's code in this record in a way
-/// a request's own mutant cannot reach, and how.
-fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWide> {
-    let points = [&mutant.statement, &mutant.function]
+/// The points a record's server processes ran, each with whether a request
+/// named none of those runs, and whether one did: read once a record, not
+/// once a mutant, as a record of a large suite holds thousands.
+type ServerRuns<'r> = HashMap<&'r str, (bool, bool)>;
+
+fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
+    let mut runs = ServerRuns::new();
+    for record in raw
+        .server
+        .iter()
+        .filter(|record| record.record_type == "hit")
+    {
+        if let Some(id) = &record.id {
+            let ran = runs.entry(id.as_str()).or_default();
+            ran.0 |= record.request.is_none();
+            ran.1 |= record.request.is_some();
+        }
+    }
+    runs
+}
+
+/// Whether a server process ran the mutant's code in this record (`runs`,
+/// its `server_runs`) in a way a request's own mutant cannot reach, and how.
+fn server_wide(
+    raw: &RawTestResult,
+    runs: &ServerRuns<'_>,
+    mutant: &CandidateMutant,
+) -> Option<ServerWide> {
+    let ran = [&mutant.statement, &mutant.function]
         .into_iter()
         .flatten()
+        .filter_map(|point| runs.get(point.as_str()))
         .collect::<Vec<_>>();
-    let mut ran = raw.server.iter().filter(|record| {
-        record.record_type == "hit" && record.id.as_ref().is_some_and(|id| points.contains(&id))
-    });
-    let first = ran.next()?;
+    if ran.is_empty() {
+        return None;
+    }
     if !matches!(role_of(raw), "test" | "setup") {
         // Work for a request that named no test and ran while none did (a
         // web server's readiness check) ran without any mutant in the pass,
         // as each request runs with its own; only work no request started
         // (start-up, timers) needs the server started with the mutant.
-        if std::iter::once(first)
-            .chain(ran)
-            .any(|record| record.request.is_none())
-        {
+        if ran.iter().any(|(unrequested, _)| *unrequested) {
             return Some(ServerWide::Background);
         }
         return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
@@ -491,9 +513,8 @@ fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWi
     if mutant.function.is_none() {
         return Some(ServerWide::ModuleLevel);
     }
-    std::iter::once(first)
-        .chain(ran)
-        .any(|record| record.request.is_some())
+    ran.iter()
+        .any(|(_, requested)| *requested)
         .then_some(ServerWide::ByTime)
 }
 
@@ -630,7 +651,11 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         for point in &own.hits {
             by_point.entry(point.clone()).or_default().push(at);
         }
-        seen.push(Seen { record, seen: own });
+        seen.push(Seen {
+            record,
+            seen: own,
+            server: server_runs(raw),
+        });
     }
 
     let mut mutants = Vec::new();
@@ -787,9 +812,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
 }
 
 /// One record's own observations, by its place among the run's.
-struct Seen {
+struct Seen<'r> {
     record: usize,
     seen: Observations,
+    server: ServerRuns<'r>,
 }
 
 /// A mutant's candidates, the test files it runs whole, and how a server
@@ -805,7 +831,7 @@ struct Selection {
 /// What choosing a mutant's candidates reads.
 struct Selecting<'r> {
     raw_results: &'r [RawTestResult],
-    seen: &'r [Seen],
+    seen: &'r [Seen<'r>],
     by_point: &'r HashMap<String, Vec<usize>>,
     unbounded: &'r [usize],
     tests: &'r [PlannedTest],
@@ -852,7 +878,11 @@ impl Selecting<'_> {
         records.dedup();
         let mut covering = HashSet::<usize>::new();
         for at in records {
-            let Seen { record, seen: own } = &self.seen[at];
+            let Seen {
+                record,
+                seen: own,
+                server,
+            } = &self.seen[at];
             let raw = &self.raw_results[*record];
             let role = role_of(raw);
             let test = (role == "test")
@@ -878,7 +908,7 @@ impl Selecting<'_> {
                 could_infect(mutant, own, self.whole, self.language)
             };
             if why.is_some() && server_wide.is_none() {
-                server_wide = self::server_wide(raw, mutant);
+                server_wide = self::server_wide(raw, server, mutant);
             }
             let why = match reads {
                 None => why,
@@ -1773,7 +1803,7 @@ mod tests {
         raw.server = vec![server_hit("s", Some(1))];
         let module_level = mutant(serde_json::json!({"statement": "s"}));
         assert_eq!(
-            server_wide(&raw, &module_level),
+            server_wide(&raw, &server_runs(&raw), &module_level),
             Some(ServerWide::ModuleLevel)
         );
     }

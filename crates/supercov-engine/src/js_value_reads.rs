@@ -173,7 +173,7 @@ impl Inert {
     fn of(expression: &Expression<'_>) -> bool {
         let mut inert = Inert::default();
         inert.expression(expression);
-        !inert.other && !(inert.names && inert.operators)
+        !(inert.other || inert.names && inert.operators)
     }
 
     fn expression(&mut self, expression: &Expression<'_>) {
