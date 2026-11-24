@@ -1,6 +1,6 @@
 name: Stop on a failure
 description: >-
-  A pull request's job failed: say which job and which step, then cancel every
+  A job failed: say which job and which step. In a pull request, also cancel every
   other unfinished run of the same commit, so the failure is the answer at
   once instead of after the slowest leg of every workflow. This job's own run
   is left to finish: cancelling it would end this job as cancelled, not
@@ -29,6 +29,17 @@ runs:
         step=${step:-a step}
         if [ -n "${SUPERCOV_INFRA_FAILURE:-}" ]; then
           echo "::warning title=$job failed on a download::$step failed because $SUPERCOV_INFRA_FAILURE, not because of the commit. The other runs of $SHA go on."
+          exit 0
+        fi
+        # Outside a pull request (a dispatch, a push, a release's own jobs)
+        # there is no commit of its own to stop: `gh run list --commit ""`
+        # lists the newest runs of every branch, and cancelling those stopped
+        # unrelated work. Say what failed and stop nothing.
+        if [ -z "$SHA" ]; then
+          echo "::error title=$job failed::$step failed."
+          echo "### $job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Step **$step** failed in job **$job**." >> "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
         echo "::error title=$job failed::$step failed. The other runs of $SHA are stopped; this run finishes."
