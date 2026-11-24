@@ -176,6 +176,7 @@ pub(crate) fn list(
         .into_iter()
         .map(|mutant| {
             let mut candidate = crate::js_mutant_links::CandidateMutant {
+                log_only: false,
                 id: String::new(),
                 mutator: mutant.genre.to_owned(),
                 replacement: mutant.descriptor().to_owned(),

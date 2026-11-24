@@ -140,6 +140,14 @@ pub struct PlannedMutant {
     /// it switched on. Drivers that run no server ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_wide: Option<ServerWide>,
+    /// Set where a server process ran its code for one of its candidates.
+    /// A switch the strong build places where the module loads (`static`
+    /// in its list: an arrow mutated whole, defined at a module's top
+    /// level) is then evaluated once, as the server loads the module, and
+    /// what it made serves every later request whatever mutant the request
+    /// names: such a mutant, too, runs with the server started with it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub server_ran: bool,
     /// How many tests ran its code: what a pass by coverage alone would run
     /// it against. The candidates are those of them that infected it.
     pub covering: usize,
@@ -480,9 +488,11 @@ fn could_infect(
 }
 
 /// The points a record's server processes ran, each with whether a request
-/// named none of those runs, and whether one did: read once a record, not
-/// once a mutant, as a record of a large suite holds thousands.
-type ServerRuns<'r> = HashMap<&'r str, (bool, bool)>;
+/// named none of those runs, whether one did, and whether one was a request
+/// no test was credited with, sent while tests ran
+/// (`coverage_report::REQUEST_DURING_TESTS`): read once a record, not once a
+/// mutant, as a record of a large suite holds thousands.
+type ServerRuns<'r> = HashMap<&'r str, (bool, bool, bool)>;
 
 fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
     let mut runs = ServerRuns::new();
@@ -495,6 +505,7 @@ fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
             let ran = runs.entry(id.as_str()).or_default();
             ran.0 |= record.request.is_none();
             ran.1 |= record.request.is_some();
+            ran.2 |= record.request == Some(crate::coverage_report::REQUEST_DURING_TESTS);
         }
     }
     runs
@@ -515,22 +526,42 @@ fn server_wide(
     if ran.is_empty() {
         return None;
     }
+    let at_load = mutant.function.is_none();
     if !matches!(role_of(raw), "test" | "setup") {
         // Work for a request that named no test and ran while none did (a
         // web server's readiness check) ran without any mutant in the pass,
         // as each request runs with its own; only work no request started
         // (start-up, timers) needs the server started with the mutant.
-        if ran.iter().any(|(unrequested, _)| *unrequested) {
+        if ran.iter().any(|(unrequested, _, _)| *unrequested) {
             return Some(ServerWide::Background);
         }
-        return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
+        if at_load {
+            return Some(ServerWide::ModuleLevel);
+        }
+        // A request that named no test, sent while tests ran (several at
+        // once, so it is none of theirs by time): one of them may have sent
+        // it without its name (`curl` from the test, a client the runtime
+        // does not reach), and no mutant a request names reaches it there.
+        return ran
+            .iter()
+            .any(|(_, _, during_tests)| *during_tests)
+            .then_some(ServerWide::ByTime);
     }
-    if mutant.function.is_none() {
+    if at_load {
         return Some(ServerWide::ModuleLevel);
     }
     ran.iter()
-        .any(|(_, requested)| *requested)
+        .any(|(_, requested, _)| *requested)
         .then_some(ServerWide::ByTime)
+}
+
+/// Whether a server process ran the mutant's code in this record (`runs`,
+/// its `server_runs`).
+fn server_ran(runs: &ServerRuns<'_>, mutant: &CandidateMutant) -> bool {
+    [&mutant.statement, &mutant.function]
+        .into_iter()
+        .flatten()
+        .any(|point| runs.contains_key(point.as_str()))
 }
 
 fn weak_name(status: Status) -> &'static str {
@@ -716,6 +747,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             candidates: Vec::new(),
             whole_files: Vec::new(),
             server_wide: None,
+            server_ran: false,
             covering: 0,
             statement: mutant.statement.clone(),
             function: mutant.function.clone(),
@@ -788,6 +820,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     }
                 }
                 planned.server_wide = broad.server_wide;
+                planned.server_ran = broad.server_ran;
                 // No test ran its code: what ran it was work no test of
                 // the run could have caused (a run with no test, a test
                 // file's modules loaded with no test of it), and no test
@@ -852,6 +885,8 @@ struct Selection {
     chosen: BTreeMap<usize, CandidateReason>,
     whole_files: HashSet<String>,
     server_wide: Option<ServerWide>,
+    /// A server ran its code for a record it may be killed by.
+    server_ran: bool,
     /// How many tests ran its code.
     covering: usize,
 }
@@ -886,6 +921,7 @@ impl Selecting<'_> {
         let mut chosen = BTreeMap::<usize, CandidateReason>::new();
         let mut whole_files = HashSet::<String>::new();
         let mut server_wide = None;
+        let mut server_ran = false;
         let mut take = |test: usize, why: CandidateReason| {
             chosen.entry(test).or_insert(why);
         };
@@ -937,6 +973,9 @@ impl Selecting<'_> {
             };
             if why.is_some() && server_wide.is_none() {
                 server_wide = self::server_wide(raw, server, mutant);
+            }
+            if why.is_some() && !server_ran {
+                server_ran = self::server_ran(server, mutant);
             }
             let why = match reads {
                 None => why,
@@ -991,6 +1030,7 @@ impl Selecting<'_> {
             chosen,
             whole_files,
             server_wide,
+            server_ran,
             covering: covering.len(),
         }
     }
@@ -1823,6 +1863,45 @@ mod tests {
         );
     }
 
+    /// Whether a server ran a mutant's code: what tells the driver an arrow
+    /// mutated whole at a module's top level is evaluated in a server as it
+    /// loads, not in a page.
+    #[test]
+    fn a_mutant_whose_code_a_server_ran_says_so() {
+        let arrow = mutant(serde_json::json!({"statement": "s", "function": "f"}));
+        let mut raw = record("a", "test", None, &["f"]);
+        assert!(!server_ran(&server_runs(&raw), &arrow));
+        raw.server = vec![server_hit("f", None)];
+        assert!(server_ran(&server_runs(&raw), &arrow));
+        assert_eq!(server_wide(&raw, &server_runs(&raw), &arrow), None);
+    }
+
+    /// Work for a request that named no test, left no test's: sent while
+    /// tests ran, one of them may have sent it without its name, and the
+    /// mutant runs with the server started with it; sent while none ran (a
+    /// readiness check), each request's own mutant covers it.
+    #[test]
+    fn a_request_no_test_named_sent_while_tests_ran_needs_the_server_started_with_it() {
+        let in_function = mutant(serde_json::json!({"statement": "s", "function": "f"}));
+        let mut background = record("background", "background", None, &[]);
+        background.server = vec![server_hit(
+            "s",
+            Some(crate::coverage_report::REQUEST_OUTSIDE_TESTS),
+        )];
+        assert_eq!(
+            server_wide(&background, &server_runs(&background), &in_function),
+            None
+        );
+        background.server.push(server_hit(
+            "s",
+            Some(crate::coverage_report::REQUEST_DURING_TESTS),
+        ));
+        assert_eq!(
+            server_wide(&background, &server_runs(&background), &in_function),
+            Some(ServerWide::ByTime)
+        );
+    }
+
     /// Module-level code a server ran for a test is the server module's top
     /// level, which runs once for every later request.
     #[test]
@@ -2082,6 +2161,7 @@ mod tests {
                         .collect(),
                     whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
                     server_wide: None,
+                    server_ran: false,
                     covering: 0,
                     statement: None,
                     function: None,

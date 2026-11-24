@@ -468,6 +468,12 @@ pub struct CandidateMutant {
     /// `function-source`, `with-statement`, `node-not-found`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unplaceable: Option<String>,
+    /// The mutated span lies wholly inside the arguments of a logging call
+    /// (`console.*`, or a method named `info`, `warn`, `error`, `debug`,
+    /// `trace` or `log` on any receiver): all it can change is a log line.
+    /// A classification for reports and triage; it changes no status.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log_only: bool,
 }
 
 /// The points of a module-level value's reads (`js_value_reads`): `read`

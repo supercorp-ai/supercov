@@ -652,14 +652,31 @@ pub const ATTRIBUTION_PARTIAL: &str = "partial";
 /// reach and never hides any of it.
 pub const ATTRIBUTION_BY_TIME: &str = "by-time";
 
+/// What work no test was credited with keeps of its request's number: that
+/// it was done for a request, sent while no test was running (a web server's
+/// readiness check, work between tests).
+pub(crate) const REQUEST_OUTSIDE_TESTS: u64 = 0;
+
+/// What work no test was credited with keeps of its request's number: that
+/// it was done for a request that named no test, sent while a test was
+/// running (several at once, or one whose phases do not cover it). A test
+/// may have sent it from a client that carries no test's name (`curl` in a
+/// child process, a tool or language the runtime does not reach), so a
+/// mutant switched on per request never reaches it: strong mutation starts
+/// the server with such a mutant switched on (`strong_plan`).
+pub(crate) const REQUEST_DURING_TESTS: u64 = 1;
+
 /// Server work for a request that named no test -- a webhook a mock server
 /// sends -- done while one test, and only one, was running is that test's,
 /// credited by the time it ran. Where tests ran at once, or none was
-/// running (start-up, between tests), it stays no test's, and is returned.
+/// running (start-up, between tests), it stays no test's, and is returned;
+/// its request number says which ([`REQUEST_DURING_TESTS`],
+/// [`REQUEST_OUTSIDE_TESTS`]).
 ///
 /// A test's time is from its first phase to the end of its last: what it did
 /// is known to fall inside, and work after it is left alone rather than
-/// guessed at.
+/// guessed at. Whether any test was running is judged by each test's whole
+/// span where it has one, from its start to its end.
 fn credit_by_time(
     raw_results: &mut [RawTestResult],
     processes: Vec<Vec<ServerRecord>>,
@@ -681,6 +698,27 @@ fn credit_by_time(
             Some((index, start, end, attempt))
         })
         .collect::<Vec<_>>();
+    // Each test's whole time: its span, or its phases where it has none.
+    let running = raw_results
+        .iter()
+        .filter(|raw| raw.role != "background")
+        .filter_map(|raw| {
+            raw.span.map(|[start, end]| (start, end)).or_else(|| {
+                let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+                let end = raw
+                    .phases
+                    .iter()
+                    .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
+                    .max()?;
+                Some((start, end))
+            })
+        })
+        .collect::<Vec<_>>();
+    let during_tests = |at: i64| {
+        running
+            .iter()
+            .any(|(start, end)| *start <= at && at <= *end)
+    };
     let mut work = Vec::new();
     for records in processes {
         // The attempts this process served a request naming, and among those
@@ -741,11 +779,20 @@ fn credit_by_time(
             }
             None => {
                 // Which request it was is left out, so a request's work is
-                // counted once; that it was a request's is kept (`Some(0)`):
-                // strong mutation switches a request's mutant per request,
-                // and start-up work only by starting the server with it.
+                // counted once; that it was a request's is kept, and whether
+                // a test was running then: strong mutation switches a
+                // request's mutant per request, and start-up work, or a
+                // request a test may have sent without its name, only by
+                // starting the server with it.
                 let mut record = record;
-                record.request = record.request.map(|_| 0);
+                let during = record.timestamp_ms.is_some_and(during_tests);
+                record.request = record.request.map(|_| {
+                    if during {
+                        REQUEST_DURING_TESTS
+                    } else {
+                        REQUEST_OUTSIDE_TESTS
+                    }
+                });
                 if kept.insert(serde_json::to_vec(&record).unwrap_or_default()) {
                     unattributed.push(record);
                 }
@@ -5363,15 +5410,17 @@ mod tests {
         // A third that overlaps the second: they ran at once.
         let mut beside = raw("report", 0, "passed", &[]);
         beside.phases = vec![phase(350, 450)];
-        // A test that reported no phase has no time to credit.
-        let unphased = raw("unphased", 0, "passed", &[]);
+        // A test that reported no phase has no time to credit, though its
+        // span says it was running.
+        let mut unphased = raw("unphased", 0, "passed", &[]);
+        unphased.span = Some([600, 700]);
         let mut results = vec![first, second, beside, unphased];
         // A second process repeats the work left after every test: it is
         // counted once.
         let left = credit_by_time(
             &mut results,
             vec![
-                vec![at(50), at(155), loading, at(320), at(360), at(500)],
+                vec![at(50), at(155), loading, at(320), at(360), at(500), at(650)],
                 vec![at(500)],
             ],
         );
@@ -5385,11 +5434,25 @@ mod tests {
         assert_eq!(results[2].server.len(), 0);
         assert_eq!(results[2].attribution, ATTRIBUTION_EXACT);
         assert!(results[3].server.is_empty());
+        // What is left says whether a test was running when its request
+        // came: while two ran at once, one of them may have sent it.
+        assert_eq!(
+            left.iter()
+                .map(|record| (record.timestamp_ms.unwrap(), record.request))
+                .collect::<Vec<_>>(),
+            [
+                (50, Some(REQUEST_OUTSIDE_TESTS)),
+                (170, None),
+                (360, Some(REQUEST_DURING_TESTS)),
+                (500, Some(REQUEST_OUTSIDE_TESTS)),
+                (650, Some(REQUEST_DURING_TESTS)),
+            ]
+        );
         let left = left
             .iter()
             .filter_map(|record| record.timestamp_ms)
             .collect::<Vec<_>>();
-        assert_eq!(left, [50, 170, 360, 500]);
+        assert_eq!(left, [50, 170, 360, 500, 650]);
         // Still complete: the credit adds to the test's reach, never hides it.
         assert!(coverage_is_complete(ATTRIBUTION_BY_TIME));
         assert_eq!(

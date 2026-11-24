@@ -4529,6 +4529,9 @@ pub struct IndexedMutant {
     pub reason: String,
     /// Why the input that would make it differ is out of a test's reach.
     pub untestable: Option<(Untestable, String)>,
+    /// All it can change is what a logging call is given
+    /// (`mutant_list::CandidateMutant::log_only`).
+    pub log_only: bool,
 }
 
 impl IndexedMutant {
@@ -4689,6 +4692,8 @@ pub(crate) fn mutation_sections(
             record[1] = u8::from(mutant.proxy);
             record[2] = Untestable::code(mutant.untestable.as_ref().map(|(kind, _)| *kind));
             record[3] = u8::from(mutant.changed.is_some());
+            // Indexes written before it have 0 here: not log-only.
+            record[96] = u8::from(mutant.log_only);
             put_u32(&mut record, 4, usize_u32(number));
             put_u32(&mut record, 8, mutant.start.0);
             put_u32(&mut record, 12, mutant.start.1);
@@ -4829,7 +4834,7 @@ impl CoverageIndex<'_> {
         let mut mutants = Vec::with_capacity(file.count as usize);
         for index in file.first..file.first + file.count {
             let record = self.index.record(SECTION_MUTANTS, index)?;
-            if record[96..].iter().any(|byte| *byte != 0) {
+            if record[97..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("mutant reserved bytes"));
             }
             let untestable = match Untestable::from_code(record[2])? {
@@ -4855,6 +4860,7 @@ impl CoverageIndex<'_> {
                 code: self.mutant_text(record, 56)?,
                 reason: self.mutant_text(record, 64)?,
                 untestable,
+                log_only: bool_field(record[96])?,
             });
         }
         Ok(mutants)
@@ -4915,6 +4921,7 @@ mod tests {
     #[test]
     fn mutation_sections_round_trip() {
         let mutant = |file: &str, line: u32, status: MutantStatus, proxy: bool| IndexedMutant {
+            log_only: false,
             file: file.into(),
             start: (line, 3),
             end: (line, 9),
@@ -4941,7 +4948,11 @@ mod tests {
                 ..mutant("src/a.js", 3, MutantStatus::NotInfected, false)
             },
             mutant("src/b.js", 7, MutantStatus::NotReached, false),
-            mutant("src/b.js", 8, MutantStatus::Unknown, false),
+            // All it changes is a log line.
+            IndexedMutant {
+                log_only: true,
+                ..mutant("src/b.js", 8, MutantStatus::Unknown, false)
+            },
             IndexedMutant {
                 changed: Some((".slice(0, n)".into(), String::new())),
                 ..mutant("src/b.js", 9, MutantStatus::Infected, false)
@@ -5035,6 +5046,7 @@ mod tests {
         report.mutation = Some(MutationResults {
             mutant_set: "stryker-js@10.1.1".into(),
             mutants: vec![IndexedMutant {
+                log_only: true,
                 file: "src/a.js".into(),
                 start: (1, 3),
                 end: (1, 9),
@@ -5126,7 +5138,8 @@ mod tests {
                 }),
             ),
             ("OutOfBounds", file(4, u32::MAX)),
-            ("mutant reserved bytes", mutant(96, vec![1])),
+            ("mutant reserved bytes", mutant(97, vec![1])),
+            ("boolean", mutant(96, vec![2])),
             ("mutant untestable", mutant(2, vec![3])),
             ("mutant changed", mutant(3, vec![2])),
             ("mutant status", mutant(0, vec![200])),

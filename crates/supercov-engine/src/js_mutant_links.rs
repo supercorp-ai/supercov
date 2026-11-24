@@ -271,6 +271,26 @@ pub(crate) struct MutantFacts {
     effect_stack: Vec<bool>,
     /// Equivalent mutants and untestable boundaries, from the program alone.
     statics: crate::js_static_mutants::StaticFacts,
+    /// The arguments of each logging call, from the first one's start to
+    /// the last one's end: a call to `console.*`, or to a method named
+    /// `info`, `warn`, `error`, `debug`, `trace` or `log` on any receiver.
+    log_arguments: Vec<Span>,
+}
+
+/// The method names whose calls are taken for logging, on any receiver.
+const LOG_METHODS: [&str; 6] = ["info", "warn", "error", "debug", "trace", "log"];
+
+/// Whether a call's callee is a logging method: `console.<anything>`, or
+/// `<receiver>.info` (`warn`, `error`, `debug`, `trace`, `log`).
+fn is_log_call(callee: &Expression<'_>) -> bool {
+    let Expression::StaticMemberExpression(member) = callee.get_inner_expression() else {
+        return false;
+    };
+    let console = matches!(
+        member.object.get_inner_expression(),
+        Expression::Identifier(object) if object.name == "console"
+    );
+    console || LOG_METHODS.contains(&member.property.name.as_str())
 }
 
 struct FactCollector<'s> {
@@ -300,6 +320,14 @@ impl MutantFacts {
         let mut facts = collector.facts;
         facts.statics = crate::js_static_mutants::StaticFacts::collect(program);
         facts
+    }
+
+    /// Whether the mutated span lies wholly inside a logging call's
+    /// arguments: all the mutant can change is what is logged.
+    fn log_only(&self, span: Span) -> bool {
+        self.log_arguments
+            .iter()
+            .any(|arguments| arguments.start <= span.start && span.end <= arguments.end)
     }
 
     /// How the expression at `span` is used, through right operands.
@@ -585,6 +613,14 @@ impl<'a> Visit<'a> for FactCollector<'_> {
     fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
         if expression.optional {
             self.chain(expression.span, &expression.callee);
+        }
+        if let (Some(first), Some(last)) =
+            (expression.arguments.first(), expression.arguments.last())
+            && is_log_call(&expression.callee)
+        {
+            self.facts
+                .log_arguments
+                .push(Span::new(first.span().start, last.span().end));
         }
         walk::walk_call_expression(self, expression);
     }
@@ -896,6 +932,7 @@ pub(crate) fn link(
                 reads: evidence.reads.get(&at).cloned(),
                 is_static: false,
                 unplaceable: None,
+                log_only: facts.log_only(span),
             }
         })
         .collect()
@@ -1045,6 +1082,37 @@ mod tests {
             .unwrap();
         assert_eq!(body.statement, None);
         assert_eq!(body.function.as_deref(), Some(function));
+    }
+
+    /// A mutant wholly inside a logging call's arguments only changes a log
+    /// line: `console.*`, or a method named like a log level on any
+    /// receiver. One around the call, in its callee, or in another call's
+    /// arguments is not.
+    #[test]
+    fn a_mutant_inside_a_logging_call_s_arguments_only_changes_a_log_line() {
+        let source = concat!(
+            "export function f(a: number, logger: any, save: any) {\n",
+            "  console.log(`saved ${a + 1}`);\n",
+            "  logger?.warn(\"slow\", { took: a * 2 });\n",
+            "  this.log.error(\"failed\");\n",
+            "  save(\"kept\", a - 1);\n",
+            "  if (a > 0) console.info(\"positive\");\n",
+            "  return a;\n",
+            "}\n",
+        );
+        let output = instrumented(source, false);
+        let log_only = |original: &str, mutator: &str, replacement: &str| {
+            mutant(&output, original, mutator, replacement).log_only
+        };
+        assert!(log_only("a + 1", "ArithmeticOperator", "-"));
+        assert!(log_only("`saved ${a + 1}`", "StringLiteral", "empty"));
+        assert!(log_only("\"slow\"", "StringLiteral", "empty"));
+        assert!(log_only("a * 2", "ArithmeticOperator", "/"));
+        assert!(log_only("\"failed\"", "StringLiteral", "empty"));
+        assert!(log_only("\"positive\"", "StringLiteral", "empty"));
+        assert!(!log_only("\"kept\"", "StringLiteral", "empty"));
+        assert!(!log_only("a - 1", "ArithmeticOperator", "+"));
+        assert!(!log_only("a > 0", "ConditionalExpression", "true"));
     }
 
     #[test]

@@ -137,6 +137,7 @@ type CandidateMutant, written and read = closed {
   reads?: ReadLink | null
   static?: boolean
   unplaceable?: string | null
+  logOnly?: boolean
 }
 
 type ChainLink, written and read = closed {

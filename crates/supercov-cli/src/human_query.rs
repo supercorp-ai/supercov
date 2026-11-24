@@ -1063,13 +1063,33 @@ pub(crate) fn strong_verdict(mutant: &supercov_engine::mutants_query::MutantEntr
 
 /// The hint that a mutant not infected is practically untestable.
 fn untestable_suffix(mutant: &supercov_engine::mutants_query::MutantEntry) -> String {
+    let log_line = if mutant.log_only {
+        "  (only changes a log line)"
+    } else {
+        ""
+    };
     match mutant.weak.untestable {
         Some(kind)
             if mutant.status == supercov_engine::coverage_index::MutantStatus::NotInfected =>
         {
-            format!("  ({} boundary)", kind.name())
+            format!("  ({} boundary){log_line}", kind.name())
         }
-        _ => String::new(),
+        _ => log_line.to_owned(),
+    }
+}
+
+/// A strong verdict's count as the summary says it: the survivors with how
+/// many of them only change a log line.
+pub(crate) fn strong_count(status: &str, n: usize, log_only_survivors: Option<usize>) -> String {
+    match log_only_survivors {
+        Some(log_only) if status == "survived" && log_only > 0 => {
+            format!(
+                "{} {status} ({} only change a log line)",
+                count(n),
+                count(log_only)
+            )
+        }
+        _ => format!("{} {status}", count(n)),
     }
 }
 
@@ -1385,7 +1405,7 @@ fn mutants_text(
                 score(summary.mutation_score),
                 strong
                     .iter()
-                    .map(|(status, n)| format!("{} {status}", count(*n)))
+                    .map(|(status, n)| strong_count(status, *n, summary.log_only_survivors))
                     .collect::<Vec<_>>()
                     .join(" · ")
             ));
@@ -3187,6 +3207,7 @@ mod tests {
             MutantsSummary, WeakResult,
         };
         let mutant = |line: u32, status: MutantStatus| MutantEntry {
+            log_only: false,
             id: format!("src/a.ts:{line}:3-{line}:9:LogicalOperator:&&"),
             file: "src/a.ts".into(),
             span: MutantSpan {
