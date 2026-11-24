@@ -17,14 +17,20 @@ runs:
         SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         # This job and the step that failed, from the run's record of its
-        # jobs: the one this runner is running.
-        failed=$(gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
-            --jq ".jobs[] | select(.runner_name == \"$RUNNER_NAME\" and .status == \"in_progress\")
-                | \"\(.name)\t\([.steps[] | select(.conclusion == \"failure\") | .name] | first // \"a step\")\"" \
-            2>/dev/null | head -1) || true
-        job=$(printf '%s' "$failed" | cut -f1)
-        step=$(printf '%s' "$failed" | cut -f2)
+        # jobs: the one this runner is running. The record says a step failed
+        # a few seconds after the step ends, so it is asked again until it
+        # does, for half a minute at most.
+        for attempt in 1 2 3 4 5 6; do
+          failed=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
+              --jq ".jobs[] | select(.runner_name == \"$RUNNER_NAME\" and .status == \"in_progress\")
+                  | \"\(.name)\t\([.steps[] | select(.conclusion == \"failure\") | .name] | first // \"\")\"" \
+              2>/dev/null | head -1) || true
+          job=$(printf '%s' "$failed" | cut -f1)
+          step=$(printf '%s' "$failed" | cut -f2)
+          [ -n "$step" ] && break
+          sleep 5
+        done
         job=${job:-$GITHUB_JOB}
         step=${step:-a step}
         if [ -n "${SUPERCOV_INFRA_FAILURE:-}" ]; then

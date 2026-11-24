@@ -38,6 +38,10 @@ concurrency:
 jobs:
   check:
     name: Quick check (${{ matrix.os }})
+    # A release pull request runs the whole matrix once; the quick check's
+    # picks there (gate scripts that need a release build or browsers this
+    # job does not set up) only fail for want of them.
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
