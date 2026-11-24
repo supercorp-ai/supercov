@@ -617,6 +617,7 @@ fn compiler_host(
     let output = compiler
         .command(root)
         .arg("-vV")
+        // fault-site: rust-cargo-configuration.compiler-host
         .launch_output()
         .map_err(|error| io_error(&compiler.rustc.resolve(root), error))?;
     if !output.status.success() {

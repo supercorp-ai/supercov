@@ -295,11 +295,14 @@ fn mutated_source(files: &BTreeMap<String, FileMutants>, mutant: &PlanMutant) ->
 /// An overlay for `go` (`-overlay`) that replaces `file` with `contents`,
 /// written in `directory`: the overlay's path.
 fn write_overlay(directory: &Path, file: &Path, contents: &str) -> Result<PathBuf, String> {
+    // fault-site: go-strong.write-overlay.create-dir-all
     fs::create_dir_all(directory).map_err(failed(directory))?;
     let replaced = directory.join("mutated.go");
     let overlay = directory.join("overlay.json");
     let document = json!({ "Replace": { file.to_string_lossy(): replaced } });
+    // fault-site: go-strong.write-overlay.write-1
     fs::write(&replaced, contents).map_err(failed(&replaced))?;
+    // fault-site: go-strong.write-overlay.write-2
     fs::write(&overlay, document.to_string()).map_err(failed(&overlay))?;
     Ok(overlay)
 }
@@ -326,6 +329,7 @@ fn vet_one(
         .arg(format!("-overlay={}", overlay.display()))
         .arg(pattern(&directory_of(&mutant.file)))
         .current_dir(pass.request.root)
+        // fault-site: go-strong.vet-one
         .launch_registered()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -468,8 +472,11 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
         return Ok(binary);
     }
     let source = directory.join("src");
+    // fault-site: go-strong.helper.create-dir-all
     fs::create_dir_all(&source).map_err(failed(&source))?;
+    // fault-site: go-strong.helper.write-1
     fs::write(source.join("main.go"), HELPER_SOURCE).map_err(failed(&source))?;
+    // fault-site: go-strong.helper.write-2
     fs::write(source.join("go.mod"), HELPER_MODULE).map_err(failed(&source))?;
     let output = Command::new(go)
         // Without its symbol table and paths: a third smaller, and the
@@ -481,6 +488,7 @@ pub(crate) fn helper(root: &Path, go: &str) -> Result<PathBuf, String> {
         .env("GOWORK", "off")
         .env("GOFLAGS", "-mod=mod")
         .env("CGO_ENABLED", "0")
+        // fault-site: go-strong.helper.launch-registered
         .launch_registered()
         .map_err(failed(Path::new(go)))?;
     if !output.status.success() {
@@ -659,6 +667,7 @@ impl Pass<'_> {
             .env(ACTIVE_MUTANT_ENV, mutant.unwrap_or("-"));
         process_group(&mut command);
         self.profile.lock().expect("profile").runs += 1;
+        // fault-site: go-strong.run-binary
         let Ok(mut child) = command.launch() else {
             // A binary that would not start ran nothing, and passed nothing.
             return RunOutcome {
@@ -782,7 +791,9 @@ fn read_all<R: std::io::Read + Send + 'static>(mut reader: R) -> std::thread::Jo
 /// Copies the project into `destination`, leaving out what is not the
 /// project's (`.git`, `.supercov`).
 fn copy_project(source: &Path, destination: &Path) -> Result<(), String> {
+    // fault-site: go-strong.copy-project.create-dir-all
     fs::create_dir_all(destination).map_err(failed(destination))?;
+    // fault-site: go-strong.copy-project.read-dir
     fs::read_dir(source)
         .map_err(failed(source))?
         .flatten()
@@ -790,12 +801,14 @@ fn copy_project(source: &Path, destination: &Path) -> Result<(), String> {
         .try_for_each(|entry| {
             let path = entry.path();
             let target = destination.join(entry.file_name());
+            // fault-site: go-strong.copy-project.file-type
             let kind = fs::file_type(&entry).map_err(failed(&path))?;
             if kind.is_dir() {
                 copy_project(&path, &target)
             } else if kind.is_symlink() {
                 copy_link(&path, &target)
             } else {
+                // fault-site: go-strong.copy-project.copy
                 fs::copy(&path, &target).map(drop).map_err(failed(&path))
             }
         })
@@ -804,7 +817,9 @@ fn copy_project(source: &Path, destination: &Path) -> Result<(), String> {
 /// A symbolic link copied as the link it is.
 #[cfg(unix)]
 fn copy_link(path: &Path, target: &Path) -> Result<(), String> {
+    // fault-site: go-strong.copy-link.read-link
     let link = fs::read_link(path).map_err(failed(path))?;
+    // fault-site: go-strong.copy-link.symlink
     fs::symlink(&link, target).map_err(failed(target))
 }
 
@@ -846,10 +861,12 @@ fn runtimes(workspace: &Path) -> Result<Vec<(String, String)>, String> {
             let module = crate::go_project::module_path(&at)
                 .ok_or_else(|| format!("{}: no module path in go.mod", at.display()))?;
             let runtime = at.join(crate::go_run::RUNTIME_DIRECTORY_NAME);
+            // fault-site: go-strong.runtimes.create-dir-all
             fs::create_dir_all(&runtime).map_err(failed(&runtime))?;
             crate::go_run::runtime_files()
                 .into_iter()
                 .try_for_each(|(name, contents)| {
+                    // fault-site: go-strong.runtimes.write
                     fs::write(runtime.join(name), contents).map_err(failed(&runtime))
                 })?;
             Ok((
@@ -900,10 +917,12 @@ fn offset_of(text: &str, line: usize, column: usize) -> Option<usize> {
 
 /// Reads the plan, and opens the results to append to.
 fn open(request: &GoStrongRequest) -> Result<(Plan, std::fs::File), String> {
+    // fault-site: go-strong.open.read
     let bytes = fs::read(request.plan).map_err(failed(request.plan))?;
     let plan = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
+    // fault-site: go-strong.open.open-with
     let results = fs::open_with(&options, request.results).map_err(failed(request.results))?;
     Ok((plan, results))
 }
@@ -933,6 +952,7 @@ pub fn run_go_strong(
     };
     [&pass.bins, &pass.scratch]
         .into_iter()
+        // fault-site: go-strong.run-go-strong
         .try_for_each(|directory| fs::create_dir_all(directory).map_err(failed(directory)))?;
     let to_run = plan
         .mutants
@@ -958,6 +978,7 @@ fn read_files<'p>(
         .into_iter()
         .map(|file| {
             let path = pass.request.root.join(&file);
+            // fault-site: go-strong.read-files
             let source = fs::read_to_string(&path).map_err(failed(&path))?;
             let tokens = crate::go_mutants::listed_tokens(&source).map_err(|e| e.to_string())?;
             Ok((file, FileMutants { source, tokens }))
@@ -1105,6 +1126,7 @@ fn render(
                     || text.clone(),
                 );
                 let path = pass.workspace.join(file);
+                // fault-site: go-strong.render.write
                 fs::write(&path, &text).map_err(failed(&path))?;
                 Ok((
                     file.clone(),
@@ -1122,6 +1144,7 @@ fn render(
             .args(&pass.flags.build)
             .args(&directories)
             .current_dir(&pass.workspace)
+            // fault-site: go-strong.render.launch-registered
             .launch_registered()
             .map_err(failed(Path::new(&pass.flags.program)))?;
         if output.status.success() {
@@ -1210,6 +1233,7 @@ fn run_mutants(
         "[supercov] copying the project for the strong pass"
     );
     if pass.workspace.exists() {
+        // fault-site: go-strong.run-mutants
         fs::remove_dir_all(&pass.workspace).map_err(failed(&pass.workspace))?;
     }
     copy_project(pass.request.root, &pass.workspace)?;
@@ -1370,6 +1394,7 @@ fn run_helper(helper: &Path, root: &Path, request: &Value) -> Result<CheckAnswer
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // fault-site: go-strong.run-helper
         .launch()
         .map_err(failed(helper))?;
     let _registered = crate::child_signal_guard::register(&child);
@@ -1407,6 +1432,7 @@ fn build_package(pass: &Pass, directory: &str, overlay: Option<&Path>) -> Packag
         .arg(&binary)
         .arg(pattern(directory))
         .current_dir(&pass.workspace)
+        // fault-site: go-strong.build-package
         .launch_registered();
     let mut package = Package {
         binary: binary.clone(),

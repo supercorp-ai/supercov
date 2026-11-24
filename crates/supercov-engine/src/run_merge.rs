@@ -2633,7 +2633,7 @@ mod tests {
         assert_eq!(kept_statuses(&root), None);
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
         save_verdicts(&root, "run-a", "stryker-js@10.1.1", &[(TRUE, "killed")]);
-        let notes = crate::fault::during("fs.write#strong_verdicts.rs:33", || {
+        let notes = crate::fault::during("fs.write#strong-verdicts.save", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");
@@ -2646,7 +2646,7 @@ mod tests {
         // third archive opened: each run's, then the merged run's): nothing
         // is lent, and the merge stands.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.open#evidence_archive.rs:697@3", || {
+        let notes = crate::fault::during("fs.open#evidence-archive.read-archive-each@3", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");
@@ -2661,7 +2661,7 @@ mod tests {
         // The store cannot be listed again to find the merged run (the
         // second listing: the merge's own, then this one): the same.
         fs::remove_dir_all(root.join(".supercov/runs/merged")).unwrap();
-        let notes = crate::fault::during("fs.read_dir#run_store.rs:695@2", || {
+        let notes = crate::fault::during("fs.read_dir#run-store.discover-runs@2", || {
             merge_noted(&root, &["run-a", "run-b"])
         });
         assert_eq!(notes.len(), 1, "{notes:?}");

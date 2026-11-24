@@ -139,6 +139,7 @@ pub fn workspace_modules(root: &Path) -> BTreeSet<String> {
 
 fn walk(root: &Path, directory: &Path, files: &mut GoFiles) -> Result<(), String> {
     let members = workspace_modules(root);
+    // fault-site: go-project.walk
     let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     let mut sorted = entries
@@ -279,12 +280,14 @@ fn ignored_by_the_toolchain(
     directory: &Path,
     files: &mut GoFiles,
 ) -> Result<(), String> {
+    // fault-site: go-project.ignored-by-the-toolchain.read-dir
     let entries = crate::fault_fs::read_dir(directory)
         .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("could not read {}: {error}", directory.display()))?;
         let path = entry.path();
+        // fault-site: go-project.ignored-by-the-toolchain.file-type
         let file_type = crate::fault_fs::file_type(&entry)
             .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
@@ -680,11 +683,11 @@ mod tests {
         for fault in [
             "fs.read_dir",
             "fs.read_dir entry",
-            "fs.read_dir#go_project.rs:142@2",
-            "fs.read_dir#go_project.rs:282",
-            "fs.read_dir entry#go_project.rs:282",
-            "fs.file_type#go_project.rs:288",
-            "fs.read_dir#go_project.rs:282@2",
+            "fs.read_dir#go-project.walk@2",
+            "fs.read_dir#go-project.ignored-by-the-toolchain.read-dir",
+            "fs.read_dir entry#go-project.ignored-by-the-toolchain.read-dir",
+            "fs.file_type#go-project.ignored-by-the-toolchain.file-type",
+            "fs.read_dir#go-project.ignored-by-the-toolchain.read-dir@2",
         ] {
             assert!(
                 crate::fault::during(fault, || discover_go_files(&root)).is_err(),

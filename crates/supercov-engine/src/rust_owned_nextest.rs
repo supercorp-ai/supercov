@@ -133,6 +133,7 @@ pub(crate) fn run_nextest(
     // The identity contract is pinned to the nextest versions it was verified
     // against; anything else fails before a test runs.
     let version = cargo(&nextest_version_arguments(invocation))
+        // fault-site: rust-owned-nextest.run-nextest.launch-output-1
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !version.status.success() {
@@ -187,6 +188,7 @@ pub(crate) fn run_nextest(
         list_arguments.extend(listing.runner_arguments);
     }
     let listed = cargo(&list_arguments)
+        // fault-site: rust-owned-nextest.run-nextest.launch-output-2
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !listed.status.success() {
@@ -200,6 +202,7 @@ pub(crate) fn run_nextest(
             RustTestRunnerError::CargoJson(format!("invalid nextest test listing: {error}"))
         })?;
     let metadata = cargo(&cargo_metadata_arguments(invocation))
+        // fault-site: rust-owned-nextest.run-nextest.launch-output-3
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !metadata.status.success() {
@@ -425,6 +428,7 @@ fn nextest_artifacts(
     catalog: &TestListSummary,
     metadata: &CargoMetadataOutput,
 ) -> Result<BTreeMap<String, NextestArtifact>, RustTestRunnerError> {
+    // fault-site: rust-owned-nextest.nextest-artifacts
     let canonical_target = fs::canonicalize(target_directory).map_err(io_error)?;
     let packages = metadata
         .packages
@@ -503,6 +507,7 @@ fn nextest_artifacts(
 
 fn read_attempts(directory: &Path) -> Result<Vec<AttemptRecord>, RustTestRunnerError> {
     let mut records = Vec::new();
+    // fault-site: rust-owned-nextest.read-attempts
     for entry in fs::read_dir(directory).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
         if path
@@ -601,6 +606,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
             &plan.token,
             &evidence,
         ))
+        // fault-site: rust-owned-nextest.nextest-runner-inner
         .launch_status()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let code = exit_code(&status);
@@ -1500,8 +1506,8 @@ exit "$(cat "$fake/$step.status" 2>/dev/null || echo 0)"
             );
         }
         for fault in [
-            "fs.canonicalize#rust_owned_nextest.rs:428",
-            "fs.read_dir entry#rust_owned_nextest.rs:506",
+            "fs.canonicalize#rust-owned-nextest.nextest-artifacts",
+            "fs.read_dir entry#rust-owned-nextest.read-attempts",
         ] {
             let fake = FakeNextest::new();
             fake.runs(&[("tests::alpha", 1, 0)], 0);

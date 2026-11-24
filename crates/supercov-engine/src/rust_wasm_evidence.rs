@@ -374,6 +374,7 @@ pub(crate) fn publish(
     validate_frontend_report_request(&run.declaration, &run.request)
         .map_err(|error| error.to_string())?;
     let work = root.join(".supercov/work").join(&metadata.id);
+    // fault-site: rust-wasm-evidence.publish
     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
     let archive_path = work.join(wasm.archive);
     let raw = write_archive(
@@ -850,8 +851,8 @@ mod tests {
         for fault in [
             "report-request",
             "fs.create_dir_all@1",
-            "fs.rename#evidence_archive.rs:512",
-            "fs.rename#lifecycle.rs:1194",
+            "fs.rename#evidence-archive.write-entries.rename",
+            "fs.rename#lifecycle.publish-run-with-fault.rename",
         ] {
             let attempt = fresh();
             assert!(

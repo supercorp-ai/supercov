@@ -320,6 +320,7 @@ pub fn write_query_index(
     // of a 3,900-test run 50 ms.
     drop(file);
     let result = written
+        // fault-site: query-index.write-query-index
         .and_then(|()| fs::rename(&temporary, destination))
         .map_err(QueryIndexError::from);
     if result.is_err() {
@@ -334,6 +335,7 @@ pub fn write_query_index(
 /// its checksum included, so a damaged one is refused there.
 pub fn recorded_evidence(path: &Path) -> Result<([u8; 32], u64), QueryIndexError> {
     let mut header = [0_u8; QUERY_INDEX_HEADER_SIZE];
+    // fault-site: query-index.recorded-evidence
     fs::read_exact_from(&mut fs::open(path)?, &mut header)?;
     let sha256 = header[48..80].try_into().expect("a 32-byte slice");
     Ok((sha256, get_u64(&header, 24)))
@@ -351,6 +353,7 @@ impl QueryIndex {
         if !metadata.is_file() {
             return Err(QueryIndexError::NotRegularFile(path.to_owned()));
         }
+        // fault-site: query-index.open
         let file = fs::open(path)?;
         // Supercov publishes a new immutable inode by rename and never mutates
         // the inode while it may be mapped. Readers retain this file handle.

@@ -150,6 +150,7 @@ fn daemon_side_socket(_upstream: &Path) -> PathBuf {
 pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
     let preferred = state.join("docker.sock");
     if preferred.as_os_str().len() < 100 {
+        // fault-site: docker-proxy.socket-path.create-dir-all
         fs::create_dir_all(state)?;
         return Ok(preferred);
     }
@@ -161,6 +162,7 @@ pub fn socket_path(state: &Path) -> io::Result<PathBuf> {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0)
     ));
+    // fault-site: docker-proxy.socket-path.create-private-dir
     fs::create_private_dir(&directory)?;
     Ok(directory.join("docker.sock"))
 }
@@ -216,6 +218,7 @@ impl DockerProxy {
     /// Listen on `socket` and relay to `upstream`.
     pub fn start(socket: &Path, upstream: &Path, settings: ProxySettings) -> io::Result<Self> {
         if let Some(parent) = socket.parent() {
+            // fault-site: docker-proxy.start.create-dir-all-1
             fs::create_dir_all(parent)?;
         }
         let _ = fs::remove_file(socket);
@@ -224,6 +227,7 @@ impl DockerProxy {
             .set_nonblocking(true)
             .expect("a listening socket just bound can be made nonblocking");
         if let Some(parent) = settings.state.parent() {
+            // fault-site: docker-proxy.start.create-dir-all-2
             fs::create_dir_all(parent)?;
         }
         // The marks containers leave (`MARK_VARIABLE`) go in a directory made
@@ -3086,23 +3090,26 @@ mod tests {
         let daemon = directory.join("d.sock");
         let _created = fake_daemon(&daemon);
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:153", || {
-                socket_path(&directory.join("state"))
-            })
+            crate::fault::during(
+                "fs.create_dir_all#docker-proxy.socket-path.create-dir-all",
+                || { socket_path(&directory.join("state")) }
+            )
             .is_err()
         );
         // A run directory too deep for a socket address gets a private
         // directory under /tmp instead, which can fail to be made too.
         assert!(
-            crate::fault::during("fs.create_dir#docker_proxy.rs:164", || {
-                socket_path(&directory.join("state").join("d".repeat(120)))
-            })
+            crate::fault::during(
+                "fs.create_dir#docker-proxy.socket-path.create-private-dir",
+                || { socket_path(&directory.join("state").join("d".repeat(120))) }
+            )
             .is_err()
         );
         assert!(
-            crate::fault::during("fs.create_dir_all#docker_proxy.rs:227", || {
-                DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory))
-            })
+            crate::fault::during(
+                "fs.create_dir_all#docker-proxy.start.create-dir-all-2",
+                || { DockerProxy::start(&directory.join("p.sock"), &daemon, settings(&directory)) }
+            )
             .is_err()
         );
         let gone = directory.join("gone.sock");

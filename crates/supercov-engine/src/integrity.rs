@@ -424,6 +424,7 @@ fn digest_paths(
         if let Some(bytes) = meaning {
             hash.update(&bytes);
         } else {
+            // fault-site: integrity.digest-paths
             let mut file = fs::open(&path).map_err(|source| io_error(&path, source))?;
             loop {
                 let read = fs::read_from(&mut file, &mut buffer)
@@ -505,6 +506,7 @@ fn walk_files(
     if !metadata.file_type().is_dir() {
         return Err(IntegrityError::UnsafeFile(directory.to_owned()));
     }
+    // fault-site: integrity.walk-files
     let mut entries = fs::read_dir(directory)
         .map_err(|source| io_error(directory, source))?
         .collect::<Result<Vec<_>, _>>()

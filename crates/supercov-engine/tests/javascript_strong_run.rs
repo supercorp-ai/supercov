@@ -170,13 +170,22 @@ fn a_pass_that_cannot_write_or_start_what_it_needs_fails() {
     let _one = one_at_a_time();
     let cases = [
         // The list of the plan's files, for the processes that instrument.
-        ("fs.write#javascript_run.rs:1018", "strong-files.json"),
+        (
+            "fs.write#javascript-run.run-javascript.write-1",
+            "strong-files.json",
+        ),
         // A restart's job.
-        ("fs.write#javascript_run.rs:3027", "restart-0.json"),
+        (
+            "fs.write#javascript-run.run-strong-restarts",
+            "restart-0.json",
+        ),
         // The run's state, read back to say it is complete.
-        ("fs.read#javascript_run.rs:1289", "state.json"),
+        (
+            "fs.read#javascript-run.run-javascript.update-run-state-2",
+            "state.json",
+        ),
         // The first restart's command, after the pass's own.
-        ("spawn#process_supervision.rs:1583@2", "/bin/sh"),
+        ("spawn#process-supervision.spawn-contained@2", "/bin/sh"),
     ];
     for (fault, says) in cases {
         let pass = Pass::new("faults");

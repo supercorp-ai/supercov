@@ -103,6 +103,7 @@ fn is_test_path(relative: &str) -> Option<&'static str> {
 }
 
 fn walk(root: &Path, directory: &Path, files: &mut RubyFiles) -> Result<(), String> {
+    // fault-site: ruby-project.walk
     let mut entries = fs::read_dir(directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -230,6 +231,7 @@ fn prepare(
     let mut listed_files = Vec::new();
     for relative in &files.sources {
         let path = root.join(relative);
+        // fault-site: ruby-project.prepare
         let source = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         match crate::ruby_instrumenter::build_ruby_obligations_with(
             relative,

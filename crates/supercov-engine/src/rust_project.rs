@@ -179,6 +179,7 @@ fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
         .args(["metadata", "--format-version=1", "--no-deps"])
         .current_dir(root)
         .env("CARGO_TARGET_DIR", copy_target_directory(root))
+        // fault-site: rust-project.cargo-metadata
         .launch_output()
         .map_err(|error| RustProjectError::MetadataLaunch(error.to_string()))?;
     if !output.status.success() {
@@ -317,6 +318,7 @@ fn resolve_module_tree(
     tests: &mut BTreeSet<PathBuf>,
     owners: &mut BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 ) -> Result<(), RustProjectError> {
+    // fault-site: rust-project.resolve-module-tree
     let canonical_workspace = canonical_directory(workspace)?;
     // (file, directory its `mod` children resolve in, crate root)
     let (mut pending, mut pending_tests): (Vec<_>, Vec<_>) = roots
@@ -596,6 +598,7 @@ fn crate_roots(
             .filter(|target| !target.kind.iter().any(|kind| kind == "custom-build"))
             .try_for_each(|target| {
                 let root =
+                    // fault-site: rust-project.crate-roots
                     fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
                         path: target.src_path.clone(),
                         reason: error.to_string(),
@@ -1215,6 +1218,7 @@ pub(crate) fn prepare_rust_strong_project(
         .iter()
         .map(|path| {
             let relative = confined_relative(&workspace, path).expect(INSIDE);
+            // fault-site: rust-project.prepare-rust-strong-project.read-to-string-1
             let source = fs::read_to_string(path).map_err(|error| RustProjectError::Io {
                 path: path.clone(),
                 reason: error.to_string(),
@@ -1256,6 +1260,7 @@ pub(crate) fn prepare_rust_strong_project(
             .collect::<Vec<_>>();
         let file_switched = crate::rust_schemata::switch(source, &runtime_path, file, &chosen);
         let path = workspace.join(file);
+        // fault-site: rust-project.prepare-rust-strong-project.write-1
         fs::write(&path, &file_switched.code).map_err(|error| RustProjectError::Io {
             path: path.clone(),
             reason: error.to_string(),
@@ -1265,6 +1270,7 @@ pub(crate) fn prepare_rust_strong_project(
     }
     let mut crate_roots = Vec::new();
     for root in needs_runtime {
+        // fault-site: rust-project.prepare-rust-strong-project.read-to-string-2
         let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),
@@ -1275,6 +1281,7 @@ pub(crate) fn prepare_rust_strong_project(
             &runtime_module,
             &crate_key("strong", &relative),
         ));
+        // fault-site: rust-project.prepare-rust-strong-project.write-2
         fs::write(&root, source).map_err(|error| RustProjectError::Io {
             path: root.clone(),
             reason: error.to_string(),
@@ -2340,43 +2347,19 @@ fn integration_choice() {
                 .map(|(index, mutant)| (index as u64, mutant))
                 .collect::<Vec<_>>(),
         )]);
-        let text = include_str!("rust_project.rs");
-        let body = &text[text
-            .find("pub(crate) fn prepare_rust_strong_project(")
-            .unwrap()..];
-        let start = text.len() - body.len();
-        // The line a call is on, wherever on it the call starts.
-        let line_of = |needle: &str| {
-            text[..start + body.find(needle).unwrap()]
-                .matches('\n')
-                .count()
-                + 1
-        };
         // A crate's root, and the workspace as its modules are resolved,
-        // that cannot be found: their calls are earlier in the file.
-        let anywhere = |needle: &str| text[..text.find(needle).unwrap()].matches('\n').count() + 1;
-        for needle in [
-            "fs::canonicalize(&target.src_path).map_err",
-            "let canonical_workspace = ",
-        ] {
-            let site = format!("fs.canonicalize#rust_project.rs:{}", anywhere(needle));
-            let failed =
-                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
-            assert!(
-                matches!(failed, Err(RustProjectError::Io { .. })),
-                "{site}: {:?}",
-                failed.err()
-            );
-        }
-        for (fault, needle) in [
-            ("read_to_string", "fs::read_to_string(path)"),
-            ("read_to_string", "fs::read_to_string(&root)"),
-            ("write", "fs::write(&root, source)"),
+        // that cannot be found; a source that cannot be read, or its
+        // switched copy written.
+        for site in [
+            "fs.canonicalize#rust-project.crate-roots",
+            "fs.canonicalize#rust-project.resolve-module-tree",
+            "fs.read_to_string#rust-project.prepare-rust-strong-project.read-to-string-1",
+            "fs.read_to_string#rust-project.prepare-rust-strong-project.read-to-string-2",
+            "fs.write#rust-project.prepare-rust-strong-project.write-2",
         ] {
             fs::write(root.join("src/lib.rs"), source).unwrap();
-            let site = format!("fs.{fault}#rust_project.rs:{}", line_of(needle));
             let failed =
-                crate::fault::during(&site, || prepare_rust_strong_project(&root, &mutants));
+                crate::fault::during(site, || prepare_rust_strong_project(&root, &mutants));
             assert!(
                 matches!(failed, Err(RustProjectError::Io { .. })),
                 "{site}: {:?}",

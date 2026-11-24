@@ -252,6 +252,7 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // fault-site: child-signal-guard.output
         .start()?;
     let _registered = register(&child);
     child.wait_with_output()
@@ -325,6 +326,7 @@ pub fn output_streamed(command: &mut Command, keep: fn(&[u8]) -> bool) -> io::Re
 
 /// `Command::status()`, with the child registered while it runs.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    // fault-site: child-signal-guard.status
     let mut child = command.start()?;
     let _registered = register(&child);
     child.wait()

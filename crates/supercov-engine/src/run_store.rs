@@ -638,6 +638,7 @@ fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
     if !valid_run_id(entry) {
         return Err(RunStoreError::InvalidRun("run directory name"));
     }
+    // fault-site: run-store.load-run
     let directory_metadata = fs::symlink_metadata(directory)?;
     if !directory_metadata.file_type().is_dir() {
         return Err(RunStoreError::UnsafeStore(directory.to_owned()));
@@ -692,6 +693,7 @@ pub fn discover_runs(project_root: &Path) -> Result<RunInventory, RunStoreError>
     }
     let mut runs = Vec::new();
     let mut rejected = Vec::new();
+    // fault-site: run-store.discover-runs
     for entry in fs::read_dir(&store)? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1299,6 +1301,7 @@ fn prune_filtered_indexes(kept: &Path) {
     let directory = kept
         .parent()
         .expect("a filtered index lies in its run's directory");
+    // fault-site: run-store.prune-filtered-indexes
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -1367,6 +1370,7 @@ pub struct StatementSpan {
 
 /// The spans publication wrote, when it did.
 pub fn read_statement_spans(run: &StoredRun) -> Option<Vec<serde_json::Value>> {
+    // fault-site: run-store.read-statement-spans
     let bytes = fs::read(run.directory.join(STATEMENT_SPANS_FILE)).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -1380,6 +1384,7 @@ pub(crate) fn write_statement_spans(run: &StoredRun, report: &CoverageReport) ->
 pub fn read_assessment_input(
     run: &StoredRun,
 ) -> Option<crate::assertion_coverage::AssessmentInput> {
+    // fault-site: run-store.read-assessment-input
     let file = fs::open(run.directory.join(ASSESSMENT_INPUT_FILE)).ok()?;
     serde_json::from_reader(flate2::read::GzDecoder::new(io::BufReader::new(file))).ok()
 }
@@ -1738,7 +1743,7 @@ mod tests {
         }
         write("filtered-notes.txt", 0);
         // A directory that cannot be listed is pruned of nothing.
-        crate::fault::during("fs.read_dir#run_store.rs:1302", || {
+        crate::fault::during("fs.read_dir#run-store.prune-filtered-indexes", || {
             prune_filtered_indexes(&kept)
         });
         assert!(root.join("filtered-01.index").exists());

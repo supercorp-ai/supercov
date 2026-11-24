@@ -1580,6 +1580,7 @@ fn spawn_contained(
             Ok(())
         });
     }
+    // fault-site: process-supervision.spawn-contained
     let child = command.launch().map_err(|source| {
         if source.raw_os_error() == Some(WATCHDOG_ENDED) {
             SupervisionError::PlatformOperation {
@@ -1617,6 +1618,7 @@ pub fn watch_parent_process_group() -> io::Result<()> {
         } else {
             Path::new("/dev/fd")
         };
+    // fault-site: process-supervision.watch-parent-process-group
     let descriptors = crate::fault_fs::read_dir(descriptor_root)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
@@ -1705,6 +1707,7 @@ impl Keyboard {
     fn give(&mut self, group: libc::pid_t, ours_to_give: bool) -> bool {
         use std::os::fd::AsRawFd;
         if self.terminal.is_none() {
+            // fault-site: process-supervision.give
             self.terminal = crate::fault_fs::open_with(
                 fs::OpenOptions::new().read(true).write(true),
                 "/dev/tty",
@@ -1886,6 +1889,7 @@ impl ProcessSupervisor {
 
     pub fn new_crash_safe(watchdog_program: &Path) -> Result<Self, SupervisionError> {
         let watchdog_program =
+            // fault-site: process-supervision.new-crash-safe
             crate::fault_fs::canonicalize(watchdog_program).map_err(|source| {
                 SupervisionError::PlatformOperation {
                     operation: "resolve parent-death watchdog executable",

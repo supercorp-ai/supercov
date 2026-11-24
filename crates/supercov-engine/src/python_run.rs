@@ -109,16 +109,20 @@ pub(crate) fn write_runtime(directory: &Path) -> Result<(), String> {
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    // fault-site: python-run.copy-tree.read-dir
     for entry in fs::read_dir(source).map_err(|error| format!("{}: {error}", source.display()))? {
         let entry = entry.map_err(|error| error.to_string())?;
         let target = destination.join(entry.file_name());
+        // fault-site: python-run.copy-tree.file-type
         if fs::file_type(&entry)
             .map_err(|error| error.to_string())?
             .is_dir()
         {
+            // fault-site: python-run.copy-tree.create-dir-all
             fs::create_dir_all(&target).map_err(|error| error.to_string())?;
             copy_tree(&entry.path(), &target)?;
         } else {
+            // fault-site: python-run.copy-tree.copy
             fs::copy(entry.path(), &target).map_err(|error| error.to_string())?;
         }
     }
@@ -210,6 +214,7 @@ pub fn current_python_integrity(
     command: &[String],
     source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
+    // fault-site: python-run.current-python-integrity
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let mut files = crate::python_project::discover_python_files(&root)?;
     // The roots the run was measured under, not this shell's: the run
@@ -446,6 +451,7 @@ fn run_direct_python_in(
             .get("SUPERCOV_MUTANTS")
             .is_some_and(|value| matches!(value.trim(), "1" | "true"))
             .then(|| list_probed_mutants(&root, &mut plan));
+        // fault-site: python-run.run-direct-python-in.write
         fs::write(
             &plan_path,
             serde_json::to_vec(&plan).expect("plain data serializes"),
@@ -566,6 +572,7 @@ fn run_direct_python_in(
             .is_some_and(|value| !value.is_empty())
         {
             let debug_directory = root.join(".supercov/python-debug").join(&request.run_id);
+            // fault-site: python-run.run-direct-python-in.create-dir-all
             fs::create_dir_all(&debug_directory).map_err(|error| error.to_string())?;
             copy_tree(&python_directory, &debug_directory)?;
         }
@@ -708,13 +715,16 @@ impl PythonServer {
             python_integrity_inputs(&project.files, command).assertion_paths(),
         )?;
         let directory = root.join(".supercov/work").join(run_id).join("python");
+        // fault-site: python-run.prepare.write-runtime
         write_runtime(&directory.join("runtime"))?;
+        // fault-site: python-run.prepare.create-dir-all
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         let plan = crate::python_instrumenter::PythonProbePlan {
             root: workspace.display().to_string(),
             ..project.plan.clone()
         };
         let plan_path = directory.join("plan.json");
+        // fault-site: python-run.prepare.write-file
         fs::write(
             &plan_path,
             serde_json::to_vec(&plan).expect("plain data serializes"),
@@ -847,6 +857,7 @@ impl PythonServer {
                         .for_each(|scope| scope.run_id = metadata.id.clone());
                     run.request.integrity = serde_json::to_value(&self.integrity).ok();
                     let work = root.join(".supercov/work").join(&metadata.id);
+                    // fault-site: python-run.build-run
                     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
                     let archive_path = work.join("python-evidence.raw.gz");
                     let Archive { raw, analysed, .. } =
@@ -1061,7 +1072,7 @@ mod tests {
         );
         // A file it cannot digest leaves no fingerprint to compare.
         assert!(
-            crate::fault::during("fs.open#integrity.rs:427", || {
+            crate::fault::during("fs.open#integrity.digest-paths", || {
                 current_python_integrity(&root, &command, Some(&configured))
             })
             .is_err()
