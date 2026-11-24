@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A strong pass keeps partial progress. A mutant a pass left open (its budget spent, a job's time up) keeps the candidate tests that already passed with it, saved in the run's `strong-mutation.json` beside the verdicts, and the next pass, or the next round's jobs, runs it only against the rest; a mutant every candidate passed survived. A kill still needs one failing candidate and a survivor every candidate passing. The kept candidates merge across a sharded pass's runs (`supercov merge` says how many), carry over to later runs as verdicts do, and a candidate an edit could reach runs again. A pass says what it resumes: `37 mutant(s) resume where earlier passes left them, with 4 of 15 candidates left (the median): 412 candidate run(s) they passed are not run again`, and a budget's summary line says what the mutants it left keep. The Playwright driver records it.
+- A Playwright strong pass's command runs with `SUPERCOV_STRONG_SPREAD=1`: a harness that starts several `playwright test` processes (slots, each with its own server and database) may give a spec file to several of them, and each takes its own mutants of it from the pass's shared queue. A file with a serial describe, which such a harness keeps in one slot, no longer has to hold all its mutants there (`docs/mutation.md`, JavaScript and TypeScript).
+- The progress lines name a file with a serial describe that one invocation of several runs, where it holds the round back: how many mutants wait for it and the time its invocation has left against the others'.
+
+**Fixed**
+
+- A Playwright pass its budget stopped could record false kills. The stop takes the app's servers down under the tests still running, and a test that then failed (its page's script never served) stood as a kill, since no control came after it; an attempt Playwright reported as interrupted counted as failing too. In a stopped round a kill no control confirmed is now no verdict, an interrupted attempt settles nothing, and the mutant runs that candidate again in the next pass, resuming from the candidates it passed.
+- A command its budget, a timeout or a signal ended no longer leaves behind a process that left its process group: Playwright starts its web server detached and stops it only as it ends itself, so a stopped pass left the server running, and the next pass failed at once (`... is already used`), its mutants `error`s. Such groups are now told to end with the command, and killed with it after the grace period.
+
 ## 4.29.6
 
 **Changed**

@@ -14,7 +14,7 @@ use std::{
 use serde_json::{Value, json};
 use supercov_engine::{
     run_store::{StoredRun, discover_runs, select_run},
-    strong_plan::{StrongPlan, StrongVerdicts, Verdict, plan_for_run},
+    strong_plan::{Progress as Passed, StrongPlan, StrongVerdicts, Verdict, plan_for_run},
 };
 
 pub(crate) const HELP: &str = "\
@@ -473,6 +473,11 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     narrow(&mut plan, &root, run, options)?;
     let narrowed = plan.clone();
     let mut saved = read_saved(run);
+    // The candidates each mutant with no verdict already passed with it, in
+    // passes over this run.
+    let mut progress = saved_document(run)
+        .map(|document| document.progress)
+        .unwrap_or_default();
     let asked = plan
         .mutants
         .iter()
@@ -480,7 +485,9 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .collect::<Vec<_>>();
     // After an edit, the verdicts no change could have moved.
     let carried = if options.carry && !options.plan {
-        carry_over(&root, &inventory.runs, run, &plan, &saved)
+        let (carried, passed) = carry_over(&root, &inventory.runs, run, &plan, &saved);
+        add_progress(&mut progress, passed);
+        carried
     } else {
         Vec::new()
     };
@@ -488,9 +495,37 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     for (_, verdicts) in &carried {
         saved.extend(verdicts.clone());
     }
+    settle_progress(&mut progress, &saved);
     // A second pass over the same run runs only what has no verdict.
     plan.mutants
         .retain(|mutant| !saved.contains_key(&mutant.id));
+    // Each mutant resumes where earlier passes left it: only the candidates
+    // it has not passed with yet run. One that passed every candidate
+    // survived.
+    let resumed = supercov_engine::strong_verdicts::resume(&mut plan, &progress);
+    for whole in resumed
+        .iter()
+        .filter(|mutant| mutant.passed == mutant.candidates)
+    {
+        saved.insert(
+            whole.id.clone(),
+            Verdict {
+                status: "survived".into(),
+                killed_by: None,
+                tests: whole.passed as u64,
+                duration_ms: 0,
+                reason: None,
+            },
+        );
+    }
+    settle_progress(&mut progress, &saved);
+    plan.mutants
+        .retain(|mutant| !saved.contains_key(&mutant.id));
+    if !options.plan
+        && let Some(line) = resumed_line(&resumed)
+    {
+        eprintln!("{line}");
+    }
     // A shard: the k-th of n shares of about the same cost; the decided
     // ones with the first shard.
     if let Some((k, n)) = options.shard {
@@ -509,7 +544,15 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         .collect::<Vec<_>>();
     let to_run = running.len();
     let started = std::time::Instant::now();
-    let executed = execute(&root, run, plan.clone(), &mut saved, options, factor)?;
+    let executed = execute(
+        &root,
+        run,
+        plan.clone(),
+        &mut saved,
+        &mut progress,
+        options,
+        factor,
+    )?;
     let verdicts = read_saved(run);
     let mut data = summary(run, &narrowed, &asked, &verdicts, to_run, &executed);
     data["summary"]["durationMs"] = json!(started.elapsed().as_millis() as u64);
@@ -520,7 +563,16 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
         "of": total,
     });
     if let (Some(left), Some(budget)) = (executed.budget_left, options.budget) {
-        data["budget"] = json!({"seconds": budget.as_secs(), "left": left});
+        data["budget"] = json!({
+            "seconds": budget.as_secs(),
+            "left": left,
+            // What the mutants left keep for the next pass.
+            "resume": progress.len(),
+            "passed": progress.values().map(BTreeSet::len).sum::<usize>(),
+        });
+    }
+    if !resumed.is_empty() {
+        data["resumed"] = resumed_json(&resumed);
     }
     let limited = asked
         .iter()
@@ -821,9 +873,22 @@ fn plan_text(data: &Value) -> String {
             format!(" ({asked} of its {of} mutants, {})", narrowed.join(" and "))
         };
         if let Some(left) = data["budget"]["left"].as_u64() {
+            let resume = match data["budget"]["resume"].as_u64() {
+                Some(resume) if resume > 0 => format!(
+                    "; {resume} of them resume from the {} candidate(s) they passed",
+                    data["budget"]["passed"]
+                ),
+                _ => String::new(),
+            };
             extra.push_str(&format!(
-                "  budget of {} s spent: {left} mutant(s) left without a verdict, for the next pass\n",
+                "  budget of {} s spent: {left} mutant(s) left without a verdict, for the next pass{resume}\n",
                 data["budget"]["seconds"]
+            ));
+        }
+        if let Some(resumed) = data["resumed"]["mutants"].as_u64() {
+            extra.push_str(&format!(
+                "  {resumed} mutant(s) resumed where earlier passes left them: {} candidate run(s) they had passed were not run again\n",
+                data["resumed"]["skipped"]
             ));
         }
         if let Some(limited) = data["timeLimit"]["timedOut"].as_u64() {
@@ -1014,6 +1079,77 @@ fn saved_document(run: &StoredRun) -> Option<StrongVerdicts> {
         .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())
 }
 
+/// Adds `more` to `progress`: the candidates each mutant passed, together.
+fn add_progress(progress: &mut Passed, more: Passed) {
+    for (id, tests) in more {
+        progress.entry(id).or_default().extend(tests);
+    }
+}
+
+/// Drops the progress of each mutant a verdict now settles: an `error`
+/// runs again, and keeps it.
+fn settle_progress(progress: &mut Passed, saved: &std::collections::BTreeMap<String, Verdict>) {
+    progress.retain(|id, tests| {
+        !tests.is_empty()
+            && !saved
+                .get(id)
+                .is_some_and(supercov_engine::strong_verdicts::settles)
+    });
+}
+
+/// The middle of `values`, which is not empty: the lower of the two in an
+/// even count.
+fn median(mut values: Vec<usize>) -> usize {
+    values.sort_unstable();
+    values[(values.len() - 1) / 2]
+}
+
+/// What the resumed mutants are, for the answer: how many, how many of
+/// them every candidate let live already, how many candidate runs they do
+/// not repeat, and the median mutant's candidates left of how many.
+fn resumed_json(resumed: &[supercov_engine::strong_verdicts::Resumed]) -> Value {
+    let open = resumed
+        .iter()
+        .filter(|mutant| mutant.passed < mutant.candidates)
+        .collect::<Vec<_>>();
+    json!({
+        "mutants": resumed.len(),
+        "survived": resumed.len() - open.len(),
+        "skipped": resumed.iter().map(|mutant| mutant.passed).sum::<usize>(),
+        "medianLeft": (!open.is_empty()).then(|| median(open.iter().map(|mutant| mutant.candidates - mutant.passed).collect())),
+        "medianCandidates": (!open.is_empty()).then(|| median(open.iter().map(|mutant| mutant.candidates).collect())),
+    })
+}
+
+/// The line a pass that resumes mutants starts with: `37 mutant(s) resume
+/// with 4 of 15 candidates left`, the median's, and those that passed every
+/// candidate already.
+fn resumed_line(resumed: &[supercov_engine::strong_verdicts::Resumed]) -> Option<String> {
+    if resumed.is_empty() {
+        return None;
+    }
+    let said = resumed_json(resumed);
+    let open = said["mutants"].as_u64().unwrap_or(0) - said["survived"].as_u64().unwrap_or(0);
+    let mut parts = Vec::new();
+    if open > 0 {
+        parts.push(format!(
+            "{open} mutant(s) resume where earlier passes left them, with {} of {} candidates left (the median)",
+            said["medianLeft"], said["medianCandidates"]
+        ));
+    }
+    let survived = said["survived"].as_u64().unwrap_or(0);
+    if survived > 0 {
+        parts.push(format!(
+            "{survived} passed every candidate in earlier passes, and survived"
+        ));
+    }
+    Some(format!(
+        "[supercov] {}: {} candidate run(s) they passed are not run again",
+        parts.join("; "),
+        said["skipped"]
+    ))
+}
+
 /// The mutation score StrykerJS reports: killed and timed out over all
 /// that are not equivalent or errors.
 /// How many surviving mutants the pass summary names.
@@ -1171,6 +1307,21 @@ struct Saving {
     run: String,
     mutant_set: String,
     before: std::collections::BTreeMap<String, Verdict>,
+    /// The candidates each open mutant had passed before.
+    progress: Passed,
+}
+
+impl Saving {
+    /// Saves what was decided before with what the driver wrote so far.
+    fn save(&self, results: &Path) -> Result<(), String> {
+        let (verdicts, _, passed) = read_results(results);
+        let mut all = self.before.clone();
+        all.extend(verdicts);
+        let mut progress = self.progress.clone();
+        add_progress(&mut progress, passed);
+        settle_progress(&mut progress, &all);
+        save_to(&self.path, &self.run, &self.mutant_set, &all, &progress)
+    }
 }
 
 /// While a pass runs: every second, the verdicts its driver wrote so far
@@ -1213,10 +1364,8 @@ impl Progress {
                 let verdicts = read_results(&results).0;
                 if verdicts.len() > seen {
                     seen = verdicts.len();
-                    let mut all = saving.before.clone();
-                    all.extend(verdicts.clone());
                     // A save that fails here is made again when the pass ends.
-                    let _ = save_to(&saving.path, &saving.run, &saving.mutant_set, &all);
+                    let _ = saving.save(&results);
                 }
                 if said.elapsed() >= interval {
                     said = std::time::Instant::now();
@@ -1305,9 +1454,7 @@ fn end_now(
     saving: &Saving,
     signal: supercov_engine::process_supervision::ForwardedSignal,
 ) -> ! {
-    let mut all = saving.before.clone();
-    all.extend(read_results(results).0);
-    let _ = save_to(&saving.path, &saving.run, &saving.mutant_set, &all);
+    let _ = saving.save(results);
     let why = if BUDGET_SPENT.load(std::sync::atomic::Ordering::SeqCst) {
         "its budget spent".to_owned()
     } else {
@@ -1320,12 +1467,20 @@ fn end_now(
     std::process::exit(signal.exit_code())
 }
 
-/// A pass's results so far: each mutant's verdict, and what its driver said
-/// of itself.
-fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>, Vec<Value>) {
+/// A pass's results so far: each mutant's verdict, what its driver said
+/// of itself, and the candidates each mutant it left open passed with it
+/// (a `progress` record: `{"progress": true, "id": .., "passed": [..]}`).
+fn read_results(
+    results: &Path,
+) -> (
+    std::collections::BTreeMap<String, Verdict>,
+    Vec<Value>,
+    Passed,
+) {
     let text = std::fs::read_to_string(results).unwrap_or_default();
     let mut verdicts = std::collections::BTreeMap::new();
     let mut passes = Vec::new();
+    let mut progress = Passed::new();
     for line in text.lines() {
         // A line cut short by a driver still writing it says nothing yet.
         let Ok(record) = serde_json::from_str::<Value>(line) else {
@@ -1335,6 +1490,19 @@ fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>,
             passes.push(record);
             continue;
         }
+        if record["progress"] == true {
+            if let Some(id) = record["id"].as_str() {
+                progress.entry(id.to_owned()).or_default().extend(
+                    record["passed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+            continue;
+        }
         let Some(id) = record["id"].as_str() else {
             continue;
         };
@@ -1342,7 +1510,7 @@ fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>,
             verdicts.insert(id.to_owned(), verdict);
         }
     }
-    (verdicts, passes)
+    (verdicts, passes, progress)
 }
 
 /// How far a pass got: its verdicts so far of the mutants it runs, and the
@@ -1401,8 +1569,9 @@ fn save(
     run: &StoredRun,
     mutant_set: &str,
     saved: &std::collections::BTreeMap<String, Verdict>,
+    progress: &Passed,
 ) -> Result<(), String> {
-    save_to(&results_path(run), &run.id, mutant_set, saved)
+    save_to(&results_path(run), &run.id, mutant_set, saved, progress)
 }
 
 /// Writes verdicts to `path` whole, then renames them into place: a pass
@@ -1412,6 +1581,7 @@ fn save_to(
     run: &str,
     mutant_set: &str,
     saved: &std::collections::BTreeMap<String, Verdict>,
+    progress: &Passed,
 ) -> Result<(), String> {
     supercov_engine::strong_verdicts::save(
         path,
@@ -1420,6 +1590,7 @@ fn save_to(
             run: run.to_owned(),
             mutant_set: mutant_set.to_owned(),
             mutants: saved.clone(),
+            progress: progress.clone(),
         },
     )
 }
@@ -1452,9 +1623,16 @@ fn execute(
     run: &StoredRun,
     plan: StrongPlan,
     saved: &mut std::collections::BTreeMap<String, Verdict>,
+    progress: &mut Passed,
     options: &Options,
     factor: f64,
 ) -> Result<Executed, Stop> {
+    // How many candidates each resumed mutant passed before this pass: a
+    // survivor's verdict counts them with the ones it passes now.
+    let passed_before = progress
+        .iter()
+        .map(|(id, tests)| (id.clone(), tests.len() as u64))
+        .collect::<std::collections::BTreeMap<_, _>>();
     // Decided without running.
     for mutant in &plan.mutants {
         saved.extend(
@@ -1550,10 +1728,15 @@ fn execute(
                         .map_err(|e| format!("{}: {e}", work.display()))?;
                     let results = work.join("results.jsonl");
                     let ran = run_language(
-                        root, run, &plan, &remaining, &language, &command, &work, saved, budget_at,
-                        factor,
+                        root, run, &plan, &remaining, &language, &command, &work, saved, progress,
+                        budget_at, factor,
                     );
-                    let (verdicts, passes) = read_results(&results);
+                    let (mut verdicts, passes, passed) = read_results(&results);
+                    for (id, verdict) in &mut verdicts {
+                        if verdict.status == "survived" {
+                            verdict.tests += passed_before.get(id).copied().unwrap_or(0);
+                        }
+                    }
                     for sentence in supercov_engine::strong_driver::out_of_memory(&work) {
                         eprintln!("[supercov] {sentence}");
                         ran_out.get_or_insert(sentence);
@@ -1565,9 +1748,11 @@ fn execute(
                         supercov_engine::strong_driver::finish_work_directory(&work);
                     }
                     saved.extend(verdicts);
+                    add_progress(progress, passed);
+                    settle_progress(progress, saved);
                     executed.passes.extend(passes);
                     remaining.retain(|mutant| !saved.contains_key(&mutant.id));
-                    save(run, &plan.mutant_set, saved)?;
+                    save(run, &plan.mutant_set, saved, progress)?;
                     exit = ran?;
                     executed.command_exit = Some(exit);
                     // The budget's termination ends the pass as a finished
@@ -1602,7 +1787,7 @@ fn execute(
             });
         }
     }
-    save(run, &plan.mutant_set, saved)?;
+    save(run, &plan.mutant_set, saved, progress)?;
     Ok(executed)
 }
 
@@ -1618,6 +1803,7 @@ fn run_language(
     command: &[String],
     work: &Path,
     saved: &std::collections::BTreeMap<String, Verdict>,
+    progress: &Passed,
     budget_at: Option<std::time::Instant>,
     factor: f64,
 ) -> Result<i32, String> {
@@ -1667,6 +1853,7 @@ fn run_language(
             run: run.id.clone(),
             mutant_set: plan.mutant_set.clone(),
             before: saved.clone(),
+            progress: progress.clone(),
         },
         budget_at,
     );
@@ -1724,19 +1911,24 @@ fn summary(
     })
 }
 
+/// The verdicts carried over from earlier runs, with each run's id.
+type Carried = Vec<(String, std::collections::BTreeMap<String, Verdict>)>;
+
 /// Verdicts earlier runs of this checkout's project still give `run`'s
 /// mutants, by mutant id, with each run's id, newest first: of the earlier
 /// runs of the same command, dependencies, configuration and mutant set,
 /// newest first, each gives the mutants still undecided what
 /// `kept_verdicts` keeps of its verdicts. A strong pass split across
-/// machines leaves each part's verdicts in its own run.
+/// machines leaves each part's verdicts in its own run. With them, the
+/// partial progress of the mutants still undecided, every such run's
+/// together, as `kept_progress` keeps it.
 fn carry_over(
     root: &Path,
     runs: &[StoredRun],
     run: &StoredRun,
     plan: &StrongPlan,
     saved: &std::collections::BTreeMap<String, Verdict>,
-) -> Vec<(String, std::collections::BTreeMap<String, Verdict>)> {
+) -> (Carried, Passed) {
     let mut undecided = plan
         .mutants
         .iter()
@@ -1753,6 +1945,7 @@ fn carry_over(
         )
     };
     let mut carried = Vec::new();
+    let mut progress = Passed::new();
     // Newest first, as runs are listed. Once every mutant has a verdict,
     // the rest are not read: `supercov mutants` measures a run where the
     // checkout is not current, and an unchanged run decides nothing new.
@@ -1772,14 +1965,103 @@ fn carry_over(
         let Ok(affected) = supercov_engine::source_manifest::affected_tests(root, earlier) else {
             continue;
         };
-        let kept = kept_verdicts(&undecided, &plan.tests, &document.mutants, &affected);
-        if kept.is_empty() {
+        let unchanged = Unchanged::of(&affected);
+        let kept = kept_verdicts(&undecided, &plan.tests, &document.mutants, &unchanged);
+        undecided.retain(|mutant| !kept.contains_key(&mutant.id));
+        add_progress(
+            &mut progress,
+            kept_progress(&undecided, &plan.tests, &document.progress, &unchanged),
+        );
+        if !kept.is_empty() {
+            carried.push((earlier.id.clone(), kept));
+        }
+    }
+    (carried, progress)
+}
+
+/// What `tests affected` says of an earlier run (`docs/cli.md`): the test
+/// files a change since may have reached, the tests it found unaffected,
+/// and the files changed.
+struct Unchanged {
+    reached_files: BTreeSet<String>,
+    unaffected: BTreeSet<(String, String)>,
+    changed: BTreeSet<String>,
+}
+
+impl Unchanged {
+    fn of(affected: &Value) -> Self {
+        let entries = |key: &str| {
+            affected[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|entry| {
+                    (
+                        entry["file"].as_str().unwrap_or_default().to_owned(),
+                        entry["name"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        Self {
+            // A test file holding any test a change may have reached.
+            reached_files: entries("affected")
+                .into_iter()
+                .chain(entries("undetermined"))
+                .map(|(file, _)| file)
+                .collect(),
+            unaffected: entries("unaffected").into_iter().collect(),
+            changed: affected["changedFiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|entry| entry["file"].as_str().unwrap_or_default().to_owned())
+                .collect(),
+        }
+    }
+
+    /// Whether a test runs as it did: the earlier run had it, found it
+    /// unaffected, and no test of its file was reached (they share the
+    /// file's state).
+    fn test(&self, test: &supercov_engine::strong_plan::PlannedTest) -> bool {
+        let file = test.file.clone().unwrap_or_default();
+        !self.reached_files.contains(&file) && self.unaffected.contains(&(file, test.name.clone()))
+    }
+}
+
+/// The candidates each still undecided mutant passed in `earlier` that no
+/// change since could move: its file is byte for byte as it was, and the
+/// candidate is one it has now and runs as it did (`Unchanged::test`). A
+/// pass is kept candidate by candidate: a change that reaches one test
+/// leaves the others' passes standing.
+fn kept_progress(
+    undecided: &[&supercov_engine::strong_plan::PlannedMutant],
+    tests: &[supercov_engine::strong_plan::PlannedTest],
+    earlier: &Passed,
+    unchanged: &Unchanged,
+) -> Passed {
+    let mut kept = Passed::new();
+    for mutant in undecided {
+        let Some(passed) = earlier.get(&mutant.id) else {
+            continue;
+        };
+        if !supercov_engine::strong_verdicts::resumes(mutant, tests)
+            || unchanged.changed.contains(&mutant.file)
+        {
             continue;
         }
-        undecided.retain(|mutant| !kept.contains_key(&mutant.id));
-        carried.push((earlier.id.clone(), kept));
+        let standing = mutant
+            .candidates
+            .iter()
+            .map(|candidate| &tests[candidate.test])
+            .filter(|test| passed.contains(&test.id) && unchanged.test(test))
+            .map(|test| test.id.clone())
+            .collect::<BTreeSet<_>>();
+        if !standing.is_empty() {
+            kept.insert(mutant.id.clone(), standing);
+        }
     }
-    carried
+    kept
 }
 
 /// The verdicts of `earlier` that no change since could move, by mutant id,
@@ -1795,39 +2077,8 @@ fn kept_verdicts(
     undecided: &[&supercov_engine::strong_plan::PlannedMutant],
     tests: &[supercov_engine::strong_plan::PlannedTest],
     earlier: &std::collections::BTreeMap<String, Verdict>,
-    affected: &Value,
+    unchanged: &Unchanged,
 ) -> std::collections::BTreeMap<String, Verdict> {
-    let entries = |key: &str| {
-        affected[key]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|entry| {
-                (
-                    entry["file"].as_str().unwrap_or_default().to_owned(),
-                    entry["name"].as_str().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    // A test file holding any test a change may have reached.
-    let reached_files = entries("affected")
-        .into_iter()
-        .chain(entries("undetermined"))
-        .map(|(file, _)| file)
-        .collect::<BTreeSet<_>>();
-    let unaffected = entries("unaffected").into_iter().collect::<BTreeSet<_>>();
-    let changed = affected["changedFiles"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|entry| entry["file"].as_str().unwrap_or_default())
-        .collect::<BTreeSet<_>>();
-    let unchanged_test = |index: usize| {
-        let test = &tests[index];
-        let file = test.file.clone().unwrap_or_default();
-        !reached_files.contains(&file) && unaffected.contains(&(file, test.name.clone()))
-    };
     let mut kept = std::collections::BTreeMap::new();
     for mutant in undecided {
         let Some(verdict) = earlier.get(&mutant.id) else {
@@ -1836,20 +2087,20 @@ fn kept_verdicts(
         if !matches!(verdict.status.as_str(), "killed" | "survived" | "timeout") {
             continue;
         }
-        if changed.contains(mutant.file.as_str()) {
+        if unchanged.changed.contains(&mutant.file) {
             continue;
         }
         if mutant
             .whole_files
             .iter()
-            .any(|file| reached_files.contains(file))
+            .any(|file| unchanged.reached_files.contains(file))
         {
             continue;
         }
         if !mutant
             .candidates
             .iter()
-            .all(|candidate| unchanged_test(candidate.test))
+            .all(|candidate| unchanged.test(&tests[candidate.test]))
         {
             continue;
         }
@@ -2193,6 +2444,7 @@ mod tests {
             mutant("file-mate-reached", "src/a.js", &[2], &[]),
             mutant("new-candidate", "src/a.js", &[3], &[]),
             mutant("fileless", "src/a.js", &[4], &[]),
+            mutant("partial", "src/a.js", &[0, 1], &[]),
         ];
         let verdict = |status: &str| Verdict {
             status: status.into(),
@@ -2226,13 +2478,141 @@ mod tests {
             "changedFiles": [{"file": "src/b.js"}, {"change": "no file"}],
         });
         let undecided = plan.mutants.iter().collect::<Vec<_>>();
-        let kept = kept_verdicts(&undecided, &tests, &earlier, &affected);
+        let unchanged = Unchanged::of(&affected);
+        let kept = kept_verdicts(&undecided, &tests, &earlier, &unchanged);
         assert_eq!(
             kept.keys().map(String::as_str).collect::<Vec<_>>(),
             ["fileless", "kept", "timeout-kept"]
         );
-        assert!(kept_verdicts(&undecided, &tests, &earlier, &json!({})).is_empty());
-        assert!(kept_verdicts(&[], &tests, &earlier, &affected).is_empty());
+        let nothing = Unchanged::of(&json!({}));
+        assert!(kept_verdicts(&undecided, &tests, &earlier, &nothing).is_empty());
+        assert!(kept_verdicts(&[], &tests, &earlier, &unchanged).is_empty());
+        // A pass is kept candidate by candidate, on the same rules: the
+        // candidate a change reached loses its pass, the others keep
+        // theirs; a test that is no candidate now lends nothing, nor a
+        // mutant whose file changed, one that runs a file whole, or one
+        // with no candidate left standing.
+        let passed = |of: &[(&str, &[&str])]| -> Passed {
+            of.iter()
+                .map(|(id, tests)| {
+                    (
+                        (*id).to_owned(),
+                        tests.iter().map(|test| (*test).to_owned()).collect(),
+                    )
+                })
+                .collect()
+        };
+        let earlier_progress = passed(&[
+            ("partial", &["a1", "b1"]),
+            ("never-run", &["a1", "gone"]),
+            ("file-changed", &["a1"]),
+            ("whole-reached", &["a1"]),
+            ("new-candidate", &["new"]),
+        ]);
+        assert_eq!(
+            kept_progress(&undecided, &tests, &earlier_progress, &unchanged),
+            passed(&[("never-run", &["a1"]), ("partial", &["a1"])])
+        );
+        assert!(kept_progress(&undecided, &tests, &earlier_progress, &nothing).is_empty());
+    }
+
+    /// A pass that resumes mutants says so as it starts (the median
+    /// mutant's candidates left of how many), and in its summary; a pass
+    /// its budget stopped says what the mutants it left keep.
+    #[test]
+    fn resumed_mutants_are_said() {
+        use supercov_engine::strong_verdicts::Resumed;
+        let resumed = |id: &str, passed: usize, candidates: usize| Resumed {
+            id: id.into(),
+            passed,
+            candidates,
+        };
+        assert_eq!(resumed_line(&[]), None);
+        let four = [
+            resumed("a", 11, 15),
+            resumed("b", 2, 4),
+            resumed("c", 1, 15),
+            resumed("d", 3, 3),
+        ];
+        assert_eq!(
+            resumed_line(&four).unwrap(),
+            "[supercov] 3 mutant(s) resume where earlier passes left them, with 4 of 15 candidates left (the median); 1 passed every candidate in earlier passes, and survived: 17 candidate run(s) they passed are not run again"
+        );
+        assert_eq!(
+            resumed_line(&four[3..]).unwrap(),
+            "[supercov] 1 passed every candidate in earlier passes, and survived: 3 candidate run(s) they passed are not run again"
+        );
+        assert_eq!(
+            resumed_line(&four[1..2]).unwrap(),
+            "[supercov] 1 mutant(s) resume where earlier passes left them, with 2 of 4 candidates left (the median): 2 candidate run(s) they passed are not run again"
+        );
+        let summary = json!({"killed": 1, "timeout": 0, "survived": 0, "noCoverage": 0,
+            "equivalent": 0, "error": 0, "ran": 1, "durationMs": 5, "mutationScore": null});
+        let text = plan_text(&json!({"run": "r1", "summary": summary,
+            "resumed": resumed_json(&four),
+            "budget": {"seconds": 60, "left": 3, "resume": 2, "passed": 9}}));
+        assert!(
+            text.contains("  4 mutant(s) resumed where earlier passes left them: 17 candidate run(s) they had passed were not run again\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  budget of 60 s spent: 3 mutant(s) left without a verdict, for the next pass; 2 of them resume from the 9 candidate(s) they passed\n"),
+            "{text}"
+        );
+        let none_kept = plan_text(&json!({"run": "r1", "summary": summary,
+            "budget": {"seconds": 60, "left": 3, "resume": 0, "passed": 0}}));
+        assert!(
+            none_kept.contains("for the next pass\n") && !none_kept.contains("resume"),
+            "{none_kept}"
+        );
+    }
+
+    /// A pass's results carry the candidates each mutant it left open
+    /// passed, together; a record with no mutant says nothing. A verdict
+    /// that settles a mutant drops its progress, an error keeps it.
+    #[test]
+    fn a_pass_s_results_carry_its_open_mutants_progress() {
+        let directory =
+            std::env::temp_dir().join(format!("supercov-results-progress-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let results = directory.join("results.jsonl");
+        std::fs::write(
+            &results,
+            concat!(
+                "{\"progress\":true,\"id\":\"m1\",\"passed\":[\"t1\",\"t2\"]}\n",
+                "{\"progress\":true,\"id\":\"m1\",\"passed\":[\"t3\",4]}\n",
+                "{\"progress\":true,\"passed\":[\"t1\"]}\n",
+                "{\"progress\":true,\"id\":\"m2\"}\n",
+                "{\"id\":\"m3\",\"status\":\"killed\"}\n",
+            ),
+        )
+        .unwrap();
+        let (verdicts, _, mut progress) = read_results(&results);
+        assert_eq!(verdicts.keys().collect::<Vec<_>>(), ["m3"]);
+        let set = |tests: &[&str]| {
+            tests
+                .iter()
+                .map(|test| (*test).to_owned())
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(progress["m1"], set(&["t1", "t2", "t3"]));
+        assert!(progress["m2"].is_empty());
+        progress.insert("m3".into(), set(&["t1"]));
+        progress.insert("m4".into(), set(&["t1"]));
+        let mut saved = verdicts;
+        saved.insert(
+            "m4".into(),
+            Verdict {
+                status: "error".into(),
+                killed_by: None,
+                tests: 0,
+                duration_ms: 0,
+                reason: None,
+            },
+        );
+        settle_progress(&mut progress, &saved);
+        assert_eq!(progress.keys().collect::<Vec<_>>(), ["m1", "m4"]);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The summary names the first survivors and counts the rest.

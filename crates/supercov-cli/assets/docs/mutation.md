@@ -129,6 +129,14 @@ mutants the tests let survive.
   as a finished one, its verdicts saved; the summary says how many mutants it
   left for the next pass (`budget of 2400 s spent: 812 mutant(s) left without
   a verdict, for the next pass`).
+- **Partial progress.** A mutant a pass left open keeps the candidate tests
+  that already passed with it, saved with the run's verdicts, and the next
+  pass runs it only against the rest (`37 mutant(s) resume where earlier
+  passes left them, with 4 of 15 candidates left (the median)`): a kill needs
+  one failing candidate, a survivor every candidate passing, and the ones
+  that passed did. The candidates are kept as verdicts are, after an edit, a
+  merge and in a later round: a candidate a change could reach runs again.
+  The Playwright driver records them.
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
@@ -425,6 +433,28 @@ no mutants shows none of this.
   has left. A candidate in a project others start from (a login `setup`)
   never runs with a mutant: a mutant no other test kills is an `error` that
   says so.
+- **A harness with slots.** A harness that runs several `playwright test`
+  processes at once (slots, each with its own server and database) can let
+  every slot work on a spec file it would otherwise keep in one: in a strong
+  pass the command runs with `SUPERCOV_STRONG_SPREAD=1`, and each slot that
+  runs a file takes its own mutants of it from a queue the pass's slots
+  share. A file with a serial describe is the case that matters: a harness
+  keeps its tests together, so one slot runs all its mutants, and the
+  progress lines say so and what it costs (`"e2e/buy.spec.ts" has a serial
+  describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about
+  12m00s there, the others about 1m00s`). Supercov cannot do this without the
+  harness: Playwright's file filters come from the command line before any
+  config loads, and a slot's server and database are its own process's.
+  Where the variable is set, give such files to every slot:
+
+  ```ts
+  const spread = process.env.SUPERCOV_STRONG_SPREAD === '1';
+  // ...after sharing out the tests, a serial file to one slot:
+  if (spread) for (const slot of slots) slot.files.push(...serialFiles);
+  ```
+
+  Each slot runs a file's tests once without a mutant before its first
+  mutant there, so spreading costs every slot that baseline.
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.

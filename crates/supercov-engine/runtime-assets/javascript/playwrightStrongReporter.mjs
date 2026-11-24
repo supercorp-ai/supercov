@@ -11,7 +11,7 @@
 // from whichever invocations ran it, and what was cut short is unfinished.
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, readJson, reasonOf, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
+import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, readJson, reasonOf, serialFile, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
 
 // How often, at most, the status file is written.
 const STATUS_MS = 1_000;
@@ -68,6 +68,8 @@ export default class SupercovPlaywrightStrongReporter {
         // The tests this invocation runs, and the baseline time of the runs
         // it ended: its pace, for the time its work left takes.
         this.held = [];
+        // Those of them in a file with a serial describe.
+        this.serial = new Set();
         this.doneMs = 0;
         this.queuedAt = 0;
     }
@@ -91,8 +93,11 @@ export default class SupercovPlaywrightStrongReporter {
             if (withoutCopy(test.titlePath()).copy)
                 continue;
             writeJson(`${this.pass.round}/originals/${key(placeOf(test))}`, test.id);
-            if (this.work.tests[test.id]?.jobs)
+            if (this.work.tests[test.id]?.jobs) {
                 this.held.push(test.id);
+                if (serialFile(test.location.file))
+                    this.serial.add(test.id);
+            }
         }
         this.copies = copies;
         const mutants = Object.keys(this.work.entries).length;
@@ -227,7 +232,7 @@ export default class SupercovPlaywrightStrongReporter {
     countQueued() {
         this.queuedAt = Date.now();
         try {
-            const queued = queuedWork(this.pass, this.work, this.held);
+            const queued = queuedWork(this.pass, this.work, this.held, this.serial);
             const spent = (this.lastEndedAt ?? 0) - (this.firstStartedAt ?? 0);
             if (this.doneMs > 0 && spent > 0)
                 queued.leftMs = Math.round((queued.ms * spent) / this.doneMs);
@@ -322,6 +327,9 @@ export default class SupercovPlaywrightStrongReporter {
                 serial.push(job);
         };
         const trustedUntil = globalError ? globalError.at : Infinity;
+        // A round the budget or a signal stopped: its servers went down
+        // under the tests still running, which then failed for that.
+        const stopped = process.env["SUPERCOV_STRONG_STOPPED"] === "1";
         // One mutant an invocation: which invocation took each, and where a
         // server of that invocation ran it (an invocation whose server was
         // started before it, outside it, never ran its mutant there).
@@ -365,8 +373,11 @@ export default class SupercovPlaywrightStrongReporter {
                 continue;
             }
             // A kill no control came after (the round ended first): as sure as a
-            // kill on a server no other mutant's attempt shared.
-            const killer = failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
+            // kill on a server no other mutant's attempt shared. Not where the
+            // round was stopped: the stop takes the servers down under the
+            // tests still running, and a test that failed then failed for it.
+            // The mutant runs that candidate again in the next pass.
+            const killer = stopped ? undefined : failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
             if (killer) {
                 const { status, reason } = verdictOf(killer);
                 verdict({ status, killedBy: killer.original, reason: `${reason}${suffix}` });
@@ -408,12 +419,26 @@ export default class SupercovPlaywrightStrongReporter {
         }
         for (const job of work.restarts)
             next(job, job.reason, job.tests);
+        // What each mutant left open passed: its candidates that ran with it
+        // and passed (before any error outside a test), by the plan's ids. A
+        // later pass, or a later round, resumes there. A round of mutants a
+        // server ran from its start lends nothing to a request's own switch.
+        if (kind !== "alone") {
+            for (const id of Object.keys(work.entries)) {
+                if (existsSync(`${pass.shared}/verdicts/${key(id)}`))
+                    continue;
+                const passed = (byMutant.get(id) ?? [])
+                    .filter((attempt) => attempt.outcome === "passed" && attempt.endedAt < trustedUntil)
+                    .map((attempt) => work.tests[attempt.original]?.planId ?? attempt.original);
+                if (passed.length)
+                    write({ progress: true, id, passed: [...new Set(passed)].sort() });
+            }
+        }
         // A round of what an earlier one left that ran to its end and decided
         // nothing would only ask for the same again. One the budget or a
         // signal stopped leaves its mutants without a verdict, for the next
         // pass (a confirmation round stopped before its first test made two
         // mutants of a 60 s pass `error`s).
-        const stopped = process.env["SUPERCOV_STRONG_STOPPED"] === "1";
         if (kind !== "main" && !decided && !stopped) {
             for (const job of rest)
                 write({ id: job.id, status: "error", reason: "its tests did not finish, in two rounds", tests: 0, durationMs: 0 });

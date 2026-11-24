@@ -851,7 +851,12 @@ engine runs the strong reporter's `judge`, which gives the rest theirs: a kill
 no control came after (the round ended first) stands, as any kill did before;
 a candidate that failed without the mutant is left out; what did not run is
 unfinished, and runs in a `rest` round. A pass the budget stopped is judged
-too, and keeps what it finished.
+too, and keeps what it finished, but no kill there that no control confirmed:
+the stop takes the app's servers down under the tests still running, and a
+test that failed then failed for that. A fixture's survivor failed so, its
+page's script never served, and stood as a kill. Such a mutant runs that
+candidate again in the next pass, and an attempt Playwright reports as
+interrupted settles nothing.
 
 **What the pass says as it goes.** Each invocation's runner writes a status
 file (its round, the baselines, attempts and controls so far, the tests
@@ -908,6 +913,39 @@ works out the same work from the same plan and writes it alike, and none
 removes what another wrote. A test's baseline, a mutant's claims and its kill
 are the pass's; a file's lock (one test of the file at a time), a kill's
 control and what ran beside what are the invocation's, as its server is.
+
+**Serial files and slots.** A harness that shares tests out to slots keeps
+a file with a serial describe in one slot: its tests may lean on one
+another. The strong pass runs a serial describe as a default one, so a file
+has no order its copies must keep beyond the sweeps, and the queue its
+copies take mutants from is the pass's, shared by every invocation. Running
+the file in several slots is then exact as it stands: a mutant's claim on a
+candidate is pass-wide, so no two slots run the same test with the same
+mutant; each slot's first run of each test is its own control on its own
+server and database; and a kill is confirmed by the next control of its test
+in the slot that made it. What it costs is each slot's baseline of the
+file's tests.
+
+Supercov cannot put the file in a slot the harness did not give it. The
+`playwright test` command reads its file filters from the command line before
+it loads any config, and Supercov's config can narrow the run but not widen
+it; and a slot's server and database belong to its own process, so a second
+invocation Supercov started against them would run beside the slot's tests
+on state they do not expect. So the harness must cooperate, and the pass
+tells it it may: the command runs with `SUPERCOV_STRONG_SPREAD=1`, and a
+harness that sees it may give a serial file (or any file) to every slot. With
+`--list` a harness still sees each test once: copies stay out of the list
+(see below), since a harness that shared them out would keep a serial file's
+copies together just the same.
+
+Where it does not, the progress lines say so. The runner records the spec
+files it loaded with a serial describe (in `playwright test`'s runner
+process, which loads every file before the first test); each invocation's
+status counts the mutants waiting for such a file's tests; and where only one
+of a round's invocations runs the file and it has more time left than any
+other, the line names the file, its mutants, and the two times:
+
+    [supercov]   "tests/e2e/buy.spec.ts" has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; a harness that gives it to every invocation of a strong pass shares them out (SUPERCOV_STRONG_SPREAD, docs/mutation.md)
 
 **A process that runs out of heap is named.** Every Node process of a strong
 pass runs with `--report-on-fatalerror` into the pass's directory. A process
@@ -1280,6 +1318,58 @@ negotiator 3.4 s and 1.0 s. Before the resident runners each job started
 Jest or Mocha: ms took 21.8 s, cron-parser 37.3 s, negotiator 5.9 s. Under
 tap, a job runs its file with `node` alone, as StrykerJS's runner does: ini
 13.6 s against 8.1 s.
+
+## Partial progress across passes and rounds
+
+A pass its budget stops, or a CI job's time limit, used to leave a mutant
+open with nothing to show for the candidates it had already passed: the next
+pass ran it from its first candidate. On a large application's e2e area
+(about 1,600 of 2,160 mutants decided in a first round of 8 jobs), the
+mutants left were mostly survivors-to-be with many candidates, a few of them
+slow, and each further round decided only about 100: each one ran the same
+cheap candidates again before it reached the ones it had not tried.
+
+So a mutant's progress is kept: **the candidate tests that passed with it
+switched on.** The argument is the plan's own. A kill needs one candidate
+that fails with the mutant; a survivor needs every candidate to pass. A
+candidate that passed with the mutant can make neither a kill nor a survivor
+of it by running again with the same code and the same test, so a later pass
+runs the mutant only against the rest, and a mutant every candidate of which
+passed survived. Three conditions keep the fact the same fact:
+
+- **What it applies to.** A mutant whose candidates run one at a time with
+  the request's own switch: not one that runs a test file whole (Vitest's
+  module-level mutants, where the file's run, not a test's, is the unit) and
+  not one a server must start with (`serverWide`: a pass with a per-request
+  switch says nothing of it; the alone rounds record no progress).
+- **Which passes count.** The Playwright judge records, for each mutant its
+  round leaves without a verdict, the candidates whose attempt passed before
+  any error outside a test (the same set it would count toward a survivor),
+  as a `progress` record in the results. An attempt Playwright interrupted
+  (the budget's termination) neither passed nor failed: it settles nothing.
+- **When it stops holding.** It is invalidated as a verdict is, candidate by
+  candidate: carried to a later run (`supercov mutants` after an edit, a
+  later round's jobs) only where the mutant's file is byte for byte as it
+  was and the candidate is one the earlier run found unaffected, with no test
+  of its file reached; merged (`supercov merge`) as the union of every run's
+  candidates, a run lending only tests it measured, for a file it recorded
+  with the merged run's bytes. A candidate that is no longer a candidate
+  lends nothing.
+
+It is saved in `strong-mutation.json` beside the verdicts, as `progress`
+(mutant id to test ids), an optional field older releases ignore; a verdict
+that settles a mutant drops its progress, and an `error` (which runs again)
+keeps it. The engine takes the candidates off the plan before it shares the
+mutants out, so the shares, the order and the driver see the work that is
+left; a survivor's verdict counts the candidates it passed before.
+
+**Why the slow tail was bounded, and what this does to it.** Within a
+Playwright pass the order already ran cheap candidates first; across passes
+the same cheap candidates ran again, and a mutant reached its slow ones only
+in a pass long enough for all of them. With progress kept, each pass adds to
+what the last reached: a mutant with 15 candidates, four of which poll for
+10 s, runs its cheap ones once and the slow ones in whichever later passes
+reach them.
 
 ## After an edit: verdicts no change could move
 
