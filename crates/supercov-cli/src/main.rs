@@ -256,6 +256,8 @@ fn hydrate_line_source_from_working_tree(
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
+    // The CLI's own fault sites, named before any fault is read.
+    supercov_engine::fault::name_sites(include!(concat!(env!("OUT_DIR"), "/fault_sites.rs")));
     let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     // nextest's target runner for the owned frontend: test arguments pass
     // through untouched, so dispatch before anything reads them as UTF-8.

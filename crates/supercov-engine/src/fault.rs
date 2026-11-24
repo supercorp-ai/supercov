@@ -4,9 +4,11 @@
 //! `site#N` only the first call from the Nth place in the code that calls it
 //! (where the site knows its caller, as [`crate::fault_fs`] does) and
 //! `site#N@M` only its Mth -- the count of one place, which no walk over a
-//! varying number of files moves -- and `site#file.rs:L` (or
-//! `site#file.rs:L@M`) the call made at line `L` of `file.rs`, whatever
-//! order places are first called in, as threads working at once decide --
+//! varying number of files moves -- and `site#NAME` (or `site#NAME@M`) the
+//! call at the place a `// fault-site: NAME` comment on the line above it
+//! names, whatever order places are first called in, as threads working at
+//! once decide, and however the lines around it move (`site#file.rs:L`, the
+//! call made at line `L` of `file.rs`, is what names replace) --
 //! `site.operation` only the calls that make that operation (`fs.hard_link`,
 //! where the caller names what it does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
@@ -46,12 +48,79 @@ enum Named {
     Nth(usize, std::sync::Mutex<Vec<Place>>),
     /// The place at this line of a file of this name.
     At(String, u32),
+    /// The place a `// fault-site: NAME` comment names.
+    Site(&'static Site),
 }
 
 /// Where in the code a call was made, and which call it was: a helper marked
 /// `#[track_caller]` hands its caller's place to the calls it makes, and two
 /// different calls from there are two places.
 pub type Place = (&'static std::panic::Location<'static>, &'static str);
+
+/// A call site named for tests: its name, its file's path under the crate's
+/// `src`, and its line. Each crate's build script finds the comments
+/// `// fault-site: NAME` in its sources and writes the table of them.
+pub type Site = (&'static str, &'static str, u32);
+
+/// The engine's named sites.
+#[cfg(any(test, debug_assertions))]
+const SITES: &[Site] = include!(concat!(env!("OUT_DIR"), "/fault_sites.rs"));
+
+/// Another crate's named sites, [`name_sites`] gave.
+#[cfg(any(test, debug_assertions))]
+static MORE_SITES: std::sync::OnceLock<&'static [Site]> = std::sync::OnceLock::new();
+
+/// Name the sites of the crate that calls this, its build script's table:
+/// the CLI's, first thing in `main`, before a fault is read.
+pub fn name_sites(sites: &'static [Site]) {
+    #[cfg(any(test, debug_assertions))]
+    let _ = MORE_SITES.set(sites);
+    #[cfg(not(any(test, debug_assertions)))]
+    let _ = sites;
+}
+
+/// Every named site.
+#[cfg(any(test, debug_assertions))]
+fn sites() -> impl Iterator<Item = &'static Site> {
+    SITES
+        .iter()
+        .chain(MORE_SITES.get().into_iter().copied().flatten())
+}
+
+/// The site named `name`. A name no site has is a test's mistake: it would
+/// fail nothing, so it stops the test here instead.
+#[cfg(any(test, debug_assertions))]
+fn site_named(name: &str) -> &'static Site {
+    sites()
+        .find(|site| site.0 == name)
+        .unwrap_or_else(|| panic!("no fault site is named `{name}`"))
+}
+
+/// Whether `file`, a path as `file!()` writes it, is the source at
+/// `relative` under a crate's `src`: it ends with that path, after a
+/// separator of either kind.
+#[cfg(any(test, debug_assertions))]
+fn is_source(file: &str, relative: &str) -> bool {
+    let Some(start) = file.len().checked_sub(relative.len()) else {
+        return false;
+    };
+    let same = |(&ours, &theirs): (&u8, &u8)| ours == theirs || ours == b'\\' && theirs == b'/';
+    file.as_bytes()[start..]
+        .iter()
+        .zip(relative.as_bytes())
+        .all(same)
+        && file.as_bytes()[..start]
+            .last()
+            .is_none_or(|&before| before == b'/' || before == b'\\')
+}
+
+/// The name of the site at `location`, if it has one.
+#[cfg(any(test, debug_assertions))]
+fn name_at(location: &std::panic::Location<'_>) -> Option<&'static str> {
+    sites()
+        .find(|(_, file, line)| *line == location.line() && is_source(location.file(), file))
+        .map(|(name, _, _)| *name)
+}
 
 #[cfg(any(test, debug_assertions))]
 static FAULTS: std::sync::LazyLock<Vec<Fault>> =
@@ -105,10 +174,11 @@ fn parse(text: &str) -> Vec<Fault> {
                         .parse()
                         .ok()
                         .map(|line| Named::At(file.to_owned(), line)),
-                    None => place
-                        .parse::<usize>()
-                        .ok()
-                        .map(|nth| Named::Nth(nth, std::sync::Mutex::new(Vec::new()))),
+                    None if place.is_empty() => None,
+                    None => Some(match place.parse::<usize>() {
+                        Ok(nth) => Named::Nth(nth, std::sync::Mutex::new(Vec::new())),
+                        Err(_) => Named::Site(site_named(place)),
+                    }),
                 },
             }
         })
@@ -174,9 +244,12 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
     }
 }
 
-/// Say that the call at `site` failed by request, and where the call was
-/// made when the site knows (`test fault at fs (lifecycle.rs:760
-/// create_dir_all)`), so a test can check it failed the call it meant to.
+/// Say that the call at `site` failed by request, and, when the site knows
+/// where the call was made, the name of that place and the operation
+/// (`test fault at fs (run-store.discover-runs read_dir)`), so a test can
+/// check it failed the call it meant to, then the file and line, for a
+/// reader only. A place no comment names gives its file and line where the
+/// name would be.
 /// Written to the descriptor itself: a child forked to exec a command may not
 /// allocate or take the lock `eprintln!` takes, so the line is written as
 /// digits from the stack. Windows writes to the handle for the same reason:
@@ -186,7 +259,7 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
 fn announce(site: &str, place: Option<Place>) {
     let mut digits = [0_u8; 10];
     let mut first = digits.len();
-    let (file, operation) = match place {
+    let (file, operation, name) = match place {
         Some((location, operation)) => {
             let mut line = location.line();
             // A line has a digit at least.
@@ -199,28 +272,43 @@ fn announce(site: &str, place: Option<Place>) {
                 }
             }
             let file = location.file();
-            (file.rsplit(['/', '\\']).next().unwrap_or(file), operation)
+            (
+                file.rsplit(['/', '\\']).next().unwrap_or(file),
+                operation,
+                name_at(location),
+            )
         }
-        None => ("", ""),
+        None => ("", "", None),
     };
-    let placed: [&[u8]; 6] = if place.is_some() {
-        [
+    let placed: [&[u8]; 9] = match (place, name) {
+        (Some(_), Some(name)) => [
+            b" (",
+            name.as_bytes(),
+            b" ",
+            operation.as_bytes(),
+            b") at ",
+            file.as_bytes(),
+            b":",
+            &digits[first..],
+            b"\n",
+        ],
+        (Some(_), None) => [
             b" (",
             file.as_bytes(),
             b":",
             &digits[first..],
             b" ",
             operation.as_bytes(),
-        ]
-    } else {
-        [b""; 6]
+            b")",
+            b"",
+            b"\n",
+        ],
+        (None, _) => [b"", b"", b"", b"", b"", b"", b"", b"", b"\n"],
     };
-    let closing: &[u8] = if place.is_some() { b")\n" } else { b"\n" };
     #[cfg(unix)]
     [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
         .into_iter()
         .chain(placed)
-        .chain([closing])
         .for_each(|part| {
             // SAFETY: a write of a live buffer to standard error.
             unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
@@ -237,7 +325,6 @@ fn announce(site: &str, place: Option<Place>) {
         [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
             .into_iter()
             .chain(placed)
-            .chain([closing])
             .for_each(|part| {
                 let _ = stderr.write_all(part);
             });
@@ -290,6 +377,13 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
             (Some(Named::At(file, line)), Some((location, _))) => {
                 location.file().rsplit(['/', '\\']).next() == Some(file.as_str())
                     && location.line() == *line
+                    && !count_down(&fault.skip)
+                    && fault.remaining.as_ref().is_none_or(count_down)
+            }
+            // A call from the place a comment names.
+            (Some(Named::Site((_, file, line))), Some((location, _))) => {
+                location.line() == *line
+                    && is_source(location.file(), file)
                     && !count_down(&fault.skip)
                     && fault.remaining.as_ref().is_none_or(count_down)
             }
@@ -445,6 +539,59 @@ mod tests {
         assert!(!first);
         assert!(second);
         assert!(!again);
+    }
+
+    /// `site#NAME` fails the call at the place a `// fault-site: NAME`
+    /// comment names, and with `@M` its Mth; a call elsewhere goes on, and so
+    /// does one that cannot say where it is.
+    #[test]
+    fn a_place_named_by_a_comment_fails_there() {
+        let call = || {
+            // fault-site: fault.named-for-a-test
+            super::injected_here("t", "op")
+        };
+        let calls = super::during("t#fault.named-for-a-test@2", || {
+            (0..3).map(|_| call()).collect::<Vec<_>>()
+        });
+        assert_eq!(calls, [false, true, false]);
+        let elsewhere = super::during("t#fault.named-for-a-test", || {
+            super::injected_here("t", "op")
+        });
+        assert!(!elsewhere);
+        let unplaced = super::during("t#fault.named-for-a-test", || super::injected("t"));
+        assert!(!unplaced);
+    }
+
+    /// A name no site has stops the test that wrote it.
+    #[test]
+    #[should_panic(expected = "no fault site is named `fault.nowhere`")]
+    fn a_name_no_site_has_is_refused() {
+        super::during("t#fault.nowhere", || ());
+    }
+
+    /// A named place's file is the source under `src` it names, whichever
+    /// separator the build wrote.
+    #[test]
+    fn a_named_file_is_matched_by_its_path_under_src() {
+        for (file, relative, expected) in [
+            ("crates/supercov-engine/src/fault.rs", "fault.rs", true),
+            ("fault.rs", "fault.rs", true),
+            (
+                "crates\\supercov-cli\\src\\quality\\store.rs",
+                "quality/store.rs",
+                true,
+            ),
+            ("src/unfault.rs", "fault.rs", false),
+            ("rs", "fault.rs", false),
+            ("src/quality\\store.rs", "quality_store.rs", false),
+            ("src/quality/other.rs", "quality/store.rs", false),
+        ] {
+            assert_eq!(
+                super::is_source(file, relative),
+                expected,
+                "{file} {relative}"
+            );
+        }
     }
 
     /// `site#file.rs:L` fails the call made at that line only, and with
