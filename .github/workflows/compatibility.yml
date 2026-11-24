@@ -180,6 +180,13 @@ jobs:
           shared-key: compatibility
           save-if: ${{ matrix.partition == 1 }}
       - run: npm ci
+      # The workspace's tests run Maven and Gradle where a JDK is found, and
+      # every runner here has one. Restored only: the JDK jobs below keep
+      # what the platform's builds fetch, one cache per platform rather than
+      # one per job.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
       # The only clippy pass that sees Windows- and macOS-only code.
       - if: matrix.partition == 1
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -203,7 +210,7 @@ jobs:
     # 3.9 has no build for the Ubuntu 26.04 ubuntu-latest is now; it is
     # still measured on Linux, on the last Ubuntu that has one.
     runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.9' && 'ubuntu-24.04' || matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -228,6 +235,12 @@ jobs:
           shared-key: compatibility
           save-if: false
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo build -p supercov
+        timeout-minutes: 25
       # Every interpreter measures itself: the gate refuses to fall back to
       # another Python on the runner, and asserts the version it measured.
       - run: npm run test:python
@@ -301,7 +314,7 @@ jobs:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,')) }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -326,6 +339,12 @@ jobs:
         with:
           tool: cargo-nextest@0.9.140
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:rust-public-cargo
         timeout-minutes: 15
       # A failure here ends this commit's other runs too: no waiting on them.
@@ -343,7 +362,7 @@ jobs:
     # retired macOS 14 in November 2026.
     name: Go ${{ matrix.go }} (${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }})
     runs-on: ${{ (matrix.os == 'macos-latest' && matrix.go == '1.22') && 'macos-15' || matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -369,6 +388,12 @@ jobs:
           shared-key: compatibility
           save-if: false
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo test --no-run -p supercov-engine --test go_frontend --test go_run && cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:go
         timeout-minutes: 15
         env:
@@ -398,7 +423,7 @@ jobs:
     if: ${{ !github.event.pull_request.draft && (inputs.only == '' || contains(format(',{0},', inputs.only), ',jvm,')) }}
     name: JDK ${{ matrix.java }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -419,10 +444,12 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-      - uses: gradle/actions/setup-gradle@v5
-      # The platform's own console runner, which one test drives directly to
-      # prove the listener attributes through the platform rather than through
-      # anything Maven or Gradle does around it.
+      # What the tests' Maven and Gradle builds fetch, kept; and their own
+      # retries turned up for the rest. Here rather than setup-gradle's
+      # cache, which a pull request only reads and nothing here ever wrote.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
       # Not preinstalled on any runner. One test compiles Kotlin with the
       # standalone compiler rather than through Gradle, so that what the
       # rewriter produces is known to be Kotlin the compiler accepts and not
@@ -431,16 +458,26 @@ jobs:
         shell: bash
         run: |
           version=2.2.20
-          curl -sSL --retry 3 -o "$RUNNER_TEMP/kotlin.zip" \
-            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip"
+          bash .github/fetch-verified.sh \
+            "https://github.com/JetBrains/kotlin/releases/download/v$version/kotlin-compiler-$version.zip" \
+            "$RUNNER_TEMP/kotlin.zip" sha256 \
+            || { echo "SUPERCOV_INFRA_FAILURE=the Kotlin compiler could not be fetched" >> "$GITHUB_ENV"; exit 1; }
           unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/kotlinc/bin" >> "$GITHUB_PATH"
+      # The platform's own console runner, which one test drives directly to
+      # prove the listener attributes through the platform rather than through
+      # anything Maven or Gradle does around it. In the local Maven
+      # repository, kept with the rest, and checked against its SHA-1: fetched
+      # bare, a refusal's page was once taken for the jar.
       - name: Fetch the JUnit Platform console runner
         shell: bash
         run: |
-          jar="$RUNNER_TEMP/junit-platform-console-standalone.jar"
-          curl -sSL --retry 3 -o "$jar" \
-            https://repo1.maven.org/maven2/org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          path=org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          jar="$HOME/.m2/repository/$path"
+          bash .github/fetch-verified.sh "https://repo1.maven.org/maven2/$path" "$jar" sha1 \
+            || { echo "SUPERCOV_INFRA_FAILURE=the JUnit console runner could not be fetched" >> "$GITHUB_ENV"; exit 1; }
+          # A path Windows reads, not the shell's /c/... one.
+          [ "$RUNNER_OS" = Windows ] && jar=$(cygpath -w "$jar")
           echo "JUNIT_CONSOLE_JAR=$jar" >> "$GITHUB_ENV"
       # Apache Ant, which no runner ships, and the jars its builds are given
       # on their command lines rather than resolving: JUnit 4 for <junit>, the
@@ -454,10 +491,22 @@ jobs:
           shared-key: compatibility
           save-if: false
       - run: npm ci
+      # Built in a step of its own: with no Rust cache yet for this platform
+      # (a pull request's first run), the build alone took 14 of the test
+      # step's 15 minutes on macOS, and the limit meant for a hung test
+      # ended a slow compile instead.
+      - run: cargo test --no-run -p supercov-engine --test jvm_frontend --test jvm_run && cargo build -p supercov
+        timeout-minutes: 25
       - run: npm run test:jvm
         timeout-minutes: 28
         env:
           SUPERCOV_REQUIRE_JVM: "1"
+      # What this run fetched, kept for the next, even after a failure; by
+      # one JDK of the two, which fetch the same.
+      - if: ${{ !cancelled() && matrix.java == '21' }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure

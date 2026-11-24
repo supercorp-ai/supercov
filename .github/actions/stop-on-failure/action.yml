@@ -2,7 +2,10 @@ name: Stop on a failure
 description: >-
   A pull request's job failed: cancel every other unfinished run of the same
   commit, then this run, so the failure is the answer at once instead of after
-  the slowest leg of every workflow.
+  the slowest leg of every workflow. A job that failed only because a download
+  did not come whole after every retry (a setup step says so in
+  SUPERCOV_INFRA_FAILURE) fails alone: it says nothing about the commit, and
+  the other runs go on to say what they can.
 runs:
   using: composite
   steps:
@@ -11,6 +14,10 @@ runs:
         GH_TOKEN: ${{ github.token }}
         SHA: ${{ github.event.pull_request.head.sha }}
       run: |
+        if [ -n "${SUPERCOV_INFRA_FAILURE:-}" ]; then
+          echo "::warning::This job failed on a download, not on the commit: $SUPERCOV_INFRA_FAILURE. The other runs of $SHA go on."
+          exit 0
+        fi
         echo "A job failed: stopping the other runs of $SHA."
         for id in $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$SHA" --limit 50 \
             --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId'); do

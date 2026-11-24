@@ -27635,11 +27635,29 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
 /// `SUPERCOV_TEST_MARKER` first.
 #[cfg(unix)]
 fn vitest_slow_project(label: &str) -> Project {
+    vitest_slow_project_waiting(label, 0)
+}
+
+/// `vitest_slow_project`, its slow test also taking `unmutated_ms` without
+/// a mutant: a mutant's test is given three times its measured time and
+/// 10 s more, so the longer it takes, the later slow.js's mutants are
+/// judged timeouts.
+#[cfg(unix)]
+fn vitest_slow_project_waiting(label: &str, unmutated_ms: u64) -> Project {
     let project = vitest_mutants_project(label);
     project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    let unmutated = if unmutated_ms > 0 {
+        format!(
+            " else {{\n    await new Promise((done) => setTimeout(done, {unmutated_ms}));\n  }}"
+        )
+    } else {
+        String::new()
+    };
     project.write(
         "test/slow.test.js",
-        "import { renameSync, writeFileSync } from \"node:fs\";\nimport { expect, it } from \"vitest\";\nimport { twice } from \"../src/slow.js\";\nit(\"doubles\", async () => {\n  if (twice(2) !== 4) {\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {\n      writeFileSync(`${marker}.tmp`, String(process.pid));\n      renameSync(`${marker}.tmp`, marker);\n    }\n    await new Promise((done) => setTimeout(done, 300000));\n  }\n  expect(twice(2)).toBe(4);\n}, 300000);\n",
+        &format!(
+            "import {{ renameSync, writeFileSync }} from \"node:fs\";\nimport {{ expect, it }} from \"vitest\";\nimport {{ twice }} from \"../src/slow.js\";\nit(\"doubles\", async () => {{\n  if (twice(2) !== 4) {{\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {{\n      writeFileSync(`${{marker}}.tmp`, String(process.pid));\n      renameSync(`${{marker}}.tmp`, marker);\n    }}\n    await new Promise((done) => setTimeout(done, 300000));\n  }}{unmutated}\n  expect(twice(2)).toBe(4);\n}}, 300000);\n"
+        ),
     );
     project.commit("slow");
     project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
@@ -27761,7 +27779,11 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
 #[cfg(unix)]
 #[test]
 fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
-    let project = vitest_slow_project("strong-budget");
+    // Ten seconds without a mutant: slow.js's mutants are judged timeouts
+    // 40 s into their copies, well past the budget below. Given 13 s, the
+    // limit of a test that takes no time, they were judged before a slow
+    // runner's budget was spent.
+    let project = vitest_slow_project_waiting("strong-budget", 10_000);
     let slow_ids = || {
         saved_statuses(&project)
             .into_iter()
@@ -27788,9 +27810,35 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
     assert_eq!(reply["summary"]["error"], 0, "{reply}");
     assert!(reply["result"].is_null(), "{reply}");
     assert!(slow_ids().is_empty(), "{:?}", slow_ids());
-    // Long enough for cart.js's mutants, not for slow.js's.
+    // Long enough for cart.js's mutants, not for slow.js's, whose test waits
+    // five minutes and is judged a timeout 40 s in. What cart.js's take is
+    // this machine's: a fixed twelve seconds decided only some of them on a
+    // busy macOS runner. Timed by a pass of their own, whose verdicts are
+    // then forgotten.
+    let timed = project.supercov(&[
+        "runs",
+        "latest",
+        "mutants",
+        "test",
+        "--file",
+        "src/cart.js",
+        "--json",
+    ]);
+    let reply = timed.json();
+    assert_eq!(timed.code(), 0, "{reply}\n{}", timed.stderr());
+    assert_eq!(reply["summary"]["error"], 0, "{reply}");
+    let cart_ms = reply["summary"]["durationMs"].as_u64().unwrap();
+    let run = project.latest();
+    std::fs::remove_file(
+        project
+            .root
+            .join(format!(".supercov/runs/{run}/strong-mutation.json")),
+    )
+    .unwrap();
+    // Three times that beside slow.js's copies, and short of their 40 s.
+    let budget = (cart_ms * 3 / 1000 + 10).min(30).to_string();
     let second = project.supercov(&[
-        "runs", "latest", "mutants", "test", "--budget", "12", "--json",
+        "runs", "latest", "mutants", "test", "--budget", &budget, "--json",
     ]);
     let reply = second.json();
     assert_eq!(second.code(), 0, "{reply}\n{}", second.stderr());
@@ -27860,15 +27908,21 @@ fn copies_keep_to_the_project_s_workers_and_their_pool_ids() {
 #[test]
 fn a_hook_or_a_load_that_fails_says_its_error() {
     let project = vitest_mutants_project("strong-hooks");
+    // One worker: the file's baseline copy, listed first, loads first, and
+    // the mutant's copies after it. With a worker per processor the two
+    // started side by side, and on an arm64 runner the mutant's copy loaded
+    // first some of the time: the load meant to fail was the baseline's.
     project.write(
         "vitest.config.js",
-        "export default { test: { setupFiles: [\"./test/setup.js\"] } };\n",
+        "export default { test: { maxWorkers: 1, setupFiles: [\"./test/setup.js\"] } };\n",
     );
-    // Fails where `SETUP_FAILS` names a count file: the first load after
-    // the first, or (`always`) every load after the first.
+    // Fails where `SETUP_FAILS_COUNTER` names a directory: the first load
+    // after the first, or (`always`) every load after the first. Each load
+    // takes the next number by creating its file, so that two loads can
+    // never both take the same one.
     project.write(
         "test/setup.js",
-        "import { readFileSync, writeFileSync } from \"node:fs\";\nconst counter = process.env.SETUP_FAILS_COUNTER;\nif (counter) {\n  let count = 0;\n  try { count = Number(readFileSync(counter, \"utf8\")); } catch {}\n  writeFileSync(counter, String(count + 1));\n  if (count === 1 || (count > 1 && process.env.SETUP_FAILS === \"always\")) throw new Error(\"the test database is gone\");\n}\n",
+        "import { closeSync, mkdirSync, openSync } from \"node:fs\";\nconst counter = process.env.SETUP_FAILS_COUNTER;\nif (counter) {\n  mkdirSync(counter, { recursive: true });\n  let count = 0;\n  for (;; count++) {\n    try { closeSync(openSync(`${counter}/${count}`, \"wx\")); break; } catch (error) { if (error.code !== \"EEXIST\") throw error; }\n  }\n  if (count === 1 || (count > 1 && process.env.SETUP_FAILS === \"always\")) throw new Error(\"the test database is gone\");\n}\n",
     );
     project.write(
         "src/schema.js",
@@ -27888,7 +27942,7 @@ fn a_hook_or_a_load_that_fails_says_its_error() {
     let counter = project.root.with_extension("counter");
     let counter_path = counter.to_str().unwrap();
     let pass = |env: &[(&str, &str)]| {
-        let _ = std::fs::remove_file(&counter);
+        let _ = std::fs::remove_dir_all(&counter);
         let run = project.latest();
         let _ = std::fs::remove_file(
             project
