@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- A strong pass's `next build` no longer checks types. The check emits nothing the server runs and says nothing of a mutant: Next's type-check worker reads the sources as their authors wrote them, the checkout the measured run already built and checked. On a large application's e2e suite it was 12 s of a 30 s build, paid before any test of each job of a pass split across jobs could start. A measured run still checks types. The strong command's log says Next's `Skipping validation of types`.
+
 ## 4.29.10
 
 **Changed**

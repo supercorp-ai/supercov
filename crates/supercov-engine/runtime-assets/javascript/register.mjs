@@ -628,6 +628,22 @@ else {
     return print.apply(this, [kept.join("\\n"), ...message.slice(1)]);
 })(warnOnce)); } catch {}
 `.replace(/\n\s*/g, " ");
+    // A strong pass's `next build` does not check types. The check emits
+    // nothing the server runs, and says nothing of a mutant: its worker reads
+    // the sources as their authors wrote them (`installAuthoredSourceView`
+    // above), switches and all left out, so it checks the checkout the
+    // measured run built already. It took 12 s of a 30 s build, in every job
+    // of a pass split across jobs. A measured run still checks: whether its
+    // command passes is the project's.
+    const unchecked = process.env.SUPERCOV_STRONG === "1" ? `
+;try { loadConfig = ((load) => async function loadConfig(...args) {
+    const config = await load.apply(this, args);
+    try {
+        if (config && typeof config === "object") config.typescript = { ...(config.typescript || {}), ignoreBuildErrors: true };
+    } catch {}
+    return config;
+})(loadConfig); } catch {}
+`.replace(/\n\s*/g, " ") : "";
     // A project's `turbopack.root`, set to its own directory, names the copy
     // here, while the copy's dependencies are links into the project's
     // node_modules. Turbopack resolves no package outside its root and
@@ -677,7 +693,7 @@ else {
             }
             else if (filename.endsWith("config.js") &&
                 /[\\/]next[\\/]dist[\\/]server[\\/]config\.js$/.test(filename)) {
-                content = append(content, widened);
+                content = append(content, `${widened}${unchecked}`);
             }
         }
         return Reflect.apply(compile, this, [content, filename, ...rest]);
