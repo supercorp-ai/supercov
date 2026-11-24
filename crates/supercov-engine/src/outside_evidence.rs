@@ -764,6 +764,7 @@ pub fn import_line_evidence(request: &ImportRequest<'_>) -> Result<ImportOutcome
             recorded_by: parent.metadata.recorded_by.clone(),
             companions: None,
             supersedes: None,
+            measured_as: None,
         };
         publish_run(request.root, &metadata, &archive_path)
             .map_err(|error| format!("Could not publish the imported run: {error}"))?;

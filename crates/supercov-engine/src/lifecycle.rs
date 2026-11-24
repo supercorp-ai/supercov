@@ -1005,29 +1005,7 @@ pub(crate) fn publish_run_with_fault(
     // of each command instead dropped all but one of four machines' shards,
     // each run with the same command and copied into one store.
     if metadata.merged != Some(true) {
-        // A store that cannot be listed cannot take the run either.
-        let earlier = crate::fault::or(
-            "run-store-unlisted",
-            || {
-                Err(crate::run_store::RunStoreError::Io(io::Error::other(
-                    "injected fault at run-store-unlisted",
-                )))
-            },
-            || crate::run_store::discover_runs(root),
-        )
-        .map_err(|error| LifecycleError::InvalidState(format!("run store: {error}")))?
-        .runs
-        .into_iter()
-        // A merge's command is `supercov merge`, which is no other run's.
-        .filter(|run| {
-            run.metadata.command == metadata.command
-                && run.metadata.source_roots == metadata.source_roots
-                && run.metadata.integrity.instrumenter_version
-                    == metadata.integrity.instrumenter_version
-        })
-        .map(|run| run.id)
-        .collect::<Vec<_>>();
-        metadata.supersedes = (!earlier.is_empty()).then_some(earlier);
+        metadata.supersedes = measured_before(root, &metadata)?;
     }
     let metadata = &metadata;
     // The query index of the analysis the frontend hands over is worked out
@@ -1215,6 +1193,93 @@ pub(crate) fn publish_run_with_fault(
     }
     fs::rename(&staging, &destination).map_err(|source| io_error(&destination, source))?;
     sync_directory(runs)?;
+    Ok(destination)
+}
+
+/// The runs of `metadata`'s measurement -- its command, source roots and
+/// frontend -- the store holds now, which a run published beside them
+/// supersedes; `None` for none. A merge made with no run named takes it in
+/// their place. Taking the newest run of each command instead dropped all
+/// but one of four machines' shards, each run with the same command and
+/// copied into one store.
+fn measured_before(
+    root: &Path,
+    metadata: &RunMetadata,
+) -> Result<Option<Vec<String>>, LifecycleError> {
+    // A store that cannot be listed cannot take the run either.
+    let earlier = crate::fault::or(
+        "run-store-unlisted",
+        || {
+            Err(crate::run_store::RunStoreError::Io(io::Error::other(
+                "injected fault at run-store-unlisted",
+            )))
+        },
+        || crate::run_store::discover_runs(root),
+    )
+    .map_err(|error| LifecycleError::InvalidState(format!("run store: {error}")))?
+    .runs
+    .into_iter()
+    // A merge's command is `supercov merge`, which is no other run's.
+    .filter(|run| {
+        run.metadata.command == metadata.command
+            && run.metadata.source_roots == metadata.source_roots
+            && run.metadata.integrity.instrumenter_version
+                == metadata.integrity.instrumenter_version
+    })
+    .map(|run| run.id)
+    .collect::<Vec<_>>();
+    Ok((!earlier.is_empty()).then_some(earlier))
+}
+
+/// A run of its own for a job that continues `source` on a checkout
+/// unchanged since it was measured (`docs/design/mutants.md`, Continuation
+/// rounds): its evidence and every record published from it, under the id
+/// and start given, without its strong verdicts -- a pass keeps those, as
+/// any earlier run's -- or its query index, which the first query rebuilds.
+/// Measuring the command again would record what `source` records, at the
+/// cost of running it; the run differs from `source` only in its id, so the
+/// jobs of one round each save into a run a merge can add up. It supersedes
+/// what a run measured now would.
+pub fn derive_run(
+    root: &Path,
+    source: &crate::run_store::StoredRun,
+    id: &str,
+    started_at: &str,
+) -> Result<PathBuf, LifecycleError> {
+    let mut metadata = source.metadata.clone();
+    metadata.measured_as = Some(source.evidence_run_id().to_owned());
+    metadata.id = id.to_owned();
+    metadata.started_at = started_at.to_owned();
+    metadata.supersedes = measured_before(root, &metadata)?;
+    let runs = root.join(".supercov/runs");
+    let staging = root.join(".supercov/work").join(id).join("run-derivation");
+    fs::create_dir_all(&staging).map_err(|error| io_error(&staging, error))?;
+    let names = fs::read_dir(&source.directory)
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .map_err(|error| io_error(&source.directory, error))?;
+    for name in names {
+        let text = name.to_string_lossy();
+        // Its own: what the run is, and what a pass and a query saved into
+        // it. Any other file is a record of the evidence, and stands for
+        // both runs.
+        let own = text == "run.json"
+            || text == crate::strong_plan::STRONG_VERDICTS_FILE
+            || text.starts_with(crate::run_store::RUST_QUERY_INDEX_FILE)
+            || text.starts_with('.');
+        if !own {
+            copy_regular_file(&source.directory.join(&name), &staging.join(&name))?;
+        }
+    }
+    let mut json = serde_json::to_vec_pretty(&metadata).expect("plain data serializes");
+    json.push(b'\n');
+    atomic_write(root, &staging.join("run.json"), &json)?;
+    let destination = runs.join(id);
+    fs::rename(&staging, &destination).map_err(|error| io_error(&destination, error))?;
+    sync_directory(&runs)?;
     Ok(destination)
 }
 
@@ -1631,6 +1696,7 @@ pub(crate) fn test_run_metadata(id: &str, bytes: u64) -> RunMetadata {
         recorded_by: None,
         companions: None,
         supersedes: None,
+        measured_as: None,
     }
 }
 
@@ -1718,6 +1784,85 @@ mod tests {
         root
     }
 
+    /// A run made from another holds the records of its evidence, not what
+    /// is the source's own (its metadata, its verdicts, its query index,
+    /// temporary files), names the id its evidence was recorded under, and
+    /// supersedes the runs of its command; one made from that keeps naming
+    /// the first. A source that holds nothing gives a run of its metadata.
+    #[test]
+    fn a_run_made_from_another_keeps_its_evidence_records_and_names_its_measurement() {
+        let root = project();
+        let stored = |id: &str| {
+            let directory = root.join(".supercov/runs").join(id);
+            crate::run_store::StoredRun {
+                id: id.into(),
+                evidence_path: directory.join("evidence.raw.gz"),
+                metadata_path: directory.join("run.json"),
+                query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+                directory,
+                metadata: metadata(id, 4),
+            }
+        };
+        let source = stored("2026-01-01T00-00-00-000Z");
+        fs::create_dir_all(&source.directory).unwrap();
+        for (name, contents) in [
+            ("evidence.raw.gz", "evid"),
+            ("test-executions.json", "{}"),
+            ("run.json", "{}"),
+            (crate::strong_plan::STRONG_VERDICTS_FILE, "{}"),
+            (crate::run_store::RUST_QUERY_INDEX_FILE, "index"),
+            ("query-index.v1.bin.verified", "1"),
+            (".strong-mutation.json.partial", "{}"),
+        ] {
+            fs::write(source.directory.join(name), contents).unwrap();
+        }
+        let id = "2026-01-02T00-00-00-000Z";
+        let made = derive_run(&root, &source, id, "2026-01-02T00:00:00Z").unwrap();
+        let mut names = fs::read_dir(&made)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            ["evidence.raw.gz", "run.json", "test-executions.json"]
+        );
+        assert_eq!(
+            fs::read_to_string(made.join("evidence.raw.gz")).unwrap(),
+            "evid"
+        );
+        let written: RunMetadata =
+            serde_json::from_slice(&fs::read(made.join("run.json")).unwrap()).unwrap();
+        assert_eq!(written.id, id);
+        assert_eq!(written.started_at, "2026-01-02T00:00:00Z");
+        assert_eq!(written.measured_as.as_deref(), Some(source.id.as_str()));
+        // The store lists none of its runs: the test's metadata is not one
+        // it reads.
+        assert_eq!(written.supersedes, None);
+        // Made from the made run: still the first run's measurement.
+        let again = crate::run_store::StoredRun {
+            metadata: written,
+            ..stored(id)
+        };
+        assert_eq!(again.evidence_run_id(), source.id);
+        let empty = stored("2026-01-03T00-00-00-000Z");
+        fs::create_dir_all(&empty.directory).unwrap();
+        let third = "2026-01-04T00-00-00-000Z";
+        let from_empty = derive_run(&root, &empty, third, "2026-01-04T00:00:00Z").unwrap();
+        assert_eq!(
+            fs::read_dir(&from_empty)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            ["run.json"]
+        );
+        let chained = derive_run(&root, &again, "2026-01-05T00-00-00-000Z", "x").unwrap();
+        let chained: RunMetadata =
+            serde_json::from_slice(&fs::read(chained.join("run.json")).unwrap()).unwrap();
+        assert_eq!(chained.measured_as.as_deref(), Some(source.id.as_str()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A run's history that cannot be moved to the trash stops the clean.
     #[test]
     fn a_run_history_that_cannot_be_moved_stops_the_clean() {
@@ -1729,7 +1874,7 @@ mod tests {
             &state(&root, id, RunStateStatus::Complete, std::process::id()),
         )
         .unwrap();
-        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1534", || {
+        let stopped = crate::fault::during("fs.create_dir_all#lifecycle.rs:1599", || {
             cleanup_storage_locked(
                 &root,
                 CleanupOptions {
@@ -1754,7 +1899,7 @@ mod tests {
         let store = root.join(".supercov/runs");
         fs::create_dir_all(store.join("run_a")).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1269", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1334", || {
                 child_directories(&store)
             })
             .is_err()
@@ -1762,7 +1907,7 @@ mod tests {
         let copied = root.join("copied");
         fs::create_dir_all(&copied).unwrap();
         assert!(
-            crate::fault::during("fs.read_dir entry#lifecycle.rs:1344", || {
+            crate::fault::during("fs.read_dir entry#lifecycle.rs:1409", || {
                 copy_evidence(&store, &copied, &mut 0)
             })
             .is_err()

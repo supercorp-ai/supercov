@@ -598,6 +598,7 @@ type RunMetadata, written = closed {
   recordedBy?: string | null
   companions?: [CompanionRun] | null
   supersedes?: [string] | null
+  measuredAs?: string | null
 }
 
 type RunMetadata, read = closed {
@@ -619,6 +620,7 @@ type RunMetadata, read = closed {
   recordedBy?: string | null
   companions?: [CompanionRun] | null
   supersedes?: [string] | null
+  measuredAs?: string | null
 }
 
 type RunTimings, written and read = closed {

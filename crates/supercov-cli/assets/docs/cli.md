@@ -542,9 +542,11 @@ phpunit`). See `docs/design/strong-mutation.md`,
   job's run holds its share's verdicts, `merge` keeps them all in the merged
   run, and a later `supercov mutants` keeps each verdict nothing changed could
   move from whichever earlier run holds it (see
-  [Combine shards](#combine-shards)). `supercov mutants --shard` measures a
+  [Combine shards](#combine-shards)). `supercov mutants --shard` saves into a
   run of its own even on an unchanged checkout, so a job never saves into a
-  run it restored, which every job of its round holds a copy of.
+  run it restored, which every job of its round holds a copy of. There it
+  makes that run from the newest restored run whose command passed, without
+  measuring again, and keeps every verdict the restored runs hold.
 - `--critical <glob>` (repeatable): every mutant there must be killed or
   accepted, or the command fails.
 - `--fail-on survived,timeout,no-coverage,error`: fail on any asked mutant with
@@ -558,9 +560,11 @@ phpunit`). See `docs/design/strong-mutation.md`,
   that never ended, Ctrl-C, a killed job) keeps what it decided, and the next
   pass runs the rest. Ctrl-C or SIGTERM stops every process the pass started,
   and the pass ends within seconds: 8 s after the signal at the latest.
-- `--budget <seconds>` stops the pass once it is spent: it ends as a finished
-  pass, its verdicts saved, and says how many mutants it left for the next.
-  The cheapest mutants run first, by their tests' recorded times.
+- `--budget <seconds>` stops the pass once it is spent, counted from the
+  command's start (with `supercov mutants`, measuring included): it ends as a
+  finished pass, its verdicts saved, and says how many mutants it left for the
+  next, and what measuring took where that was half the budget or more. The
+  cheapest mutants run first, by their tests' recorded times.
 - `--timeout-factor <x>`: a Playwright test that runs with a mutant is
   stopped past x times its baseline + 5 s (default 1.5, StrykerJS's), and the
   mutant is a `timeout`. `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it where the
@@ -1231,8 +1235,9 @@ another measured again lends none either. Split a strong pass across jobs this
 way: each job measures and runs `supercov mutants --shard k/n -- <command>`,
 and the last merges (see `docs/mutation.md`, A pass split across jobs). A
 second round on the same commit restores the first round's runs and does the
-same: each job measures a run of its own, which keeps the restored runs'
-verdicts and replaces them, and the last job's `merge` takes the new runs.
+same: each job saves into a run of its own, made from a restored one without
+measuring again, which keeps the restored runs' verdicts and replaces them,
+and the last job's `merge` takes the new runs.
 
 A run named twice is refused (`Each merged run must be unique: r1 is named
 more than once`): copies of one run that several jobs saved verdicts into
