@@ -1231,9 +1231,10 @@ impl Progress {
                     let pace = first_mutant_at.map_or(started.elapsed(), |first| {
                         std::time::Duration::from_millis(now.saturating_sub(first))
                     });
+                    let left = status.as_ref().and_then(|status| status.left_ms);
                     eprintln!(
                         "{}",
-                        progress_line(&verdicts, &costs, started.elapsed(), pace)
+                        progress_line(&verdicts, &costs, started.elapsed(), pace, left)
                     );
                     let last = results
                         .parent()
@@ -1349,16 +1350,27 @@ fn read_results(results: &Path) -> (std::collections::BTreeMap<String, Verdict>,
 /// of the mutants decided over the time they took (`pace`: since the first
 /// mutant began, where the driver says when; the command's start-up and
 /// baselines are not the mutants' pace), which a few costly mutants do not
-/// swing as a count of mutants did (the cheapest run first).
+/// swing as a count of mutants did (the cheapest run first). A driver that
+/// counts the runs its round has left (`round_left`, Playwright's: each
+/// mutant's candidates still to try, at each test's baseline and each
+/// invocation's own pace) knows better, and is said instead: the cheap and
+/// likely kills come first, so the mutants decided early are no measure of
+/// those left.
 fn progress_line(
     verdicts: &std::collections::BTreeMap<String, Verdict>,
     costs: &std::collections::BTreeMap<String, u64>,
     elapsed: std::time::Duration,
     pace: std::time::Duration,
+    round_left: Option<u64>,
 ) -> String {
     let count = |status: &str| verdicts.values().filter(|v| v.status == status).count();
     let spent = verdicts.keys().filter_map(|id| costs.get(id)).sum::<u64>();
-    let left = if spent > 0 {
+    let left = if let Some(left) = round_left {
+        format!(
+            "; about {} left in this round",
+            supercov_engine::process_supervision::format_duration(u128::from(left))
+        )
+    } else if spent > 0 {
         let all = costs.values().sum::<u64>();
         let rest = pace.as_millis() * u128::from(all.saturating_sub(spent)) / u128::from(spent);
         format!(
@@ -2251,7 +2263,7 @@ mod tests {
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
         let elapsed = std::time::Duration::from_secs(20);
-        let none = progress_line(&Default::default(), &costs, elapsed, elapsed);
+        let none = progress_line(&Default::default(), &costs, elapsed, elapsed, None);
         assert_eq!(
             none,
             "[supercov] strong pass: 0 of 3 mutants (0 killed, 0 timed out, 0 survived, 0 errors), 20s"
@@ -2263,7 +2275,7 @@ mod tests {
         .map(|(id, verdict)| (id.to_owned(), verdict))
         .into_iter()
         .collect();
-        let line = progress_line(&decided, &costs, elapsed, elapsed);
+        let line = progress_line(&decided, &costs, elapsed, elapsed, None);
         assert!(
             line.starts_with(
                 "[supercov] strong pass: 2 of 3 mutants (1 killed, 0 timed out, 1 survived, 0 errors), 20s; about "
@@ -2276,11 +2288,18 @@ mod tests {
         )));
         // Paced from the first mutant, 10 s in: the start-up is not the
         // mutants' pace.
-        let paced = progress_line(&decided, &costs, elapsed, elapsed / 2);
+        let paced = progress_line(&decided, &costs, elapsed, elapsed / 2, None);
         assert!(paced.ends_with(&format!(
             "about {} left",
             supercov_engine::process_supervision::format_duration(490_000)
         )));
+        // The driver's count of the runs its round has left, where it says
+        // one, before any verdict too.
+        let counted = progress_line(&Default::default(), &costs, elapsed, elapsed, Some(95_000));
+        assert!(
+            counted.ends_with("0 errors), 20s; about 1m35s left in this round"),
+            "{counted}"
+        );
     }
 
     #[test]

@@ -716,12 +716,12 @@ fixtures are the test's. A copy takes its work as it starts, from a queue on
 disk that every worker and every invocation of the pass share: the next
 mutant whose candidate the test is, not yet tried against it, one no other
 attempt runs first; making the claim's mark (a directory) is what takes it,
-so two copies never take one. The test's mutants are ordered by where it
-stands in each one's candidates (the likeliest killer's mutants first), then
-the plan's order. A test gets one copy for each mutant that may take it, one
-for each control a kill may call for (below), and its first run; the generated
-config sets `repeatEach` to 1, `retries: 0` and no failure limit, and keeps the
-project's workers.
+so two copies never take one; which one it takes is the next section's. A
+test gets one copy for each mutant that may take it, one for each control a
+kill may call for (below), one for each mutant with a candidate before it (a
+sweep it may wait out, below), and its first run; the generated config sets
+`repeatEach` to 1, `retries: 0` and no failure limit, and keeps the project's
+workers.
 
 This replaces rows of repetitions (`repeatEach`). Playwright gives every
 repetition index a worker of its own, so each row started a worker and a
@@ -742,27 +742,95 @@ the rest of the 4 one mutant that holds each test until its own timeout.
 takes a mutant runs it; a test that passes moves the mutant on, and the next
 copy of another candidate that starts takes it there, in whichever worker or
 invocation runs that test; a kill marks the mutant, and no copy takes it
-again. A mutant every candidate let live has survived. Since every copy of a
-test takes whatever its queue holds, a test's mutants are all tried by the
-time its copies are spent, whatever order the tests run in, so a mutant
+again. A mutant every candidate let live has survived. A test's copies
+outnumber what its queue can ask of it, so its mutants are all tried by the
+time its copies are spent, whatever order the tests run in, and a mutant
 never waits for a stage. Where every mutant left in a test's queue runs
 elsewhere at that moment, the copy takes one of those too rather than leave
 the test's copies unused: its verdict is the same either way.
 
-**Controls: a run with no mutant first in each worker.** The first run of a
-test in a worker, and its first run there after it failed, has no mutant.
-The first such run of a test in a main round is its baseline: a test that
-fails without a mutant is no candidate (a second control that passes makes it
-one again). A test runs with a mutant only in a worker where it passed without
-one, so a test that leans on what an earlier test of its file left in the
-worker (a serial describe, a `beforeAll`) runs with its mutants as it ran
-without them. A failed test gives Playwright's next test a new worker, so the
-test after a kill is a control: passing, it confirms the kills before it on
-the same server (the invocation's); failing, it puts them in doubt, and they
-run again one test at a time. A test whose control fails twice in an
-invocation is not run there again. Controls stand in for the canaries rows
-had (rows with no mutant, planted among the mutated ones): each kill is now
-followed by one, at the cost of a run of the test.
+**Which candidate first.** A mutant's candidates are ordered cheapest to a
+kill first: each test's measured time (a second where the run timed none)
+over how likely it is to kill the mutant, a test whose own evidence infected
+it taken as four times likelier than one that only reached it (a module its
+page loaded, a request no test named). So a test that infected it goes
+first unless it is more than four times slower, and a slow test goes last:
+a test that polls for ten seconds until a purchase is active is tried after
+the half-second tests that merely load its page, though it infected the
+mutant and they did not. The order has to be kept by the copies, since
+Playwright fixes what a worker runs when it loads a file, so it is kept in
+three places:
+
+- *Sweeps.* A worker runs a file's tests in the order they are declared,
+  and Supercov's declaration arranges them as it declares them: after the
+  tests themselves (each test's first run), the first copy of every test,
+  cheapest test first, then every test's second copy, and so on, each beside
+  the tests of its own describe (a describe's hooks stay its tests'). A file
+  whose tests all reach one module (a page's) used to run its first test with
+  each of the mutants, then its second test with each: a mutant there was
+  decided only once the file's last test ran it, and a pass its budget cut
+  short decided none of those. In sweeps, its tests take one mutant each in
+  turn, so mutants are decided one after another.
+- *Which mutant a copy takes.* Of the mutants waiting for its test, a copy
+  takes the one with the fewest candidates before this test still to try
+  (none: its cheaper or likelier candidates let it live, and this test is the
+  next that may kill it), then one this test infected, then the one whose
+  candidates still to try take the least time (the closest to a verdict),
+  then the test's queue order. A candidate that failed without any mutant
+  holds nothing back.
+- *Waiting a sweep.* Where even that mutant has a candidate before this test
+  still to try, the copy takes none, while the test's copies after it still
+  cover every mutant waiting for it and a control for each: its next copy, a
+  sweep later, looks again. So a slow test's copies go to the mutants its
+  cheaper candidates let live, while those candidates run (in this file, or
+  in another invocation); and once its copies are short, it takes what is
+  left all the same. Each test gets a copy for each mutant with a candidate
+  before it, for these waits; a copy that takes nothing is skipped, which
+  costs Playwright a test's start and end.
+
+Verdicts stay what they were: a kill is any candidate's, a survivor ran every
+candidate, and a test's copies still cover every mutant waiting for it. What
+changes is when: a mutant a cheap test kills never waits for a slow one, and a
+slow test holds a mutant to its time limit only when no cheaper test could
+kill it first.
+
+Measured on a large application's e2e suite, its billing area's tail: the
+572 mutants four passes had left (most survivors-to-be, each with a median of
+12 candidates and 119 at the 90th percentile; 403 of them reached by one file
+of 15 tests whose 4 slowest poll 8-11 s until a purchase is active, a file
+the harness runs whole in one of a job's 6 slots). With 8 jobs of 32 CPUs and
+about 6 minutes of a pass each, from the same state, 4.29.5 decided 57: that
+file's first test ran each of a job's 70 or so mutants before its second test
+began, so a mutant there was decided only after the file's last test ran it,
+and no pass reached it. In sweeps the pass decided 147 for the same machines
+($0.60). Its slowest test, which 4.29.5 ran 210 times in that pass (each
+job's first test of the file, so nearly all its slot's time), ran 16 times,
+once its cheaper candidates had let each mutant live, and the file's other
+slow tests, which 4.29.5 never reached, ran 73 times. That slot still bounds the tail (each of its mutants takes
+about a minute there), and the progress lines say so: the costliest tests
+left are that file's, and the time left in the round is the slot's.
+
+**Controls: a run with no mutant first in each invocation.** A test's first
+run in an invocation, its first there after it failed without a mutant, and
+its first after a kill there have no mutant. The first such run of a test in
+a main round is its baseline: a test that fails without a mutant is no
+candidate (a second control that passes makes it one again). A test runs with
+a mutant only on a server (an invocation's) where it passed without one. A
+kill's next run of its test is a control: passing, it confirms the kills
+before it on the same server; failing, it puts them in doubt, and they run
+again one test at a time. A test whose control fails twice in an invocation
+is not run there again. Controls stand in for the canaries rows had (rows with
+no mutant, planted among the mutated ones): each kill is followed by one, at
+the cost of a run of the test.
+
+A failed test gives Playwright's next test a new worker, and the first run of
+each test in each worker used to be a control too. With a file's copies in
+sweeps that would follow every kill with a control of each test of the file;
+a control is the invocation's, as its server is, so only the killing test runs
+one. A test that leans on what an earlier test of its file left in the worker
+(a serial describe, a `beforeAll`) is caught as before: a kill it makes for
+that reason is followed by its control, which fails the same way and puts the
+kill in doubt.
 
 **Serial describes run in order but go on.** A `describe.serial` (or
 `describe.configure({ mode: 'serial' })`) runs as a default describe: in
@@ -787,17 +855,32 @@ too, and keeps what it finished.
 
 **What the pass says as it goes.** Each invocation's runner writes a status
 file (its round, the baselines, attempts and controls so far, the tests
-running and since when), and prints a line on the command's output for each
-attempt with a mutant (`<mutant>: "<test>" lives (1.4s)`), so a harness that
-watches its processes' last lines sees them work. `mutants test` adds to its
-progress line what the round does, what runs and for how long, and where
-nothing has ended for two minutes what it waits on: a test running up to its
-time, or, with no test running, the command's last line. Before any Playwright
-invocation began, it says the command's last line. The estimate of the time
-left is the plan's cost of the mutants left at the pace since the first
-mutant ran, not since the command started, so the start-up (a production
-build, a server) does not stretch it. The command's process tree is listed
-after ten minutes, not every minute.
+running and since when, and the work its tests have left), and prints a line
+on the command's output for each attempt with a mutant (`<mutant>: "<test>"
+lives (1.4s)`), so a harness that watches its processes' last lines sees them
+work. `mutants test` adds to its progress line what the round does, the
+costliest tests left, what runs and for how long, and where nothing has ended
+for two minutes what it waits on: a test running up to its time, or, with no
+test running, the command's last line. Before any Playwright invocation began,
+it says the command's last line. The command's process tree is listed after
+ten minutes, not every minute.
+
+The work left is counted from the queues every five seconds: for each test
+the invocation runs, how many mutants wait for it (not decided, not yet tried
+against it) at its baseline. The three tests whose runs left take longest are
+named, with how many mutants wait for each, its baseline and its limit:
+
+    [supercov]   costliest test left: "Social Media is added on the saved card, yearly or monthly, and the page waits until it is active", 38 mutant(s) wait for it, 7s a run (its limit 16s)
+
+The time left is each invocation's work left at its own pace (the baseline
+time of the runs it ended, over the time they took, which counts the skipped
+copies and new workers too), the slowest invocation's: `about 12m40s left in
+this round`. It is counted from what each mutant has left to try, so it
+follows the order: kills that come early do not make the survivors' runs look
+cheap, and a slow test that many mutants still wait for in one invocation is
+what the estimate waits on, as the round does. Where no driver counts its work
+(Vitest), the estimate is the plan's cost of the mutants left at the pace
+since the first mutant ran, as before.
 
 **Memory: copies in invocations of a bounded size.** Playwright makes every
 test case of every file it loads before the first test runs, in the runner.
@@ -860,6 +943,12 @@ error (its first line, ANSI stripped) is the verdict's reason.
 **Projects others start from run as they are.** The tests of a project
 another project depends on (`dependencies`, `teardown`: a login that stores
 the session the others start from) run in every invocation with no mutant.
+Such a test is no candidate this pass can run, as a test of another runner
+is not: a mutant no other test kills is an `error` that names the project,
+never a `survived` it has not earned. It used to wait for that candidate, as
+`unfinished`, pass after pass: on a large application's e2e suite, 99 of the
+572 mutants its billing area had left after four passes had the login among
+their candidates.
 
 **Time.** A test run with a mutant gets StrykerJS's limit,
 `timeoutFactor × baseline + 5 s` (`timeoutFactor` 1.5 by default;
