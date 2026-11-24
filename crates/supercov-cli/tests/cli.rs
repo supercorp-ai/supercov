@@ -24040,9 +24040,13 @@ fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
     project.write(".gitignore", "node_modules\n.supercov\n");
     let words = "export const WORDS = {\n  en: { hello: \"Hello\", bye: \"Bye\" },\n  fr: { hello: \"Bonjour\", bye: \"Au revoir\" },\n};\nconst LETTERS = { a: \"A\" };\nexport const COPIED = LETTERS.a;\nexport const PLAIN = \"plain\";\nexport function word(lang, key) {\n  return WORDS[lang][key];\n}\n";
     project.write("server/words.js", words);
+    // A word the mutant took away is a 500 for the request that read it.
+    // Uncaught, it took the server down, and a test that reads no word,
+    // its request in flight on the other worker, failed first and was
+    // named the broad pass's killer.
     project.write(
         "support/server.js",
-        "import http from \"node:http\";\nimport { word, COPIED, PLAIN } from \"../server/words.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/word\") return response.end(word(url.searchParams.get(\"lang\"), url.searchParams.get(\"key\")));\n  if (url.pathname === \"/copied\") return response.end(COPIED);\n  if (url.pathname === \"/plain\") return response.end(PLAIN);\n  response.end(\"other\");\n}).listen(Number(process.env.PORT));\n",
+        "import http from \"node:http\";\nimport { word, COPIED, PLAIN } from \"../server/words.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/word\") {\n    try {\n      return response.end(word(url.searchParams.get(\"lang\"), url.searchParams.get(\"key\")));\n    } catch (error) {\n      response.statusCode = 500;\n      return response.end(String(error));\n    }\n  }\n  if (url.pathname === \"/copied\") return response.end(COPIED);\n  if (url.pathname === \"/plain\") return response.end(PLAIN);\n  response.end(\"other\");\n}).listen(Number(process.env.PORT));\n",
     );
     project.write(
         "playwright.config.js",
