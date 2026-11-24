@@ -112,11 +112,14 @@ fn rewrite_scope_run_ids(value: &mut Value, merged_run_id: &str) {
 }
 
 /// The tests a run's archive holds a record of.
+///
+/// Each entry is read on its own, on every core: a merge reads every run's,
+/// and a run of a whole browser suite holds hundreds of megabytes of them.
 fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> {
-    let mut tests = BTreeMap::new();
-    for entry in archive {
+    let named = crate::threads::parallel_map(archive, |entry| {
+        let mut named = Vec::new();
         let Ok(text) = std::str::from_utf8(&entry.contents) else {
-            continue;
+            return named;
         };
         for line in text.lines() {
             if !line.contains("\"testId\"") {
@@ -125,11 +128,13 @@ fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> 
             if let Ok(value) = serde_json::from_str::<Value>(line)
                 && let (Some(id), Some(name)) = (value["testId"].as_str(), value["test"].as_str())
             {
-                tests.insert(id.to_owned(), name.to_owned());
+                named.push((id.to_owned(), name.to_owned()));
             }
         }
-    }
-    tests
+        named
+    });
+    // In the archive's order, so a test named twice keeps its last name.
+    named.into_iter().flatten().collect()
 }
 
 /// An entry's records for the merge, without those of the tests measured
@@ -139,11 +144,64 @@ pub(crate) fn rewritten_contents(
     merged_run_id: &str,
     superseded: Option<&BTreeSet<String>>,
 ) -> Result<Option<Vec<u8>>, String> {
+    Ok(rewritten_records(contents, merged_run_id, superseded)?.contents(|_| true))
+}
+
+/// An entry's records rewritten for the merge, each with the test it is of:
+/// what `rewritten_contents` writes, before the merge leaves out a run's
+/// copy of a test another run holds alike.
+struct Rewritten {
+    /// Every record kept, one after another.
+    text: Vec<u8>,
+    /// Each record's test, an index into `tests`, and its bytes in `text`.
+    records: Vec<(Option<usize>, std::ops::Range<usize>)>,
+    tests: Vec<String>,
+    /// Whether a superseded test's records were left out.
+    left_out: bool,
+    /// Whether the entry ended with a newline.
+    ended: bool,
+}
+
+impl Rewritten {
+    /// The entry with the records `keep` keeps, given each one's test, or
+    /// None for a record of no test. None when nothing of the entry is left.
+    fn contents(&self, keep: impl Fn(Option<&str>) -> bool) -> Option<Vec<u8>> {
+        let mut written = Vec::with_capacity(self.text.len());
+        let mut kept = false;
+        let mut left_out = self.left_out;
+        for (test, bytes) in &self.records {
+            if !keep(test.map(|test| self.tests[test].as_str())) {
+                left_out = true;
+                continue;
+            }
+            if kept {
+                written.push(b'\n');
+            }
+            kept = true;
+            written.extend_from_slice(&self.text[bytes.clone()]);
+        }
+        if self.ended && kept {
+            written.push(b'\n');
+        }
+        (kept || !left_out).then_some(written)
+    }
+}
+
+fn rewritten_records(
+    contents: &[u8],
+    merged_run_id: &str,
+    superseded: Option<&BTreeSet<String>>,
+) -> Result<Rewritten, String> {
     let contents = std::str::from_utf8(contents)
         .map_err(|_| "coverage evidence contains non-UTF-8 data".to_owned())?;
-    let mut rewritten = Vec::with_capacity(contents.len());
-    let mut left_out = false;
-    let mut kept = false;
+    let mut rewritten = Rewritten {
+        text: Vec::with_capacity(contents.len()),
+        records: Vec::new(),
+        tests: Vec::new(),
+        left_out: false,
+        ended: contents.ends_with('\n'),
+    };
+    let mut indexes = std::collections::HashMap::<String, usize>::new();
     // A compact attempt file names its scope on a writer's first line only:
     // a line without one is of the test of the line before it.
     let mut current_test: Option<String> = None;
@@ -185,29 +243,110 @@ pub(crate) fn rewritten_contents(
             }
         };
         if superseded.is_some_and(|tests| test.as_ref().is_some_and(|test| tests.contains(test))) {
-            left_out = true;
+            rewritten.left_out = true;
             continue;
         }
-        if kept {
-            rewritten.push(b'\n');
-        }
-        kept = true;
+        let start = rewritten.text.len();
         match record {
             Ok(entries) => {
-                rewritten.extend(rewritten_record(&entries, merged_run_id).map_err(|error| {
-                    format!("cannot merge malformed recognized JSON evidence: {error}")
-                })?);
+                rewritten
+                    .text
+                    .extend(rewritten_record(&entries, merged_run_id).map_err(|error| {
+                        format!("cannot merge malformed recognized JSON evidence: {error}")
+                    })?);
             }
             Err(mut value) => {
                 rewrite_scope_run_ids(&mut value, merged_run_id);
-                rewritten.extend(serde_json::to_vec(&value).expect("plain data serializes"));
+                rewritten
+                    .text
+                    .extend(serde_json::to_vec(&value).expect("plain data serializes"));
             }
         }
+        let test = test.map(|test| {
+            *indexes.entry(test).or_insert_with_key(|test| {
+                rewritten.tests.push(test.clone());
+                rewritten.tests.len() - 1
+            })
+        });
+        rewritten.records.push((test, start..rewritten.text.len()));
     }
-    if contents.ends_with('\n') && kept {
-        rewritten.push(b'\n');
+    Ok(rewritten)
+}
+
+/// Of one run, what another run earlier in the merge holds byte for byte:
+/// a test's records, or the records of no test in one of its entries.
+#[derive(Default)]
+struct HeldAlike {
+    tests: BTreeSet<String>,
+    /// Entries, by path, whose records of no test are alike.
+    untested: BTreeSet<String>,
+}
+
+impl HeldAlike {
+    fn len(&self) -> usize {
+        self.tests.len() + self.untested.len()
     }
-    Ok((kept || !left_out).then_some(rewritten))
+}
+
+/// Of each run, the records another run, earlier in the merge, holds byte
+/// for byte (`jobs` and `rewritten` in the merge's order, each entry's
+/// records as the merge writes them): a run made from another without
+/// measuring, or a test measured alike twice. That copy is left out, and
+/// every copy that differs in anything is kept: a test whose path depends on
+/// the time keeps each path it took. A run's copy of a test is its records
+/// in its entries' order, with the entry each is in; the records of no test
+/// (a server's background) are a copy of their entry's.
+fn copies_held_alike(
+    jobs: &[(usize, &EvidenceArchiveEntry)],
+    rewritten: &[Option<&Rewritten>],
+    runs: usize,
+) -> Vec<HeldAlike> {
+    use sha2::Digest;
+    // Of a test (`true`) or of an entry's records of no test.
+    type Key<'a> = (bool, &'a str);
+    // Each run's copies, hashed on every core, a run at a time.
+    let hashed = crate::threads::parallel_map(&(0..runs).collect::<Vec<_>>(), |run| {
+        let mut copies = BTreeMap::<Key<'_>, sha2::Sha256>::new();
+        for ((shard, entry), rewritten) in jobs.iter().zip(rewritten) {
+            let Some(rewritten) = rewritten.filter(|_| shard == run) else {
+                continue;
+            };
+            for (test, bytes) in &rewritten.records {
+                let key = match test {
+                    Some(test) => (true, rewritten.tests[*test].as_str()),
+                    None => (false, entry.path.as_str()),
+                };
+                let copy = copies.entry(key).or_default();
+                // Lengths first, so no two different sequences of paths and
+                // records hash alike.
+                for part in [entry.path.as_bytes(), &rewritten.text[bytes.clone()]] {
+                    copy.update((part.len() as u64).to_le_bytes());
+                    copy.update(part);
+                }
+            }
+        }
+        copies
+            .into_iter()
+            .map(|(key, copy)| (key, <[u8; 32]>::from(copy.finalize())))
+            .collect::<Vec<_>>()
+    });
+    let mut held = BTreeMap::<Key<'_>, BTreeSet<[u8; 32]>>::new();
+    hashed
+        .into_iter()
+        .map(|copies| {
+            let mut alike = HeldAlike::default();
+            for (key, copy) in copies {
+                if held.entry(key).or_default().insert(copy) {
+                    continue;
+                }
+                match key {
+                    (true, test) => alike.tests.insert(test.to_owned()),
+                    (false, path) => alike.untested.insert(path.to_owned()),
+                };
+            }
+            alike
+        })
+        .collect()
 }
 
 fn merged_path(path: &str, shard: usize) -> String {
@@ -994,26 +1133,34 @@ pub fn merge_runs(
             let document = serde_json::from_slice::<StrongVerdicts>(&saved.ok()?).ok()?;
             Some((index, document))
         })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(index, document)| {
+            let tests = measured_tests(&archives[index]).into_keys().collect();
+            (index, document, tests)
+        })
         .collect::<Vec<_>>();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
         .map_err(|error| format!("Cannot lock coverage store for merge: {error}"))?;
     let work = root.join(".supercov/work").join(merged_run_id);
+    // Owned before the merge's work, which lets the runs' evidence go
+    // once it is written into the merged run's.
+    let mut entries = vec![
+        EvidenceArchiveEntry {
+            path: "coverage-model.json".into(),
+            contents: model.to_vec(),
+        },
+        EvidenceArchiveEntry {
+            path: "frontend.json".into(),
+            contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
+        },
+        EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: manifest.to_vec(),
+        },
+    ];
     let result = (|| {
-        let mut entries = vec![
-            EvidenceArchiveEntry {
-                path: "coverage-model.json".into(),
-                contents: model.to_vec(),
-            },
-            EvidenceArchiveEntry {
-                path: "frontend.json".into(),
-                contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
-            },
-            EvidenceArchiveEntry {
-                path: "manifest.json".into(),
-                contents: manifest.to_vec(),
-            },
-        ];
         entries.extend(mutants.map(|contents| EvidenceArchiveEntry {
             path: "mutants.json".into(),
             contents,
@@ -1046,9 +1193,9 @@ pub fn merge_runs(
             let superseded = grown.as_ref().and_then(|grown| grown.superseded.get(shard));
             match grown.as_ref().and_then(|grown| grown.files.as_ref()) {
                 Some(files) if entry.path == crate::source_capture::ARCHIVE_PATH => {
-                    Ok(Some(files.clone()))
+                    Ok(Err(files.clone()))
                 }
-                _ => rewritten_contents(&entry.contents, merged_run_id, superseded),
+                _ => rewritten_records(&entry.contents, merged_run_id, superseded).map(Ok),
             }
         };
         let threads = std::thread::available_parallelism()
@@ -1076,16 +1223,47 @@ pub fn merge_runs(
                 .collect::<Vec<_>>()
         });
         rewritten.sort_unstable_by_key(|(index, _)| *index);
+        // Each entry's records, or the merge's one record of the files.
+        let rewritten = rewritten
+            .into_iter()
+            .map(|(_, rewritten)| rewritten)
+            .collect::<Result<Vec<_>, _>>()?;
+        let records = rewritten
+            .iter()
+            .map(|rewritten| rewritten.as_ref().ok())
+            .collect::<Vec<_>>();
+        // A test two runs hold alike is kept once. Runs of one checkout that
+        // each measured the suite (the jobs of a sharded pass) hold it once
+        // each, and a run made from another without measuring holds it as
+        // that one does.
+        let alike = copies_held_alike(&jobs, &records, archives.len());
+        let copies_left_out = alike.iter().map(HeldAlike::len).sum::<usize>();
         // An entry with nothing left had only records of tests measured
-        // again elsewhere.
-        for ((shard, entry), (_, contents)) in jobs.iter().zip(rewritten) {
-            if let Some(contents) = contents? {
+        // again elsewhere, or held alike by another run.
+        for ((shard, entry), rewritten) in jobs.iter().zip(rewritten) {
+            let contents = match rewritten {
+                Err(files) => Some(files),
+                Ok(rewritten) => {
+                    let alike = &alike[*shard];
+                    let untested = alike.untested.contains(&entry.path);
+                    rewritten.contents(|test| match test {
+                        Some(test) => !alike.tests.contains(test),
+                        None => !untested,
+                    })
+                }
+            };
+            if let Some(contents) = contents {
                 entries.push(EvidenceArchiveEntry {
                     path: merged_path(&entry.path, *shard),
                     contents,
                 });
             }
         }
+        // The runs' evidence is all in the merged run's now: let it go
+        // before the merged run is read back to plan its mutants, which
+        // holds every record parsed.
+        drop(jobs);
+        drop(archives);
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
             .map_err(|error| format!("Could not write merged evidence: {error}"))?;
@@ -1143,15 +1321,15 @@ pub fn merge_runs(
             .map_err(|error| format!("Could not publish merged run: {error}"))?;
         finalize_published_run(root, merged_run_id)
             .map_err(|error| format!("Could not finalize merged run: {error}"))?;
-        let notes = kept_verdicts(
-            root,
-            merged_run_id,
-            &inputs,
-            &archives,
-            held,
-            &owners,
-            &hashes,
-        );
+        let mut notes = kept_verdicts(root, merged_run_id, &inputs, held, &owners, &hashes);
+        if copies_left_out > 0 {
+            notes.insert(
+                0,
+                format!(
+                    "{copies_left_out} copy(ies) of records that an earlier run held byte for byte kept once, from that run"
+                ),
+            );
+        }
         Ok(MergedRun {
             id: merged_run_id.to_owned(),
             notes,
@@ -1170,14 +1348,14 @@ pub fn merge_runs(
 
 /// The merged run's strong verdicts, from those the runs merged saved
 /// (`strong_verdicts::merged_verdicts`), saved into it; what was kept, and
-/// each run whose verdicts were not, and why. A run's test ids are those its
-/// records name; a test it recorded only by name lends no survival.
+/// each run whose verdicts were not, and why. `held` is each run that saved
+/// verdicts, with them and the ids of the tests its records name: a test it
+/// recorded only by name lends no survival.
 fn kept_verdicts(
     root: &Path,
     merged_run_id: &str,
     inputs: &[&StoredRun],
-    archives: &[Vec<EvidenceArchiveEntry>],
-    held: Vec<(usize, StrongVerdicts)>,
+    held: Vec<(usize, StrongVerdicts, BTreeSet<String>)>,
     owners: &BTreeMap<String, usize>,
     hashes: &[BTreeMap<String, String>],
 ) -> Vec<String> {
@@ -1213,7 +1391,7 @@ fn kept_verdicts(
     let mut notes = Vec::new();
     let mut lending = Vec::new();
     // Not empty, as said above: a loop over it never runs zero times.
-    held.into_iter().for_each(|(index, document)| {
+    held.into_iter().for_each(|(index, document, tests)| {
         let id = &inputs[index].id;
         if plan.as_ref().map(|plan| &plan.mutant_set) != Some(&document.mutant_set) {
             notes.push(format!(
@@ -1222,9 +1400,6 @@ fn kept_verdicts(
             ));
             return;
         }
-        let tests = measured_tests(&archives[index])
-            .into_keys()
-            .collect::<BTreeSet<_>>();
         let other_bytes = owners
             .iter()
             .filter(|(path, owner)| hashes[index].get(*path) != hashes[**owner].get(*path))
@@ -1369,6 +1544,82 @@ mod tests {
         );
     }
 
+    /// A test two runs recorded byte for byte alike (a run made from
+    /// another without measuring, under an id of its own) is kept once, from
+    /// the first; a copy that differs in anything (a test whose path or
+    /// timing differed) is kept beside it. Nothing either measured is lost.
+    #[test]
+    fn a_test_recorded_alike_by_several_runs_is_kept_once_and_every_other_copy_kept() {
+        let root = temporary();
+        for id in ["run-a", "run-b", "run-c"] {
+            create_analyzable_test_run(&root, id);
+        }
+        let worker = |id: &str| {
+            read_archive(&root.join(".supercov/runs").join(id).join("evidence.raw.gz"))
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.path == "worker/mcdc.json")
+                .unwrap()
+                .contents
+        };
+        let record = serde_json::from_slice::<Value>(&worker("run-a")).unwrap();
+        assert!(record["testId"].is_string(), "{record}");
+        // Run b's record names its own run: the merge names the merged one
+        // in both, so they are alike.
+        let mut own_run = record.clone();
+        own_run["scope"] = serde_json::json!({"runId": "run-b", "testId": record["testId"]});
+        let mut first = record.clone();
+        first["scope"] = serde_json::json!({"runId": "run-a", "testId": record["testId"]});
+        rewrite_entry(
+            &root,
+            "run-a",
+            "worker/mcdc.json",
+            Some(serde_json::to_vec(&first).unwrap()),
+        );
+        rewrite_entry(
+            &root,
+            "run-b",
+            "worker/mcdc.json",
+            Some(serde_json::to_vec(&own_run).unwrap()),
+        );
+        // Run c's took longer.
+        let mut slower = first.clone();
+        slower["durationMs"] =
+            serde_json::json!(record["durationMs"].as_f64().unwrap_or(0.0) + 1.0);
+        rewrite_entry(
+            &root,
+            "run-c",
+            "worker/mcdc.json",
+            Some(serde_json::to_vec(&slower).unwrap()),
+        );
+        assert_ne!(worker("run-a"), worker("run-b"));
+        let merged = merge_runs(
+            &root,
+            &["run-a".into(), "run-b".into(), "run-c".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            merged.notes,
+            [
+                "1 copy(ies) of records that an earlier run held byte for byte kept once, from that run"
+            ]
+        );
+        let archive = read_archive(&root.join(".supercov/runs/merged/evidence.raw.gz")).unwrap();
+        let workers = archive
+            .iter()
+            .filter(|entry| entry.path.ends_with("mcdc.json"))
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workers,
+            ["shards/0/worker/mcdc.json", "shards/2/worker/mcdc.json"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn merges_compatible_runs_atomically_and_rejects_duplicates() {
         let root = temporary();
@@ -1395,8 +1646,10 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path.starts_with("shards/0/"))
         );
+        // The two runs recorded their test byte for byte alike: it is kept
+        // once, from the first.
         assert!(
-            archive
+            !archive
                 .iter()
                 .any(|entry| entry.path.starts_with("shards/1/"))
         );
@@ -2569,6 +2822,8 @@ mod tests {
         )
     }
 
+    /// The merge's notes on strong verdicts: these runs are made alike, so
+    /// the note that their tests' records were kept once is left out.
     fn merge_noted(root: &Path, ids: &[&str]) -> Vec<String> {
         merge_runs(
             root,
@@ -2579,6 +2834,9 @@ mod tests {
         )
         .unwrap()
         .notes
+        .into_iter()
+        .filter(|note| !note.ends_with("byte for byte kept once, from that run"))
+        .collect()
     }
 
     const TRUE: &str = "src/app.js:1:5-1:18:ConditionalExpression:true";
