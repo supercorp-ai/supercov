@@ -24235,12 +24235,14 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
         .supercov_with(&["--", "node", "e2e.mjs"], &roots)
         .succeeds();
     let _ = std::fs::remove_file(&listed);
+    let planning = std::time::Instant::now();
     let plan = project
         .supercov_with(
             &["runs", "latest", "mutants", "test", "--plan", "--json"],
             &roots,
         )
         .json();
+    let planning = planning.elapsed().as_secs();
     let planned = plan["mutants"]
         .as_array()
         .unwrap()
@@ -24252,10 +24254,12 @@ fn a_large_playwright_plan_runs_in_a_small_heap() {
     // an invocation (about seven mutants), so that a minute sees several
     // even on a slow runner: with six hundred an ARM runner's first
     // invocation used the whole minute, and with a hundred and twenty a
-    // macOS runner's.
+    // macOS runner's. The budget counts planning too, which takes a slow
+    // runner most of a minute here: the pass gets its minute after it.
+    let budget = (60 + 2 * planning).to_string();
     let ran = project.supercov_with(
         &[
-            "runs", "latest", "mutants", "test", "--json", "--budget", "60",
+            "runs", "latest", "mutants", "test", "--json", "--budget", &budget,
         ],
         &[
             roots[0],
