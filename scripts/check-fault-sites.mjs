@@ -9,7 +9,7 @@
 //
 // - no test, script or source addresses a call or matches a message by a
 //   source file and line (`lifecycle.rs:1194`, `lifecycle\.rs:1194`,
-//   `lifecycle.rs:{line}`);
+//   `lifecycle.rs:{line}`, or a site's file alone, `fs#lifecycle.rs`);
 // - every name is given once, across the crates (each crate's build fails on
 //   a repeat within it), and two crates name no place by the same path;
 // - every `site#NAME` a test or script writes is a name some comment gives
@@ -39,7 +39,7 @@ const names = [...new Set(sources.map((file) => basename(file, ".rs")))].map((na
   name.replace(/[^\w]/gu, ""),
 );
 const pin = new RegExp(
-  String.raw`(?<![\w/\\.-])(?:${names.join("|")})(?:\\?\.)rs:(?:\d|\{|\$\{)(?!\d*:\d)`,
+  String.raw`(?<![\w/\\.-])(?:${names.join("|")})(?:\\?\.)rs:(?:\d|\{|\$\{)(?!\d*:\d)|#(?:${names.join("|")})(?:\\?\.)rs\b`,
   "u",
 );
 // The site comments, and every `site#NAME` written to fail one.

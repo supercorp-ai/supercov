@@ -15510,7 +15510,7 @@ fn a_failing_system_call_while_starting_a_command_is_named_or_retried() {
         "watchdog-exec",
         "watchdog-read",
         "proc-fd",
-        "fs.read_dir#process_supervision.rs",
+        "fs.read_dir#process-supervision.watch-parent-process-group",
     ];
     let reached = |fault: &str, said: &str| {
         for site in fault.split(',') {
