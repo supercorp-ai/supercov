@@ -1,12 +1,19 @@
 # Changelog
 
-## Unreleased
+## 4.29.6
+
+**Changed**
+
+- A Playwright strong pass tries each mutant's candidates cheapest to a kill first (a test's measured time over how likely it is to kill, a test that infected the mutant taken as four times likelier than one that only reached it), so slow tests go last, and decides mutants one after another. A file's copies run in sweeps, every test's first copy, cheapest test first, then every test's second; a copy takes the waiting mutant with the fewest candidates before its test still to try, then one its test infected, then the one closest to a verdict; and a copy whose every waiting mutant still has a cheaper candidate to try waits a sweep, while the test's copies left cover what it must run. A mutant a fast test kills no longer waits for, or holds, a slow test until its time limit, and a slow test runs the mutants its cheaper candidates let live. A survivor still runs every candidate. On a large application's e2e suite, the 572 mutants its billing area had left after four passes (8 jobs, about 6 minutes of a pass each), a pass decided 147 where 4.29.5 decided 57 from the same state: one file of slow tests that poll until a purchase is active held every mutant there, and its first test ran each of them before the next test began.
+- A test's run without a mutant (its control) is the invocation's, as its server is: only the test that killed runs one before its next mutant, not every test of the file in the new worker Playwright starts after a failure.
+- The progress lines name the costliest tests left, how many mutants wait for each, its time a run and its limit, and the time left is the round's work left (each mutant's candidates still to try, at each test's baseline and each invocation's own pace): `about 12m40s left in this round`.
 
 **Fixed**
 
 - A strong pass split across jobs can go on in a second round on the same commit. `supercov mutants --shard k/n -- <command>` now measures a run of its own even when the checkout is unchanged since the runs a job restored, keeps their verdicts, and runs its share of the rest; the last job's `supercov merge` takes the round's runs, which replace the restored ones. Before, every job of a second round saved its share into a copy of the latest restored run: on a large application's e2e suite eight jobs wrote eight copies of one run id, the merge refused them, and the 1,265 decided mutants they held could only be added up by hand. `docs/mutation.md`'s sharded CI example shows a continuation round.
 - `supercov merge` says how many strong verdicts came from each run and how many the merged run's plan decides (`1265 strong verdict(s) kept from runs r8, r7: 1103 from r8, 150 from r7, 12 the merged run's plan decides`). A verdict two runs hold alike counts for the first run named.
 - A run named twice in `supercov merge` is refused with why (copies of one run share its id, and the store holds one of them) and what to do, instead of `Each merged run must be unique` alone.
+- A Playwright mutant with a candidate in a project others start from (a login `setup`, a `teardown`), which runs without a mutant, waited for it as unfinished, pass after pass. It is now an `error` saying so when no other test kills it, as a mutant with candidates under another runner is.
 
 ## 4.29.5
 

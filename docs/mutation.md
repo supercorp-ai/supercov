@@ -415,6 +415,16 @@ no mutants shows none of this.
   as detected; the summary says how many, and against what limit.
   `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
   1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
+  A mutant tries its candidates cheapest to a kill first (a test's time over
+  how likely it is to kill: one that infected the mutant counts as four
+  times likelier than one that only reached it), and a slow test runs it only
+  once its cheaper candidates let it live; a file's tests take one mutant
+  each in turn, so mutants are decided one after another rather than all at
+  the end. The progress lines name the tests with the most work left (how
+  many mutants wait for each, and its time a run) and the time the round
+  has left. A candidate in a project others start from (a login `setup`)
+  never runs with a mutant: a mutant no other test kills is an `error` that
+  says so.
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.

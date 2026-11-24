@@ -11,10 +11,12 @@
 // from whichever invocations ran it, and what was cut short is unfinished.
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, readJson, reasonOf, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
+import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, queuedWork, readJson, reasonOf, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
 
 // How often, at most, the status file is written.
 const STATUS_MS = 1_000;
+// How often, at most, the work left is counted for it.
+const QUEUED_MS = 5_000;
 
 /** Each JSON file in a directory of the pass, or none. */
 function readAll(directory) {
@@ -63,6 +65,11 @@ export default class SupercovPlaywrightStrongReporter {
         this.running = new Map();
         this.counts = { baselines: 0, controls: 0, failedControls: 0, attempts: 0, killed: 0, timedOut: 0, passed: 0 };
         this.writtenAt = 0;
+        // The tests this invocation runs, and the baseline time of the runs
+        // it ended: its pace, for the time its work left takes.
+        this.held = [];
+        this.doneMs = 0;
+        this.queuedAt = 0;
     }
     // It prints its own lines, and says it prints: Playwright adds a reporter
     // of its own where none does. The command's output is a log beside the
@@ -84,6 +91,8 @@ export default class SupercovPlaywrightStrongReporter {
             if (withoutCopy(test.titlePath()).copy)
                 continue;
             writeJson(`${this.pass.round}/originals/${key(placeOf(test))}`, test.id);
+            if (this.work.tests[test.id]?.jobs)
+                this.held.push(test.id);
         }
         this.copies = copies;
         const mutants = Object.keys(this.work.entries).length;
@@ -137,6 +146,8 @@ export default class SupercovPlaywrightStrongReporter {
     /** A line on the command's output for each attempt with a mutant, and each control that failed. */
     say(attempt) {
         const took = seconds((attempt.endedAt ?? Date.now()) - attempt.startedAt);
+        this.firstStartedAt ??= attempt.startedAt;
+        this.doneMs += attempt.baselineMs ?? this.work.tests[attempt.original]?.durationMs ?? 0;
         if (attempt.kind !== "mutant") {
             this.counts[attempt.kind === "baseline" ? "baselines" : "controls"] += 1;
             if (attempt.outcome === "failed" || attempt.outcome === "timed-out") {
@@ -186,6 +197,8 @@ export default class SupercovPlaywrightStrongReporter {
                 limitMs: attempt?.limitMs,
             };
         });
+        if (now && this.work && Date.now() - this.queuedAt >= QUEUED_MS)
+            this.countQueued();
         try {
             writeJson(`${this.pass.shared}/status/${process.pid}.json`, {
                 round: this.pass.name,
@@ -198,10 +211,30 @@ export default class SupercovPlaywrightStrongReporter {
                 firstMutantAt: this.firstMutantAt,
                 lastEndedAt: this.lastEndedAt,
                 running,
+                ...(this.queued ? { queued: this.queued } : {}),
             });
         }
         catch {
             // The status is for the progress line; the pass goes on without it.
+        }
+    }
+    /**
+     * The work left in this invocation's tests (`queuedWork`), and the time
+     * it takes at the pace so far: the baseline time of the runs it ended
+     * over the time they took, which counts what runs besides the tests (a
+     * copy with nothing to run, a new worker after a kill).
+     */
+    countQueued() {
+        this.queuedAt = Date.now();
+        try {
+            const queued = queuedWork(this.pass, this.work, this.held);
+            const spent = (this.lastEndedAt ?? 0) - (this.firstStartedAt ?? 0);
+            if (this.doneMs > 0 && spent > 0)
+                queued.leftMs = Math.round((queued.ms * spent) / this.doneMs);
+            this.queued = queued;
+        }
+        catch {
+            // Counted again at the next status.
         }
     }
     onEnd() {
@@ -369,9 +402,8 @@ export default class SupercovPlaywrightStrongReporter {
                 next(entry, "unfinished", left);
                 continue;
             }
-            const others = work.otherRunners[id];
-            verdict(others
-                ? { status: "error", reason: `no Playwright test killed it, and its other candidates ran under ${others.join(", ")}, which this pass does not run` }
+            verdict(entry.unrun
+                ? { status: "error", reason: `no Playwright test killed it, and ${entry.unrun}` }
                 : { status: "survived", ...(after ? { reason: after } : {}) });
         }
         for (const job of work.restarts)
@@ -407,13 +439,13 @@ export default class SupercovPlaywrightStrongReporter {
         for (const entry of aloneAgain)
             (takenAny ? alone : aloneEach).push(entry);
         if (alone.length)
-            write({ restart: { kind: "alone", everywhere: true, batch: true, reason: "server-wide", mutants: alone, otherRunners: work.otherRunners } });
+            write({ restart: { kind: "alone", everywhere: true, batch: true, reason: "server-wide", mutants: alone, otherRunners: work.otherRunners, setupOnly: work.setupOnly } });
         for (const job of aloneEach)
-            write({ restart: { kind: "alone", everywhere: true, reason: job.reason, mutants: [job], otherRunners: work.otherRunners } });
+            write({ restart: { kind: "alone", everywhere: true, reason: job.reason, mutants: [job], otherRunners: work.otherRunners, setupOnly: work.setupOnly } });
         if (rest.length)
-            write({ restart: { kind: "rest", reason: "unfinished", mutants: rest, otherRunners: work.otherRunners } });
+            write({ restart: { kind: "rest", reason: "unfinished", mutants: rest, otherRunners: work.otherRunners, setupOnly: work.setupOnly } });
         if (serial.length)
-            write({ restart: { kind: "serial", reason: [...new Set(serial.map((job) => job.reason))].join(", "), mutants: serial, otherRunners: work.otherRunners } });
+            write({ restart: { kind: "serial", reason: [...new Set(serial.map((job) => job.reason))].join(", "), mutants: serial, otherRunners: work.otherRunners, setupOnly: work.setupOnly } });
         const mutated = attempts.filter((attempt) => attempt.kind === "mutant");
         write({
             summary: true,

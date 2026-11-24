@@ -9,12 +9,23 @@
 // disk that every worker and every invocation of the pass share. A mutant
 // goes from candidate to candidate as copies take it, and stops at its first
 // kill; nothing waits for a stage to end, and no worker restarts for a
-// mutant. The first run of a test in each worker is a control, with no
-// mutant: the pass's baseline the first time, and after a kill (a failed
-// test gives Playwright's next test a new worker) the check that the test
-// still passes without the mutant on the same server, which confirms the
-// kill. A harness may start several invocations at once, each with a share
-// of the tests; they share the pass's files and decide the same way.
+// mutant. A test's first run in each invocation is a control, with no
+// mutant: the pass's baseline the first time; and after a kill, the test's
+// next run is one too, the check that it still passes without the mutant on
+// the same server, which confirms the kill. A harness may start several
+// invocations at once, each with a share of the tests; they share the pass's
+// files and decide the same way.
+//
+// The order (docs/design/strong-mutation.md, "Which candidate first"): a
+// mutant's candidates are ordered cheapest to a kill first (each test's time
+// over how likely it is to kill: those whose own evidence infected it are
+// taken as likelier), so a slow test comes last; a file's copies run in
+// sweeps, the k-th copy of each of its tests in turn, cheapest test first;
+// and a copy takes, of the mutants waiting for its test, the one with the
+// fewest earlier candidates still to try, the one its test infected, and the
+// one closest to a verdict, in that order. So a slow test runs a mutant once
+// its cheaper candidates let it live, and a file's tests finish one mutant
+// before the next rather than one test's mutants before the next test's.
 //
 // The attempt's mutant goes into its scope, which reaches the app's server
 // with every request (header, cookies, child processes) and the page through
@@ -43,6 +54,10 @@ import { basename, dirname, resolve, sep } from "node:path";
 const TIMEOUT_FACTOR = 1.5;
 const TIMEOUT_CONSTANT_MS = 5_000;
 const DEFAULT_DURATION_MS = 1_000;
+// How much likelier to kill a mutant a test is taken to be where its own
+// evidence infected it than where it only reached it: what orders a mutant's
+// candidates, with their times.
+const INFECTED_LIKELIER = 4;
 const POLL_MS = 50;
 // Playwright makes every test case of every file it loads before the first
 // test runs, in the runner: an invocation holds about this many copies, and
@@ -57,6 +72,8 @@ export const PAGE_TIMEOUT_MARKER = "SUPERCOV_MUTANT_TIMEOUT";
 
 /** A copy's describe: `[supercov copy <k>]`, k from 1. */
 const COPY_TITLE = /^\[supercov copy (\d+)\]$/;
+// The most costly tests a status file names.
+const COSTLY_SHOWN = 3;
 export function copyTitle(copy) {
     return `[supercov copy ${copy}]`;
 }
@@ -91,8 +108,15 @@ export function strongPass() {
     };
 }
 
+const keys = new Map();
 export function key(text) {
-    return createHash("sha256").update(String(text)).digest("hex").slice(0, 24);
+    const said = String(text);
+    let found = keys.get(said);
+    if (found === undefined) {
+        found = createHash("sha256").update(said).digest("hex").slice(0, 24);
+        keys.set(said, found);
+    }
+    return found;
 }
 
 export function writeJson(path, value) {
@@ -147,7 +171,7 @@ export function mark(path) {
  * and every control of it that passed in this pass, in any worker or round
  * (a test whose time varies is given its slowest), and a second at least.
  */
-function baselineMsOf(pass, original, test) {
+export function baselineMsOf(pass, original, test) {
     let longest = Math.max(DEFAULT_DURATION_MS, test.durationMs ?? 0);
     for (const name of entries(`${pass.shared}/durations/${key(original)}`))
         longest = Math.max(longest, Number(name.split("-")[1]) || 0);
@@ -155,7 +179,7 @@ function baselineMsOf(pass, original, test) {
 }
 
 /** A mutant attempt's time limit from its test's baseline: StrykerJS's `timeoutMS`. */
-function limitOf(baselineMs, factor) {
+export function limitOf(baselineMs, factor) {
     return Math.ceil(baselineMs * factor + TIMEOUT_CONSTANT_MS);
 }
 
@@ -204,7 +228,8 @@ function serialFilesOf(plan, tests, fullyParallel) {
 /**
  * The projects others depend on (`dependencies`, `teardown`): their tests,
  * a login that stores the session others start from, run as they are in
- * every invocation, with no mutant, whether or not a mutant needs them.
+ * every invocation, with no mutant, whether or not a mutant needs them. A
+ * mutant's candidate among them is never run with it.
  */
 function setupProjectsOf(config) {
     const names = new Set();
@@ -221,6 +246,12 @@ function setupProjectsOf(config) {
 function fullyParallelOf(config) {
     const projects = Array.isArray(config?.projects) && config.projects.length ? config.projects : [{}];
     return projects.every((project) => project.fullyParallel ?? config?.fullyParallel ?? false);
+}
+
+/** The project others start from that a plan test is in, by its name (`<project> > <file> > ...`). */
+function inSetupProject(test, setupProjects) {
+    const name = test.name ?? "";
+    return setupProjects.find((project) => project && name.startsWith(`${project} > `));
 }
 
 // A plan test's id as Playwright knows it: a Rust wasm run names a test by
@@ -253,10 +284,12 @@ function declarationKey(file, title) {
 /**
  * The pass's work, worked out in the runner from the plan (or the job the
  * round runs): each mutant to run with its candidate tests in the order it
- * takes them (those whose own evidence infected it first, cheapest first),
- * each test's queue of mutants (those it is the likeliest killer of first),
- * and how many copies each test needs: one for each mutant that may take it,
- * one more for each control a kill may call for, and the first control.
+ * takes them (cheapest to a kill first: by measured time, those whose own
+ * evidence infected it counted as likelier), each test's queue of mutants (those
+ * it is the likeliest killer of first), and how many copies each test needs:
+ * one for each mutant that may take it, one more for each control a kill may
+ * call for, and the first control. A candidate in a project others start
+ * from is never run with the mutant: the mutant's verdict says so.
  */
 function buildPass(pass, root, config) {
     const plan = readJson(pass.planPath);
@@ -273,6 +306,8 @@ function buildPass(pass, root, config) {
     const restarts = [];
     const deferred = [];
     const otherRunners = { ...(job?.otherRunners ?? {}) };
+    const setupOnly = { ...(job?.setupOnly ?? {}) };
+    const setupProjects = setupProjectsOf(config);
     const mutants = [];
     if (job && job.kind !== "main") {
         for (const entry of job.mutants) {
@@ -312,33 +347,55 @@ function buildPass(pass, root, config) {
                 });
                 continue;
             }
-            // Its candidates, cheapest first (the plan's order), those whose own
-            // evidence shows it infected first of all.
+            // Its candidates, and which of them infected it.
             const own = [];
             const others = new Set();
+            const setup = new Set();
             for (const candidate of mutant.candidates) {
                 const test = plan.tests[candidate.test];
-                if (test && tests[playwrightId(test)])
+                const project = test && tests[playwrightId(test)] && inSetupProject(test, setupProjects);
+                if (project)
+                    setup.add(project);
+                else if (test && tests[playwrightId(test)])
                     own.push({ id: playwrightId(test), infected: candidate.reason === "infected" });
                 else if (test)
                     others.add(test.runner);
             }
             if (others.size)
                 otherRunners[mutant.id] = [...others].sort();
+            if (setup.size)
+                setupOnly[mutant.id] = [...setup].sort();
             if (!own.length) {
-                immediate.push(others.size
-                    ? { id: mutant.id, status: "error", reason: `its candidates ran under ${[...others].sort().join(", ")}, which this pass does not run`, tests: 0, durationMs: 0 }
+                const unrun = unrunReason(otherRunners[mutant.id], setupOnly[mutant.id], "its candidates");
+                immediate.push(unrun
+                    ? { id: mutant.id, status: "error", reason: unrun, tests: 0, durationMs: 0 }
                     : { id: mutant.id, status: "survived", reason: "no-runnable-candidate", tests: 0, durationMs: 0 });
                 continue;
             }
-            const ordered = [...new Set([...own.filter((test) => test.infected), ...own.filter((test) => !test.infected)].map((test) => test.id))];
+            // Cheapest to a kill first: each test's measured time (one the
+            // run timed none of counts as a second, the least a baseline
+            // is), over how likely it is to kill, a test whose own evidence
+            // infected it `INFECTED_LIKELIER` times likelier than one that
+            // only reached it; the plan's order between equals. So a test
+            // that infected it goes first unless it is that much slower,
+            // and a slow test goes last.
+            const costOf = (test) => (tests[test.id].durationMs ?? DEFAULT_DURATION_MS) * (test.infected ? 1 : INFECTED_LIKELIER);
+            own.sort((a, b) => costOf(a) - costOf(b));
+            const infected = [...new Set(own.filter((test) => test.infected).map((test) => test.id))];
+            const ordered = [...new Set(own.map((test) => test.id))];
             const switched = `${mutant.file}#${found.index}`;
             if (mutant.serverWide) {
                 restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: mutant.serverWide });
                 continue;
             }
-            mutants.push({ id: mutant.id, mutant: switched, tests: ordered });
+            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected });
         }
+    }
+    // What a survivor's verdict says of the candidates it was not run with.
+    for (const entry of mutants) {
+        const unrun = unrunReason(otherRunners[entry.id], setupOnly[entry.id], "its other candidates");
+        if (unrun)
+            entry.unrun = unrun;
     }
     // Each test's queue, and the copies the round's mutants need, as many as
     // an invocation holds; the mutants past them wait for the next.
@@ -347,7 +404,10 @@ function buildPass(pass, root, config) {
     let copies = 0;
     const entries = {};
     for (const entry of mutants) {
-        const added = entry.tests.reduce((sum, id) => sum + 2 + (queues.has(id) ? 0 : 1), 0);
+        // Two copies a candidate (an attempt, and a control should it
+        // kill), one more where it is not the first (a sweep it may wait
+        // out), and each test's first run.
+        const added = entry.tests.reduce((sum, id, at) => sum + 2 + (at > 0 ? 1 : 0) + (queues.has(id) ? 0 : 1), 0);
         if (copies && copies + added > limit && kind === "main") {
             deferred.push({ id: entry.id });
             continue;
@@ -361,14 +421,21 @@ function buildPass(pass, root, config) {
         });
     }
     const declared = {};
+    // What orders a sweep of a file's copies: each test's measured time.
+    const costs = {};
     for (const [id, queue] of queues) {
-        // The likeliest killers' mutants first; the plan's order between equals.
+        // The likeliest killers' mutants first; the plan's order between
+        // equals. A copy takes from it by each mutant's standing then.
         queue.sort((a, b) => a.at - b.at);
         const test = tests[id];
         test.jobs = queue.length;
         test.queue = queue.map((job) => job.id);
         const where = declarationKey(resolve(root, test.file), test.title);
-        declared[where] = Math.max(declared[where] ?? 0, 2 * queue.length + 1);
+        // A copy for each sweep the test may wait out: one for each mutant
+        // with a candidate before it.
+        const later = queue.filter((job) => job.at > 0).length;
+        declared[where] = Math.max(declared[where] ?? 0, 2 * queue.length + later + 1);
+        costs[where] = Math.max(costs[where] ?? 0, test.durationMs ?? DEFAULT_DURATION_MS);
     }
     return {
         pass: pass.name,
@@ -386,14 +453,30 @@ function buildPass(pass, root, config) {
         timeoutFactor: Number(plan.timeoutFactor) > 0 ? Number(plan.timeoutFactor) : TIMEOUT_FACTOR,
         tests,
         declared,
+        costs,
         entries,
-        setupProjects: setupProjectsOf(config),
+        setupProjects,
         concurrency,
         immediate,
         restarts,
         otherRunners,
+        setupOnly,
         deferred,
     };
+}
+
+/**
+ * Why a mutant no Playwright test killed has no verdict of `survived`: the
+ * candidates this pass does not run with it (`lead` names them), or
+ * `undefined` where it runs every one.
+ */
+export function unrunReason(others, setup, lead) {
+    const parts = [];
+    if (others?.length)
+        parts.push(`${lead} ran under ${others.join(", ")}, which this pass does not run`);
+    if (setup?.length)
+        parts.push(`${lead} are in the project${setup.length > 1 ? "s" : ""} ${setup.map((name) => JSON.stringify(name)).join(", ")}, which the others start from and which run${setup.length > 1 ? "" : "s"} without a mutant`);
+    return parts.length ? parts.join("; ") : undefined;
 }
 
 /** The round's work: built and written by the runner, read by its judge. */
@@ -427,6 +510,7 @@ function writeRoundFiles(pass, work) {
         timeoutFactor: work.timeoutFactor,
         tests,
         declared: work.declared,
+        costs: work.costs,
         setupProjects: work.setupProjects,
         concurrency: work.concurrency,
     });
@@ -564,6 +648,11 @@ function invocationMutant(pass) {
  * describe runs as a default one: in order, in one worker, but a failed test
  * (a kill) does not skip the rest; a test that leans on an earlier one's
  * state is caught by its control.
+ *
+ * A worker runs a file's tests in the order they are declared, so the
+ * copies are arranged in sweeps as they are declared (`arrange`): after the
+ * tests themselves, every test's first copy, cheapest test first, then
+ * every test's second copy, and so on, beside the tests of their describe.
  */
 export function installCopies(baseTest) {
     if (!copying())
@@ -583,9 +672,18 @@ export function installCopies(baseTest) {
         if (type === "skip" || type === "fixme")
             return;
         const suite = this._currentSuite?.(location, "test()");
-        const copies = copiesOf(suite?._requireFile ?? location?.file, title);
-        for (let copy = 1; copy < copies; copy++)
+        const file = suite?._requireFile ?? location?.file;
+        const copies = copiesOf(file, title);
+        if (copies < 2)
+            return;
+        const cost = costOf(file, title);
+        for (let copy = 1; copy < copies; copy++) {
             describe.call(this, "default", location, copyTitle(copy), () => declare.call(this, type, location, title, fnOrDetails, fn));
+            const made = Array.isArray(suite?._entries) ? suite._entries[suite._entries.length - 1] : undefined;
+            if (made)
+                sweeps.set(made, { copy, cost });
+        }
+        arrange(suite);
     };
     prototype._describe = function (type, ...rest) {
         return describe.call(this, type === "serial" ? "default" : type === "serial.only" ? "only" : type, ...rest);
@@ -600,8 +698,36 @@ let declaredCopies;
 function copiesOf(file, title) {
     if (!file)
         return 1;
-    declaredCopies ??= readJsonOr(`${strongPass().round}/worker.json`, { declared: {} }).declared;
-    return declaredCopies[declarationKey(file, title)] ?? 1;
+    declaredCopies ??= readJsonOr(`${strongPass().round}/worker.json`, { declared: {}, costs: {} });
+    return declaredCopies.declared[declarationKey(file, title)] ?? 1;
+}
+
+/** A test's measured time, which places its copies in each sweep. */
+function costOf(file, title) {
+    return declaredCopies.costs?.[declarationKey(file, title)] ?? DEFAULT_DURATION_MS;
+}
+
+/** Each copy's describe: which copy it is and its test's cost. */
+const sweeps = new WeakMap();
+
+/**
+ * Puts a describe's entries in sweeps: what is not a copy first, as
+ * declared, then the copies by their number, the cheapest test's first,
+ * the declared order between equals. The worker runs a file's tests in this
+ * order (it loads the file itself), so a file's tests take one mutant each
+ * in turn rather than one test all its mutants before the next test starts,
+ * and a slow test runs last in each sweep. A Playwright whose suites keep
+ * their entries otherwise is left as declared.
+ */
+export function arrange(suite) {
+    const list = suite?._entries;
+    if (!Array.isArray(list))
+        return;
+    const placed = list.map((entry, at) => ({ entry, at, sweep: sweeps.get(entry) ?? { copy: 0, cost: 0 } }));
+    placed.sort((a, b) => a.sweep.copy - b.sweep.copy || a.sweep.cost - b.sweep.cost || a.at - b.at);
+    placed.forEach((place, at) => {
+        list[at] = place.entry;
+    });
 }
 
 /** How a test did with no mutant: `passed`, `failed`, or `undefined` before it ended. */
@@ -693,9 +819,23 @@ export function invocation() {
     return process.env["SUPERCOV_PLAYWRIGHT_INVOCATION"] ?? "0";
 }
 
-// The tests that passed without a mutant in this worker (a control): a test
-// runs with a mutant only in a worker where it passed without one.
-const passedHere = new Set();
+/**
+ * Whether a test's next run in this invocation has no mutant: none of its
+ * runs without one passed here yet (or the last failed), or a kill of it
+ * here waits for one to confirm it. A test runs with a mutant only on a
+ * server where it passed without one, whichever worker runs it.
+ */
+function needsControl(pass, test) {
+    return !existsSync(readyPath(pass, invocation(), test)) || entries(`${pass.round}/pending/${invocation()}/${key(test)}`).length > 0;
+}
+
+function readyPath(pass, at, test) {
+    return `${pass.round}/ready/${at}/${key(test)}`;
+}
+
+function claimPath(pass, id, test) {
+    return `${pass.round}/claims/${key(id)}/${key(test)}`;
+}
 
 /** Whether a mutant needs no more attempts: a verdict given, killed, or held for a later round. */
 function settled(pass, id) {
@@ -726,42 +866,102 @@ function inFlightSince(pass, id) {
 }
 
 /**
- * The next mutant for a copy of `test`: the first of its queue not settled
- * and not yet tried against it, one no other attempt runs first. Taken by
- * making its mark, which only one copy can.
+ * The next mutant for a copy of `test`: of its queue, one not settled, not
+ * yet tried against it and run by no other attempt now, the best by its
+ * standing (`standingOf`). Taken by making its mark, which only one copy
+ * can. Where even the best has a candidate before `test` still to try (a
+ * cheaper test, or one likelier to kill it), the copy takes none while the
+ * test's copies left (`copiesLeft`, after this one) still cover every mutant
+ * waiting for it and a control for each: the test's next copy, a sweep
+ * later, looks again. So a slow test's copies go to the mutants its cheaper
+ * candidates let live, and it runs every mutant all the same before its
+ * copies are spent.
  */
-function takeJob(pass, test, only, limitMs) {
+function takeJob(pass, shape, test, only, limitMs, copiesLeft) {
     const queue = queueOf(pass, test);
-    const busy = [];
-    for (let at = queue.done; at < queue.ids.length; at++) {
-        const id = queue.ids[at];
-        if (only !== undefined && id !== only)
-            continue;
-        const tried = `${pass.round}/claims/${key(id)}/${key(test)}`;
-        if (existsSync(tried) || settled(pass, id)) {
-            // Nothing undoes either: no copy looks at it again.
-            if (at === queue.done)
-                queue.done += 1;
-            continue;
+    // A test that fails without any mutant is no candidate: it holds back
+    // no later one.
+    const failed = new Map();
+    const unrunnable = (other) => {
+        if (!failed.has(other))
+            failed.set(other, baselineOf(pass, other) === "failed");
+        return failed.get(other);
+    };
+    let busy;
+    for (;;) {
+        busy = [];
+        let best;
+        let waiting = 0;
+        for (let at = queue.done; at < queue.ids.length; at++) {
+            const id = queue.ids[at];
+            if (only !== undefined && id !== only)
+                continue;
+            if (existsSync(claimPath(pass, id, test)) || settled(pass, id)) {
+                // Nothing undoes either: no copy looks at it again.
+                if (at === queue.done)
+                    queue.done += 1;
+                continue;
+            }
+            waiting += 1;
+            const since = inFlightSince(pass, id);
+            if (since !== undefined) {
+                // One that has run longer than this test's limit may hang:
+                // a second attempt would only wait as long.
+                if (Date.now() - since < limitMs)
+                    busy.push(id);
+                continue;
+            }
+            const standing = standingOf(pass, shape, id, test, at, unrunnable);
+            if (!best || before(standing, best.standing))
+                best = { id, standing };
         }
-        const since = inFlightSince(pass, id);
-        if (since !== undefined) {
-            // One that has run longer than this test's limit may hang:
-            // a second attempt would only wait as long.
-            if (Date.now() - since < limitMs)
-                busy.push(id);
-            continue;
-        }
-        if (mark(tried))
-            return id;
+        if (!best)
+            break;
+        const controls = entries(`${pass.round}/pending/${invocation()}/${key(test)}`).length;
+        if (only === undefined && best.standing[0] > 0 && copiesLeft >= 2 * waiting + controls)
+            return undefined;
+        if (mark(claimPath(pass, best.id, test)))
+            return best.id;
+        // Another copy took it first: choose again.
     }
     // Every mutant left runs elsewhere now: one of them here too, rather
     // than leave this test's copies unused while its attempt runs.
     for (const id of busy) {
-        if (only === undefined && !settled(pass, id) && mark(`${pass.round}/claims/${key(id)}/${key(test)}`))
+        if (only === undefined && !settled(pass, id) && mark(claimPath(pass, id, test)))
             return id;
     }
     return undefined;
+}
+
+/**
+ * Where a mutant stands for a copy of `test`, best first: how many of its
+ * candidates before `test` are still to try (none: its cheaper candidates
+ * let it live, and this test is the next that may kill it), whether `test`
+ * infected it, how long its candidates still to try take (the closest to a
+ * verdict first), and its place in the test's queue.
+ */
+function standingOf(pass, shape, id, test, at, unrunnable) {
+    const entry = mutantOf(pass, id);
+    const passed = passedWith(pass, id);
+    const place = entry.tests.indexOf(test);
+    let earlier = 0;
+    let leftMs = 0;
+    entry.tests.forEach((other, index) => {
+        if (passed.has(key(other)) || unrunnable(other))
+            return;
+        leftMs += shape.tests[other]?.durationMs ?? DEFAULT_DURATION_MS;
+        if (index < place)
+            earlier += 1;
+    });
+    return [earlier, entry.infected?.includes(test) ? 0 : 1, leftMs, at];
+}
+
+function before(a, b) {
+    for (let at = 0; at < a.length; at++) {
+        if (a[at] !== b[at])
+            return a[at] < b[at];
+    }
+    return false;
 }
 
 /** Whether a test has mutants left to take, or kills to confirm, in this invocation. */
@@ -771,10 +971,44 @@ function workLeft(pass, test) {
     const queue = queueOf(pass, test);
     for (let at = queue.done; at < queue.ids.length; at++) {
         const id = queue.ids[at];
-        if (!existsSync(`${pass.round}/claims/${key(id)}/${key(test)}`) && !settled(pass, id))
+        if (!existsSync(claimPath(pass, id, test)) && !settled(pass, id))
             return true;
     }
     return false;
+}
+
+/**
+ * The work left in this invocation's tests, for the progress lines: how
+ * many mutants wait for each test it runs (not settled, not yet tried
+ * against it), how long that takes at the test's baseline, and the costliest
+ * few tests, those whose runs left take longest. `held` are the tests the
+ * invocation runs.
+ */
+export function queuedWork(pass, work, held) {
+    const settledNow = new Set([...entries(`${pass.shared}/verdicts`), ...entries(`${pass.round}/killed`)]);
+    const claimed = new Map();
+    const tests = [];
+    let ms = 0;
+    for (const id of held) {
+        const test = work.tests[id];
+        let waiting = 0;
+        for (const mutant of test?.queue ?? []) {
+            const at = key(mutant);
+            if (settledNow.has(at))
+                continue;
+            if (!claimed.has(at))
+                claimed.set(at, new Set(entries(`${pass.round}/claims/${at}`)));
+            if (!claimed.get(at).has(key(id)))
+                waiting += 1;
+        }
+        if (!waiting)
+            continue;
+        const baselineMs = baselineMsOf(pass, id, test);
+        ms += waiting * baselineMs;
+        tests.push({ title: test.title ?? id, waiting, baselineMs, limitMs: limitOf(baselineMs, work.timeoutFactor) });
+    }
+    tests.sort((a, b) => b.waiting * b.baselineMs - a.waiting * a.baselineMs || a.title.localeCompare(b.title));
+    return { ms, tests: tests.slice(0, COSTLY_SHOWN) };
 }
 
 /**
@@ -849,9 +1083,10 @@ export async function strongClaim(testInfo) {
     if (entries(unreliable).length >= CONTROL_FAILURES)
         return null;
     let attempt;
-    if (!shape.everywhere && !passedHere.has(original)) {
-        // The test's first run in this worker, or the first since it failed
-        // here: without a mutant, the round's baseline or a kill's control.
+    if (!shape.everywhere && needsControl(pass, original)) {
+        // The test's first run in this invocation, the first since it failed
+        // here, or the first since a kill here: without a mutant, the
+        // round's baseline or a kill's control.
         if (!workLeft(pass, original))
             return null;
         attempt = shape.baselines && baselineOf(pass, original) === undefined
@@ -866,7 +1101,11 @@ export async function strongClaim(testInfo) {
         const derived = limitOf(baselineMs, shape.timeoutFactor);
         // The test's own timeout, where shorter, ends it first anyway.
         const limitMs = configured > 0 ? Math.min(derived, configured) : derived;
-        const id = takeJob(pass, original, shape.batch ? invocationMutant(pass) ?? null : undefined, limitMs);
+        // This copy's number, and the test's copies after it in this
+        // invocation: what a copy that waits a sweep may spend.
+        const copy = withoutCopy(testInfo.titlePath).copy;
+        const copiesLeft = copiesOf(testInfo.file, testInfo.title) - 1 - copy;
+        const id = takeJob(pass, shape, original, shape.batch ? invocationMutant(pass) ?? null : undefined, limitMs, copiesLeft);
         if (!id)
             return null;
         const entry = mutantOf(pass, id);
@@ -960,9 +1199,8 @@ function surviveIfDone(pass, id) {
     if (!entry.tests.every((test) => passed.has(key(test))))
         return;
     const ran = entry.tests.length;
-    const others = readJsonOr(`${pass.round}/pass.json`, { otherRunners: {} }).otherRunners?.[id];
-    giveVerdict(pass, others
-        ? { id, status: "error", reason: `no Playwright test killed it, and its other candidates ran under ${others.join(", ")}, which this pass does not run`, tests: ran, durationMs: 0 }
+    giveVerdict(pass, entry.unrun
+        ? { id, status: "error", reason: `no Playwright test killed it, and ${entry.unrun}`, tests: ran, durationMs: 0 }
         : { id, status: "survived", ...(entry.reason ? { reason: reasonOf(loadWorker(pass).kind, entry.reason) } : {}), tests: ran, durationMs: 0 });
 }
 
@@ -1028,7 +1266,6 @@ export function settleAttempt(pass, attempt) {
         return ended;
     }
     if (ended.outcome === "passed") {
-        passedHere.add(test);
         mark(`${pass.round}/passed/${key(attempt.id)}/${key(test)}`);
         // One mutant an invocation: a survivor waits for the judge, who
         // knows whether its server ran it.
@@ -1041,7 +1278,6 @@ export function settleAttempt(pass, attempt) {
     // A kill, or a timeout (it ran out of its limit): no other copy takes
     // the mutant now, and either is confirmed alike.
     const { status, reason } = verdictOf(ended);
-    passedHere.delete(test);
     mark(`${pass.round}/killed/${key(attempt.id)}`);
     if (beside)
         mark(`${pass.round}/confirm/${key(attempt.id)}`);
@@ -1069,9 +1305,9 @@ function suffix(shape, entry) {
 /**
  * A run with no mutant: the test's baseline (the first in a main round), or
  * a control after a kill. Passing, it lets the test take mutants in this
- * worker and confirms the kills before it on this server; failing, it puts
- * them in doubt, and a test that fails so twice in an invocation is not run
- * there again.
+ * invocation and confirms the kills before it on this server; failing, it
+ * puts them in doubt, and a test that fails so twice in an invocation is not
+ * run there again.
  */
 function settleControl(pass, ended, shape) {
     const test = ended.original;
@@ -1099,7 +1335,7 @@ function settleControl(pass, ended, shape) {
             mark(`${pass.round}/doubt/${key(kill.id)}`);
     }
     if (passed) {
-        passedHere.add(test);
+        mark(readyPath(pass, ended.invocation, test));
         // Its time, for its mutants' limits.
         mark(`${pass.shared}/durations/${key(test)}`);
         writeFileSync(`${pass.shared}/durations/${key(test)}/${ended.worker}-${ended.endedAt - ended.startedAt}`, "");
@@ -1107,7 +1343,7 @@ function settleControl(pass, ended, shape) {
     }
     if (ended.outcome === "skipped")
         return;
-    passedHere.delete(test);
+    rmSync(readyPath(pass, ended.invocation, test), { recursive: true, force: true });
     mark(`${pass.round}/unreliable/${ended.invocation}/${key(test)}`);
     writeFileSync(`${pass.round}/unreliable/${ended.invocation}/${key(test)}/${ended.worker}-${Date.now()}`, "");
 }

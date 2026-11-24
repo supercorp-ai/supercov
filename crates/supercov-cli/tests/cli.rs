@@ -23713,6 +23713,184 @@ fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
     );
 }
 
+/// A Playwright mutant tries its cheap candidates before its slow one: a
+/// test that polls for seconds until the page says it is active is declared
+/// first in its file, beside three fast tests that each read one text. The
+/// mutants a fast test kills are decided by it, in under a second each, and
+/// the slow test never runs them; it runs only the mutants every fast test
+/// let live, and a survivor runs all four of its candidates. While it runs,
+/// the progress lines name the slow test as the costliest left and say the
+/// time its round has left.
+#[cfg(unix)]
+#[test]
+fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-order");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-order", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><body><p id=\"first\"></p><p id=\"second\"></p><p id=\"third\"></p><p id=\"state\"></p><script src=\"/app.js\"></script></body>\n",
+    );
+    project.write(
+        "public/app.js",
+        "function show(id, text) {\n  document.getElementById(id).textContent = text;\n}\nshow(\"first\", \"First\");\nshow(\"second\", \"Second\");\nshow(\"third\", \"Third\");\nconsole.log(\"loaded\");\nsetTimeout(() => show(\"state\", \"Active\"), 3000);\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    // The slow test first: a pass that ran a file's tests in their order,
+    // each test all its mutants, would run every mutant with it first.
+    project.write(
+        "tests/app.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits until it is active\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\", { timeout: 60_000 });\n});\nfor (const [id, text] of [[\"first\", \"First\"], [\"second\", \"Second\"], [\"third\", \"Third\"]]) {\n  test(`shows the ${id}`, async ({ page }) => {\n    await page.goto(\"/\");\n    expect(await page.locator(`#${id}`).textContent()).toBe(text);\n  });\n}\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright order");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let plan = project
+        .supercov_with(
+            &["runs", "latest", "mutants", "test", "--plan", "--json"],
+            &[roots],
+        )
+        .json();
+    let tests = plan["tests"].as_array().unwrap();
+    let slow = tests
+        .iter()
+        .find(|test| test["title"] == "waits until it is active")
+        .unwrap_or_else(|| panic!("no slow test in {plan}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The command's output, with each attempt's line: SUPERCOV_VERBOSE.
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[
+            roots,
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+            ("SUPERCOV_VERBOSE", "1"),
+        ],
+    );
+    let said = format!("{}\n{}", ran.stdout(), ran.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!(
+        "{}\n{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::json!({ "tests": plan["tests"], "mutants": plan["mutants"] })
+    );
+    let on_line = |line: u32| {
+        mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("public/app.js:{line}:"))
+            })
+            .collect::<Vec<_>>()
+    };
+    // Each mutant of `show` and of the three texts breaks what a fast test
+    // reads: a fast test kills it, at once.
+    let mut fast_kills = Vec::new();
+    for line in 1..=6 {
+        for mutant in on_line(line) {
+            let strong = &mutant["strong"];
+            assert_eq!(strong["status"], "killed", "{mutant}\n{context}");
+            assert_ne!(strong["killedBy"], slow.as_str(), "{mutant}\n{context}");
+            assert!(
+                strong["durationMs"].as_u64() < Some(3_000),
+                "{mutant}\n{context}"
+            );
+            fast_kills.push(mutant["id"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(fast_kills.len() >= 4, "{context}");
+    // The slow test ran none of them: each attempt's line names its mutant
+    // and its test.
+    let slow_ran = said
+        .lines()
+        .filter(|line| line.contains(": \"waits until it is active\" "))
+        .filter_map(|line| line.split("[supercov] ").nth(1))
+        .filter_map(|line| line.split(": \"").next())
+        .collect::<Vec<_>>();
+    assert!(!slow_ran.is_empty(), "{context}");
+    for id in &slow_ran {
+        assert!(!fast_kills.iter().any(|fast| fast == id), "{id}\n{context}");
+    }
+    // Nothing a fast test reads: every fast test lets it live, then the
+    // slow one, all four candidates run.
+    let loaded = on_line(7);
+    assert_eq!(loaded.len(), 1, "{context}");
+    assert_eq!(loaded[0]["strong"]["status"], "survived", "{context}");
+    assert_eq!(loaded[0]["strong"]["tests"], 4, "{context}");
+    // What only the slow test reads (the state it waits for): it runs out
+    // of its time limit there, once the fast tests let it live.
+    let detected_by_slow = on_line(8)
+        .into_iter()
+        .filter(|mutant| mutant["strong"]["status"] == "timeout")
+        .inspect(|mutant| {
+            assert_eq!(
+                mutant["strong"]["killedBy"],
+                slow.as_str(),
+                "{mutant}\n{context}"
+            )
+        })
+        .count();
+    assert!(detected_by_slow >= 1, "{context}");
+    // The progress lines name the costliest test left and the round's time.
+    assert!(
+        said.contains("costliest test left: \"waits until it is active\", "),
+        "{context}"
+    );
+    assert!(said.contains(" left in this round"), "{context}");
+}
+
 /// A measured Playwright run's plan carries each test's span, from the
 /// fixture's record of the attempt (the reporter's record of the same
 /// attempt has none), and a file whose tests ran side by side in a
@@ -25409,12 +25587,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1627",
+            "fs.write#mutants_test_command.rs:1639",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1627"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1639"),
         "{}",
         unwritten.stderr()
     );

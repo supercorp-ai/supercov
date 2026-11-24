@@ -2,7 +2,10 @@
 //! Playwright driver's invocations each write a status file
 //! (`playwrightStrongReporter.mjs`: the round, the attempts so far, the tests
 //! running and since when), and the command's output goes to a log beside
-//! the pass's results. A pass that goes quiet says what it waits on.
+//! the pass's results. A pass that goes quiet says what it waits on. Each
+//! invocation also counts the work its tests have left (how many mutants
+//! wait for each, at its baseline), so the lines name the costliest tests
+//! and the time the round has left.
 
 use std::path::Path;
 
@@ -13,6 +16,9 @@ const QUIET_MS: u64 = 120_000;
 
 /// The running tests a line names at most.
 const RUNNING_SHOWN: usize = 3;
+
+/// The costliest tests left the lines name at most.
+const COSTLY_SHOWN: usize = 3;
 
 /// The invocations of the latest round, together.
 #[derive(Debug, Default, PartialEq)]
@@ -28,6 +34,28 @@ pub(crate) struct DriverStatus {
     /// When the round's last invocation began, or an attempt last ended.
     pub(crate) last_event_at: u64,
     pub(crate) running: Vec<Running>,
+    /// The time the round's work left takes: its slowest invocation's, each
+    /// at its own pace.
+    pub(crate) left_ms: Option<u64>,
+    /// The tests with the most work left, the costliest first.
+    pub(crate) costly: Vec<Costly>,
+}
+
+/// A test with mutants waiting for it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Costly {
+    pub(crate) title: String,
+    /// How many mutants wait for it.
+    pub(crate) waiting: u64,
+    /// How long it takes without a mutant, and with one at most.
+    pub(crate) baseline_ms: u64,
+    pub(crate) limit_ms: u64,
+}
+
+impl Costly {
+    fn work(&self) -> u64 {
+        self.waiting.saturating_mul(self.baseline_ms)
+    }
 }
 
 /// A test running now.
@@ -78,6 +106,18 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
             }
             let event = number(&file["lastEndedAt"]).max(number(&file["startedAt"]));
             status.last_event_at = status.last_event_at.max(event);
+            let queued = &file["queued"];
+            if let Some(left) = queued["leftMs"].as_u64() {
+                status.left_ms = Some(status.left_ms.map_or(left, |most| most.max(left)));
+            }
+            for test in queued["tests"].as_array().into_iter().flatten() {
+                status.costly.push(Costly {
+                    title: test["title"].as_str().unwrap_or("?").to_owned(),
+                    waiting: number(&test["waiting"]),
+                    baseline_ms: number(&test["baselineMs"]),
+                    limit_ms: number(&test["limitMs"]),
+                });
+            }
             for test in file["running"].as_array().into_iter().flatten() {
                 status.running.push(Running {
                     title: test["title"].as_str().unwrap_or("?").to_owned(),
@@ -92,6 +132,15 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
             }
         });
     status.running.sort_by_key(|test| test.since);
+    // A test several invocations run is named once, with its most work.
+    status
+        .costly
+        .sort_by(|a, b| b.work().cmp(&a.work()).then_with(|| a.title.cmp(&b.title)));
+    let mut named = std::collections::BTreeSet::new();
+    status
+        .costly
+        .retain(|test| named.insert(test.title.clone()));
+    status.costly.truncate(COSTLY_SHOWN);
     Some(status)
 }
 
@@ -135,6 +184,17 @@ pub(crate) fn lines(
             String::new()
         },
     )];
+    // The tests whose runs left take longest: a slow test many mutants
+    // still wait for is what the round's end waits on.
+    for test in &status.costly {
+        lines.push(format!(
+            "[supercov]   costliest test left: {:?}, {} mutant(s) wait for it, {} a run (its limit {})",
+            test.title,
+            test.waiting,
+            ago(test.baseline_ms),
+            ago(test.limit_ms)
+        ));
+    }
     for test in status.running.iter().take(RUNNING_SHOWN) {
         let running = now.saturating_sub(test.since);
         // A mutant's attempt says its limit, and when it nears it: a test
@@ -261,13 +321,22 @@ mod tests {
             serde_json::json!({ "round": "restart-0", "updatedAt": 30, "startedAt": 20,
                 "counts": { "baselines": 0, "attempts": 4, "controls": 2, "failedControls": 0 },
                 "firstMutantAt": 25, "lastEndedAt": 28,
-                "running": [{ "title": "pays", "mutant": "a.ts:1", "startedAt": 26, "begunAt": 25, "limitMs": 9500 }] }),
+                "running": [{ "title": "pays", "mutant": "a.ts:1", "startedAt": 26, "begunAt": 25, "limitMs": 9500 }],
+                "queued": { "ms": 90_000, "leftMs": 120_000, "tests": [
+                    { "title": "polls", "waiting": 9, "baselineMs": 8_000, "limitMs": 17_000 },
+                    { "title": "lists", "waiting": 4, "baselineMs": 1_000, "limitMs": 6_500 },
+                    { "title": "opens", "waiting": 2, "baselineMs": 2_000, "limitMs": 8_000 },
+                ] } }),
         );
         write(
             "3.json",
             serde_json::json!({ "round": "restart-0", "updatedAt": 29, "startedAt": 21,
                 "counts": { "attempts": 1 }, "firstMutantAt": 22,
-                "running": [{ "title": "lists", "kind": "control", "begunAt": 24 }, { "begunAt": 27 }] }),
+                "running": [{ "title": "lists", "kind": "control", "begunAt": 24 }, { "begunAt": 27 }],
+                "queued": { "ms": 6_000, "leftMs": 7_000, "tests": [
+                    { "title": "lists", "waiting": 6, "baselineMs": 1_000, "limitMs": 6_500 },
+                    { "waiting": 1 },
+                ] } }),
         );
         write("4.json.draft", "{".into());
         let status = read(&directory).unwrap();
@@ -282,6 +351,29 @@ mod tests {
                 attempts: 5,
                 first_mutant_at: Some(22),
                 last_event_at: 28,
+                left_ms: Some(120_000),
+                // The costliest first; a test two invocations name once,
+                // with its most work; three at most.
+                costly: vec![
+                    Costly {
+                        title: "polls".into(),
+                        waiting: 9,
+                        baseline_ms: 8_000,
+                        limit_ms: 17_000,
+                    },
+                    Costly {
+                        title: "lists".into(),
+                        waiting: 6,
+                        baseline_ms: 1_000,
+                        limit_ms: 6_500,
+                    },
+                    Costly {
+                        title: "opens".into(),
+                        waiting: 2,
+                        baseline_ms: 2_000,
+                        limit_ms: 8_000,
+                    },
+                ],
                 running: vec![
                     Running {
                         title: "lists".into(),
@@ -304,9 +396,12 @@ mod tests {
                 ],
             }
         );
-        // A file with no round is the main round's.
+        // A file with no round is the main round's; one with no work counted
+        // has no time left to say.
         write("5.json", serde_json::json!({ "updatedAt": 40 }));
-        assert_eq!(read(&directory).unwrap().round, "main");
+        let main = read(&directory).unwrap();
+        assert_eq!(main.round, "main");
+        assert_eq!((main.left_ms, main.costly.len()), (None, 0));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -333,6 +428,8 @@ mod tests {
             attempts: 400,
             first_mutant_at: Some(1),
             last_event_at: 100_000,
+            left_ms: None,
+            costly: Vec::new(),
             running: (0..4)
                 .map(|at| Running {
                     title: format!("t{at}"),
@@ -366,6 +463,20 @@ mod tests {
                 "[supercov]   running for 20s of 27s: \"t2\" with a.ts:1",
             ]
         );
+        // The costliest tests left come before the running ones.
+        status.costly.push(Costly {
+            title: "polls".into(),
+            waiting: 9,
+            baseline_ms: 8_000,
+            limit_ms: 17_000,
+        });
+        let costly = lines(Some(&status), 110_000, 3, None);
+        assert_eq!(
+            costly[1],
+            "[supercov]   costliest test left: \"polls\", 9 mutant(s) wait for it, 8s a run (its limit 17s)"
+        );
+        assert_eq!(costly[2], limited[1]);
+        status.costly.clear();
         status.failed_controls = 1;
         let quiet = lines(Some(&status), 230_000, 3, None);
         assert!(
