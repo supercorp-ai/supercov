@@ -369,8 +369,12 @@ fn merge(into: &mut Observations, from: &Observations) {
         .extend(from.unvalued_hits.iter().cloned());
     for (id, vectors) in &from.decisions {
         let seen = into.decisions.entry(id.clone()).or_default();
+        // Looked up in a set: a decision a test file's modules and its test
+        // both took holds many vectors, and every test of the file is merged
+        // with them.
+        let mut known = seen.iter().cloned().collect::<HashSet<_>>();
         for vector in vectors {
-            if !seen.contains(vector) {
+            if known.insert(vector.clone()) {
                 seen.push(vector.clone());
             }
         }
@@ -393,14 +397,17 @@ fn merge(into: &mut Observations, from: &Observations) {
 /// its function where no statement contains it. A mutant with neither
 /// point cannot be narrowed, and counts as hit by anything.
 fn may_reach(mutant: &CandidateMutant, seen: &Observations) -> bool {
-    mutant
-        .statement
-        .as_ref()
-        .is_none_or(|statement| seen.hits.contains(statement))
-        && mutant
-            .function
-            .as_ref()
-            .is_none_or(|function| seen.hits.contains(function))
+    may_reach_also_hit(mutant, seen, None)
+}
+
+/// `may_reach`, with `also_hit` counted among what `seen` hit.
+fn may_reach_also_hit(
+    mutant: &CandidateMutant,
+    seen: &Observations,
+    also_hit: Option<&str>,
+) -> bool {
+    let hit = |point: &String| also_hit == Some(point.as_str()) || seen.hits.contains(point);
+    mutant.statement.as_ref().is_none_or(hit) && mutant.function.as_ref().is_none_or(hit)
 }
 
 /// Whether `seen` could have infected the mutant: its verdict read from
@@ -417,52 +424,81 @@ fn could_infect(
     // Where this test ran the function and the run ran the statement, the
     // statement counts as run here: it only ever adds a candidate. Only a
     // JavaScript mutant's statement can hold its function: a Python
-    // mutant's is always inside it (`python_mutants`).
-    let widened;
-    let seen = match (&mutant.statement, &mutant.function) {
+    // mutant's is always inside it (`python_mutants`). It is counted, not
+    // added to a copy of what the test saw: copying a record's observations
+    // for each mutant it ran was most of planning a large run.
+    let widened = match (&mutant.statement, &mutant.function) {
         (Some(statement), Some(function))
             if language == crate::mutant_list::JAVASCRIPT
                 && seen.hits.contains(function)
                 && !seen.hits.contains(statement)
                 && whole.hits.contains(statement) =>
         {
-            let mut copy = seen.clone();
-            copy.hits.insert(statement.clone());
-            widened = copy;
-            &widened
+            Some(statement.as_str())
         }
-        _ => seen,
+        _ => None,
     };
-    if !may_reach(mutant, seen) {
+    if !may_reach_also_hit(mutant, seen, widened) {
         return None;
     }
-    match verdict(mutant, seen).0 {
+    match crate::js_weak_mutation::verdict_also_hit(mutant, seen, widened).0 {
         Status::Infected { .. } => Some(CandidateReason::Infected),
         Status::Unknown => Some(CandidateReason::Unknown),
         Status::NotReached | Status::NotInfected | Status::Equivalent => None,
     }
 }
 
+/// Of each point a server process recorded a hit of in one record, whether
+/// a hit came with no request (start-up, timers) and whether one came with
+/// a request: what `server_wide` asks of the record, read once rather than
+/// for each mutant the record ran.
+#[derive(Default)]
+struct ServerHits<'r>(HashMap<&'r str, (bool, bool)>);
+
+impl<'r> ServerHits<'r> {
+    fn of(raw: &'r RawTestResult) -> Self {
+        let mut hits = HashMap::<&str, (bool, bool)>::new();
+        for record in &raw.server {
+            if record.record_type != "hit" {
+                continue;
+            }
+            let Some(id) = &record.id else { continue };
+            let ran = hits.entry(id.as_str()).or_default();
+            if record.request.is_none() {
+                ran.0 = true;
+            } else {
+                ran.1 = true;
+            }
+        }
+        Self(hits)
+    }
+}
+
 /// Whether a server process ran the mutant's code in this record in a way
-/// a request's own mutant cannot reach, and how.
-fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWide> {
-    let points = [&mutant.statement, &mutant.function]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let mut ran = raw.server.iter().filter(|record| {
-        record.record_type == "hit" && record.id.as_ref().is_some_and(|id| points.contains(&id))
-    });
-    let first = ran.next()?;
+/// a request's own mutant cannot reach, and how. `server` is the record's
+/// `ServerHits`.
+fn server_wide(
+    raw: &RawTestResult,
+    server: &ServerHits<'_>,
+    mutant: &CandidateMutant,
+) -> Option<ServerWide> {
+    let (mut without_request, mut with_request, mut ran) = (false, false, false);
+    for point in [&mutant.statement, &mutant.function].into_iter().flatten() {
+        if let Some((without, with)) = server.0.get(point.as_str()) {
+            ran = true;
+            without_request |= without;
+            with_request |= with;
+        }
+    }
+    if !ran {
+        return None;
+    }
     if !matches!(role_of(raw), "test" | "setup") {
         // Work for a request that named no test and ran while none did (a
         // web server's readiness check) ran without any mutant in the pass,
         // as each request runs with its own; only work no request started
         // (start-up, timers) needs the server started with the mutant.
-        if std::iter::once(first)
-            .chain(ran)
-            .any(|record| record.request.is_none())
-        {
+        if without_request {
             return Some(ServerWide::Background);
         }
         return mutant.function.is_none().then_some(ServerWide::ModuleLevel);
@@ -470,10 +506,7 @@ fn server_wide(raw: &RawTestResult, mutant: &CandidateMutant) -> Option<ServerWi
     if mutant.function.is_none() {
         return Some(ServerWide::ModuleLevel);
     }
-    std::iter::once(first)
-        .chain(ran)
-        .any(|record| record.request.is_some())
-        .then_some(ServerWide::ByTime)
+    with_request.then_some(ServerWide::ByTime)
 }
 
 fn weak_name(status: Status) -> &'static str {
@@ -577,9 +610,10 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
     // Each record's own observations, and an index from a hit point to the
     // records that hit it, so a mutant's verdict is read only from the
     // records that ran its code.
-    struct Seen {
+    struct Seen<'r> {
         record: usize,
         seen: Observations,
+        server: ServerHits<'r>,
     }
     for ((test, ok), stated) in tests.iter_mut().zip(&mut runnable).zip(&stated) {
         *ok &= *stated;
@@ -613,7 +647,11 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
         for point in &own.hits {
             by_point.entry(point.clone()).or_default().push(at);
         }
-        seen.push(Seen { record, seen: own });
+        seen.push(Seen {
+            record,
+            seen: own,
+            server: ServerHits::of(raw),
+        });
     }
 
     let mut mutants = Vec::new();
@@ -693,7 +731,11 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                     records.dedup();
                     let mut covering = HashSet::<usize>::new();
                     for at in records {
-                        let Seen { record, seen: own } = &seen[at];
+                        let Seen {
+                            record,
+                            seen: own,
+                            server,
+                        } = &seen[at];
                         let raw = &raw_results[*record];
                         // Every test record was indexed by this id above.
                         if role_of(raw) == "test"
@@ -720,7 +762,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
                         };
                         let Some(why) = why else { continue };
                         if planned.server_wide.is_none() {
-                            planned.server_wide = server_wide(raw, mutant);
+                            planned.server_wide = server_wide(raw, server, mutant);
                         }
                         match (role_of(raw), &raw.test_file) {
                             ("test", _) => {
@@ -1439,7 +1481,7 @@ mod tests {
         raw.server = vec![server_hit("s", Some(1))];
         let module_level = mutant(serde_json::json!({"statement": "s"}));
         assert_eq!(
-            server_wide(&raw, &module_level),
+            server_wide(&raw, &ServerHits::of(&raw), &module_level),
             Some(ServerWide::ModuleLevel)
         );
     }
