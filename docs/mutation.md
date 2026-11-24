@@ -427,7 +427,12 @@ no mutants shows none of this.
   stopping at its first failing test.
 - **Playwright** carries each test's mutant with its requests, so one server
   serves different mutants to different workers. A mutant of a server's
-  start-up runs with the server started again for it. StrykerJS has no
+  start-up runs with the server started again for it. A mutant in a
+  module-level object or array literal (a translation table, a menu) runs
+  against the tests that read its value, which a run measured with the
+  mutants' probes records, not every test whose server loaded the module;
+  the plan says how many were narrowed and by how much
+  (`docs/design/strong-mutation.md`, Module-level values). StrykerJS has no
   Playwright runner, so Playwright's verdicts are checked by hand (see below).
   A test run with a mutant gets StrykerJS's time limit: its baseline (the
   longest of its measured run and its runs without a mutant in the pass)

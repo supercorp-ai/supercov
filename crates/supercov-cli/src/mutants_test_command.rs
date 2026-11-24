@@ -2373,6 +2373,64 @@ mod tests {
         }
     }
 
+    /// The plan and the pass say how many module-level mutants had their
+    /// candidates narrowed and by how much, and how many kept every test.
+    #[test]
+    fn the_plan_says_how_far_reads_narrowed_module_level_candidates() {
+        use supercov_engine::strong_plan::Narrowed;
+        let mut plan = plan_of(&[], &["infected", "infected", "infected", "unknown"]);
+        plan.mutants[0].narrowed = Some(Narrowed {
+            from: 40,
+            to: 3,
+            escaped: false,
+        });
+        plan.mutants[1].narrowed = Some(Narrowed {
+            from: 40,
+            to: 0,
+            escaped: false,
+        });
+        plan.mutants[2].narrowed = Some(Narrowed {
+            from: 40,
+            to: 40,
+            escaped: true,
+        });
+        let narrowed = narrowing(plan.mutants.iter()).unwrap();
+        assert_eq!(
+            narrowed,
+            json!({"mutants": 2, "candidatesBefore": 80, "candidatesAfter": 3, "escaped": 1})
+        );
+        assert_eq!(
+            narrowing_text(&narrowed),
+            "  narrowed      2 module-level mutant(s) to the tests that read their value: 3 candidate(s) where loading their module gave 80\n  1 module-level mutant(s) kept every test that loaded their module: their value was read while a module loaded\n"
+        );
+        assert_eq!(narrowing(plan.mutants[3..].iter()), None);
+        assert_eq!(narrowing_text(&Value::Null), "");
+        let escaped_only = narrowing(plan.mutants[2..].iter()).unwrap();
+        assert!(narrowing_text(&escaped_only).starts_with("  1 module-level"));
+        let summary = json!({"mutants": 4, "toRun": 4, "candidateRuns": 3, "tests": 0,
+            "decided": {"survived": 0, "noCoverage": 0, "equivalent": 0}, "narrowed": narrowed});
+        assert!(
+            plan_text(&json!({"run": "r1", "summary": summary}))
+                .ends_with("their value was read while a module loaded\n")
+        );
+        let mut ran = summary.clone();
+        for (key, value) in [
+            ("killed", 1),
+            ("timeout", 0),
+            ("survived", 0),
+            ("noCoverage", 0),
+            ("error", 0),
+            ("ran", 1),
+            ("durationMs", 1),
+        ] {
+            ran[key] = json!(value);
+        }
+        assert!(
+            plan_text(&json!({"run": "r1", "summary": ran}))
+                .contains("  narrowed      2 module-level")
+        );
+    }
+
     /// A run with no test is refused: by how many mutants' code its command
     /// ran and the runner that ran it, or as having run none.
     #[test]

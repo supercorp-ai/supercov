@@ -2319,11 +2319,6 @@ function probeDecisionName(file, place) {
 }
 function registerProbeV2(definition) {
   var _a8, _b;
-  // The module registering is loading: see trackV2.
-  try {
-    markModuleLoading();
-  } catch {
-  }
   const pointCount = definition.points;
   const file = {
     key: definition.key,
@@ -2351,6 +2346,17 @@ function registerProbeV2(definition) {
     none: optionalCallEmptySpread
   };
   rememberProbeV2File(file);
+  // The module registering is loading until its top level ends: see trackV2.
+  try {
+    markModuleLoading(file);
+  } catch {
+  }
+  file.loaded = () => {
+    try {
+      valueReadState().loading.delete(file);
+    } catch {
+    }
+  };
   // What a probe calls: this file's hit, by place alone. Outside a loop the
   // probe is the call alone and this makes its check, so it stays small
   // enough for V8 to inline where the code is hot. The epoch is NaN wherever
@@ -2745,7 +2751,7 @@ const capturedQueueMicrotask = typeof queueMicrotask === "function" ? queueMicro
 function valueReadState() {
   let reads = globalThis[valueReadStateKey];
   if (reads === void 0) {
-    reads = { loading: false, resetQueued: false, targets: /* @__PURE__ */ new WeakMap(), cloneWrapped: false };
+    reads = { loading: /* @__PURE__ */ new Set(), resetQueued: false, targets: /* @__PURE__ */ new WeakMap(), cloneWrapped: false };
     try {
       Object.defineProperty(globalThis, valueReadStateKey, { __proto__: null, value: reads, configurable: true });
     } catch {
@@ -2754,18 +2760,21 @@ function valueReadState() {
   }
   return reads;
 }
-// A module is loading from its registration until the code that loaded it
-// gives up the thread: module graphs evaluate synchronously, and the first
-// microtask after runs once they are done. A module's top-level await gives
-// it up too, and `resumeV2` marks the module loading again where it resumes.
-function markModuleLoading() {
+// A module is loading from its registration, the first thing its code does,
+// to the end of its top level, where it calls its file's `loaded()`. One that
+// throws there never gets to it: no module is loading once the code that
+// loaded it gives up the thread, as module graphs evaluate synchronously, and
+// the first microtask after runs once they are done. A module's top-level
+// await gives it up too, and `resumeV2` marks it loading again where it
+// resumes.
+function markModuleLoading(file) {
   const reads = valueReadState();
-  reads.loading = true;
+  reads.loading.add(file);
   if (reads.resetQueued)
     return;
   reads.resetQueued = true;
   const reset = () => {
-    reads.loading = false;
+    reads.loading.clear();
     reads.resetQueued = false;
   };
   if (capturedQueueMicrotask !== void 0)
@@ -2773,9 +2782,9 @@ function markModuleLoading() {
   else
     Promise.resolve().then(reset);
 }
-function resumeV2(value) {
+function resumeV2(file, value) {
   try {
-    markModuleLoading();
+    markModuleLoading(file);
   } catch {
   }
   return value;
@@ -2798,7 +2807,7 @@ function trackV2(file, base, keys, value) {
   const note = (key) => {
     try {
       const place = typeof key === "string" ? places.get(key) : void 0;
-      const loading = reads.loading ? 1 : 0;
+      const loading = reads.loading.size > 0 ? 1 : 0;
       file.hit(base + loading);
       if (place !== void 0)
         file.hit(base + 2 + 2 * place + loading);

@@ -597,21 +597,29 @@ pub(crate) fn awaits_at_top_level(program: &Program<'_>) -> bool {
 }
 
 /// Marks the module loading again where its top level resumes after an
-/// await: `resumeV2(await x)`, and `resumeV2()` first in a `for await` body.
+/// await: `resumeV2(file, await x)`, and `resumeV2(file)` first in a
+/// `for await` body.
 pub(crate) struct ResumeTransformer<'a, 'n> {
     pub ast: AstBuilder<'a>,
+    /// The file's probe binding (`__supercovFile`).
+    pub file: String,
     pub helper: &'n mut dyn FnMut(&'static str) -> String,
 }
 
 impl<'a> ResumeTransformer<'a, '_> {
-    fn call(&mut self, arguments: Vec<Argument<'a>>) -> Expression<'a> {
+    fn call(&mut self, value: Option<Expression<'a>>) -> Expression<'a> {
         let helper = (self.helper)("resumeV2");
+        let file = Argument::from(
+            self.ast
+                .expression_identifier(Span::default(), self.ast.ident(&self.file)),
+        );
         self.ast.expression_call(
             Span::default(),
             self.ast
                 .expression_identifier(Span::default(), self.ast.ident(&helper)),
             NONE,
-            self.ast.vec_from_iter(arguments),
+            self.ast
+                .vec_from_iter(std::iter::once(file).chain(value.map(Argument::from))),
             false,
         )
     }
@@ -630,7 +638,7 @@ impl<'a> VisitMut<'a> for ResumeTransformer<'a, '_> {
         walk_mut::walk_expression(self, expression);
         if matches!(expression, Expression::AwaitExpression(_)) {
             let awaited = expression.take_in(self.ast.allocator);
-            *expression = self.call(vec![Argument::from(awaited)]);
+            *expression = self.call(Some(awaited));
         }
     }
 
@@ -641,7 +649,7 @@ impl<'a> VisitMut<'a> for ResumeTransformer<'a, '_> {
         }
         let mark = self
             .ast
-            .statement_expression(Span::default(), self.call(Vec::new()));
+            .statement_expression(Span::default(), self.call(None));
         let body = statement.body.take_in(self.ast.allocator);
         statement.body = Statement::BlockStatement(
             self.ast
@@ -883,14 +891,141 @@ mod tests {
         assert!(reads("'fn'", "StringLiteral").is_none());
     }
 
+    /// Every form a literal's values may take, and what each makes of its
+    /// mutants: a literal under type syntax is tracked once, whatever wraps
+    /// it; a literal of plain values may be replaced whole; one holding a
+    /// computed key, a spread or an `in` may not; a mutant in a key, a
+    /// spread or a function is not linked; a `__proto__` that does not set
+    /// the prototype is a key like another.
+    #[test]
+    fn every_form_of_a_value_is_judged_as_its_evaluation_allows() {
+        let source = concat!(
+            "const LEAVES = { a: 1n, b: null, c: /x/, d: function () {}, e: () => 1, f: true, g: `t${1}`, h: -1, i: !0, j: 1 + 2, k: 1 || 2, l: true ? { m: 1 } : [2], n: (1, 2), o: f<string>, p: [, 'q'], r: 'r' as string, s: 's'!, t: <string>'t' };\n",
+            "const NOT_DROPPED = [{ [k]: 'u' }, { ...{ v: 'v' } }, [...w, 'x'], { y: 'y' in w }, { z: delete w.z }, { aa: k + 1 }];\n",
+            "const WRAPPED = ({ ab: 'ab' }) satisfies object;\n",
+            "const ASSERTED = { ac: 'ac' } as Record<string, string>;\n",
+            "const NON_NULL = { ad: 'ad' }!;\n",
+            "const ANGLED = <object>{ ae: 'ae' };\n",
+            "const KEYS = { 1.5: 'half', 1e21: 'huge', [2 * 3]: 'six', ['__proto__']: 'computed', __proto__() { return 'method'; }, get __proto__() { return 'getter'; } };\n",
+            "const SHORT = { __proto__ };\n",
+            "const CODE = { f() { return 'in method'; }, g: () => 'in arrow', C: class { m() { return 'in class'; } } };\n",
+            "let NONE, NUMBER = 1 + 1;\n",
+        );
+        let output = instrumented(source, "src/forms.ts", true);
+        let linked =
+            |original: &str, mutator: &str| mutant(&output, original, mutator).reads.is_some();
+        // Each leaf of a literal of plain values: replaced whole.
+        assert!(linked(
+            "{ a: 1n, b: null, c: /x/, d: function () {}, e: () => 1, f: true, g: `t${1}`, h: -1, i: !0, j: 1 + 2, k: 1 || 2, l: true ? { m: 1 } : [2], n: (1, 2), o: f<string>, p: [, 'q'], r: 'r' as string, s: 's'!, t: <string>'t' }",
+            "ObjectLiteral"
+        ));
+        assert!(linked("'q'", "StringLiteral"));
+        assert!(linked("1 + 2", "ArithmeticOperator"));
+        assert!(linked("true", "BooleanLiteral"));
+        // A computed key, a spread, `in`, `delete`, an operator over a name.
+        for (original, mutator) in [
+            ("{ [k]: 'u' }", "ObjectLiteral"),
+            ("{ ...{ v: 'v' } }", "ObjectLiteral"),
+            ("[...w, 'x']", "ArrayDeclaration"),
+            ("{ y: 'y' in w }", "ObjectLiteral"),
+            ("{ z: delete w.z }", "ObjectLiteral"),
+            ("{ aa: k + 1 }", "ObjectLiteral"),
+            ("'v'", "StringLiteral"),
+        ] {
+            assert!(!linked(original, mutator), "{original}\n{}", output.code);
+        }
+        assert!(linked("'u'", "StringLiteral"));
+        assert!(linked("'x'", "StringLiteral"));
+        // Under type syntax, tracked once; StrykerJS mutates nothing under
+        // `as`, so nothing is.
+        assert!(
+            !output.code.contains("const ASSERTED = __supercov"),
+            "{}",
+            output.code
+        );
+        for name in ["WRAPPED", "NON_NULL", "ANGLED"] {
+            let line = output
+                .code
+                .lines()
+                .find(|line| line.contains(&format!("const {name} =")))
+                .unwrap();
+            assert_eq!(line.matches("TrackV2").count(), 1, "{line}");
+        }
+        for original in ["'ab'", "'ad'", "'ae'"] {
+            assert!(linked(original, "StringLiteral"), "{original}");
+        }
+        // Keys: a fraction or a huge number is not said plainly, a mutated
+        // computed key is not linked, and only `__proto__: x` sets the
+        // prototype.
+        let keys = tracked(&output)
+            .into_iter()
+            .find(|(_, keys)| keys.contains(&"__proto__".to_owned()))
+            .unwrap_or_else(|| panic!("{}", output.code));
+        assert_eq!(keys.1, ["__proto__"]);
+        assert_eq!(
+            mutant(&output, "'half'", "StringLiteral")
+                .reads
+                .as_ref()
+                .unwrap()
+                .read,
+            keys.0
+        );
+        assert_eq!(
+            mutant(&output, "'huge'", "StringLiteral")
+                .reads
+                .as_ref()
+                .unwrap()
+                .read,
+            keys.0
+        );
+        assert!(!linked("2 * 3", "ArithmeticOperator"));
+        assert!(linked("'six'", "StringLiteral"));
+        assert!(linked("'computed'", "StringLiteral"));
+        // Code in a method, an arrow or a class is not module-level.
+        for original in [
+            "'in method'",
+            "'in arrow'",
+            "'in class'",
+            "'method'",
+            "'getter'",
+        ] {
+            assert!(!linked(original, "StringLiteral"), "{original}");
+        }
+        // Not a literal: nothing to track.
+        assert!(!linked("1 + 1", "ArithmeticOperator"));
+        // A shorthand `__proto__` is an own property, and a name read alone.
+        assert!(linked("{ __proto__ }", "ObjectLiteral"));
+    }
+
+    /// Which declarations: every exported one but those Next.js reads from
+    /// a middleware's source, whatever their pattern, and no `using`.
+    #[test]
+    fn declarations_a_framework_reads_or_disposes_of_are_not_tracked() {
+        let source = concat!(
+            "export const config = { matcher: ['/a'] };\n",
+            "export const other = { b: 'b' };\n",
+            "const local = { c: 'c' };\n",
+            "export const { d } = { d: 'd' };\n",
+            "using e = { f: 'f', [Symbol.dispose]() {} };\n",
+        );
+        let output = instrumented(source, "middleware.ts", true);
+        let linked = |original: &str| mutant(&output, original, "StringLiteral").reads.is_some();
+        assert!(!linked("'/a'"));
+        assert!(linked("'b'"));
+        assert!(linked("'c'"));
+        assert!(linked("'d'"));
+        assert!(!linked("'f'"));
+    }
+
     /// Where a module's top level awaits, the code after resumes marked as
     /// loading; a function's await is left alone.
     #[test]
     fn a_top_level_await_marks_the_module_loading_where_it_resumes() {
-        let source = "const config = await load();\nfor await (const part of parts()) use(part);\nexport async function later() {\n  return await load();\n}\n";
+        let source = "const config = await load();\nfor await (const part of parts()) use(part);\nfor (const part of parts()) use(part);\nexport async function later() {\n  return await load();\n}\nconst arrow = async () => await load();\nclass Later {\n  async m() {\n    await load();\n  }\n}\n";
         let output = instrumented(source, "src/top.ts", true);
         assert!(
-            output.code.contains("ResumeV2") && output.code.contains("(await load())"),
+            output.code.contains("ResumeV2")
+                && output.code.contains("(__supercovFile7, await load())"),
             "{}",
             output.code
         );
@@ -908,5 +1043,12 @@ mod tests {
         );
         let without = instrumented(source, "src/top.ts", false);
         assert!(!without.code.contains("ResumeV2"), "{}", without.code);
+        // Awaits in functions alone: nothing to mark.
+        let inner = "export async function later() {\n  return await load();\n}\nconst arrow = async () => await load();\nclass Later {\n  async m() {\n    await load();\n  }\n}\nfor (const part of parts()) use(part);\n";
+        assert!(
+            !instrumented(inner, "src/inner.ts", true)
+                .code
+                .contains("ResumeV2")
+        );
     }
 }

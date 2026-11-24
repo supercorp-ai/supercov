@@ -1326,6 +1326,37 @@ mod tests {
             candidates(&plan, "f"),
             [("a".to_owned(), CandidateReason::Infected)]
         );
+        // A clock's value: no infection to read, so as before.
+        let clock = mutant(serde_json::json!({
+            "id": "c", "mutator": "ConditionalExpression", "replacement": "true",
+            "original": "a > b", "statement": "s", "decision": {"id": "d"},
+            "reads": {"read": "r", "escape": "e"},
+            "untestable": {"rule": "clock", "reason": "reads the clock"}
+        }));
+        let mut loaded = record("a", "test", Some("t/a.test.js"), &["s"]);
+        loaded.runtime[0].decisions = vec![decision("d", &[(true, true)])];
+        let plan = super::plan(
+            &[loaded, record("b", "test", Some("t/b.test.js"), &["r"])],
+            listed(vec![clock], &[]),
+        )
+        .unwrap();
+        let clocked = planned(&plan, "c");
+        assert_eq!(clocked.weak, "not-infected");
+        assert_eq!(clocked.narrowed, None);
+        // Mocha's setup, which names no test file, loading the module takes
+        // no test; a test with no file reading it takes itself alone.
+        let mut setup = record("setup", "setup", None, &["s"]);
+        setup.provenance.runner = "mocha".into();
+        let mut reader = record("reader", "test", None, &["r"]);
+        reader.provenance.runner = "mocha".into();
+        let mut other = record("other", "test", Some("t/o.test.js"), &[]);
+        other.provenance.runner = "mocha".into();
+        let plan = super::plan(&[setup, reader, other], listed(vec![module_level], &[])).unwrap();
+        assert_eq!(
+            candidates(&plan, "m"),
+            [("reader".to_owned(), CandidateReason::Read)]
+        );
+        assert!(planned(&plan, "m").whole_files.is_empty());
     }
 
     #[test]

@@ -6122,6 +6122,10 @@ mod tests {
             },
         )]);
         report.view.tests[0].hits.push("unknown-hit".into());
+        // A module-level value's read is the strong plan's, not a hit to show.
+        report.view.tests[0]
+            .hits
+            .push("read:0123456789abcdef".into());
         let root = crate::test_directory::TestDirectory::adopt({
             let root = std::env::temp_dir().join(format!(
                 "supercov-unknown-hit-{}-{}",
@@ -6173,6 +6177,18 @@ mod tests {
             .expect("the unknown hit is listed");
         assert_eq!(unknown.obligation, "unknown");
         assert_eq!(unknown.file, None);
+        assert!(
+            detail.tests[0]
+                .hit_details
+                .iter()
+                .all(|hit| !hit.id.starts_with("read:"))
+        );
+        assert!(
+            detail.tests[0]
+                .hits
+                .iter()
+                .all(|hit| !hit.starts_with("read:"))
+        );
     }
 
     #[test]

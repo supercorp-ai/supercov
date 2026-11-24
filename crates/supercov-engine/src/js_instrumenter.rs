@@ -6314,6 +6314,7 @@ fn instrument_candidate_with_binding(
         let mut name = |export| helpers.name(export);
         crate::js_value_reads::ResumeTransformer {
             ast,
+            file: probe_file_v2.clone(),
             helper: &mut name,
         }
         .visit_program(&mut parsed.program);
@@ -6459,6 +6460,26 @@ fn instrument_candidate_with_binding(
             false,
         )),
     );
+    // Where the probes are placed, the end of the module's top level: a
+    // read of a module-level value until then is one made as modules load
+    // (`js_value_reads`), from its registration on.
+    if probes_enabled() {
+        parsed.program.body.push(ast.statement_expression(
+            Span::default(),
+            ast.expression_call(
+                Span::default(),
+                Expression::from(ast.member_expression_static(
+                    Span::default(),
+                    ast.expression_identifier(Span::default(), ast.ident(&probe_file_v2)),
+                    ast.identifier_name(Span::default(), "loaded"),
+                    false,
+                )),
+                NONE,
+                ast.vec(),
+                false,
+            ),
+        ));
+    }
     let mut runtime_imports = vec![
         ("mcdcBegin", &mcdc_begin),
         ("mcdcCondition", &mcdc_condition),
@@ -15941,7 +15962,8 @@ export function shapes(n: number): unknown {
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are
     /// on otherwise, and a file with no site of a kind imports nothing for
-    /// it, its every name as it was with them off.
+    /// it, its every name as it was with them off; a file with none is as
+    /// with them off but for the call that ends its top level.
     #[test]
     fn probes_are_on_unless_turned_off_and_only_where_a_file_has_sites() {
         let instrumented = |on: bool, source: &str| {
@@ -15953,7 +15975,9 @@ export function shapes(n: number): unknown {
         // No comparison, arithmetic, method or arrow site.
         let siteless = "export function f(a: boolean, b: boolean) {\n  if (a && b) {\n    return 'both';\n  }\n  const o = a ? { x: 1 } : null;\n  return o?.x;\n}\n";
         let (on, off) = (instrumented(true, siteless), instrumented(false, siteless));
-        assert_eq!(on.code, off.code);
+        // But for the end of the module's top level, marked for the reads
+        // of module-level values (`js_value_reads`).
+        assert_eq!(on.code, format!("{}__supercovFile7.loaded();\n", off.code));
         assert!(!on.mutants.is_empty());
         assert!(off.mutants.is_empty());
         // A file with only arithmetic imports its helper alone, and no other
