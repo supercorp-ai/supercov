@@ -909,6 +909,16 @@ test file. The two-step retry is gone: under the old floor it decided nearly
 nothing (1 timeout in that area), and at the new limit a real hang would cost
 three times the limit, one test at a time.
 
+Measured on the same suite's billing area, round 1 of 8 jobs with the same
+10-minute budget each: 787 mutants decided where 611 were (645 detected: 360
+killed and 285 timeouts, where 480 and 1), the 90th percentile kill 7.1 s
+where it was 60.7 s, and a timeout's median 7.3 s (most tests there take about
+a second, so their limit is 6.5 s). A detection by one test took 5.9 s of slot
+time on average where it took 10.3 s; the rest of a pass's time is its
+survivors' runs, its baselines and controls, and the mutants run alone with
+the server. Of the mutants both passes ran, none that survived became a
+timeout; 130 kills became timeouts, 253 stayed kills.
+
 **Run alone, the server started with the mutant.** That per-request
 switching is exact only where nothing one request does reaches another, and
 a server keeps what its top level made. So the plan marks a mutant
