@@ -112,11 +112,14 @@ fn rewrite_scope_run_ids(value: &mut Value, merged_run_id: &str) {
 }
 
 /// The tests a run's archive holds a record of.
+///
+/// Each entry is read on its own, on every core: a merge reads every run's,
+/// and a run of a whole browser suite holds hundreds of megabytes of them.
 fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> {
-    let mut tests = BTreeMap::new();
-    for entry in archive {
+    let named = crate::threads::parallel_map(archive, |entry| {
+        let mut named = Vec::new();
         let Ok(text) = std::str::from_utf8(&entry.contents) else {
-            continue;
+            return named;
         };
         for line in text.lines() {
             if !line.contains("\"testId\"") {
@@ -125,11 +128,13 @@ fn measured_tests(archive: &[EvidenceArchiveEntry]) -> BTreeMap<String, String> 
             if let Ok(value) = serde_json::from_str::<Value>(line)
                 && let (Some(id), Some(name)) = (value["testId"].as_str(), value["test"].as_str())
             {
-                tests.insert(id.to_owned(), name.to_owned());
+                named.push((id.to_owned(), name.to_owned()));
             }
         }
-    }
-    tests
+        named
+    });
+    // In the archive's order, so a test named twice keeps its last name.
+    named.into_iter().flatten().collect()
 }
 
 /// An entry's records for the merge, without those of the tests measured
@@ -994,26 +999,34 @@ pub fn merge_runs(
             let document = serde_json::from_slice::<StrongVerdicts>(&saved.ok()?).ok()?;
             Some((index, document))
         })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(index, document)| {
+            let tests = measured_tests(&archives[index]).into_keys().collect();
+            (index, document, tests)
+        })
         .collect::<Vec<_>>();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
         .map_err(|error| format!("Cannot lock coverage store for merge: {error}"))?;
     let work = root.join(".supercov/work").join(merged_run_id);
+    // Owned before the merge's work, which lets the runs' evidence go
+    // once it is written into the merged run's.
+    let mut entries = vec![
+        EvidenceArchiveEntry {
+            path: "coverage-model.json".into(),
+            contents: model.to_vec(),
+        },
+        EvidenceArchiveEntry {
+            path: "frontend.json".into(),
+            contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
+        },
+        EvidenceArchiveEntry {
+            path: "manifest.json".into(),
+            contents: manifest.to_vec(),
+        },
+    ];
     let result = (|| {
-        let mut entries = vec![
-            EvidenceArchiveEntry {
-                path: "coverage-model.json".into(),
-                contents: model.to_vec(),
-            },
-            EvidenceArchiveEntry {
-                path: "frontend.json".into(),
-                contents: serde_json::to_vec(&merged_declaration).expect("plain data serializes"),
-            },
-            EvidenceArchiveEntry {
-                path: "manifest.json".into(),
-                contents: manifest.to_vec(),
-            },
-        ];
         entries.extend(mutants.map(|contents| EvidenceArchiveEntry {
             path: "mutants.json".into(),
             contents,
@@ -1086,6 +1099,11 @@ pub fn merge_runs(
                 });
             }
         }
+        // The runs' evidence is all in the merged run's now: let it go
+        // before the merged run is read back to plan its mutants, which
+        // holds every record parsed.
+        drop(jobs);
+        drop(archives);
         let archive_path = work.join("evidence.raw.gz");
         let raw = write_archive(entries, &archive_path)
             .map_err(|error| format!("Could not write merged evidence: {error}"))?;
@@ -1143,15 +1161,7 @@ pub fn merge_runs(
             .map_err(|error| format!("Could not publish merged run: {error}"))?;
         finalize_published_run(root, merged_run_id)
             .map_err(|error| format!("Could not finalize merged run: {error}"))?;
-        let notes = kept_verdicts(
-            root,
-            merged_run_id,
-            &inputs,
-            &archives,
-            held,
-            &owners,
-            &hashes,
-        );
+        let notes = kept_verdicts(root, merged_run_id, &inputs, held, &owners, &hashes);
         Ok(MergedRun {
             id: merged_run_id.to_owned(),
             notes,
@@ -1170,14 +1180,14 @@ pub fn merge_runs(
 
 /// The merged run's strong verdicts, from those the runs merged saved
 /// (`strong_verdicts::merged_verdicts`), saved into it; what was kept, and
-/// each run whose verdicts were not, and why. A run's test ids are those its
-/// records name; a test it recorded only by name lends no survival.
+/// each run whose verdicts were not, and why. `held` is each run that saved
+/// verdicts, with them and the ids of the tests its records name: a test it
+/// recorded only by name lends no survival.
 fn kept_verdicts(
     root: &Path,
     merged_run_id: &str,
     inputs: &[&StoredRun],
-    archives: &[Vec<EvidenceArchiveEntry>],
-    held: Vec<(usize, StrongVerdicts)>,
+    held: Vec<(usize, StrongVerdicts, BTreeSet<String>)>,
     owners: &BTreeMap<String, usize>,
     hashes: &[BTreeMap<String, String>],
 ) -> Vec<String> {
@@ -1213,7 +1223,7 @@ fn kept_verdicts(
     let mut notes = Vec::new();
     let mut lending = Vec::new();
     // Not empty, as said above: a loop over it never runs zero times.
-    held.into_iter().for_each(|(index, document)| {
+    held.into_iter().for_each(|(index, document, tests)| {
         let id = &inputs[index].id;
         if plan.as_ref().map(|plan| &plan.mutant_set) != Some(&document.mutant_set) {
             notes.push(format!(
@@ -1222,9 +1232,6 @@ fn kept_verdicts(
             ));
             return;
         }
-        let tests = measured_tests(&archives[index])
-            .into_keys()
-            .collect::<BTreeSet<_>>();
         let other_bytes = owners
             .iter()
             .filter(|(path, owner)| hashes[index].get(*path) != hashes[**owner].get(*path))
