@@ -397,7 +397,7 @@ function buildPass(pass, root, config) {
                 restarts.push({ id: mutant.id, mutant: switched, tests: ordered, reason: serverWide });
                 continue;
             }
-            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected });
+            mutants.push({ id: mutant.id, mutant: switched, tests: ordered, infected, ...(mutant.passedBefore ? { passedBefore: mutant.passedBefore } : {}) });
         }
     }
     // What a survivor's verdict says of the candidates it was not run with.
@@ -644,8 +644,54 @@ export function spreadSerialFiles(argv, root) {
     if (!fileFilters(argv.slice(3)).length)
         return [];
     const files = spreadFiles(pass, root);
+    // The files the command did not name itself: this invocation runs them
+    // for the pass, after the harness gave them to another.
+    const named = fileFilters(argv.slice(3)).map((filter) => resolve(filter.replace(/(:\d+)+$/, "")));
+    const own = (file) => {
+        const path = resolve(root, file);
+        return named.some((filter) => path === filter || path.startsWith(`${filter}${sep}`));
+    };
+    globalThis[SPREAD_ONLY] = { files: files.filter((file) => !own(file)), named };
     argv.splice(3, 0, ...files.map(specFilter));
     return files;
+}
+
+const SPREAD_ONLY = Symbol.for("supercov.spreadOnly");
+
+/**
+ * Which spread files this invocation runs for the pass only (its command
+ * did not name them), written for its workers once the round's work is
+ * known: none where no mutant no candidate let live yet waits for a test of
+ * the invocation's own files (a later round's survivors-to-be), where
+ * running them in every invocation is what spreading is for.
+ */
+function writeSpreadOnly(pass, work, root) {
+    const said = globalThis[SPREAD_ONLY];
+    let files = said?.files ?? [];
+    if (files.length) {
+        const spread = new Set(files);
+        const ownTest = (id) => {
+            const file = work.tests[id]?.file;
+            if (!file || spread.has(file))
+                return false;
+            const path = resolve(root, file);
+            return said.named.some((filter) => path === filter || path.startsWith(`${filter}${sep}`));
+        };
+        const freshOwnWork = Object.values(work.entries).some((entry) => !entry.passedBefore && entry.tests.some(ownTest));
+        if (!freshOwnWork)
+            files = [];
+    }
+    writeJson(`${pass.round}/spread-only/${process.pid}.json`, files);
+}
+
+/**
+ * The spread files this invocation runs though its command did not name
+ * them (`spreadSerialFiles`), by their path from the project root.
+ */
+let spreadOnlyFiles;
+function spreadOnly(pass, file) {
+    spreadOnlyFiles ??= new Set(readJsonOr(`${pass.round}/spread-only/${invocation()}.json`, []));
+    return spreadOnlyFiles.has(file);
 }
 
 /**
@@ -683,6 +729,8 @@ export function strongConfig(normalized, root, reporterPath) {
         process.env["SUPERCOV_PLAYWRIGHT_INVOCATION"] = String(process.pid);
         writeJson(`${pass.round}/pass.json`, work);
         writeRoundFiles(pass, work);
+        if (work.kind === "main")
+            writeSpreadOnly(pass, work, root);
         passCache = work;
         if (work.batch)
             takeAloneMutant(pass, work, root);
@@ -972,6 +1020,16 @@ function ready(pass, test) {
     return existsSync(readyPath(pass, invocation(), test));
 }
 
+/** Whether a run of `test` passed on this invocation's server, with a mutant or without. */
+function warm(pass, test) {
+    return ready(pass, test) || existsSync(`${pass.round}/warm/${invocation()}/${key(test)}`);
+}
+
+/** Whether no candidate let a mutant live yet, in this pass or an earlier one. */
+function fresh(pass, id, entry) {
+    return !entry.passedBefore && passedWith(pass, id).size === 0;
+}
+
 /**
  * Where a mutant is held while a cold attempt's failure waits for its
  * control (`settleAttempt`): no other copy takes it meanwhile.
@@ -1054,12 +1112,7 @@ function inFlightSince(pass, id) {
  * candidates let live, and it runs every mutant all the same before its
  * copies are spent.
  */
-function takeJob(pass, shape, test, only, limitMs, copiesLeft) {
-    if (only === undefined) {
-        const again = takeRetry(pass, test);
-        if (again !== undefined)
-            return again;
-    }
+function takeJob(pass, shape, test, only, limitMs, copiesLeft, freshOnly = false) {
     const queue = queueOf(pass, test);
     // A test that fails without any mutant is no candidate: it holds back
     // no later one.
@@ -1084,6 +1137,12 @@ function takeJob(pass, shape, test, only, limitMs, copiesLeft) {
                     queue.done += 1;
                 continue;
             }
+            // A spread file in an invocation the harness did not give it to
+            // takes only mutants no candidate let live yet (likely to fail
+            // it, soon decided); the rest wait for the invocation that runs
+            // it as its own, so that this one reaches its own files.
+            if (freshOnly && !fresh(pass, id, mutantOf(pass, id)))
+                continue;
             waiting += 1;
             const since = inFlightSince(pass, id);
             if (since !== undefined) {
@@ -1100,7 +1159,9 @@ function takeJob(pass, shape, test, only, limitMs, copiesLeft) {
         if (!best)
             break;
         const controls = entries(`${pass.round}/pending/${invocation()}/${key(test)}`).length;
-        if (only === undefined && best.standing[0] > 0 && copiesLeft >= 2 * waiting + controls)
+        // The copies kept back cover each mutant waiting and a control for
+        // each, and a cold failure's retry.
+        if (only === undefined && best.standing[0] > 0 && copiesLeft >= 2 * waiting + controls + COLD_RETRY_COPIES)
             return undefined;
         if (mark(claimPath(pass, best.id, test)))
             return best.id;
@@ -1109,7 +1170,7 @@ function takeJob(pass, shape, test, only, limitMs, copiesLeft) {
     // Every mutant left runs elsewhere now: one of them here too, rather
     // than leave this test's copies unused while its attempt runs.
     for (const id of busy) {
-        if (only === undefined && !settled(pass, id) && mark(claimPath(pass, id, test)))
+        if (only === undefined && !settled(pass, id) && (!freshOnly || fresh(pass, id, mutantOf(pass, id))) && mark(claimPath(pass, id, test)))
             return id;
     }
     return undefined;
@@ -1149,6 +1210,9 @@ function before(a, b) {
 /** Whether a test has mutants left to take, or kills to confirm, in this invocation. */
 function workLeft(pass, test) {
     if (entries(`${pass.round}/pending/${invocation()}/${key(test)}`).length)
+        return true;
+    const retries = `${pass.round}/retry/${invocation()}/${key(test)}`;
+    if (entries(retries).some((name) => !existsSync(`${retries}/${name}/again`)))
         return true;
     const queue = queueOf(pass, test);
     for (let at = queue.done; at < queue.ids.length; at++) {
@@ -1300,17 +1364,34 @@ export async function strongClaim(testInfo) {
         // invocation: what a copy that waits a sweep may spend.
         const copy = withoutCopy(testInfo.titlePath).copy;
         const copiesLeft = copiesOf(testInfo.file, testInfo.title) - 1 - copy;
-        const id = takeJob(pass, shape, original, shape.batch ? invocationMutant(pass) ?? null : undefined, limitMs, copiesLeft);
+        const only = shape.batch ? invocationMutant(pass) ?? null : undefined;
+        const again = only === undefined ? takeRetry(pass, original) : undefined;
+        const freshOnly = !shape.everywhere && only === undefined && spreadOnly(pass, test.file);
+        const id = again ?? takeJob(pass, shape, original, only, limitMs, copiesLeft, freshOnly);
         if (!id)
             return null;
         const entry = mutantOf(pass, id);
-        // Cold: no run of the test without a mutant passed on this server
-        // yet. Its failure may be the server's first request to a page, not
-        // the mutant's: it is tried again once a control has passed.
-        const cold = !shape.everywhere && !ready(pass, original);
-        attempt = { kind: "mutant", id, mutant: entry.mutant, baselineMs, limitMs, timeoutFactor: shape.timeoutFactor, ...(cold ? { cold } : {}) };
-        mark(`${pass.round}/inflight/${key(id)}`);
-        writeFileSync(`${pass.round}/inflight/${key(id)}/${process.pid}-${key(testInfo.testId)}`, String(Date.now()));
+        // Cold: no run of the test passed on this server yet, with or
+        // without a mutant. Its failure may be the server's first request
+        // to a page, not the mutant's: it is tried again once a control has
+        // passed.
+        const cold = !shape.everywhere && !warm(pass, original);
+        if (cold && again === undefined && copiesLeft >= 1 && fresh(pass, id, entry)) {
+            // A mutant no candidate let live yet is as likely as not to fail
+            // its first (its cheapest likely killer): a failure there, cold,
+            // would run it twice. The test runs without it first, and takes
+            // it next (`takeRetry`), where a copy is left for that.
+            mark(retryPath(pass, invocation(), original, id));
+            writeJson(`${retryPath(pass, invocation(), original, id)}/id`, id);
+            attempt = shape.baselines && baselineOf(pass, original) === undefined
+                ? { kind: "baseline", id: null, mutant: "-" }
+                : { kind: "control", id: null, mutant: "-" };
+        }
+        else {
+            attempt = { kind: "mutant", id, mutant: entry.mutant, baselineMs, limitMs, timeoutFactor: shape.timeoutFactor, ...(cold ? { cold } : {}) };
+            mark(`${pass.round}/inflight/${key(id)}`);
+            writeFileSync(`${pass.round}/inflight/${key(id)}/${process.pid}-${key(testInfo.testId)}`, String(Date.now()));
+        }
     }
     const lock = shape.concurrency.workers !== 1 && shape.concurrency.serialFiles.includes(test.file)
         ? await lockFile(pass, test.file)
@@ -1470,6 +1551,7 @@ export function settleAttempt(pass, attempt) {
     }
     if (ended.outcome === "passed") {
         mark(`${pass.round}/passed/${key(attempt.id)}/${key(test)}`);
+        mark(`${pass.round}/warm/${attempt.invocation}/${key(test)}`);
         // One mutant an invocation: a survivor waits for the judge, who
         // knows whether its server ran it.
         if (!shape.batch)

@@ -28,6 +28,10 @@ use crate::coverage_report::{
 use crate::js_weak_mutation::{Observations, Status, observations, verdict};
 use crate::mutant_list::{CandidateMutant, MutantsFile};
 
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 /// A test the plan may run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,6 +152,11 @@ pub struct PlannedMutant {
     /// names: such a mutant, too, runs with the server started with it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub server_ran: bool,
+    /// How many of its candidates passed with it in earlier passes, which
+    /// this pass does not run again (`strong_verdicts::resume`): a mutant
+    /// some candidate let live is unlikely to fail its next one.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub passed_before: usize,
     /// How many tests ran its code: what a pass by coverage alone would run
     /// it against. The candidates are those of them that infected it.
     pub covering: usize,
@@ -846,6 +855,7 @@ pub(crate) fn plan(raw_results: &[RawTestResult], listed: MutantsFile) -> Option
             whole_files: Vec::new(),
             server_wide: None,
             server_ran: false,
+            passed_before: 0,
             covering: 0,
             statement: mutant.statement.clone(),
             function: mutant.function.clone(),
@@ -2417,6 +2427,7 @@ mod tests {
                     whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
                     server_wide: None,
                     server_ran: false,
+                    passed_before: 0,
                     covering: 0,
                     statement: None,
                     function: None,

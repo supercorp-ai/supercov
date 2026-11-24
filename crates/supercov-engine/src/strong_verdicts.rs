@@ -89,6 +89,7 @@ pub fn resume(plan: &mut StrongPlan, progress: &Progress) -> Vec<Resumed> {
             .candidates
             .retain(|candidate| !passed.contains(&tests[candidate.test].id));
         let left = mutant.candidates.len();
+        mutant.passed_before = candidates - left;
         if left < candidates {
             resumed.push(Resumed {
                 id: mutant.id.clone(),
@@ -288,6 +289,7 @@ mod tests {
             whole_files: whole.iter().map(|file| (*file).to_owned()).collect(),
             server_wide: None,
             server_ran: false,
+            passed_before: 0,
             covering: candidates.len(),
             statement: None,
             function: None,
@@ -408,6 +410,19 @@ mod tests {
         assert!(settles(&verdict("killed")) && settles(&verdict("survived")));
         assert!(!settles(&verdict("error")));
         assert_eq!(left("page"), [4]);
+        // The plan says how many each passed before: the driver takes a
+        // mutant that lived through a candidate as unlikely to fail.
+        let before = |id: &str| {
+            plan.mutants
+                .iter()
+                .find(|mutant| mutant.id == id)
+                .unwrap()
+                .passed_before
+        };
+        assert_eq!(
+            ["partway", "done", "page", "untouched", "whole"].map(before),
+            [2, 2, 1, 0, 0]
+        );
     }
 
     /// Shards' progress merges to its union, for the mutants the merged

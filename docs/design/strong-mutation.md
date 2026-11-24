@@ -1017,8 +1017,9 @@ judged by the control after it. What the run before was also for is a cold
 server: a first request to a page can be slow or fail where the next is not
 (a route compiled on first use, a cache), and a control after a failure
 that coldness caused passes, warm, and would confirm a false kill. So an
-attempt that started before any control of its test passed on its server is
-*cold*, and a cold failure (a kill or a timeout) decides nothing: its mutant
+attempt that started before any run of its test passed on its server (with
+a mutant or without) is *cold*, and a cold failure (a kill or a timeout)
+decides nothing: its mutant
 is held (no other copy takes it), the next copy of the test runs a control,
 and after it the test runs the mutant again, once, now warm (or where the
 test fails without any mutant, which makes it no candidate as before); a
@@ -1027,6 +1028,17 @@ is then also set by a control on that server, as every decisive attempt's
 was. Each test gets two more copies for this. A test whose mutants all live
 costs no run without a mutant at all; a test's first failure in an
 invocation costs one more run than before (the attempt again).
+
+A cold test whose next mutant no candidate let live yet (in this pass or,
+by the plan's `passedBefore`, an earlier one) runs without it first, as it
+used to, and takes it next: such a mutant is as likely as not to fail its
+first candidate, its likeliest killer, and a cold failure there would run it
+twice (a timeout twice its whole limit). A mutant that lived through a
+candidate is not: it is taken at once. On the same suite's area, of a job's
+first runs of a test in an invocation, those that took a fresh mutant failed
+35 to 47% of the time, those that took one that had lived 2 to 10%; and of
+107 cold failures run again, every one failed again, each timeout costing
+its limit twice.
 
 On a large application's e2e suite, the billing area's late rounds (8 jobs
 of 4 slots, about 7.5 minutes of each job's pass): of one job's runs, 81
@@ -1130,6 +1142,26 @@ works out the same work from the same plan and writes it alike, and none
 removes what another wrote. A test's baseline, a mutant's claims and its kill
 are the pass's; a file's lock (one test of the file at a time), a kill's
 control and what ran beside what are the invocation's, as its server is.
+
+**A spread file in an invocation the harness did not give it to.** A
+worker runs its spec files in Playwright's order, one after another, so a
+spread file that sorts first is where every slot starts. On the same area's
+first round after measuring, every slot of a job spent 87 to 94% of its
+attempt time on the 23 spread files, the same alphabetically first ones in
+each slot, on mutants that had already lived through a candidate there (a
+survivor-to-be with 300 candidates ran 69 of them in one slot), and its own
+files' mutants, most of them killed by their first candidate, waited for a
+later round: the round decided 263 mutants by running them where the round
+before spreading decided about 460. So where an invocation's own files (those
+its command names) have a mutant no candidate let live yet, a spread file it
+was not given takes only such mutants there; the rest wait for the
+invocation that runs the file as its own, which takes every mutant of it.
+Once no fresh mutant waits for an invocation's own files (a later round's
+survivors-to-be), every invocation takes every mutant of every spread file,
+as spreading intends. Which mutants a test may take changes, never what an
+attempt decides: a mutant one invocation leaves waits for a copy of another.
+Replayed on that round's logs, the attempts it moves off the spread files to
+the invocations' own were 54 to 60% of a job's attempt time.
 
 **Serial files and slots.** A harness that shares tests out to slots keeps
 a file with a serial describe in one slot: its tests may lean on one
