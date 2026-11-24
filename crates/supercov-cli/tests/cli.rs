@@ -23774,6 +23774,220 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     assert!(shared, "{log}\n{context}");
 }
 
+/// A module-level table a server builds as it starts, read by few of a
+/// browser suite's tests: each of its mutants has for candidates the tests
+/// that read its value, not every test of the run, and the plan says how
+/// far that narrowed them. A value read while the server's modules loaded,
+/// and a value no literal holds, keep every test. Soundness: the same suite
+/// measured without the probes plans every test for each, and every mutant
+/// that broad pass kills, the narrowed one kills, with the broad killer
+/// among its candidates.
+#[cfg(unix)]
+#[test]
+fn a_module_level_value_s_mutants_run_against_the_tests_that_read_it() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-module-values");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-module-values", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    let words = "export const WORDS = {\n  en: { hello: \"Hello\", bye: \"Bye\" },\n  fr: { hello: \"Bonjour\", bye: \"Au revoir\" },\n};\nconst LETTERS = { a: \"A\" };\nexport const COPIED = LETTERS.a;\nexport const PLAIN = \"plain\";\nexport function word(lang, key) {\n  return WORDS[lang][key];\n}\n";
+    project.write("server/words.js", words);
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { word, COPIED, PLAIN } from \"../server/words.js\";\nhttp.createServer((request, response) => {\n  const url = new URL(request.url, \"http://local\");\n  if (url.pathname === \"/word\") return response.end(word(url.searchParams.get(\"lang\"), url.searchParams.get(\"key\")));\n  if (url.pathname === \"/copied\") return response.end(COPIED);\n  if (url.pathname === \"/plain\") return response.end(PLAIN);\n  response.end(\"other\");\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/ready\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/words.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"greets in English\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=en&key=hello\")).text()).toBe(\"Hello\");\n});\ntest(\"says goodbye in French\", async ({ request }) => {\n  expect(await (await request.get(\"/word?lang=fr&key=bye\")).text()).toBe(\"Au revoir\");\n});\n",
+    );
+    project.write(
+        "tests/other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\nfor (const n of [1, 2, 3]) {\n  test(`answers otherwise ${n}`, async ({ request }) => {\n    expect(await (await request.get(\"/other\")).text()).toBe(\"other\");\n  });\n}\ntest(\"copies a letter\", async ({ request }) => {\n  expect(await (await request.get(\"/copied\")).text()).toBe(\"A\");\n});\ntest(\"answers plainly\", async ({ request }) => {\n  expect(await (await request.get(\"/plain\")).text()).toBe(\"plain\");\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("module-level values");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "server");
+    // Each run's plan, and its pass's verdicts, by mutant id.
+    let measure_and_test = |probes: bool| {
+        let mut env = vec![roots];
+        if probes {
+            env.push(("SUPERCOV_MUTANTS", "1"));
+        }
+        project
+            .supercov_with(&["--", "npx", "playwright", "test"], &env)
+            .succeeds();
+        let plan = project
+            .supercov_with(
+                &["runs", "latest", "mutants", "test", "--plan", "--json"],
+                &[roots],
+            )
+            .json();
+        let text = project
+            .supercov_with(&["runs", "latest", "mutants", "test", "--plan"], &[roots])
+            .succeeds();
+        let ran = project.supercov_with(&["runs", "latest", "mutants", "test", "--json"], &[roots]);
+        let said = ran.stderr();
+        let reply = ran.json();
+        let verdicts = project
+            .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+            .json()["data"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|mutant| {
+                (
+                    mutant["id"].as_str().unwrap().to_owned(),
+                    mutant["strong"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        (plan, text, reply, said, verdicts)
+    };
+    let (plan, text, reply, said, narrowed) = measure_and_test(true);
+    let context = format!("{plan}\n{reply}\n{said}");
+    let tests = plan["tests"].as_array().unwrap().clone();
+    // The mutant of `text` on its line, by its mutator.
+    let planned = |text: &str, mutator: &str| {
+        let (line, column) = words
+            .lines()
+            .enumerate()
+            .find_map(|(line, source)| source.find(text).map(|at| (line + 1, at + 1)))
+            .unwrap();
+        let prefix = format!(
+            "server/words.js:{line}:{column}-{line}:{}:{mutator}:",
+            column + text.len()
+        );
+        plan["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mutant| mutant["id"].as_str().unwrap().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{prefix}\n{context}"))
+            .clone()
+    };
+    let names = |mutant: &serde_json::Value| {
+        let mut names = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                tests[candidate["test"].as_u64().unwrap() as usize]["title"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    // The English greeting: the one test that read it, of the seven that
+    // ran with the server that loaded it.
+    let hello = planned("\"Hello\"", "StringLiteral");
+    assert_eq!(names(&hello), ["greets in English"], "{context}");
+    assert_eq!(
+        hello["narrowed"],
+        serde_json::json!({"from": 7, "to": 1}),
+        "{context}"
+    );
+    let goodbye = planned("\"Au revoir\"", "StringLiteral");
+    assert_eq!(names(&goodbye), ["says goodbye in French"], "{context}");
+    // Read by no test: decided without running it.
+    let bonjour = planned("\"Bonjour\"", "StringLiteral");
+    assert_eq!(bonjour["decided"], "survived", "{context}");
+    assert_eq!(bonjour["reason"], "no-test-read-it", "{context}");
+    // The English words replaced whole: what reads English.
+    let english = planned("{ hello: \"Hello\", bye: \"Bye\" }", "ObjectLiteral");
+    assert_eq!(names(&english), ["greets in English"], "{context}");
+    // Copied while the module loaded: every test stays.
+    let letter = planned("\"A\"", "StringLiteral");
+    assert_eq!(names(&letter).len(), 7, "{context}");
+    assert_eq!(letter["narrowed"]["escaped"], true, "{context}");
+    // No literal holds it: every test.
+    let plain = planned("\"plain\"", "StringLiteral");
+    assert_eq!(names(&plain).len(), 7, "{context}");
+    assert!(plain["narrowed"].is_null(), "{context}");
+    // The plan and the pass say so.
+    let summary = &plan["summary"]["narrowed"];
+    assert!(summary["mutants"].as_u64() > Some(3), "{context}");
+    assert_eq!(summary["escaped"], 2, "{context}");
+    assert!(
+        summary["candidatesAfter"].as_u64() < summary["candidatesBefore"].as_u64(),
+        "{context}"
+    );
+    assert!(
+        text.contains("module-level mutant(s) to the tests that read their value"),
+        "{text}"
+    );
+    assert_eq!(reply["summary"]["narrowed"], *summary, "{context}");
+    // The same suite measured without the probes: every module-level mutant
+    // has every test for a candidate.
+    let (broad_plan, _, broad_reply, broad_said, broad) = measure_and_test(false);
+    let broad_context = format!("{broad_plan}\n{broad_reply}\n{broad_said}\n{context}");
+    assert!(
+        broad_plan["summary"]["narrowed"].is_null(),
+        "{broad_context}"
+    );
+    let module_level = plan["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mutant| mutant["function"].is_null())
+        .collect::<Vec<_>>();
+    assert_eq!(module_level.len(), 10, "{broad_context}");
+    let mut killed = 0;
+    for mutant in module_level {
+        let id = mutant["id"].as_str().unwrap();
+        let (narrow, wide) = (&narrowed[id], &broad[id]);
+        if wide["status"] != "killed" {
+            continue;
+        }
+        killed += 1;
+        assert_eq!(narrow["status"], "killed", "{id}\n{broad_context}");
+        let killer = wide["killedBy"].as_str().unwrap();
+        let candidate = mutant["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| tests[candidate["test"].as_u64().unwrap() as usize]["id"] == killer);
+        assert!(
+            candidate,
+            "{id}: {killer} is not a candidate\n{broad_context}"
+        );
+    }
+    assert!(killed >= 6, "{broad_context}");
+}
+
 /// A Playwright mutant attempt is stopped at its time limit, its test's
 /// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
 /// there as a `timeout`, though its test clicks with no timeout of its own

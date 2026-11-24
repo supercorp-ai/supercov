@@ -709,6 +709,7 @@ pub(crate) fn candidates_of(
                     }
                 }),
                 untestable: untestable.clone(),
+                reads: None,
                 is_static: false,
                 unplaceable: None,
             });

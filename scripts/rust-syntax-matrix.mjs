@@ -71,6 +71,8 @@ function installRuntime(target) {
         hitEpochs: new Uint32Array(definition.points),
         // What a statement probe calls, by place, when its point is new.
         hit() {},
+        // What the end of a module's top level calls.
+        loaded() {},
         decisionEpochs: definition.decisionWidths.map((width) =>
           width <= 6
             ? new Uint32Array(2 * 3 ** width)
@@ -220,6 +222,12 @@ const probeHelpers = {
     return receiver;
   },
   valueV2(_site, value) {
+    return value;
+  },
+  trackV2(_file, _base, _keys, value) {
+    return value;
+  },
+  resumeV2(_file, value) {
     return value;
   },
   strongSlot() {
@@ -390,7 +398,7 @@ async function runBrowser(name) {
               mcdcBegin(id, width) { return { id, values: Array(width).fill(null) }; },
               mcdcCondition(frame, conditionIndex, value) { frame.values[conditionIndex] = Boolean(value); return value; },
               mcdcEnd(_frame, value) { return value; },
-              registerProbeV2(definition) { return { ...definition, clock: { e: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), hit() {}, decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
+              registerProbeV2(definition) { return { ...definition, clock: { e: 1, fast: true }, hitEpochs: new Uint32Array(definition.points), hit() {}, loaded() {}, decisionEpochs: definition.decisionWidths.map((width) => width <= 6 ? new Uint32Array(2 * 3 ** width) : new Map()), pendingDefaults: new Uint32Array(definition.defaultCount ?? 0), none: emptySpread }; },
               coverageHitV2() {},
               renderedValueV2(_file, _index, value) { return value; },
               mcdcEndV2(_file, _decisionIndex, _encoded, value) { return value; },
@@ -414,6 +422,8 @@ async function runBrowser(name) {
               assignV2(_site, _current, value) { return value; },
               methodV2(_site, receiver) { return receiver; },
               valueV2(_site, value) { return value; },
+              trackV2(_file, _base, _keys, value) { return value; },
+              resumeV2(_file, value) { return value; },
               strongSlot() { return { a: -1, h() {} }; },
               selectShortV2(_file, _first, value) { return value; },
               selectRightV2(_file, _first, value) { return value; },

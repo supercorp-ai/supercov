@@ -14,7 +14,9 @@ use std::{
 use serde_json::{Value, json};
 use supercov_engine::{
     run_store::{StoredRun, discover_runs, select_run},
-    strong_plan::{Progress as Passed, StrongPlan, StrongVerdicts, Verdict, plan_for_run},
+    strong_plan::{
+        PlannedMutant, Progress as Passed, StrongPlan, StrongVerdicts, Verdict, plan_for_run,
+    },
 };
 
 pub(crate) const HELP: &str = "\
@@ -884,6 +886,53 @@ fn span_lines(id: &str) -> (u32, u32) {
     (0, u32::MAX)
 }
 
+/// How a plan's module-level mutants had their candidates narrowed to the
+/// tests that read their values: how many were, by how much, and how many
+/// kept every test that loaded their module, their value read as a module
+/// loaded. `None` where no mutant's value was read through its literal.
+fn narrowing<'p>(mutants: impl Iterator<Item = &'p PlannedMutant>) -> Option<Value> {
+    let (mut narrowed, mut escaped, mut before, mut after) = (0u64, 0u64, 0u64, 0u64);
+    for mutant in mutants {
+        let Some(narrowing) = mutant.narrowed else {
+            continue;
+        };
+        if narrowing.escaped {
+            escaped += 1;
+            continue;
+        }
+        narrowed += 1;
+        before += narrowing.from as u64;
+        after += narrowing.to as u64;
+    }
+    (narrowed + escaped > 0).then(|| {
+        json!({
+            "mutants": narrowed,
+            "candidatesBefore": before,
+            "candidatesAfter": after,
+            "escaped": escaped,
+        })
+    })
+}
+
+/// The lines that say how candidates were narrowed (`narrowing`).
+fn narrowing_text(narrowing: &Value) -> String {
+    let mut text = String::new();
+    let narrowed = narrowing["mutants"].as_u64().unwrap_or(0);
+    if narrowed > 0 {
+        text.push_str(&format!(
+            "  narrowed      {narrowed} module-level mutant(s) to the tests that read their value: {} candidate(s) where loading their module gave {}\n",
+            narrowing["candidatesAfter"], narrowing["candidatesBefore"]
+        ));
+    }
+    let escaped = narrowing["escaped"].as_u64().unwrap_or(0);
+    if escaped > 0 {
+        text.push_str(&format!(
+            "  {escaped} module-level mutant(s) kept every test that loaded their module: their value was read while a module loaded\n"
+        ));
+    }
+    text
+}
+
 fn plan_json(run: &StoredRun, plan: &StrongPlan) -> Value {
     let mut counts = json!({"run": 0, "survived": 0, "noCoverage": 0, "equivalent": 0});
     let mut runs = 0u64;
@@ -912,6 +961,7 @@ fn plan_json(run: &StoredRun, plan: &StrongPlan) -> Value {
             },
             "candidateRuns": runs,
             "tests": plan.tests.len(),
+            "narrowed": narrowing(plan.mutants.iter()),
         },
         "tests": plan.tests,
         "mutants": plan.mutants,
@@ -1021,6 +1071,7 @@ fn plan_text(data: &Value) -> String {
                     .join(", ")
             ));
         }
+        extra.push_str(&narrowing_text(&summary["narrowed"]));
         if let Some(from) = data["measurement"]["derivedFrom"].as_str() {
             extra.push_str(&format!(
                 "  not measured: the checkout is unchanged since run {from}, which this run was made from\n"
@@ -1052,7 +1103,7 @@ fn plan_text(data: &Value) -> String {
         );
     }
     format!(
-        "Strong mutation plan for {}: {} mutants\n  to run        {} (at most {} test runs)\n  survived      {} (no test infected them)\n  no coverage   {}\n  equivalent    {}\n",
+        "Strong mutation plan for {}: {} mutants\n  to run        {} (at most {} test runs)\n  survived      {} (no test infected them)\n  no coverage   {}\n  equivalent    {}\n{}",
         data["run"].as_str().unwrap_or(""),
         summary["mutants"],
         summary["toRun"],
@@ -1060,6 +1111,7 @@ fn plan_text(data: &Value) -> String {
         summary["decided"]["survived"],
         summary["decided"]["noCoverage"],
         summary["decided"]["equivalent"],
+        narrowing_text(&summary["narrowed"]),
     )
 }
 
@@ -2088,6 +2140,11 @@ fn summary(
             // Errors because no driver runs their tests, by runner.
             "notRun": not_run(plan, &asked_verdicts),
             "commandExitCode": executed.command_exit,
+            "narrowed": narrowing(
+                plan.mutants
+                    .iter()
+                    .filter(|mutant| asked_verdicts.contains_key(&mutant.id))
+            ),
         },
         "passes": executed.passes,
     })
@@ -2511,6 +2568,7 @@ mod tests {
             statement: None,
             function: None,
             function_hit_by: Default::default(),
+            narrowed: None,
         };
         let plan = StrongPlan {
             mutant_set: "set".into(),
@@ -2614,9 +2672,68 @@ mod tests {
                     statement: None,
                     function: None,
                     function_hit_by: Default::default(),
+                    narrowed: None,
                 })
                 .collect(),
         }
+    }
+
+    /// The plan and the pass say how many module-level mutants had their
+    /// candidates narrowed and by how much, and how many kept every test.
+    #[test]
+    fn the_plan_says_how_far_reads_narrowed_module_level_candidates() {
+        use supercov_engine::strong_plan::Narrowed;
+        let mut plan = plan_of(&[], &["infected", "infected", "infected", "unknown"]);
+        plan.mutants[0].narrowed = Some(Narrowed {
+            from: 40,
+            to: 3,
+            escaped: false,
+        });
+        plan.mutants[1].narrowed = Some(Narrowed {
+            from: 40,
+            to: 0,
+            escaped: false,
+        });
+        plan.mutants[2].narrowed = Some(Narrowed {
+            from: 40,
+            to: 40,
+            escaped: true,
+        });
+        let narrowed = narrowing(plan.mutants.iter()).unwrap();
+        assert_eq!(
+            narrowed,
+            json!({"mutants": 2, "candidatesBefore": 80, "candidatesAfter": 3, "escaped": 1})
+        );
+        assert_eq!(
+            narrowing_text(&narrowed),
+            "  narrowed      2 module-level mutant(s) to the tests that read their value: 3 candidate(s) where loading their module gave 80\n  1 module-level mutant(s) kept every test that loaded their module: their value was read while a module loaded\n"
+        );
+        assert_eq!(narrowing(plan.mutants[3..].iter()), None);
+        assert_eq!(narrowing_text(&Value::Null), "");
+        let escaped_only = narrowing(plan.mutants[2..].iter()).unwrap();
+        assert!(narrowing_text(&escaped_only).starts_with("  1 module-level"));
+        let summary = json!({"mutants": 4, "toRun": 4, "candidateRuns": 3, "tests": 0,
+            "decided": {"survived": 0, "noCoverage": 0, "equivalent": 0}, "narrowed": narrowed});
+        assert!(
+            plan_text(&json!({"run": "r1", "summary": summary}))
+                .ends_with("their value was read while a module loaded\n")
+        );
+        let mut ran = summary.clone();
+        for (key, value) in [
+            ("killed", 1),
+            ("timeout", 0),
+            ("survived", 0),
+            ("noCoverage", 0),
+            ("error", 0),
+            ("ran", 1),
+            ("durationMs", 1),
+        ] {
+            ran[key] = json!(value);
+        }
+        assert!(
+            plan_text(&json!({"run": "r1", "summary": ran}))
+                .contains("  narrowed      2 module-level")
+        );
     }
 
     /// A run with no test is refused: by how many mutants' code its command

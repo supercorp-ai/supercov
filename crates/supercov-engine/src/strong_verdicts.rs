@@ -290,6 +290,7 @@ mod tests {
             statement: None,
             function: None,
             function_hit_by: BTreeMap::new(),
+            narrowed: None,
         }
     }
 

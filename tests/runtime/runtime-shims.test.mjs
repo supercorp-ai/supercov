@@ -1693,3 +1693,68 @@ test("a process writing records writes each value its probes see once per contex
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a module-level literal is read through a proxy that records which keys each read named, and while a module loads, its escapes", async () => {
+  const { trackV2, resumeV2, registerProbeV2 } = await import("../../runtime/javascript/runtime.mjs");
+  const hits = [];
+  const file = { hit: (place) => hits.push(place) };
+  const taken = () => hits.splice(0).sort((a, b) => a - b);
+  // A primitive comes back as it is.
+  assert.equal(trackV2(file, 0, [], "plain"), "plain");
+  assert.equal(trackV2(file, 0, [], null), null);
+  // Registering a module marks it loading until its top level ends, or the
+  // next microtask where it never does: reads then hit the escapes (any + 1,
+  // a key's + 1).
+  const registered = registerProbeV2({ key: "values", points: 10, decisionWidths: [], defaultCount: 0, selectionPoints: [0, 0], selectionTrees: [] });
+  const words = trackV2(file, 0, ["en"], { en: trackV2(file, 4, ["hi"], { hi: "Hello", bye: "Bye" }), fr: "Bonjour" });
+  assert.equal(words.en.hi, "Hello");
+  assert.deepEqual(taken(), [1, 3, 5, 7]);
+  registered.loaded();
+  assert.equal(words.fr, "Bonjour");
+  assert.deepEqual(taken(), [0]);
+  registerProbeV2({ key: "throws", points: 1, decisionWidths: [], defaultCount: 0, selectionPoints: [0, 0], selectionTrees: [] });
+  words.fr;
+  assert.deepEqual(taken(), [1]);
+  await Promise.resolve();
+  // Later, reads: any read of a literal, and its key's where it has one.
+  assert.equal(words.fr, "Bonjour");
+  assert.deepEqual(taken(), [0]);
+  assert.equal(words.en.bye, "Bye");
+  assert.deepEqual(taken(), [0, 2, 4]);
+  assert.equal("hi" in words.en, true);
+  assert.deepEqual(Object.keys(words.en), ["hi", "bye"]);
+  assert.equal(Object.getOwnPropertyDescriptor(words.en, "hi").value, "Hello");
+  // `in`, Object.keys (which reads each key's descriptor) and the descriptor.
+  assert.equal(taken().filter((place) => place === 6).length, 3);
+  // Writes, definitions and deletions reach the literal.
+  words.en.hi = "Hi";
+  Object.defineProperty(words.en, "new", { value: 1, configurable: true });
+  delete words.en.new;
+  assert.equal(words.en.hi, "Hi");
+  assert.equal(Object.hasOwn(words.en, "new"), false);
+  // A proxy behaves as its target.
+  const list = trackV2(file, 8, ["0"], ["a", "b"]);
+  assert.equal(Array.isArray(list), true);
+  assert.deepEqual([...list], ["a", "b"]);
+  assert.equal(JSON.stringify(words), '{"en":{"hi":"Hi","bye":"Bye"},"fr":"Bonjour"}');
+  // structuredClone copies a value holding one through its traps.
+  taken();
+  const cloned = structuredClone({ words, list, kept: new Map([["k", list]]), set: new Set([words.en]), at: new Date(0) });
+  assert.deepEqual(cloned.words, { en: { hi: "Hi", bye: "Bye" }, fr: "Bonjour" });
+  assert.deepEqual(cloned.kept.get("k"), ["a", "b"]);
+  assert.equal(cloned.at.getTime(), 0);
+  assert.ok(taken().includes(8));
+  assert.deepEqual(structuredClone({ a: 1 }), { a: 1 });
+  assert.deepEqual(structuredClone({ a: 1 }, {}), { a: 1 });
+  assert.throws(() => structuredClone(() => 1), { name: "DataCloneError" });
+  assert.deepEqual(structuredClone(words, {}).en, { hi: "Hi", bye: "Bye" });
+  // A module's top level resumes loading after an await.
+  taken();
+  assert.equal(resumeV2(registered, 7), 7);
+  words.fr;
+  assert.deepEqual(taken(), [1]);
+  await Promise.resolve();
+  // A hit that throws reads on.
+  const failing = trackV2({ hit: () => { throw new Error("no"); } }, 0, [], { a: 1 });
+  assert.equal(failing.a, 1);
+});

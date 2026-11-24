@@ -195,6 +195,7 @@ pub(crate) fn list(
                 arrow: None,
                 equivalent: None,
                 untestable: None,
+                reads: None,
                 is_static: false,
                 unplaceable: None,
             };

@@ -795,6 +795,7 @@ pub(crate) fn candidates(
             arrow: None,
             equivalent: None,
             untestable: None,
+            reads: None,
             is_static: false,
             unplaceable: None,
         });
