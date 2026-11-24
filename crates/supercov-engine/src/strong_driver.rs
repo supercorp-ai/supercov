@@ -20,13 +20,6 @@ pub const STRONG_FILES: &str = "SUPERCOV_STRONG_FILES";
 pub const STRONG_PLAN: &str = "SUPERCOV_STRONG_PLAN";
 /// Where the driver appends its verdicts (`results.jsonl`).
 pub const STRONG_RESULTS: &str = "SUPERCOV_STRONG_RESULTS";
-/// Set to `1` in a Playwright strong pass's command: the pass's tests take
-/// their work from a queue every invocation of `playwright test` shares, so
-/// a harness that starts several (slots, each with its own server and
-/// database) may give a spec file to any number of them -- a file it keeps
-/// in one slot otherwise, such as one with a serial describe -- and each
-/// runs a share of its mutants (`docs/mutation.md`).
-pub const STRONG_SPREAD: &str = "SUPERCOV_STRONG_SPREAD";
 /// `<file>#<index>`: the mutant switched on in a process from its start;
 /// `-` or unset for none. `file` is the mutant's file as `mutants.json`
 /// keys it, `index` its place in that file's list.

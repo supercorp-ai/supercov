@@ -433,28 +433,19 @@ no mutants shows none of this.
   has left. A candidate in a project others start from (a login `setup`)
   never runs with a mutant: a mutant no other test kills is an `error` that
   says so.
-- **A harness with slots.** A harness that runs several `playwright test`
-  processes at once (slots, each with its own server and database) can let
-  every slot work on a spec file it would otherwise keep in one: in a strong
-  pass the command runs with `SUPERCOV_STRONG_SPREAD=1`, and each slot that
-  runs a file takes its own mutants of it from a queue the pass's slots
-  share. A file with a serial describe is the case that matters: a harness
-  keeps its tests together, so one slot runs all its mutants, and the
-  progress lines say so and what it costs (`"e2e/buy.spec.ts" has a serial
-  describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about
-  12m00s there, the others about 1m00s`). Supercov cannot do this without the
-  harness: Playwright's file filters come from the command line before any
-  config loads, and a slot's server and database are its own process's.
-  Where the variable is set, give such files to every slot:
-
-  ```ts
-  const spread = process.env.SUPERCOV_STRONG_SPREAD === '1';
-  // ...after sharing out the tests, a serial file to one slot:
-  if (spread) for (const slot of slots) slot.files.push(...serialFiles);
-  ```
-
-  Each slot runs a file's tests once without a mutant before its first
-  mutant there, so spreading costs every slot that baseline.
+- **A harness with slots.** A harness may run several `playwright test`
+  processes at once (slots, each with its own server and database) and keep
+  a spec file with a serial describe whole, in one slot. In a strong pass
+  such a file runs in every slot whose command names spec files, and each
+  slot takes its own mutants of it from a queue the pass's slots share, so one
+  slot no longer runs all of them. Nothing in the harness or the command
+  changes: Supercov's preload adds the file to each invocation's file filters
+  before Playwright reads them, and leaves `--list` as it is. Each slot runs
+  the file's tests once without a mutant before its first mutant there. A
+  file it cannot spread (one that sets its serial mode in a helper of its
+  own) is named in the progress lines, with what it costs (`"e2e/buy.spec.ts"
+  has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s)
+  wait about 12m00s there, the others about 1m00s`).
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.

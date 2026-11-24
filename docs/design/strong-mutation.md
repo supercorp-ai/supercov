@@ -930,24 +930,46 @@ server and database; and a kill is confirmed by the next control of its test
 in the slot that made it. What it costs is each slot's baseline of the
 file's tests.
 
-Supercov cannot put the file in a slot the harness did not give it. The
-`playwright test` command reads its file filters from the command line before
-it loads any config, and Supercov's config can narrow the run but not widen
-it; and a slot's server and database belong to its own process, so a second
-invocation Supercov started against them would run beside the slot's tests
-on state they do not expect. So the harness must cooperate, and the pass
-tells it it may: the command runs with `SUPERCOV_STRONG_SPREAD=1`, and a
-harness that sees it may give a serial file (or any file) to every slot. With
-`--list` a harness still sees each test once: copies stay out of the list
-(see below), since a harness that shared them out would keep a serial file's
-copies together just the same.
+So the pass spreads such files itself. A config cannot do it: `playwright
+test` reads its file filters from the command line before it loads any
+config, and a config can narrow the run but not widen it. And it cannot start
+invocations of its own: a slot's server and database belong to the slot's
+process, and a second invocation against them would run beside the slot's
+tests on state they do not expect. But Supercov's preload runs in each
+invocation's process before Playwright parses its command line, as it
+already does to put Supercov's config in place of the project's. In a strong
+pass it adds a filter for each spread file to `argv`. A spread file is a spec
+file whose text declares a serial describe (`describe.serial`, or `mode:
+'serial'`) and whose tests some mutant still to run is a candidate of,
+worked out once a pass from its plan.
 
-Measured on the same area with its harness changed so (the serial files
-given to every slot when the variable is set): the files ran in every slot
-and the line below no longer appeared. But the harness is code every e2e
-test runs through, so carry-over rightly treated the edit as reaching every
-test and kept none of the earlier rounds' verdicts; its effect on the tail
-is to be measured from a state the changed harness measured.
+- **Only where the command names spec files.** Playwright's file filters are
+  the arguments after `test` that are not an option's value: `--project`
+  takes every argument up to the next option, `--debug`, `--only-changed`
+  and `-u` take the next unless it is an option, the rest of the valued
+  options take one, and nothing after `--` counts. A command that names none
+  runs every file already, and a filter added there would narrow it.
+- **`--list` is left as it is**, as 4.29.3 left it: a harness shares its tests
+  out from the list, and sees each test once.
+- **A filter matches the file alone**, by its path from the project root, with
+  either separator, its characters escaped: `/(?:^|[\\/])tests[\\/]e2e[\\/]buy\.spec\.ts$/`.
+  `--grep`, `--project` and a config's own `testDir` and `testMatch` still
+  apply. An invocation whose config does not reach the file runs nothing more.
+  A project another depends on runs as it does without the file.
+- **The invocation says so** on its output: `[supercov] strong pass: 1 spec
+  file(s) with a serial describe run in this invocation too, each taking its
+  own mutants of them: tests/e2e/buy.spec.ts`.
+
+A file that sets its serial mode some other way (a helper of its own) is not
+seen as serial. It stays where the harness put it, and the line below says
+what that costs.
+
+Measured on the same area, with its harness changed by hand to give the
+serial files to every slot: the files ran in every slot and the line below no
+longer appeared. But a harness is code every e2e test runs through, so
+carry-over rightly treated that edit as reaching every test and kept none of
+the earlier rounds' verdicts. Spreading from the preload leaves the harness
+and the command as they are.
 
 Where it does not, the progress lines say so. The runner records the spec
 files it loaded with a serial describe (in `playwright test`'s runner
@@ -956,7 +978,7 @@ status counts the mutants waiting for such a file's tests; and where only one
 of a round's invocations runs the file and it has more time left than any
 other, the line names the file, its mutants, and the two times:
 
-    [supercov]   "tests/e2e/buy.spec.ts" has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; a harness that gives it to every invocation of a strong pass shares them out (SUPERCOV_STRONG_SPREAD, docs/mutation.md)
+    [supercov]   "tests/e2e/buy.spec.ts" has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; the pass spreads such a file only over invocations whose command names spec files
 
 **A process that runs out of heap is named.** Every Node process of a strong
 pass runs with `--report-on-fatalerror` into the pass's directory. A process

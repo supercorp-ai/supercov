@@ -248,11 +248,12 @@ pub(crate) fn lines(
             ago(test.limit_ms)
         ));
     }
-    // A serial file the harness gave one invocation: its mutants wait for
-    // that one, and the others end first.
+    // A serial file only one invocation ran (the pass could not spread it:
+    // the others' commands named no spec file, or its text did not say it
+    // was serial): its mutants wait for that one, and the others end first.
     for confined in &status.confined {
         lines.push(format!(
-            "[supercov]   {:?} has a serial describe, and 1 of the {} invocations runs it: its {} mutant(s) wait about {} there, the others about {}; a harness that gives it to every invocation of a strong pass shares them out (SUPERCOV_STRONG_SPREAD, docs/mutation.md)",
+            "[supercov]   {:?} has a serial describe, and 1 of the {} invocations runs it: its {} mutant(s) wait about {} there, the others about {}; the pass spreads such a file only over invocations whose command names spec files",
             confined.file,
             status.invocations,
             confined.mutants,
@@ -515,7 +516,7 @@ mod tests {
         );
         assert_eq!(
             lines(Some(&status), 10, 1, None)[1],
-            "[supercov]   \"e2e/buy.spec.ts\" has a serial describe, and 1 of the 3 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; a harness that gives it to every invocation of a strong pass shares them out (SUPERCOV_STRONG_SPREAD, docs/mutation.md)"
+            "[supercov]   \"e2e/buy.spec.ts\" has a serial describe, and 1 of the 3 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; the pass spreads such a file only over invocations whose command names spec files"
         );
         // One invocation alone: nothing to share out.
         let alone = scratch("serial-alone");

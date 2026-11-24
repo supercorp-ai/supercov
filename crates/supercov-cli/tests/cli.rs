@@ -655,14 +655,14 @@ fn ctrl_c_at_a_command_that_reads_the_keyboard_interrupts_the_run() {
     let mut terminal = common::OnTerminal::start_with(
         &project,
         &["--", "node", "ask.mjs"],
-        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1262")],
+        &[("SUPERCOV_TEST_FAULT", "fs.read#javascript_run.rs:1260")],
     );
     terminal.wait_for("asking");
     terminal.press("\u{3}");
     let (code, seen) = terminal.finish();
     assert_ne!(code, 0, "{seen}");
     assert!(
-        seen.contains("test fault at fs (javascript_run.rs:1262"),
+        seen.contains("test fault at fs (javascript_run.rs:1260"),
         "{seen}"
     );
 }
@@ -17675,17 +17675,17 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
     for fault in [
         "fs.create_dir_all#lifecycle.rs:1369",
         "fs.create_dir_all#javascript_run.rs:764",
-        "fs.write#javascript_run.rs:1118",
+        "fs.write#javascript_run.rs:1116",
         "fs.canonicalize#process_supervision.rs:1917",
-        "fs.create_dir_all#javascript_run.rs:1201",
-        "fs.create_dir_all#javascript_run.rs:1400",
+        "fs.create_dir_all#javascript_run.rs:1199",
+        "fs.create_dir_all#javascript_run.rs:1398",
         "fs.read_dir#evidence_archive.rs:263",
         "fs.create_dir_all#evidence_archive.rs:484",
+        "fs.create_dir_all#javascript_run.rs:1676",
         "fs.create_dir_all#javascript_run.rs:1678",
-        "fs.create_dir_all#javascript_run.rs:1680",
         "fs.create_dir_all#lifecycle.rs:1060",
+        "fs.create_dir_all#javascript_run.rs:1778",
         "fs.create_dir_all#javascript_run.rs:1780",
-        "fs.create_dir_all#javascript_run.rs:1782",
     ] {
         let project = Project::cart("js-records");
         project.write(".gitignore", "out/\nnode_modules/\n");
@@ -24151,6 +24151,163 @@ fn a_playwright_pass_resumes_where_its_budget_stopped_it() {
     assert!(killed >= 1, "{ready:?}\n{log}");
     // Nothing is left open, so no progress is kept.
     assert!(saved().get("progress").is_none(), "{log}");
+}
+
+/// A harness that runs two `playwright test` slots, each with its own
+/// server, and keeps a spec file with a serial describe in the first: in a
+/// strong pass that file runs in the second slot too, with the harness and
+/// its command unchanged, and the slots share its mutants -- each mutant
+/// meets each candidate once, whichever slot ran it -- while the harness's
+/// `--list` still sees the slot's own file alone.
+#[cfg(unix)]
+#[test]
+fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let ports = [0, 1].map(|_| {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    });
+    let project = Project::empty("strong-playwright-spread");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-spread", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"static/index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "static/index.html",
+        "<!doctype html><body><p id=\"state\"></p><script src=\"/public/log.js\"></script><script>setTimeout(() => { document.getElementById(\"state\").textContent = \"Active\"; }, 700);</script></body>\n",
+    );
+    // What the page logs: no test reads it, so every mutant survives every
+    // candidate.
+    project.write(
+        "public/log.js",
+        "console.log(\"one\");\nconsole.log(\"two\");\nconsole.log(\"three\");\n",
+    );
+    project.write(
+        "playwright.config.js",
+        "const port = Number(process.env.SLOT_PORT);\nexport default {\n  testDir: \"tests\",\n  workers: 1,\n  reporter: \"line\",\n  use: { baseURL: `http://127.0.0.1:${port}` },\n  webServer: { command: \"node support/server.js\", url: `http://127.0.0.1:${port}/health`, reuseExistingServer: false, timeout: 20000, env: { PORT: String(port) } },\n};\n",
+    );
+    project.write(
+        "tests/serial.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4]) {\n  test(`serial ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\n",
+    );
+    project.write(
+        "tests/other.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"other\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n});\n",
+    );
+    // Two slots, each a `playwright test` of its own share with its own
+    // server; each lists its share first, as a harness that shares tests out
+    // does.
+    project.write(
+        "harness.mjs",
+        &format!(
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/other.spec.js\"]];\nconst codes = await Promise.all(slots.map(([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{ for (const line of String(chunk).split(\"\\n\")) if (line.trim()) console.log(`[slot ${{at + 1}}] ${{line}}`); }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => done(code ?? 1));\n  }});\n}}));\nprocess.exit(Math.max(...codes));\n",
+            ports[0], ports[1]
+        ),
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright spread");
+    let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
+    project
+        .supercov_with(
+            &["--", "node", "harness.mjs"],
+            &[roots, ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let out = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[
+            roots,
+            ("SUPERCOV_VERBOSE", "1"),
+            ("SUPERCOV_PROGRESS_INTERVAL_MS", "300"),
+        ],
+    );
+    let said = format!("{}\n{}", out.stdout(), out.stderr());
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap().clone();
+    let context = format!(
+        "{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The second slot ran the serial file too, and said so.
+    assert!(
+        said.contains("[slot 2] [supercov] strong pass: 1 spec file(s) with a serial describe run in this invocation too, each taking its own mutants of them: tests/serial.spec.js"),
+        "{context}"
+    );
+    let serial_in_second = said
+        .lines()
+        .filter(|line| line.starts_with("[slot 2] [supercov] public/log.js:"))
+        .filter(|line| line.contains(": \"serial "))
+        .count();
+    assert!(serial_in_second >= 1, "{context}");
+    // Its list was the slot's own file alone.
+    assert!(said.contains("[list 2] "), "{context}");
+    assert!(
+        !said
+            .lines()
+            .any(|line| line.starts_with("[list 2] ") && line.contains("serial.spec.js")),
+        "{context}"
+    );
+    // Each mutant met each candidate once, whichever slot ran it, and
+    // survived all five.
+    let on_log = mutants
+        .iter()
+        .filter(|mutant| mutant["id"].as_str().unwrap().starts_with("public/log.js:"))
+        .collect::<Vec<_>>();
+    assert_eq!(on_log.len(), 3, "{context}");
+    for mutant in on_log {
+        let id = mutant["id"].as_str().unwrap();
+        assert_eq!(mutant["strong"]["status"], "survived", "{context}");
+        assert_eq!(mutant["strong"]["tests"], 5, "{context}");
+        let mut ran = said
+            .lines()
+            .filter_map(|line| line.split("[supercov] ").nth(1))
+            .filter(|line| line.starts_with(&format!("{id}: \"")) && line.contains("\" lives ("))
+            .map(|line| line.split('"').nth(1).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        ran.sort();
+        assert_eq!(
+            ran,
+            ["other", "serial 1", "serial 2", "serial 3", "serial 4"],
+            "{id}\n{context}"
+        );
+    }
+    // Nothing was confined to one slot.
+    assert!(
+        !said.contains("has a serial describe, and 1 of the"),
+        "{context}"
+    );
 }
 
 /// A measured Playwright run's plan carries each test's span, from the

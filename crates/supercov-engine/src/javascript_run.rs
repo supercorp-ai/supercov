@@ -995,8 +995,6 @@ fn run_javascript(
     );
     if let Some(strong) = &request.strong {
         overrides.insert("SUPERCOV_STRONG".into(), "1".into());
-        // A harness may give a spec file to several of its invocations.
-        overrides.insert(crate::strong_driver::STRONG_SPREAD.into(), "1".into());
         overrides.insert(
             "SUPERCOV_STRONG_PLAN".into(),
             strong.plan.display().to_string(),
