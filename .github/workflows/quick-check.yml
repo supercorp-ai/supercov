@@ -41,10 +41,6 @@ jobs:
     # main and a release branch run the full matrix already.
     if: github.ref_name != 'main' && !startsWith(github.ref_name, 'release/')
     name: Quick check (${{ matrix.os }})
-    # A release pull request runs the whole matrix once; the quick check's
-    # picks there (gate scripts that need a release build or browsers this
-    # job does not set up) only fail for want of them.
-    if: ${{ !startsWith(github.head_ref, 'release/') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
