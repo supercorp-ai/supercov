@@ -521,8 +521,10 @@ fn server_runs(raw: &RawTestResult) -> ServerRuns<'_> {
 }
 
 /// For a record no test was credited with: each point its servers ran, with
-/// the moments requests that named no test ran it, or `None` where some of
-/// that work was no request's, kept no time, or the record ran the point
+/// the moments requests that named no test ran it while a test of that server
+/// ran (`coverage_report::REQUEST_DURING_TESTS`), or `None` where some of that
+/// work was no request's, came while no test of its server ran (a readiness
+/// check, `REQUEST_OUTSIDE_TESTS`), kept no time, or the record ran the point
 /// outside its servers too (a test runner's own process, a page). Built only
 /// for such records; a test's own record needs none.
 type RequestTimes<'r> = HashMap<&'r str, Option<Vec<i64>>>;
@@ -535,7 +537,9 @@ fn request_times(raw: &RawTestResult) -> RequestTimes<'_> {
         .filter(|record| record.record_type == "hit")
     {
         if let Some(id) = &record.id {
-            let at = record.request.and(record.timestamp_ms);
+            let at = (record.request == Some(crate::coverage_report::REQUEST_DURING_TESTS))
+                .then_some(record.timestamp_ms)
+                .flatten();
             let seen = times.entry(id.as_str()).or_insert_with(|| Some(Vec::new()));
             match (seen.as_mut(), at) {
                 (Some(moments), Some(at)) => moments.push(at),
@@ -1447,20 +1451,24 @@ mod tests {
             ..server_hit(id, request)
         };
         let mut background = record("bg", "background", None, &["runner"]);
+        let during = Some(crate::coverage_report::REQUEST_DURING_TESTS);
+        let outside = Some(crate::coverage_report::REQUEST_OUTSIDE_TESTS);
         background.server = vec![
-            // Two requests, at 150 (a and b ran) and 450 (d ran).
-            at("hook", Some(0), Some(150)),
-            at("hook", Some(0), Some(450)),
-            // One while no test ran.
-            at("between", Some(0), Some(150)),
-            at("between", Some(0), Some(250)),
+            // Two requests while tests of their server ran, at 150 (a and b
+            // ran) and 450 (d ran).
+            at("hook", during, Some(150)),
+            at("hook", during, Some(450)),
+            // One while no test of its server ran (a readiness check while
+            // another server's tests ran).
+            at("between", during, Some(150)),
+            at("between", outside, Some(150)),
             // The server's start: no request.
             at("start", None, Some(1)),
-            at("start", Some(0), Some(150)),
+            at("start", during, Some(150)),
             // A request that kept no time.
-            at("untimed", Some(0), None),
+            at("untimed", during, None),
             // A request, and the test runner's own process too.
-            at("runner", Some(0), Some(150)),
+            at("runner", during, Some(150)),
         ];
         let raw_results = vec![
             background,
