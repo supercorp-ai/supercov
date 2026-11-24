@@ -559,6 +559,10 @@ phpunit`). See `docs/design/strong-mutation.md`,
 - `--budget <seconds>` stops the pass once it is spent: it ends as a finished
   pass, its verdicts saved, and says how many mutants it left for the next.
   The cheapest mutants run first, by their tests' recorded times.
+- `--timeout-factor <x>`: a Playwright test that runs with a mutant is
+  stopped past x times its baseline + 5 s (default 1.5, StrykerJS's), and the
+  mutant is a `timeout`. `SUPERCOV_STRONG_TIMEOUT_FACTOR` sets it where the
+  option is not given.
 - After an edit, `supercov mutants` measures the checkout again and keeps an
   earlier run's verdict for each mutant whose file is as it was and whose
   candidate tests, and their test files, nothing changed could reach (as
@@ -1316,6 +1320,7 @@ terminal or offline environment after the package has been downloaded.
 | `SUPERCOV_KEEP_WORKSPACE` | Set to `1` to leave the instrumented copy of the project in `.supercov/workspaces/` after the run, to inspect what the command ran |
 | `SUPERCOV_MUTANTS` | Set to `1` to measure a run with the probes that record the values its mutants' verdicts read, and list its mutants as it runs (see [Mutants](#mutants)); a plain run lists none and places no probe |
 | `SUPERCOV_STRONG_WORKERS` | How many test processes a JavaScript or Python strong pass runs at once (default: about one per CPU) |
+| `SUPERCOV_STRONG_TIMEOUT_FACTOR` | A Playwright strong pass's time limit for a test run with a mutant: this many times the test's baseline, + 5 s (default `1.5`; `--timeout-factor` overrides it) |
 | `SUPERCOV_COMMAND_TIMEOUT_MS` | Stop the test command after this many milliseconds: what is still running is asked to stop, then made to five seconds later, what ran is recorded, and Supercov exits `124`. No deadline by default |
 
 Examples:

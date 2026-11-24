@@ -16106,7 +16106,7 @@ fn a_javascript_run_whose_own_step_fails_says_so() {
             "spawn",
             // Supercov's own executable unresolved: no watchdog to contain
             // a crash.
-            "fs.canonicalize#main.rs:2678 => main.rs:2678",
+            "fs.canonicalize#main.rs:2679 => main.rs:2679",
             // The runtime the copy's sources load, read back to inline.
             "fs.read_to_string#javascript_frontend.rs:2057 => javascript_frontend.rs:2057",
         ],
@@ -23315,19 +23315,19 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     let route = strong("server/app.js", 9, ":EqualityOperator:!==");
     assert_eq!(route["status"], "killed", "{context}");
     assert_eq!(route["tests"], 1, "{context}");
-    // A page-side mutant, killed by the page: its assertion waits 12 s, its
-    // own timeout, longer than its measured time and the project's expect
-    // timeout allow (1.5 x under a second, + 5 s, + 5 s); the test's own
-    // timeout (30 s) is the floor, so it is a kill, not a timeout.
+    // A page-side mutant the page shows: its assertion would wait 12 s, its
+    // own timeout, but the attempt's limit (1.5 x its baseline + 5 s) ends
+    // it first, a timeout.
     let lower = strong("public/page.js", 2, ":MethodExpression:toLowerCase");
-    assert_eq!(lower["status"], "killed", "{context}");
+    assert_eq!(lower["status"], "timeout", "{context}");
     assert!(lower["killedBy"].as_str().is_some(), "{lower}\n{context}");
     assert!(
         lower["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("toHaveText")),
+            .is_some_and(|reason| reason.starts_with("ran past its time limit of ")),
         "{context}"
     );
+    assert!(lower["durationMs"].as_u64() < Some(12_000), "{context}");
     // Run, and no test tells: the log line. Its tests share the server's
     // fault switch with the @fault test, which the measured run never ran
     // beside them; neither does the strong pass, so nothing kills it.
@@ -23394,6 +23394,167 @@ fn mutants_test_runs_playwright_mutants_per_request_and_per_server_start() {
     });
     let _ = std::fs::remove_file(&served);
     assert!(shared, "{log}\n{context}");
+}
+
+/// A Playwright mutant attempt is stopped at its time limit, its test's
+/// baseline x 1.5 + 5 s: a mutant that keeps an element from appearing ends
+/// there as a `timeout`, though its test clicks with no timeout of its own
+/// and asks for 90 s; a slow test's limit grows with its baseline, so its
+/// survivor lives and its timeout waits longer; and the summary and the
+/// progress lines say so.
+#[cfg(unix)]
+#[test]
+fn a_playwright_attempt_ends_at_its_baseline_s_time_limit() {
+    let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node_modules");
+    let available = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; process.exit(existsSync(chromium.executablePath()) ? 0 : 1)"])
+        .current_dir(modules.parent().unwrap())
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            std::env::var_os("SUPERCOV_REQUIRE_BROWSER").is_none(),
+            "Playwright and Chromium are required"
+        );
+        eprintln!("skipping: Playwright or Chromium is unavailable");
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let project = Project::empty("strong-playwright-limit");
+    project.write(
+        "package.json",
+        r#"{ "name": "strong-playwright-limit", "private": true, "type": "module" }"#,
+    );
+    std::os::unix::fs::symlink(
+        modules.canonicalize().unwrap(),
+        project.root.join("node_modules"),
+    )
+    .unwrap();
+    project.write(".gitignore", "node_modules\n.supercov\n");
+    project.write(
+        "support/server.js",
+        "import http from \"node:http\";\nimport { readFileSync } from \"node:fs\";\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+    );
+    project.write(
+        "public/index.html",
+        "<!doctype html><body><script src=\"/ready.js\"></script></body>\n",
+    );
+    project.write(
+        "public/ready.js",
+        "function ready(flag) {\n  return flag === \"go\";\n}\nif (ready(\"go\")) {\n  const button = document.createElement(\"button\");\n  button.id = \"ready\";\n  document.body.append(button);\n}\n",
+    );
+    project.write(
+        "public/slow.html",
+        "<!doctype html><body><p id=\"slow\"></p><script src=\"/slow.js\"></script></body>\n",
+    );
+    project.write(
+        "public/slow.js",
+        "const box = document.getElementById(\"slow\");\nsetTimeout(() => {\n  box.textContent = \"Done\";\n  console.log(\"shown\");\n}, 3000);\n",
+    );
+    project.write(
+        "playwright.config.js",
+        &format!(
+            "export default {{\n  testDir: \"tests\",\n  workers: 2,\n  reporter: \"line\",\n  use: {{ baseURL: \"http://127.0.0.1:{port}\" }},\n  webServer: {{ command: \"node support/server.js\", url: \"http://127.0.0.1:{port}/health\", reuseExistingServer: false, timeout: 20000, env: {{ PORT: \"{port}\" }} }},\n}};\n"
+        ),
+    );
+    project.write(
+        "tests/ready.spec.js",
+        "import { test } from \"@playwright/test\";\ntest(\"clicks when ready\", async ({ page }) => {\n  test.setTimeout(90_000);\n  await page.goto(\"/\");\n  await page.locator(\"#ready\").click();\n});\n",
+    );
+    project.write(
+        "tests/slow.spec.js",
+        "import { test, expect } from \"@playwright/test\";\ntest(\"waits for the slow text\", async ({ page }) => {\n  await page.goto(\"/slow.html\");\n  await expect(page.locator(\"#slow\")).toHaveText(\"Done\", { timeout: 60_000 });\n});\n",
+    );
+    project.git(&["init", "-q"]);
+    project.commit("strong playwright limit");
+    let roots = [("SUPERCOV_SOURCE_ROOTS", "public")];
+    project
+        .supercov_with(
+            &["--", "npx", "playwright", "test"],
+            &[roots[0], ("SUPERCOV_MUTANTS", "1")],
+        )
+        .succeeds();
+    let ran = project.supercov_with(
+        &["runs", "latest", "mutants", "test", "--json"],
+        &[roots[0], ("SUPERCOV_PROGRESS_INTERVAL_MS", "300")],
+    );
+    let said = ran.stderr();
+    let reply = ran.json();
+    let listed = project
+        .supercov(&["runs", "latest", "mutants", "--json", "--limit", "0"])
+        .json();
+    let mutants = listed["data"]["mutants"].as_array().unwrap();
+    let context = format!(
+        "{reply}\n{}\n{said}",
+        mutants
+            .iter()
+            .map(|mutant| format!("{} {}", mutant["id"], mutant["strong"]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let strong = |file: &str, line: u32, ending: &str| {
+        let found = mutants
+            .iter()
+            .filter(|mutant| {
+                let id = mutant["id"].as_str().unwrap();
+                id.starts_with(&format!("{file}:{line}:")) && id.ends_with(ending)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "{file}:{line} {ending}\n{context}");
+        found[0]["strong"].clone()
+    };
+    let duration = |verdict: &serde_json::Value| verdict["durationMs"].as_u64().unwrap_or(0);
+    // The button never appears: the click waits until the limit, about
+    // 1.5 x a baseline of a second or two + 5 s, not the 90 s the test asked
+    // for nor Playwright's 30 s.
+    let never = strong("public/ready.js", 2, ":EqualityOperator:!==");
+    assert_eq!(never["status"], "timeout", "{context}");
+    assert!(
+        never["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("ran past its time limit of ")
+                && reason.contains("1.5 × its ")),
+        "{context}"
+    );
+    assert!(
+        (6_000..20_000).contains(&duration(&never)),
+        "{never}\n{context}"
+    );
+    // The slow test's baseline is over 3 s: its limit is longer, and the
+    // mutant that keeps its text from showing waits that long.
+    let blank = strong("public/slow.js", 3, ":StringLiteral:empty");
+    assert_eq!(blank["status"], "timeout", "{context}");
+    assert!(
+        (9_000..25_000).contains(&duration(&blank)),
+        "{blank}\n{context}"
+    );
+    // Slow but passing: no timeout.
+    let logged = strong("public/slow.js", 4, ":StringLiteral:empty");
+    assert_eq!(logged["status"], "survived", "{context}");
+    // The answer counts the timeouts at the limit and says the limit.
+    assert_eq!(reply["timeLimit"]["factor"], 1.5, "{context}");
+    assert!(
+        reply["timeLimit"]["timedOut"].as_u64() >= Some(2),
+        "{context}"
+    );
+    // While an attempt waits near its limit, the progress lines say so.
+    assert!(said.contains(", near its time limit: "), "{context}");
+    // The factor is the pass's to set: a factor no number is refused.
+    let refused = project.supercov_with(
+        &["runs", "latest", "mutants", "test"],
+        &[roots[0], ("SUPERCOV_STRONG_TIMEOUT_FACTOR", "slow")],
+    );
+    assert!(
+        refused
+            .stderr()
+            .contains("SUPERCOV_STRONG_TIMEOUT_FACTOR takes a number above 0, not slow"),
+        "{}",
+        refused.stderr()
+    );
 }
 
 /// A measured Playwright run's plan carries each test's span, from the
@@ -25092,12 +25253,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1545",
+            "fs.write#mutants_test_command.rs:1619",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1545"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1619"),
         "{}",
         unwritten.stderr()
     );
@@ -25345,7 +25506,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:303")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:346")],
         )
         .exits(2);
     assert!(

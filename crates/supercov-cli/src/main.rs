@@ -119,6 +119,7 @@ Settings, in the environment of the measured command (supercov docs cli says wha
   SUPERCOV_COMMAND_TIMEOUT_MS=<ms>     stop the test command after this long
   SUPERCOV_MUTANTS=1                   list mutants as the run measures, with their probes
   SUPERCOV_STRONG_WORKERS=<n>          forks a Python strong pass runs at once
+  SUPERCOV_STRONG_TIMEOUT_FACTOR=<x>   a Playwright mutant's limit: x times its baseline + 5 s
 
 Guides:
   supercov docs                        list bundled guides

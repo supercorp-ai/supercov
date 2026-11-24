@@ -224,6 +224,10 @@ npx supercov runs latest mutants test --plan --json
   [A pass split across jobs](#a-pass-split-across-jobs)).
 - `--budget <seconds>` stops the pass once that time is spent, its verdicts
   saved, and leaves the rest for the next pass.
+- `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) sets a
+  Playwright test's time limit when it runs with a mutant: x times its
+  baseline, + 5 s (default 1.5, StrykerJS's `timeoutFactor`). See
+  [Playwright](#javascript-and-typescript).
 - `--plan` prints what would run, and runs nothing.
 
 Some mutants no test can tell apart from the original. Accept them in
@@ -368,6 +372,16 @@ no mutants shows none of this.
   serves different mutants to different workers. A mutant of a server's
   start-up runs with the server started again for it. StrykerJS has no
   Playwright runner, so Playwright's verdicts are checked by hand (see below).
+  A test run with a mutant gets StrykerJS's time limit: its baseline (the
+  longest of its measured run and its runs without a mutant in the pass)
+  × 1.5 + 5 s, or its own timeout where that is shorter. Playwright's test
+  timeout is set to it, and a `test.setTimeout()` or `test.slow()` in the
+  test may shorten it but not lengthen it, so a click or an `expect` that
+  waits for an element the mutant broke ends there, not at its own 30 s. A
+  test that runs out of its limit makes its mutant a `timeout`, which counts
+  as detected; the summary says how many, and against what limit.
+  `--timeout-factor <x>` (or `SUPERCOV_STRONG_TIMEOUT_FACTOR`) changes the
+  1.5: a suite whose tests' times vary widely between runs may want 2 or 3.
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.

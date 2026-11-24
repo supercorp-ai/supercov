@@ -11,7 +11,7 @@
 // from whichever invocations ran it, and what was cut short is unfinished.
 import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, readJson, reasonOf, settleAttempt, strongPass, withoutCopy, writeJson } from "./playwrightStrong.mjs";
+import { attemptPath, baselineOf, entries, invocation, EVERYWHERE, firstWords, giveVerdict, key, loadPass, outcomeOf, placeOf, readJson, reasonOf, settleAttempt, strongPass, verdictOf, withoutCopy, writeJson } from "./playwrightStrong.mjs";
 
 // How often, at most, the status file is written.
 const STATUS_MS = 1_000;
@@ -61,7 +61,7 @@ export default class SupercovPlaywrightStrongReporter {
     constructor() {
         this.pass = strongPass();
         this.running = new Map();
-        this.counts = { baselines: 0, controls: 0, failedControls: 0, attempts: 0, killed: 0, passed: 0 };
+        this.counts = { baselines: 0, controls: 0, failedControls: 0, attempts: 0, killed: 0, timedOut: 0, passed: 0 };
         this.writtenAt = 0;
     }
     // It prints its own lines, and says it prints: Playwright adds a reporter
@@ -151,7 +151,13 @@ export default class SupercovPlaywrightStrongReporter {
             this.counts.passed += 1;
         else if (attempt.outcome === "failed")
             this.counts.killed += 1;
-        const said = attempt.outcome === "passed" ? "lives" : attempt.outcome === "failed" ? "fails" : attempt.outcome;
+        else if (attempt.outcome === "timed-out")
+            this.counts.timedOut += 1;
+        const said = {
+            "passed": "lives",
+            "failed": "fails",
+            "timed-out": `ran out of its ${seconds(attempt.limitMs)} limit (its baseline ${seconds(attempt.baselineMs)})`,
+        }[attempt.outcome] ?? attempt.outcome;
         console.log(`[supercov] ${attempt.id}: ${JSON.stringify(attempt.title)} ${said} (${took})`);
     }
     /**
@@ -177,6 +183,7 @@ export default class SupercovPlaywrightStrongReporter {
                 kind: attempt?.kind,
                 mutant: attempt?.id ?? undefined,
                 startedAt: attempt?.startedAt,
+                limitMs: attempt?.limitMs,
             };
         });
         try {
@@ -264,13 +271,13 @@ export default class SupercovPlaywrightStrongReporter {
         const rest = [];
         const aloneAgain = [];
         const aloneEach = [];
-        const next = (entry, reason, tests, budgetFactor = 1) => {
+        const next = (entry, reason, tests) => {
             const runnable = tests.filter((test) => baselineOf(pass, test) !== "failed");
             if (!runnable.length) {
                 write({ id: entry.id, status: "error", reason: "its candidate tests fail without any mutant", tests: 0, durationMs: 0 });
                 return;
             }
-            const job = { id: entry.id, mutant: entry.mutant, tests: runnable, reason, budgetFactor };
+            const job = { id: entry.id, mutant: entry.mutant, tests: runnable, reason };
             // What an alone round left runs alone again, as it was.
             if (kind === "alone")
                 aloneEach.push({ ...job, reason: entry.reason });
@@ -305,7 +312,8 @@ export default class SupercovPlaywrightStrongReporter {
             const own = byMutant.get(id) ?? [];
             const ended = own.filter((attempt) => attempt.endedAt !== undefined);
             const ranAway = own.find((attempt) => timedOut.has(attempt.attemptId) || timedOutAnywhere.has(entry.mutant));
-            const failed = ended.filter((attempt) => attempt.outcome === "failed");
+            // Kills, and attempts that ran out of their time limit.
+            const failed = ended.filter((attempt) => attempt.outcome === "failed" || attempt.outcome === "timed-out");
             const after = reasonOf(kind, entry.reason);
             const suffix = after ? `; ${after}` : "";
             const durationMs = ended.length
@@ -327,15 +335,12 @@ export default class SupercovPlaywrightStrongReporter {
             // kill on a server no other mutant's attempt shared.
             const killer = failed.find((attempt) => !attempt.beside && attempt.endedAt < trustedUntil);
             if (killer) {
-                verdict({ status: "killed", killedBy: killer.original, reason: `${killer.message ?? "the test failed"}${suffix}` });
+                const { status, reason } = verdictOf(killer);
+                verdict({ status, killedBy: killer.original, reason: `${reason}${suffix}` });
                 continue;
             }
             if (ranAway) {
                 verdict({ status: "timeout", killedBy: ranAway.original, reason: `evaluated past its hit limit${suffix}` });
-                continue;
-            }
-            if (existsSync(`${round}/held/${key(id)}`)) {
-                next(entry, "timeout-retry", entry.tests, 2 * (entry.budgetFactor ?? 1));
                 continue;
             }
             // Alone, the command failed outside any test: the mutant broke the
@@ -400,7 +405,7 @@ export default class SupercovPlaywrightStrongReporter {
         // command started with it.
         const takenAny = claimedBy.size > 0;
         for (const entry of aloneAgain)
-            (takenAny ? alone : aloneEach).push({ ...entry, budgetFactor: entry.budgetFactor ?? 1 });
+            (takenAny ? alone : aloneEach).push(entry);
         if (alone.length)
             write({ restart: { kind: "alone", everywhere: true, batch: true, reason: "server-wide", mutants: alone, otherRunners: work.otherRunners } });
         for (const job of aloneEach)
@@ -422,6 +427,8 @@ export default class SupercovPlaywrightStrongReporter {
             workerProcesses: new Set(attempts.map((attempt) => attempt.worker)).size,
             durationMs: Date.now() - started,
             attempts: mutated.length,
+            timedOut: mutated.filter((attempt) => attempt.outcome === "timed-out").length,
+            timeoutFactor: work.timeoutFactor,
             baselines: attempts.filter((attempt) => attempt.kind === "baseline").length,
             decided,
             next: { alone: alone.length, rest: rest.length, serial: serial.length },

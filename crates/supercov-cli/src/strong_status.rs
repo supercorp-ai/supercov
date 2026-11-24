@@ -37,6 +37,8 @@ pub(crate) struct Running {
     /// Its mutant, or what it runs without one (`baseline`, `control`).
     pub(crate) what: String,
     pub(crate) since: u64,
+    /// A mutant's time limit (ms from `since`), past which it is a timeout.
+    pub(crate) limit: Option<u64>,
 }
 
 fn number(value: &Value) -> u64 {
@@ -85,6 +87,7 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
                         .unwrap_or("starting")
                         .to_owned(),
                     since: number(&test["startedAt"]).max(number(&test["begunAt"])),
+                    limit: test["limitMs"].as_u64(),
                 });
             }
         });
@@ -133,9 +136,19 @@ pub(crate) fn lines(
         },
     )];
     for test in status.running.iter().take(RUNNING_SHOWN) {
+        let running = now.saturating_sub(test.since);
+        // A mutant's attempt says its limit, and when it nears it: a test
+        // that waits for what the mutant broke ends there, a timeout.
+        let limit = match test.limit {
+            Some(limit) if running.saturating_mul(4) >= limit.saturating_mul(3) => {
+                format!(" of {}, near its time limit", ago(limit))
+            }
+            Some(limit) => format!(" of {}", ago(limit)),
+            None => String::new(),
+        };
         lines.push(format!(
-            "[supercov]   running for {}: {:?} with {}",
-            ago(now.saturating_sub(test.since)),
+            "[supercov]   running for {}{limit}: {:?} with {}",
+            ago(running),
             test.title,
             test.what
         ));
@@ -150,7 +163,7 @@ pub(crate) fn lines(
             )
         } else {
             format!(
-                "[supercov]   nothing has ended for {}: a test runs until its time is up (each mutant's is its measured time and Playwright's own waits)",
+                "[supercov]   nothing has ended for {}: a test runs until its time is up (a mutant's is its test's baseline times the timeout factor, + 5 s)",
                 ago(quiet)
             )
         });
@@ -248,7 +261,7 @@ mod tests {
             serde_json::json!({ "round": "restart-0", "updatedAt": 30, "startedAt": 20,
                 "counts": { "baselines": 0, "attempts": 4, "controls": 2, "failedControls": 0 },
                 "firstMutantAt": 25, "lastEndedAt": 28,
-                "running": [{ "title": "pays", "mutant": "a.ts:1", "startedAt": 26, "begunAt": 25 }] }),
+                "running": [{ "title": "pays", "mutant": "a.ts:1", "startedAt": 26, "begunAt": 25, "limitMs": 9500 }] }),
         );
         write(
             "3.json",
@@ -273,17 +286,20 @@ mod tests {
                     Running {
                         title: "lists".into(),
                         what: "control".into(),
-                        since: 24
+                        since: 24,
+                        limit: None,
                     },
                     Running {
                         title: "pays".into(),
                         what: "a.ts:1".into(),
-                        since: 26
+                        since: 26,
+                        limit: Some(9_500),
                     },
                     Running {
                         title: "?".into(),
                         what: "starting".into(),
-                        since: 27
+                        since: 27,
+                        limit: None,
                     },
                 ],
             }
@@ -322,6 +338,7 @@ mod tests {
                     title: format!("t{at}"),
                     what: "a.ts:1".into(),
                     since: 90_000,
+                    limit: None,
                 })
                 .collect(),
         };
@@ -333,6 +350,20 @@ mod tests {
                 "[supercov]   running for 20s: \"t0\" with a.ts:1",
                 "[supercov]   running for 20s: \"t1\" with a.ts:1",
                 "[supercov]   running for 20s: \"t2\" with a.ts:1",
+            ]
+        );
+        // A mutant's attempt with its time limit, and one near it (three
+        // quarters of it gone).
+        status.running[0].limit = Some(80_000);
+        status.running[1].limit = Some(26_000);
+        status.running[2].limit = Some(27_000);
+        let limited = lines(Some(&status), 110_000, 3, None);
+        assert_eq!(
+            limited[1..],
+            [
+                "[supercov]   running for 20s of 1m20s: \"t0\" with a.ts:1",
+                "[supercov]   running for 20s of 26s, near its time limit: \"t1\" with a.ts:1",
+                "[supercov]   running for 20s of 27s: \"t2\" with a.ts:1",
             ]
         );
         status.failed_controls = 1;
