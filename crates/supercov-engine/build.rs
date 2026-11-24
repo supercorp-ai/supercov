@@ -73,9 +73,10 @@ fn compile_kotlin_grammar(crate_root: &Path) {
 /// `fault_sites.rs` for `crate::fault` to include. A line holding only
 /// `// fault-site: NAME` names the call on the line below it, so a test fails
 /// that call by its name however the lines above it move. A name is
-/// lowercase words joined by `-` and `.`. The build fails on a name given
-/// twice, a name that is no such word, or a comment with no code below it.
-/// (The CLI's build script holds the same function for its own sites.)
+/// lowercase words joined by `-` and `.`, with a `.` at least. The build
+/// fails on a name given twice, a name that is no such word, or a comment
+/// with no code below it. (The CLI's build script holds the same function
+/// for its own sites.)
 fn name_fault_sites(crate_root: &Path) {
     let source = crate_root.join("src");
     let mut files = Vec::new();
@@ -108,8 +109,10 @@ fn name_fault_sites(crate_root: &Path) {
             };
             assert!(
                 name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name.contains('.')
                     && name.split(['-', '.']).all(word),
-                "{place}: `{name}` is no fault site name: lowercase words joined by `-` and `.`"
+                "{place}: `{name}` is no fault site name: \
+                 lowercase words joined by `-` and `.`, with a `.` at least"
             );
             let below = lines.get(index + 1).map_or("", |line| line.trim());
             assert!(

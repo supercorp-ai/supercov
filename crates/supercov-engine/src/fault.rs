@@ -7,8 +7,7 @@
 //! varying number of files moves -- and `site#NAME` (or `site#NAME@M`) the
 //! call at the place a `// fault-site: NAME` comment on the line above it
 //! names, whatever order places are first called in, as threads working at
-//! once decide, and however the lines around it move (`site#file.rs:L`, the
-//! call made at line `L` of `file.rs`, is what names replace) --
+//! once decide --
 //! `site.operation` only the calls that make that operation (`fs.hard_link`,
 //! where the caller names what it does), and
 //! `site:E` (or `site:E=N`, `site:E@N`) fails it with errno `E` instead of
@@ -19,7 +18,28 @@
 //! Nth place there and not its parent's. A failing
 //! site does not make its call; it returns what the call returns when it
 //! fails, and says so on standard error (`test fault at <site>`), so a test
-//! knows the site was reached. Only debug builds read the variable: a release
+//! knows the site was reached.
+//!
+//! A test names a place, never its file and line: an edit above a call
+//! moves its line, and a test that pinned it failed for it, far from the
+//! edit. So a place a test fails is named where it is, on the line above
+//! the call (or above the call of a `#[track_caller]` helper that reaches
+//! the site, which is where the place is):
+//!
+//! ```text
+//! // fault-site: run-store.discover-runs
+//! for entry in fs::read_dir(&store)? {
+//! ```
+//!
+//! and `fs.read_dir#run-store.discover-runs` fails it. A name is lowercase
+//! words joined by `-` and `.`, with a `.` at least: the file's area, then
+//! what the call does there. Each crate's build script collects its names and
+//! fails the build when one is given twice; `scripts/check-fault-sites.mjs`
+//! (the lint job) holds them unique across crates, fails a test or script
+//! that names a site no comment gives, and fails a line pin. The message a
+//! failing place writes is `test fault at fs (NAME operation) at file.rs:L`:
+//! a test matches the name and operation, never the file and line after
+//! them, which are for a reader. Only debug builds read the variable: a release
 //! build has no such switch. The engine's own tests set faults for one thread with [`during`].
 //! Every part of it is compiled into every debug build alike: a part only
 //! the engine's test build had would make that build's coverage count lines
@@ -46,8 +66,6 @@ enum Named {
     /// The Nth place the site was called from, and those places so far, in
     /// the order they first called it.
     Nth(usize, std::sync::Mutex<Vec<Place>>),
-    /// The place at this line of a file of this name.
-    At(String, u32),
     /// The place a `// fault-site: NAME` comment names.
     Site(&'static Site),
 }
@@ -169,17 +187,10 @@ fn parse(text: &str) -> Vec<Fault> {
                     .or_else(|| count.parse().ok())
                     .or_else(|| (!place.is_empty()).then_some(1))
                     .map(std::sync::atomic::AtomicUsize::new),
-                place: match place.rsplit_once(':') {
-                    Some((file, line)) => line
-                        .parse()
-                        .ok()
-                        .map(|line| Named::At(file.to_owned(), line)),
-                    None if place.is_empty() => None,
-                    None => Some(match place.parse::<usize>() {
-                        Ok(nth) => Named::Nth(nth, std::sync::Mutex::new(Vec::new())),
-                        Err(_) => Named::Site(site_named(place)),
-                    }),
-                },
+                place: (!place.is_empty()).then(|| match place.parse::<usize>() {
+                    Ok(nth) => Named::Nth(nth, std::sync::Mutex::new(Vec::new())),
+                    Err(_) => Named::Site(site_named(place)),
+                }),
             }
         })
         .collect()
@@ -245,11 +256,11 @@ fn failing_at(site: &str, place: Option<Place>) -> Option<Option<i32>> {
 }
 
 /// Say that the call at `site` failed by request, and, when the site knows
-/// where the call was made, the name of that place and the operation
-/// (`test fault at fs (run-store.discover-runs read_dir)`), so a test can
-/// check it failed the call it meant to, then the file and line, for a
-/// reader only. A place no comment names gives its file and line where the
-/// name would be.
+/// where the call was made, the name of that place and the operation, then
+/// its file and line for a reader
+/// (`test fault at fs (run-store.discover-runs read_dir) at run_store.rs:L`),
+/// so a test can check it failed the call it meant to. A place no comment
+/// names gives the operation alone before its file and line.
 /// Written to the descriptor itself: a child forked to exec a command may not
 /// allocate or take the lock `eprintln!` takes, so the line is written as
 /// digits from the stack. Windows writes to the handle for the same reason:
@@ -280,11 +291,15 @@ fn announce(site: &str, place: Option<Place>) {
         }
         None => ("", "", None),
     };
-    let placed: [&[u8]; 9] = match (place, name) {
-        (Some(_), Some(name)) => [
+    let (name, space): (&[u8], &[u8]) = match name {
+        Some(name) => (name.as_bytes(), b" "),
+        None => (b"", b""),
+    };
+    let placed: [&[u8]; 9] = match place {
+        Some(_) => [
             b" (",
-            name.as_bytes(),
-            b" ",
+            name,
+            space,
             operation.as_bytes(),
             b") at ",
             file.as_bytes(),
@@ -292,18 +307,7 @@ fn announce(site: &str, place: Option<Place>) {
             &digits[first..],
             b"\n",
         ],
-        (Some(_), None) => [
-            b" (",
-            file.as_bytes(),
-            b":",
-            &digits[first..],
-            b" ",
-            operation.as_bytes(),
-            b")",
-            b"",
-            b"\n",
-        ],
-        (None, _) => [b"", b"", b"", b"", b"", b"", b"", b"", b"\n"],
+        None => [b"", b"", b"", b"", b"", b"", b"", b"", b"\n"],
     };
     #[cfg(unix)]
     [b"[supercov] test fault at ".as_slice(), site.as_bytes()]
@@ -370,13 +374,6 @@ fn take(faults: &[Fault], site: &str, place: Option<Place>) -> Option<Option<Opt
                     seen.push(place);
                 }
                 nth.checked_sub(1).and_then(|at| seen.get(at)) == Some(&place)
-                    && !count_down(&fault.skip)
-                    && fault.remaining.as_ref().is_none_or(count_down)
-            }
-            // A call from the place named by its file and line.
-            (Some(Named::At(file, line)), Some((location, _))) => {
-                location.file().rsplit(['/', '\\']).next() == Some(file.as_str())
-                    && location.line() == *line
                     && !count_down(&fault.skip)
                     && fault.remaining.as_ref().is_none_or(count_down)
             }
@@ -592,22 +589,6 @@ mod tests {
                 "{file} {relative}"
             );
         }
-    }
-
-    /// `site#file.rs:L` fails the call made at that line only, and with
-    /// `@M` its Mth.
-    #[test]
-    fn a_place_named_by_its_file_and_line_fails_there() {
-        #[rustfmt::skip]
-        let (line, call) = (line!(), || super::injected_here("t", "op"));
-        let calls = super::during(&format!("t#fault.rs:{line}@2"), || {
-            (0..3).map(|_| call()).collect::<Vec<_>>()
-        });
-        assert_eq!(calls, [false, true, false]);
-        let elsewhere = super::during(&format!("t#fault.rs:{}", line + 1), call);
-        assert!(!elsewhere);
-        let unplaced = super::during(&format!("t#fault.rs:{line}"), || super::injected("t"));
-        assert!(!unplaced);
     }
 
     /// `site#N@M` fails the Mth call from the Nth place only.
