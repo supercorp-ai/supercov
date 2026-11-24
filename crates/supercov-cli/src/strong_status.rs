@@ -39,6 +39,22 @@ pub(crate) struct DriverStatus {
     pub(crate) left_ms: Option<u64>,
     /// The tests with the most work left, the costliest first.
     pub(crate) costly: Vec<Costly>,
+    /// The serial files one invocation alone runs, where they hold the
+    /// round back.
+    pub(crate) confined: Vec<Confined>,
+}
+
+/// A spec file with a serial describe that only one of the round's
+/// invocations runs (a harness keeps such a file's tests together, in one
+/// slot), and what that costs: its mutants wait for that invocation alone.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Confined {
+    pub(crate) file: String,
+    /// How many mutants wait for its tests.
+    pub(crate) mutants: u64,
+    /// The time its invocation has left, and the most any other has.
+    pub(crate) left_ms: u64,
+    pub(crate) others_ms: u64,
 }
 
 /// A test with mutants waiting for it.
@@ -89,11 +105,26 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
         round,
         ..DriverStatus::default()
     };
+    // Each serial file's invocations, with their time left and its mutants.
+    let mut serial = std::collections::BTreeMap::<String, Vec<(usize, u64, u64)>>::new();
+    let mut lefts = Vec::new();
     // The latest's round has one file at least, the latest.
     files
         .iter()
         .filter(|file| file["round"].as_str().unwrap_or("main") == status.round)
         .for_each(|file| {
+            let invocation_left = number(&file["queued"]["leftMs"]);
+            lefts.push(invocation_left);
+            for held in file["queued"]["serial"].as_array().into_iter().flatten() {
+                serial
+                    .entry(held["file"].as_str().unwrap_or("?").to_owned())
+                    .or_default()
+                    .push((
+                        status.invocations,
+                        invocation_left,
+                        number(&held["mutants"]),
+                    ));
+            }
             let counts = &file["counts"];
             status.invocations += 1;
             status.baselines += number(&counts["baselines"]);
@@ -141,6 +172,28 @@ pub(crate) fn read(directory: &Path) -> Option<DriverStatus> {
         .costly
         .retain(|test| named.insert(test.title.clone()));
     status.costly.truncate(COSTLY_SHOWN);
+    // A serial file one invocation of several runs, where that invocation
+    // has more left than any other: the round's end waits on it.
+    for (file, held) in serial {
+        let [(invocation, left_ms, mutants)] = held[..] else {
+            continue;
+        };
+        let others_ms = lefts
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| *at != invocation)
+            .map(|(_, left)| *left)
+            .max()
+            .unwrap_or(0);
+        if status.invocations > 1 && left_ms > others_ms {
+            status.confined.push(Confined {
+                file,
+                mutants,
+                left_ms,
+                others_ms,
+            });
+        }
+    }
     Some(status)
 }
 
@@ -193,6 +246,19 @@ pub(crate) fn lines(
             test.waiting,
             ago(test.baseline_ms),
             ago(test.limit_ms)
+        ));
+    }
+    // A serial file only one invocation ran (the pass could not spread it:
+    // the others' commands named no spec file, or its text did not say it
+    // was serial): its mutants wait for that one, and the others end first.
+    for confined in &status.confined {
+        lines.push(format!(
+            "[supercov]   {:?} has a serial describe, and 1 of the {} invocations runs it: its {} mutant(s) wait about {} there, the others about {}; the pass spreads such a file only over invocations whose command names spec files",
+            confined.file,
+            status.invocations,
+            confined.mutants,
+            ago(confined.left_ms),
+            ago(confined.others_ms),
         ));
     }
     for test in status.running.iter().take(RUNNING_SHOWN) {
@@ -352,6 +418,7 @@ mod tests {
                 first_mutant_at: Some(22),
                 last_event_at: 28,
                 left_ms: Some(120_000),
+                confined: Vec::new(),
                 // The costliest first; a test two invocations name once,
                 // with its most work; three at most.
                 costly: vec![
@@ -405,6 +472,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A serial file only one invocation of several runs is named where
+    /// that invocation has the most left, with what its mutants wait and
+    /// the others have left; one several invocations run, one alone in a
+    /// round of one invocation, and one whose invocation ends first, are
+    /// not.
+    #[test]
+    fn a_serial_file_one_invocation_holds_is_named() {
+        let directory = scratch("serial");
+        let write = |name: &str, value: Value| {
+            std::fs::write(directory.join(name), value.to_string()).unwrap();
+        };
+        let invocation = |left: u64, serial: Value| {
+            serde_json::json!({ "round": "main", "updatedAt": 10, "counts": {},
+                "queued": { "leftMs": left, "tests": [], "serial": serial } })
+        };
+        write(
+            "1.json",
+            invocation(
+                720_000,
+                serde_json::json!([{ "file": "e2e/buy.spec.ts", "mutants": 37 },
+                    { "file": "e2e/shared.spec.ts", "mutants": 2 }]),
+            ),
+        );
+        write(
+            "2.json",
+            invocation(
+                60_000,
+                serde_json::json!([{ "file": "e2e/shared.spec.ts", "mutants": 3 },
+                    { "file": "e2e/quick.spec.ts", "mutants": 1 }]),
+            ),
+        );
+        write("3.json", invocation(30_000, Value::Null));
+        let status = read(&directory).unwrap();
+        assert_eq!(
+            status.confined,
+            [Confined {
+                file: "e2e/buy.spec.ts".into(),
+                mutants: 37,
+                left_ms: 720_000,
+                others_ms: 60_000,
+            }]
+        );
+        assert_eq!(
+            lines(Some(&status), 10, 1, None)[1],
+            "[supercov]   \"e2e/buy.spec.ts\" has a serial describe, and 1 of the 3 invocations runs it: its 37 mutant(s) wait about 12m00s there, the others about 1m00s; the pass spreads such a file only over invocations whose command names spec files"
+        );
+        // One invocation alone: nothing to share out.
+        let alone = scratch("serial-alone");
+        std::fs::write(
+            alone.join("1.json"),
+            invocation(
+                720_000,
+                serde_json::json!([{ "file": "e2e/buy.spec.ts", "mutants": 37 }]),
+            )
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read(&alone).unwrap().confined.is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&alone);
+    }
+
     /// Before any invocation began the command's last line is said, until a
     /// verdict comes; then what the round does, what runs, and whether it
     /// went quiet.
@@ -430,6 +559,7 @@ mod tests {
             last_event_at: 100_000,
             left_ms: None,
             costly: Vec::new(),
+            confined: Vec::new(),
             running: (0..4)
                 .map(|at| Running {
                     title: format!("t{at}"),

@@ -1788,6 +1788,41 @@ fn signal_process_group(child: &mut Child, signal: i32) {
     }
 }
 
+/// The process groups of the command's descendants other than its own (and
+/// this process's). A process that left the command's group outlives a
+/// signal to that group: Playwright starts its web server detached, in a
+/// group of its own, and stops it only as it ends itself, so a command
+/// ended before it could left the server running, its port taken for the
+/// next pass ("is already used").
+#[cfg(unix)]
+fn detached_groups(child: &Child) -> std::collections::BTreeSet<i32> {
+    groups_apart(&descendant_process_tree(child.id()), child.id() as i32)
+}
+
+/// The process groups of `processes` other than `own` and this process's
+/// own (which a signal must never reach): a process gone since the list
+/// was read has no group, and is left out.
+#[cfg(unix)]
+fn groups_apart(processes: &[ProcessSnapshot], own: i32) -> std::collections::BTreeSet<i32> {
+    // SAFETY: neither call takes a pointer; `getpgid` of a process that is
+    // gone fails (-1).
+    let ours = unsafe { libc::getpgrp() };
+    processes
+        .iter()
+        .map(|process| unsafe { libc::getpgid(process.pid as i32) })
+        .filter(|group| *group > 0 && *group != own && *group != ours)
+        .collect()
+}
+
+/// Sends `signal` to each of `groups`.
+#[cfg(unix)]
+fn signal_groups(groups: &std::collections::BTreeSet<i32>, signal: i32) {
+    for group in groups {
+        // SAFETY: as `signal_process_group`; a group gone since is no error.
+        let _ = unsafe { libc::kill(-group, signal) };
+    }
+}
+
 #[cfg(unix)]
 fn exit_parts(status: ExitStatus) -> (Option<i32>, Option<i32>) {
     use std::os::unix::process::ExitStatusExt;
@@ -1946,6 +1981,9 @@ impl ProcessSupervisor {
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
         let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
+        // The groups of the command's descendants that left its own, as
+        // the command was told to end: they are told too.
+        let mut detached = std::collections::BTreeSet::new();
         let mut timed_out = false;
         let mut interrupted_signal = None;
         let mut keyboard = Keyboard::default();
@@ -1992,7 +2030,9 @@ impl ProcessSupervisor {
                 && let Some(signal) = self.signals.received()
             {
                 interrupted_signal = Some(signal);
+                detached = detached_groups(child);
                 signal_process_group(child, signal.raw());
+                signal_groups(&detached, signal.raw());
                 termination = Some((now, Some(signal)));
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
@@ -2004,7 +2044,9 @@ impl ProcessSupervisor {
                         options.timeout.expect("timeout deadline").as_millis()
                     ),
                 );
+                detached = detached_groups(child);
                 signal_process_group(child, libc::SIGTERM);
+                signal_groups(&detached, libc::SIGTERM);
                 termination = Some((now, None));
                 write_diagnostic(child, started, verbose, writer);
             }
@@ -2019,6 +2061,7 @@ impl ProcessSupervisor {
                 // it is sent to: wait for it to go, and the next pass returns
                 // how it ended.
                 signal_process_group(child, libc::SIGKILL);
+                signal_groups(&detached, libc::SIGKILL);
                 let _ = child.wait();
                 continue;
             }
@@ -2762,6 +2805,101 @@ mod tests {
         assert!(result.timed_out);
         assert!(diagnostics.contains("command still running after"));
         assert!(diagnostics.contains("SUPERCOV_COMMAND_TIMEOUT_MS=70"));
+    }
+
+    /// A descendant that left the command's process group (a web server
+    /// started detached) is ended with the command: told to end as the
+    /// command is, it does not outlive it.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_in_a_group_of_its_own_ends_with_the_command() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-detached-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                format!(
+                    "perl -e 'setpgrp(0, 0); open(my $f, \">\", \"{}\"); print $f $$; close($f); sleep 30' & while :; do sleep 1; done",
+                    pid_file.display()
+                )
+                .into(),
+            ],
+            cwd: root.clone(),
+            environment: None,
+            captured_output: None,
+            console: None,
+        };
+        let options = SupervisionOptions {
+            diagnostic_interval: Duration::from_secs(60),
+            timeout: Some(Duration::from_millis(1_500)),
+            termination_grace: Duration::from_millis(200),
+        };
+        let result = supervise_command(&spec, options, &mut Vec::new()).unwrap();
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // Gone, or a zombie no one has reaped yet.
+        let alive = || {
+            let state = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the detached process {pid} outlived the command");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Of a list of processes, the groups apart: not the command's own, not
+    /// this process's (a signal there would end Supercov), and none for a
+    /// process that is gone.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_groups_apart_from_the_command_and_supercov_are_signalled() {
+        use std::os::unix::process::CommandExt;
+        let spawn = || {
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let (mut own, mut apart) = (spawn(), spawn());
+        let snapshot = |pid: u32| ProcessSnapshot {
+            pid,
+            parent_pid: std::process::id(),
+            state: None,
+            cpu_tenths: None,
+            executable: "sleep".into(),
+        };
+        let processes = [
+            snapshot(own.id()),
+            snapshot(apart.id()),
+            snapshot(std::process::id()),
+            // No such process.
+            snapshot(0x7fff_fff0),
+        ];
+        assert_eq!(
+            groups_apart(&processes, own.id() as i32),
+            [apart.id() as i32].into()
+        );
+        for child in [&mut own, &mut apart] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     #[cfg(windows)]

@@ -144,6 +144,14 @@ mutants the tests let survive.
   of the 450 s budget, which leaves the pass 140 s`). A measurement is never
   cut short, since one stopped halfway records nothing: one that outlasts the
   budget leaves the pass nothing, and the pass runs nothing.
+- **Partial progress.** A mutant a pass left open keeps the candidate tests
+  that already passed with it, saved with the run's verdicts, and the next
+  pass runs it only against the rest (`37 mutant(s) resume where earlier
+  passes left them, with 4 of 15 candidates left (the median)`): a kill needs
+  one failing candidate, a survivor every candidate passing, and the ones
+  that passed did. The candidates are kept as verdicts are, after an edit, a
+  merge and in a later round: a candidate a change could reach runs again.
+  The Playwright driver records them.
 - **Exit codes.** `0` with an answer; `1` when `--fail-on` or `--critical`
   finds a mutant; `2`, after the answer, when the measured command failed (a
   failing test kills nothing, so the verdicts cannot gate) or no mutant could
@@ -449,6 +457,19 @@ no mutants shows none of this.
   has left. A candidate in a project others start from (a login `setup`)
   never runs with a mutant: a mutant no other test kills is an `error` that
   says so.
+- **A harness with slots.** A harness may run several `playwright test`
+  processes at once (slots, each with its own server and database) and keep
+  a spec file with a serial describe whole, in one slot. In a strong pass
+  such a file runs in every slot whose command names spec files, and each
+  slot takes its own mutants of it from a queue the pass's slots share, so one
+  slot no longer runs all of them. Nothing in the harness or the command
+  changes: Supercov's preload adds the file to each invocation's file filters
+  before Playwright reads them, and leaves `--list` as it is. Each slot runs
+  the file's tests once without a mutant before its first mutant there. A
+  file it cannot spread (one that sets its serial mode in a helper of its
+  own) is named in the progress lines, with what it costs (`"e2e/buy.spec.ts"
+  has a serial describe, and 1 of the 6 invocations runs it: its 37 mutant(s)
+  wait about 12m00s there, the others about 1m00s`).
 - **Jest and Mocha** run in resident runners, as StrykerJS's do; `node:test`,
   AVA, node-tap, `bun:test` and Vitest Browser Mode run one test file per
   start of the command, with the mutant on from its start.

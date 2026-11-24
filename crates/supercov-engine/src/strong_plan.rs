@@ -177,7 +177,17 @@ pub struct StrongVerdicts {
     pub mutant_set: String,
     /// Each mutant's verdict, by its id.
     pub mutants: BTreeMap<String, Verdict>,
+    /// Partial progress: for each mutant with no verdict yet (or an
+    /// `error`), the ids of its candidate tests that already passed with it
+    /// switched on. A later pass runs it only against the rest of its
+    /// candidates (`docs/design/strong-mutation.md`, "Partial progress").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub progress: Progress,
 }
+
+/// A mutant's candidate tests that passed with it, by mutant id: what
+/// [`StrongVerdicts::progress`] holds.
+pub type Progress = BTreeMap<String, std::collections::BTreeSet<String>>;
 
 /// One mutant's strong verdict, as saved, and as a driver reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]

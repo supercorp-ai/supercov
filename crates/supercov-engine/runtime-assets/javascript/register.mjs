@@ -1086,6 +1086,14 @@ if (generatedPlaywrightConfig &&
         }
     }
     process.argv.push("--config", generatedPlaywrightConfig);
+    // A strong pass spreads its serial spec files over every invocation of
+    // Playwright that names spec files (playwrightStrong.mjs).
+    if (process.env.SUPERCOV_STRONG_PLAN) {
+        const strong = await import(__rewriteRelativeImportExtension(new URL("./playwrightStrong.mjs", import.meta.url)));
+        const spread = strong.spreadSerialFiles(process.argv, projectRoot ?? process.cwd());
+        if (spread.length)
+            console.log(`[supercov] strong pass: ${spread.length} spec file(s) with a serial describe run in this invocation too, each taking its own mutants of them: ${spread.join(", ")}`);
+    }
 }
 // A process the runner marked as not a test worker skips the wrapper, unless
 // it was started from Playwright's own files: a worker Playwright starts some

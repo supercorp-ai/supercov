@@ -296,7 +296,7 @@ function buildPass(pass, root, config) {
     const tests = {};
     plan.tests.forEach((test) => {
         if (test.runner === "playwright" && test.file)
-            tests[playwrightId(test)] = { file: test.file, title: test.title ?? null, durationMs: test.durationMs ?? null, jobs: 0 };
+            tests[playwrightId(test)] = { file: test.file, title: test.title ?? null, durationMs: test.durationMs ?? null, jobs: 0, planId: test.id };
     });
     // `workers` set only where the round runs one test at a time.
     const concurrency = { workers: undefined, serialFiles: serialFilesOf(plan, tests, fullyParallelOf(config)) };
@@ -536,6 +536,108 @@ function mutantOf(pass, id) {
     return mutantCache.get(id);
 }
 
+// `playwright test`'s options that take a value, one that may (it takes the
+// next argument unless that is an option), and the one that takes every
+// argument up to the next option: what tells a file filter from an option's
+// value.
+const VALUED_OPTIONS = new Set(["--browser", "-c", "--config", "-g", "--grep", "-G", "--grep-invert", "--global-timeout", "-j", "--workers", "--last-failed-file", "--max-failures", "--output", "--repeat-each", "--reporter", "--retries", "--run-agents", "--shard", "--test-list", "--test-list-invert", "--timeout", "--trace", "--tsconfig", "--ui-host", "--ui-port", "--update-source-method"]);
+const OPTIONAL_VALUE_OPTIONS = new Set(["--debug", "--only-changed", "-u", "--update-snapshots"]);
+const VARIADIC_OPTIONS = new Set(["--project"]);
+
+/** The file filters a `playwright test` command line names (the arguments after `test`). */
+export function fileFilters(args) {
+    const filters = [];
+    for (let at = 0; at < args.length; at++) {
+        const argument = args[at];
+        if (argument === "--")
+            break;
+        if (!argument.startsWith("-")) {
+            filters.push(argument);
+            continue;
+        }
+        if (argument.includes("="))
+            continue;
+        if (VALUED_OPTIONS.has(argument))
+            at += 1;
+        else if (OPTIONAL_VALUE_OPTIONS.has(argument) || VARIADIC_OPTIONS.has(argument)) {
+            while (at + 1 < args.length && !args[at + 1].startsWith("-")) {
+                at += 1;
+                if (!VARIADIC_OPTIONS.has(argument))
+                    break;
+            }
+        }
+    }
+    return filters;
+}
+
+/** A filter that matches one spec file, by its path from the project root, whatever the separator. */
+export function specFilter(file) {
+    const parts = file.split(/[\\/]/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return `/(?:^|[\\\\/])${parts.join("[\\\\/]")}$/`;
+}
+
+/** A spec file's text declares a serial describe. */
+const SERIAL_DECLARATION = /\.describe\.serial\b|\bmode\s*:\s*["'`]serial["'`]/;
+
+/**
+ * The spec files the pass spreads over its invocations: those with a serial
+ * describe whose tests some mutant still to run is a candidate of. Worked
+ * out once a pass, from its plan and the files' text, by the first
+ * invocation to start; the rest read it.
+ */
+function spreadFiles(pass, root) {
+    const saved = `${pass.shared}/spread-files.json`;
+    const known = readJsonOr(saved, undefined);
+    if (known)
+        return known;
+    const plan = readJson(pass.planPath);
+    const candidates = new Set();
+    for (const mutant of plan.mutants) {
+        if (mutant.decided || mutant.serverWide)
+            continue;
+        for (const candidate of mutant.candidates) {
+            const test = plan.tests[candidate.test];
+            if (test?.runner === "playwright" && test.file)
+                candidates.add(test.file);
+        }
+    }
+    const files = [...candidates].filter((file) => {
+        try {
+            return SERIAL_DECLARATION.test(readFileSync(resolve(root, file), "utf8"));
+        }
+        catch {
+            return false;
+        }
+    }).sort();
+    writeJson(saved, files);
+    return files;
+}
+
+/**
+ * Spreads a pass's serial spec files over every invocation that names spec
+ * files: a harness that shares tests out to several `playwright test`
+ * processes (slots, each with a server and a database of its own) keeps a
+ * file with a serial describe whole, in one of them, and that one slot ran
+ * every mutant of the file while the others ended early. The strong pass runs
+ * a serial describe as a default one and takes a mutant's claim on a test
+ * pass-wide, so the file runs in each slot, which takes its own mutants of it
+ * from the shared queue. Playwright reads its file filters from the command
+ * line before it loads any config, so the preload adds them to `argv`
+ * (`argv[2]` is `test`), before Playwright parses it. A command that names
+ * no file runs every file already; `--list` is left as it is (a harness
+ * shares its tests out from it). The files added, or none.
+ */
+export function spreadSerialFiles(argv, root) {
+    const pass = strongPass();
+    if (!pass || argv[2] !== "test" || argv.includes("--list"))
+        return [];
+    if (!fileFilters(argv.slice(3)).length)
+        return [];
+    const files = spreadFiles(pass, root);
+    argv.splice(3, 0, ...files.map(specFilter));
+    return files;
+}
+
 /**
  * Whether this process lists the tests (`playwright test --list`) rather
  * than run them: it reads no plan and writes nothing, and lists the
@@ -685,13 +787,35 @@ export function installCopies(baseTest) {
         }
         arrange(suite);
     };
-    prototype._describe = function (type, ...rest) {
-        return describe.call(this, type === "serial" ? "default" : type === "serial.only" ? "only" : type, ...rest);
+    prototype._describe = function (type, location, ...rest) {
+        if (type === "serial" || type === "serial.only")
+            declaredSerial(location);
+        return describe.call(this, type === "serial" ? "default" : type === "serial.only" ? "only" : type, location, ...rest);
     };
     prototype._configure = function (location, options) {
+        if (options?.mode === "serial")
+            declaredSerial(location);
         return configure.call(this, location, options?.mode === "serial" ? { ...options, mode: "default" } : options);
     };
     return true;
+}
+
+/**
+ * The spec files that declare a serial describe, as this process loaded
+ * them (the runner loads every file before its first test): a harness that
+ * keeps such a file's tests together gives it to one invocation, and the
+ * progress lines say what that costs.
+ */
+const SERIAL_FILES = Symbol.for("supercov.serialFiles");
+function declaredSerial(location) {
+    globalThis[SERIAL_FILES] ??= new Set();
+    if (location?.file)
+        globalThis[SERIAL_FILES].add(realFile(location.file));
+}
+
+/** Whether this process loaded `file` (a real path) with a serial describe in it. */
+export function serialFile(file) {
+    return Boolean(globalThis[SERIAL_FILES]?.has(realFile(file)));
 }
 
 let declaredCopies;
@@ -984,11 +1108,20 @@ function workLeft(pass, test) {
  * few tests, those whose runs left take longest. `held` are the tests the
  * invocation runs.
  */
-export function queuedWork(pass, work, held) {
+export function queuedWork(pass, work, held, serial = new Set()) {
     const settledNow = new Set([...entries(`${pass.shared}/verdicts`), ...entries(`${pass.round}/killed`)]);
     const claimed = new Map();
     const tests = [];
+    // Each serial file's mutants waiting for any of its tests.
+    const serialWaiting = new Map();
     let ms = 0;
+    // Every serial file this invocation runs, whether or not a mutant waits
+    // for it here now: which invocations run a file is what says it is
+    // confined to one.
+    for (const id of held) {
+        if (serial.has(id) && work.tests[id] && !serialWaiting.has(work.tests[id].file))
+            serialWaiting.set(work.tests[id].file, new Set());
+    }
     for (const id of held) {
         const test = work.tests[id];
         let waiting = 0;
@@ -998,8 +1131,11 @@ export function queuedWork(pass, work, held) {
                 continue;
             if (!claimed.has(at))
                 claimed.set(at, new Set(entries(`${pass.round}/claims/${at}`)));
-            if (!claimed.get(at).has(key(id)))
-                waiting += 1;
+            if (claimed.get(at).has(key(id)))
+                continue;
+            waiting += 1;
+            if (serial.has(id))
+                serialWaiting.get(test.file).add(at);
         }
         if (!waiting)
             continue;
@@ -1008,7 +1144,8 @@ export function queuedWork(pass, work, held) {
         tests.push({ title: test.title ?? id, waiting, baselineMs, limitMs: limitOf(baselineMs, work.timeoutFactor) });
     }
     tests.sort((a, b) => b.waiting * b.baselineMs - a.waiting * a.baselineMs || a.title.localeCompare(b.title));
-    return { ms, tests: tests.slice(0, COSTLY_SHOWN) };
+    const serialFiles = [...serialWaiting].map(([file, mutants]) => ({ file, mutants: mutants.size })).sort((a, b) => a.file.localeCompare(b.file));
+    return { ms, tests: tests.slice(0, COSTLY_SHOWN), ...(serialFiles.length ? { serial: serialFiles } : {}) };
 }
 
 /**
@@ -1170,6 +1307,10 @@ export function outcomeOf(status, errors) {
         return { outcome: "passed" };
     if (status === "skipped")
         return { outcome: "skipped" };
+    // Stopped from outside (the budget, a signal): it neither passed nor
+    // failed, and settles nothing.
+    if (status === "interrupted")
+        return { outcome: "interrupted" };
     if (errors.length > 0 && timeout(errors[0]))
         return { outcome: "timed-out", message };
     return { outcome: "failed", message };

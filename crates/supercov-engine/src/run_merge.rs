@@ -1230,7 +1230,13 @@ fn kept_verdicts(
             .filter(|(path, owner)| hashes[index].get(*path) != hashes[**owner].get(*path))
             .map(|(path, _)| path.clone())
             .collect::<BTreeSet<_>>();
-        lending.push((id.clone(), document.mutants, tests, other_bytes));
+        lending.push((
+            id.clone(),
+            document.mutants,
+            document.progress,
+            tests,
+            other_bytes,
+        ));
     });
     if lending.is_empty() {
         return notes;
@@ -1239,19 +1245,24 @@ fn kept_verdicts(
     let lent = lending
         .iter()
         .map(
-            |(_, verdicts, tests, other_bytes)| crate::strong_verdicts::Lent {
+            |(_, verdicts, progress, tests, other_bytes)| crate::strong_verdicts::Lent {
                 verdicts,
+                progress,
                 tests,
                 other_bytes,
             },
         )
         .collect::<Vec<_>>();
     let (mutants, taken) = crate::strong_verdicts::merged_verdicts(&plan, &lent);
+    // The candidates each mutant still open passed in any run: a pass over
+    // the merged run, or a later round carrying it over, resumes there.
+    let progress = crate::strong_verdicts::merged_progress(&plan, &lent, &mutants);
     let document = StrongVerdicts {
         schema_version: crate::strong_plan::STRONG_VERDICTS_SCHEMA_VERSION,
         run: merged_run_id.to_owned(),
         mutants,
         mutant_set: plan.mutant_set,
+        progress,
     };
     let from = lending
         .iter()
@@ -1269,13 +1280,14 @@ fn kept_verdicts(
     if planned > 0 {
         each.push(format!("{planned} the merged run's plan decides"));
     }
+    let resumed = crate::strong_verdicts::progress_note(&document.progress);
     notes.push(
         match crate::strong_verdicts::save(
             &directory.join(crate::strong_plan::STRONG_VERDICTS_FILE),
             &document,
         ) {
             Ok(()) => format!(
-                "{} strong verdict(s) kept from runs {from}: {}",
+                "{} strong verdict(s) kept from runs {from}: {}{resumed}",
                 document.mutants.len(),
                 each.join(", ")
             ),
