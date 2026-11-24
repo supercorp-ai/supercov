@@ -188,11 +188,9 @@ try {
     // each instance is handed the active mutant through its exports.
     // A switch that cannot read the pass's plan ends the pass, saying where.
     if (entry.suite === 'node:test') {
-      const strong = readFileSync(resolve(repository, 'crates/supercov-engine/src/rust_strong.rs'), 'utf8');
-      const line = strong.slice(0, strong.indexOf('crate::fault_fs::read(plan_path)')).split('\n').length;
-      const unread = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json'], { SUPERCOV_TEST_FAULT: `fs.read#rust_strong.rs:${line}` });
+      const unread = run(cwd, binary, ['runs', rust.id, 'mutants', 'test', '--json'], { SUPERCOV_TEST_FAULT: 'fs.read#rust-strong.switch-wasm.read' });
       assert.notEqual(unread.status, 0, `${unread.stdout}${unread.stderr}`);
-      assert.ok(unread.stderr.includes(`test fault at fs (rust_strong.rs:${line}`), unread.stderr);
+      assert.ok(unread.stderr.includes('test fault at fs (rust-strong.switch-wasm.read'), unread.stderr);
       assert.doesNotMatch(unread.stderr, /panicked/u, unread.stderr);
     }
     {
@@ -229,12 +227,12 @@ try {
     }
     if (entry.suite === 'node:test') {
       for (const [fault, place] of [
-        ['fs.read_dir#rust_run.rs:88', 'rust_run.rs:88'],
-        ['fs.canonicalize#source_capture.rs:25@2', 'source_capture.rs:25'],
-        ['fs.open#integrity.rs:427@3', 'integrity.rs:427'],
-        ['fs.read_to_string#rust_wasm.rs:309', 'rust_wasm.rs:309'],
+        ['fs.read_dir#rust-run.collect-project-inputs', 'rust-run.collect-project-inputs'],
+        ['fs.canonicalize#source-capture.capture.canonicalize-simplified-1@2', 'source-capture.capture.canonicalize-simplified-1'],
+        ['fs.open#integrity.digest-paths@3', 'integrity.digest-paths'],
+        ['fs.read_to_string#rust-wasm.read-records', 'rust-wasm.read-records'],
         // The wasm run's own publication: its work directory.
-        ['fs.create_dir_all#rust_wasm_evidence.rs:377', 'rust_wasm_evidence.rs:377'],
+        ['fs.create_dir_all#rust-wasm-evidence.publish', 'rust-wasm-evidence.publish'],
       ]) {
         const failed = run(cwd, binary, ['--', ...entry.command], { SUPERCOV_TEST_FAULT: fault });
         assert.notEqual(failed.status, 0, `${fault}\n${failed.stderr}`);
