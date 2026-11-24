@@ -751,6 +751,17 @@ from the project in a handful of files, and a file the measured run could
 leave without the runtime (an edge-runtime module) does not gain it. The
 command's log says `switches in N of M source file(s)`.
 
+**No type check in a strong build.** A strong pass's `next build` does not
+check types (`typescript.ignoreBuildErrors`, set by the preload where it
+already wraps Next's `loadConfig`). The check emits nothing the server runs,
+and says nothing of a mutant: Next's type-check worker reads the sources as
+their authors wrote them (the authored view, the switches left out), the
+checkout the measured run already built. On a large application's e2e suite
+it took 12 s of a 30 s build, once in every job of a pass split across jobs
+and before any of the job's tests could start. A measured run still checks:
+whether its command passes is the project's. Next says `Skipping validation
+of types` in the strong command's log.
+
 **Static mutants.** A mutant whose switch is evaluated while the module
 loads (no function or instance field initializer around it) carries
 `"static": true` in `mutants.json`.
@@ -1215,6 +1226,19 @@ the hit limit is a `timeout` at once. The verdict says the limit: `ran past
 its time limit of 9.5 s (1.5 × its 3.0 s baseline + 5 s)`; the summary counts
 such timeouts and states the factor, and the progress lines show each running
 attempt's limit and when it is near it.
+
+**No early end for an attempt that looks hung.** An attempt that has gone
+quiet (no request, no page activity) is not ended before its limit. It may
+still end otherwise: an `expect` with a timeout of its own fails it (a kill,
+not a timeout), and a timer in the page, the server or the test wakes it and
+it passes (a survivor). Nothing the pass can see tells those apart from a
+hang, so ending it early would change verdicts. Measured on a large
+application's e2e areas, timeouts are cheap already: each mutant timed out on
+its first candidate (one in about 300 ran out of its limit on two tests at
+once), 9.8 s on average, 1-25% of a job's mutant attempts' time. Most of a timeout's limit is the 5 s constant (a 1 s test's
+limit is 6.5 s); a tighter one where a test's runs vary little would likewise
+turn a mutant that slows its test by a few seconds from `survived` into
+`timeout`.
 
 This replaces a limit that was never shorter than the test's own timeout,
 plus the expect and action timeouts, with a second attempt, one test at a

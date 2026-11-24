@@ -80,3 +80,42 @@ test("a lockfile the project really has twice still warns, without the copy's", 
   assert.ok(!output.includes(".supercov/workspaces"), output);
   assert.match(output, /Warning: something else\n$/);
 });
+
+// Next's config module: `loadConfig` as Next declares and exports it.
+function configModule(copy) {
+  const file = resolve(copy, "node_modules/next/dist/server/config.js");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, [
+    '"use strict";',
+    "Object.defineProperty(exports, 'default', { enumerable: true, get: function() { return loadConfig; } });",
+    "async function loadConfig(phase, dir) { return { typescript: { tsconfigPath: 'tsconfig.json' } }; }",
+    "",
+    "//# sourceMappingURL=config.js.map",
+    "",
+  ].join("\n"));
+  writeFileSync(resolve(copy, "node_modules/next/dist/bin/next"), [
+    "require(process.argv[2]).default('phase-production-build', process.cwd())",
+    "  .then((config) => console.log(JSON.stringify(config.typescript)));",
+    "",
+  ].join("\n"));
+  return file;
+}
+
+function typescriptConfig(copy, environment) {
+  const result = spawnSync(process.execPath, [
+    `--import=${pathToFileURL(resolve(copy, ".supercov/node_modules/register.mjs")).href}`,
+    resolve(copy, "node_modules/next/dist/bin/next"),
+    resolve(copy, "node_modules/next/dist/server/config.js"),
+  ], { cwd: copy, encoding: "utf8", timeout: 15000, env: { ...process.env, SUPERCOV_STRONG: "", ...environment } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("a strong pass's next build does not check types, and a measured run's does", t => {
+  // The check took 12 s of a 30 s build in every job of a pass split across
+  // jobs, and says nothing of a mutant.
+  const { copy } = project(t);
+  configModule(copy);
+  assert.deepEqual(typescriptConfig(copy, { SUPERCOV_STRONG: "1" }), { tsconfigPath: "tsconfig.json", ignoreBuildErrors: true });
+  assert.deepEqual(typescriptConfig(copy, {}), { tsconfigPath: "tsconfig.json" });
+});
