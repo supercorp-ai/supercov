@@ -15,17 +15,18 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: ~/.cache/supercov-ant
-        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}
+        key: apache-ant-${{ inputs.version }}-jars-3-${{ runner.os }}
     - shell: bash
       env:
         VERSION: ${{ inputs.version }}
+        FETCH: ${{ github.action_path }}/../../fetch-verified.sh
       run: |
         kept="$HOME/.cache/supercov-ant"
         mkdir -p "$kept"
-        fetch() {
-          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 600 -o "$kept/$1.part" "$2" \
-            && mv "$kept/$1.part" "$kept/$1"
-        }
+        # Each download checked against the SHA-512 or SHA-1 its host
+        # publishes, and a refusal tried again after a growing wait:
+        # archive.apache.org answered 429 on 2026-11-23, and a body that is
+        # not the file is never unpacked or kept.
         # The release asked for, from Apache's CDN, then from its archive,
         # which keeps every release but answers slowly or not at all (it timed
         # out on 2026-11-05); and failing both, the CDN's current 1.10 release,
@@ -40,12 +41,12 @@ runs:
         done
         if [ -z "$zip" ]; then
           name="apache-ant-$VERSION-bin.zip"
-          fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name" \
-            || fetch "$name" "https://archive.apache.org/dist/ant/binaries/$name" \
-            || { name=$(curl -fsSL --retry 5 --connect-timeout 30 https://dlcdn.apache.org/ant/binaries/ \
+          bash "$FETCH" "https://dlcdn.apache.org/ant/binaries/$name" "$kept/$name" sha512 \
+            || bash "$FETCH" "https://archive.apache.org/dist/ant/binaries/$name" "$kept/$name" sha512 \
+            || { name=$(curl -q -fsSL --retry 5 --retry-all-errors --connect-timeout 30 https://dlcdn.apache.org/ant/binaries/ \
                    | grep -oE 'apache-ant-1\.10\.[0-9]+-bin\.zip' | sort -uV | tail -1) \
-                 && fetch "$name" "https://dlcdn.apache.org/ant/binaries/$name"; } \
-            || { echo "::error::Apache Ant could not be fetched"; exit 1; }
+                 && bash "$FETCH" "https://dlcdn.apache.org/ant/binaries/$name" "$kept/$name" sha512; } \
+            || { echo "::error::Apache Ant could not be fetched"; echo "SUPERCOV_INFRA_FAILURE=Apache Ant could not be fetched" >> "$GITHUB_ENV"; exit 1; }
           zip="$kept/$name"
         fi
         unzip -q -o "$zip" -d "$RUNNER_TEMP"
@@ -66,10 +67,8 @@ runs:
           org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar \
           org/testng/testng/6.14.3/testng-6.14.3.jar \
           com/beust/jcommander/1.72/jcommander-1.72.jar; do
-          if [ ! -s "$kept/$jar" ]; then
-            curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --create-dirs -o "$kept/$jar" \
-              "https://repo1.maven.org/maven2/$jar"
-          fi
+          bash "$FETCH" "https://repo1.maven.org/maven2/$jar" "$kept/$jar" sha1 \
+            || { echo "SUPERCOV_INFRA_FAILURE=$jar could not be fetched from Maven Central" >> "$GITHUB_ENV"; exit 1; }
           mkdir -p "$(dirname "$HOME/.m2/repository/$jar")"
           cp "$kept/$jar" "$HOME/.m2/repository/$jar"
         done
@@ -77,4 +76,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/supercov-ant
-        key: apache-ant-${{ inputs.version }}-jars-2-${{ runner.os }}
+        key: apache-ant-${{ inputs.version }}-jars-3-${{ runner.os }}

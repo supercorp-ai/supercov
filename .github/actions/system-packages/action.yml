@@ -47,6 +47,7 @@ runs:
           sleep 2
           sudo dpkg --configure -a || true
         done
+        echo "SUPERCOV_INFRA_FAILURE=the system packages did not install in six attempts" >> "$GITHUB_ENV"
         exit 1
     # Saved whether or not the install finished: what it fetched is the next
     # run's head start. apt wrote it as root.

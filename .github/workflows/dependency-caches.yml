@@ -1,0 +1,90 @@
+name: Dependency caches
+
+# What the tests' Maven and Gradle builds fetch, and Apache Ant with the jars
+# its tests use, kept in main's Actions cache. A pull request's runs can read
+# main's caches and their own, never another pull request's: with nothing on
+# main, the first round of every pull request fetched it all from Maven
+# Central and Apache, which refused with HTTP 429 often enough on 2026-11-23
+# to fail whole rounds. Each pull request's runs add what they fetch beyond
+# this to caches of their own (.github/actions/jvm-dependencies).
+#
+# The tests are run here for what they fetch, not for their verdicts: a test
+# failing does not fail this workflow, and CI and Compatibility judge them.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/jvm-dependencies/**
+      - .github/actions/apache-ant/**
+      - .github/fetch-verified.sh
+      - .github/workflows/dependency-caches.yml
+  # Weekly as well: a cache nothing reads for seven days is evicted, and new
+  # tests fetch new things.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-caches-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jvm:
+    name: JVM dependencies (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every platform a pull request's JVM tests run on.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
+      - uses: ./.github/actions/apache-ant
+      - name: Fetch the JUnit Platform console runner
+        shell: bash
+        run: |
+          path=org/junit/platform/junit-platform-console-standalone/1.10.2/junit-platform-console-standalone-1.10.2.jar
+          bash .github/fetch-verified.sh "https://repo1.maven.org/maven2/$path" "$HOME/.m2/repository/$path" sha1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The Rust cache the Compatibility jobs restore, on main too: a pull
+          # request's first run compiled everything from nothing.
+          shared-key: compatibility
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - run: npm ci
+      # What Compatibility's JDK jobs run.
+      - run: npm run test:jvm
+        continue-on-error: true
+      # The CLI's tests, which build Maven and Gradle projects of their own,
+      # as CI's check and Compatibility's filesystem jobs run them.
+      - run: cargo nextest run -p supercov --no-fail-fast
+        continue-on-error: true
+      # The scripts engine-integrations runs that build with Maven.
+      - if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          node scripts/java-syntax-zoo.mjs || true
+          node scripts/mutation-report-formats.mjs || true
+          node scripts/assertions-integration.mjs || true
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
