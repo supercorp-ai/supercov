@@ -27216,11 +27216,29 @@ fn an_interrupted_javascript_pass_leaves_no_process_running() {
 /// `SUPERCOV_TEST_MARKER` first.
 #[cfg(unix)]
 fn vitest_slow_project(label: &str) -> Project {
+    vitest_slow_project_waiting(label, 0)
+}
+
+/// `vitest_slow_project`, its slow test also taking `unmutated_ms` without
+/// a mutant: a mutant's test is given three times its measured time and
+/// 10 s more, so the longer it takes, the later slow.js's mutants are
+/// judged timeouts.
+#[cfg(unix)]
+fn vitest_slow_project_waiting(label: &str, unmutated_ms: u64) -> Project {
     let project = vitest_mutants_project(label);
     project.write("src/slow.js", "export const twice = (n) => n * 2;\n");
+    let unmutated = if unmutated_ms > 0 {
+        format!(
+            " else {{\n    await new Promise((done) => setTimeout(done, {unmutated_ms}));\n  }}"
+        )
+    } else {
+        String::new()
+    };
     project.write(
         "test/slow.test.js",
-        "import { renameSync, writeFileSync } from \"node:fs\";\nimport { expect, it } from \"vitest\";\nimport { twice } from \"../src/slow.js\";\nit(\"doubles\", async () => {\n  if (twice(2) !== 4) {\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {\n      writeFileSync(`${marker}.tmp`, String(process.pid));\n      renameSync(`${marker}.tmp`, marker);\n    }\n    await new Promise((done) => setTimeout(done, 300000));\n  }\n  expect(twice(2)).toBe(4);\n}, 300000);\n",
+        &format!(
+            "import {{ renameSync, writeFileSync }} from \"node:fs\";\nimport {{ expect, it }} from \"vitest\";\nimport {{ twice }} from \"../src/slow.js\";\nit(\"doubles\", async () => {{\n  if (twice(2) !== 4) {{\n    const marker = process.env.SUPERCOV_TEST_MARKER;\n    if (marker) {{\n      writeFileSync(`${{marker}}.tmp`, String(process.pid));\n      renameSync(`${{marker}}.tmp`, marker);\n    }}\n    await new Promise((done) => setTimeout(done, 300000));\n  }}{unmutated}\n  expect(twice(2)).toBe(4);\n}}, 300000);\n"
+        ),
     );
     project.commit("slow");
     project.supercov(&["--", "npx", "vitest", "run"]).succeeds();
@@ -27342,7 +27360,11 @@ fn a_vitest_pass_sent_a_signal_ends_in_seconds_with_what_it_decided_saved() {
 #[cfg(unix)]
 #[test]
 fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
-    let project = vitest_slow_project("strong-budget");
+    // Ten seconds without a mutant: slow.js's mutants are judged timeouts
+    // 40 s into their copies, well past the budget below. Given 13 s, the
+    // limit of a test that takes no time, they were judged before a slow
+    // runner's budget was spent.
+    let project = vitest_slow_project_waiting("strong-budget", 10_000);
     let slow_ids = || {
         saved_statuses(&project)
             .into_iter()
@@ -27370,9 +27392,10 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
     assert!(reply["result"].is_null(), "{reply}");
     assert!(slow_ids().is_empty(), "{:?}", slow_ids());
     // Long enough for cart.js's mutants, not for slow.js's, whose test waits
-    // five minutes. What cart.js's take is this machine's: a fixed twelve
-    // seconds decided only some of them on a busy macOS runner. Timed by a
-    // pass of their own, whose verdicts are then forgotten.
+    // five minutes and is judged a timeout 40 s in. What cart.js's take is
+    // this machine's: a fixed twelve seconds decided only some of them on a
+    // busy macOS runner. Timed by a pass of their own, whose verdicts are
+    // then forgotten.
     let timed = project.supercov(&[
         "runs",
         "latest",
@@ -27393,8 +27416,8 @@ fn a_budget_ends_the_pass_and_leaves_the_rest_for_the_next() {
             .join(format!(".supercov/runs/{run}/strong-mutation.json")),
     )
     .unwrap();
-    // Three times that beside slow.js's copies, and never near five minutes.
-    let budget = (cart_ms * 3 / 1000 + 10).min(120).to_string();
+    // Three times that beside slow.js's copies, and short of their 40 s.
+    let budget = (cart_ms * 3 / 1000 + 10).min(30).to_string();
     let second = project.supercov(&[
         "runs", "latest", "mutants", "test", "--budget", &budget, "--json",
     ]);
