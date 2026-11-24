@@ -1124,6 +1124,16 @@ one command measured on different machines and copied into one
 `.supercov/runs` replace none of each other: each is a share of the suite, and
 all are merged.
 
+A test whose records two runs hold byte for byte alike, once each run's id is
+the merge's, is kept once, from the first run, and so are an entry's records
+of no test (a server's background): a run made from another without measuring
+(a continuation round's shard) adds nothing to them, and the merge says how
+many copies it kept once (`3402 copy(ies) of records that an earlier run held
+byte for byte kept once, from that run`). A copy that differs in anything, a
+timestamp, a path the test took, an outcome, is kept beside the others, so
+nothing any run recorded is lost. Jobs that each measured the whole suite
+record each test with times of their own, and keep a copy each.
+
 The runs may differ in their tests, the helpers beside them, and the test
 runners' settings, as long as nothing that changed reaches what an earlier
 run's tests did. Measuring a new test alone and adding it to the runs before it
