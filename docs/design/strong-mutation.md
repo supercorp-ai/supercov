@@ -1260,7 +1260,7 @@ is no test's: with several tests running at once it is credited to none of
 them, and one of them may have sent it from a client that carries no scope
 (`curl` from the test). Each request runs with the mutant its own scope
 names, so a mutant switched on per request never reached it, and its
-candidates all passing proved nothing: on 4.29.8 and earlier such a mutant was
+candidates all passing proved nothing: before 4.29.10 such a mutant was
 `survived`. The run keeps, for work no test was credited with, whether a
 test was running when its request came (from each test's span, its first to
 its last moment, or its phases where it has none), and the plan marks the
@@ -1272,7 +1272,7 @@ where the module defines it at its top level (`export const GET = async ()
 => ...`, a handler in an object literal). The switch picks the arrow once, as
 the server loads the module, under whatever request loaded it, and every
 later request gets that arrow whatever mutant it names: such a mutant also
-survived on 4.29.8 and earlier. The strong build already marks such a switch
+survived before 4.29.10. The strong build already marks such a switch
 (`static` in the copy's list); the plan marks a mutant whose code a server
 ran (`serverRan`), and the driver runs a `static` one of those alone
 (`module-level`). A `static` mutant only a page ran stays per attempt: a

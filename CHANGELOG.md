@@ -1,15 +1,16 @@
 # Changelog
 
-## Unreleased
+## 4.29.10
 
 **Changed**
 
-- A strong pass's survivors that only change a log line are counted on their own: a mutant whose mutated span lies wholly inside the arguments of a call to `console.*`, or to a method named `info`, `warn`, `error`, `debug`, `trace` or `log` on any receiver. They are still `survived` and still count in the score; the pass summary says `survived 185 (109 only change a log line)` and lists the other survivors first, `mutants --status survived` marks each (`(only changes a log line)`, `logOnly` in JSON), and its `Strong` line counts them. On a large application's e2e areas they were 109 of 169 survivors in one and about 10 of 41 in another. A run listed before this release has none marked until its mutants are listed again.
+- A strong pass's survivors that only change a log line are counted on their own: a mutant whose mutated span lies wholly inside the arguments of a call to `console.*`, or to a method named `info`, `warn`, `error`, `debug`, `trace` or `log` on any receiver. They are still `survived` and still count in the score; the pass summary says `survived 185 (109 only change a log line)` and lists the other survivors first, `mutants --status survived` marks each (`(only changes a log line)`, `logOnly` in JSON), and its `Strong` line counts them. On a large application's e2e areas they were 109 of 169 survivors in one and about 10 of 41 in another; a pass of this release over another such area marked 75 of its 166 survivors (45%). A run listed before this release has none marked until its mutants are listed again.
 
 **Fixed**
 
 - A Playwright strong pass no longer calls a server mutant `survived` when the only request that reaches it names no test and was sent while tests ran: `curl` or another client a test starts outside Node, which carries no attempt's scope, so the mutant switched on per request never ran for it. The run now keeps whether a test was running when such a request came, and the mutant runs alone with the server started with it (`ran alone, with the server started with it switched on: its code ran for a request that named no test`). Requests a test sends from Playwright (`request.newContext()`, `page.request`, `route.fetch` in a `page.route` handler) or from Node (`fetch`, `http`) carry the scope, and a fixture test now holds each of them.
-- A Playwright strong pass no longer calls `survived` an arrow mutated whole (`() => undefined`) that a server module defines at its top level (`export const GET = async () => ...`, a handler in an object literal). Its switch is evaluated once, as the server loads the module, so no request's mutant reached it; such a mutant now runs alone with the server started with it (`it is a server module's top-level code`).
+- A Playwright strong pass no longer calls `survived` an arrow mutated whole (`() => undefined`) that a server module defines at its top level (`export const GET = async () => ...`, a handler in an object literal). Its switch is evaluated once, as the server loads the module, so no request's mutant reached it; such a mutant now runs alone with the server started with it (`it is a server module's top-level code`). With these two fixes, a pass over a large application's e2e area turned 3 of the 169 survivors 4.29.9 left there into kills, all of them module-level object literals in route modules.
+- Recording a release for the compatibility corpus right after it is published no longer fails when npm serves the release before its native packages: npx installed it without one, and every command said `the optional native package @supercov/cli-linux-x64-gnu@<version> is missing`. `scripts/compat-record.sh` now asks npx again, with fresh metadata and without the install it kept, until `supercov --version` runs, for at most about five minutes.
 
 ## 4.29.9
 
