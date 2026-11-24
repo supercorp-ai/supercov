@@ -19,11 +19,13 @@ destination=$2
 algorithm=$3
 bits=${algorithm#sha}
 
+# From standard input: given a name, GNU's tools start the line with a
+# backslash when the name holds one, as every Windows path does.
 digest() {
   if command -v "sha${bits}sum" > /dev/null 2>&1; then
-    "sha${bits}sum" "$1" | awk '{ print tolower($1) }'
+    "sha${bits}sum" < "$1" | awk '{ print tolower($1) }'
   else
-    shasum -a "$bits" "$1" | awk '{ print tolower($1) }'
+    shasum -a "$bits" < "$1" | awk '{ print tolower($1) }'
   fi
 }
 
@@ -45,7 +47,7 @@ for attempt in 1 2 3 4 5 6 7; do
     # The published checksum: the first word of the file beside the
     # download (Maven Central's hold the digest alone, Apache's add a name).
     status=$(get "$url.$algorithm" "$destination.sum")
-    [ "$status" = 200 ] && want=$(awk 'NR == 1 { print tolower($1) }' "$destination.sum")
+    [ "$status" = 200 ] && want=$(tr -d '\r' < "$destination.sum" | awk 'NR == 1 { print tolower($1) }')
     rm -f "$destination.sum"
   fi
   if [ -n "$want" ]; then
