@@ -944,6 +944,7 @@ fn build_test_artifacts(
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
         .env("RUSTFLAGS", capped_rustflags(project, lint_invocation))
+        // fault-site: rust-test-runner.build-test-artifacts
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -1095,8 +1096,10 @@ impl ArtifactLauncher {
             return Ok(Self::default());
         };
         let node_options = if target.target.starts_with("wasm32-") {
+            // fault-site: rust-test-runner.for-invocation-with.create-dir-all
             fs::create_dir_all(hook_directory).map_err(io_error)?;
             let hook = hook_directory.join("rust-wasm-node.mjs");
+            // fault-site: rust-test-runner.for-invocation-with.write
             fs::write(&hook, RUST_WASM_NODE_HOOK).map_err(io_error)?;
             let mut options = user_node_options.unwrap_or_default();
             if !options.is_empty() {
@@ -1265,6 +1268,7 @@ fn list_tests(
         .args(["--list", "--format", "terse"])
         .args(filters)
         .envs(environment.iter().map(|(key, value)| (key, value)))
+        // fault-site: rust-test-runner.list-tests
         .launch_output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -1567,6 +1571,7 @@ fn rustc_print_path(
         .args(selector)
         .args(["--print", request])
         .current_dir(&project.workspace_root)
+        // fault-site: rust-test-runner.rustc-print-path
         .launch_output()
         .map_err(|error| {
             RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))

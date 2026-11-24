@@ -321,6 +321,7 @@ fn instrument_sources(
             )
         })?;
         runtime_files().into_iter().try_for_each(|(name, contents)| {
+            // fault-site: go-run.instrument-sources.write-1
             write(&at.join(RUNTIME_DIRECTORY).join(name), contents)
         })?;
         runtimes.push((directory.clone(), format!("{module}/{RUNTIME_DIRECTORY}")));
@@ -371,6 +372,7 @@ fn instrument_sources(
                 .or_default()
                 .push(name);
         }
+        // fault-site: go-run.instrument-sources.write-2
         write(
             &path,
             &named_for_the_project(project_root, relative, &instrumented),
@@ -410,6 +412,7 @@ fn instrument_sources(
         })
         .collect();
     for (directory, package) in &source_packages {
+        // fault-site: go-run.instrument-sources.write-3
         write(
             &workspace.join(directory).join(PROBE_FILE),
             &probe_array_file(
@@ -524,6 +527,7 @@ fn instrument_workspace(
         let Some(package) = harness_package else {
             continue;
         };
+        // fault-site: go-run.instrument-workspace
         write(
             &workspace.join(&directory).join(HARNESS_FILE),
             &synthesized_harness(
@@ -743,6 +747,7 @@ pub fn current_go_integrity(
     command: &[String],
     source_roots: Option<&[String]>,
 ) -> Result<crate::run_store::RunIntegrity, String> {
+    // fault-site: go-run.current-go-integrity
     let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let files = crate::go_project::discover_go_files(&root)?;
     let mut inputs = go_integrity_inputs(&files, command);
@@ -1230,6 +1235,7 @@ impl GoServer {
             return Ok(None);
         }
         mains.into_iter().try_for_each(|(directory, _)| {
+            // fault-site: go-run.prepare.write
             write(
                 &workspace.join(directory).join(SERVER_FILE),
                 &format!(
@@ -1240,6 +1246,7 @@ impl GoServer {
             )
         })?;
         let directory = root.join(".supercov/work").join(run_id).join("go");
+        // fault-site: go-run.prepare.create-dir-all
         fs::create_dir_all(directory.join("evidence")).map_err(|error| error.to_string())?;
         Ok(Some(Self {
             project: sources.project,

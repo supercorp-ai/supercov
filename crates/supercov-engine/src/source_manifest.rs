@@ -378,6 +378,7 @@ fn load_optional_manifest(run: &StoredRun) -> Result<Option<RunManifest>, String
             .collect::<String>()
     };
     let (digest, _) =
+        // fault-site: source-manifest.load-optional-manifest
         crate::run_store::file_sha256(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = hex(digest);
     if let Some(cached) = fs::read(run.directory.join(MANIFEST_CACHE_FILE))
@@ -462,6 +463,7 @@ fn write_json(
 ) -> Result<(), String> {
     let mut bytes = serde_json::to_vec_pretty(value).expect("plain data serializes");
     bytes.push(b'\n');
+    // fault-site: source-manifest.write-json
     atomic_write(root, &run.directory.join(name), &bytes).map_err(|e| e.to_string())
 }
 /// Write the run's manifest cache and execution record into the unpublished
@@ -806,6 +808,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
         return affected_tests_of_merge(root, run);
     }
     let stored = load_manifest(run)?;
+    // fault-site: source-manifest.affected-tests.read-file
     let executions: Executions = fs::read(run.directory.join(EXECUTIONS_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -813,6 +816,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             "This run has no per-test execution record; rerun tests with this version of Supercov",
         )?;
     let executions = &executions;
+    // fault-site: source-manifest.affected-tests.canonicalize-simplified
     let root = crate::workspace::canonicalize_simplified(root).map_err(|e| e.to_string())?;
     let manifest = &stored.manifest;
     let now = manifest
@@ -824,6 +828,7 @@ pub fn affected_tests(root: &Path, run: &StoredRun) -> Result<Value, String> {
             if !canonical.starts_with(&root) || !canonical.is_file() {
                 return None;
             }
+            // fault-site: source-manifest.affected-tests.read-to-string
             let text = fs::read_to_string(canonical).ok()?;
             Some((file.clone(), FileFingerprint::read(file, &text)))
         })

@@ -178,6 +178,7 @@ fn read_journals(evidence_directory: &Path, wanted: impl Fn(&str) -> bool) -> Ve
     // How each attempt ended, where a record of the outcome alone says it
     // (Jest writes a test's evidence, then its reporter the outcome).
     let mut outcomes = BTreeMap::new();
+    // fault-site: served-tests.read-journals
     let Ok(entries) = crate::fault_fs::read_dir(evidence_directory) else {
         return Vec::new();
     };

@@ -209,6 +209,7 @@ struct Results {
 impl Results {
     fn create(path: &Path) -> Result<Self, String> {
         let file =
+            // fault-site: rust-strong.create
             crate::fault_fs::open_with(std::fs::OpenOptions::new().create(true).append(true), path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self {
@@ -285,11 +286,13 @@ fn discard(root: &Path, relative: &str) {
 fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32, String> {
     let started = Instant::now();
     let plan: Value = serde_json::from_slice(
+        // fault-site: rust-strong.pass.read
         &crate::fault_fs::read(&request.plan)
             .map_err(|e| format!("{}: {e}", request.plan.display()))?,
     )
     .map_err(|error| format!("{}: {error}", request.plan.display()))?;
     let results = Results::create(&request.results)?;
+    // fault-site: rust-strong.pass.canonicalize
     let root = crate::fault_fs::canonicalize(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let mut tests = planned_tests(&plan);
@@ -570,6 +573,7 @@ fn pass(request: &StrongRustRequest, diagnostics: &mut dyn Write) -> Result<i32,
         }
     }
     // Leave the plain copy as written.
+    // fault-site: rust-strong.pass.sync-project
     let _ = sync_project(&root, &places.plain);
 
     let counts = counts.into_inner().expect("counts");
@@ -607,6 +611,7 @@ fn planned_jobs(
         let file = planned["file"].as_str().unwrap_or_default().to_owned();
         let index = planned["index"].as_u64().unwrap_or(u64::MAX) as usize;
         let listed = sources.entry(file.clone()).or_insert_with(|| {
+            // fault-site: rust-strong.planned-jobs
             let source = crate::fault_fs::read_to_string(root.join(&file)).ok()?;
             let mutants = crate::rust_mutants::enumerate(&source)?;
             Some((source, mutants))
@@ -670,6 +675,7 @@ fn package_of(root: &Path, file: &str) -> Option<String> {
         .skip(1)
         .take_while(|directory| directory.starts_with(root))
     {
+        // fault-site: rust-strong.package-of
         let Ok(text) = crate::fault_fs::read_to_string(directory.join("Cargo.toml")) else {
             continue;
         };
@@ -825,6 +831,7 @@ fn cargo_build(
                     continue;
                 };
                 let source =
+                    // fault-site: rust-strong.cargo-build
                     crate::fault_fs::canonicalize(source).unwrap_or_else(|_| source.into());
                 let Ok(relative) = source.strip_prefix(workspace) else {
                     continue;
@@ -871,6 +878,7 @@ fn compile_error(message: &Value, workspace: &Path) -> CompileError {
             };
             let path = Path::new(file);
             let relative = if path.is_absolute() {
+                // fault-site: rust-strong.compile-error
                 crate::fault_fs::canonicalize(path)
                     .ok()
                     .and_then(|path| path.strip_prefix(workspace).ok().map(Path::to_path_buf))
@@ -908,6 +916,7 @@ fn switched_build(
     chosen: &[usize],
     invocation: &CargoTestInvocation,
 ) -> Result<(crate::rust_project::StrongWorkspace, BuildOutcome), String> {
+    // fault-site: rust-strong.switched-build
     sync_project(root, &places.switched)?;
     let mut by_file = BTreeMap::<String, Vec<(u64, RustMutant)>>::new();
     for at in chosen {
@@ -1096,6 +1105,7 @@ fn switch_wasm(
 ) -> Result<usize, String> {
     let started = Instant::now();
     let mut plan: Value = serde_json::from_slice(
+        // fault-site: rust-strong.switch-wasm.read
         &crate::fault_fs::read(plan_path).map_err(|e| format!("{}: {e}", plan_path.display()))?,
     )
     .map_err(|error| format!("{}: {error}", plan_path.display()))?;
@@ -1176,6 +1186,7 @@ fn switch_wasm(
     let target = scratch.join("target");
     let source_root = root.join(prefix);
     let build = |chosen: &[usize]| -> Result<_, String> {
+        // fault-site: rust-strong.switch-wasm.sync-project
         sync_project(&source_root, &checked)?;
         let prepared = crate::rust_project::prepare_rust_strong_project(&checked, &by_file(chosen))
             .map_err(|error| error.to_string())?;
@@ -1249,6 +1260,7 @@ fn switch_wasm(
         .as_array_mut()
         .expect("a plan with mutants of this workspace lists them")
         .retain(|mutant| !ours(mutant) || kept.contains(mutant["id"].as_str().unwrap_or("")));
+    // fault-site: rust-strong.switch-wasm.write
     crate::fault_fs::write(
         plan_path,
         serde_json::to_vec(&plan).expect("plain data serializes"),
@@ -1365,6 +1377,7 @@ fn build_alone(
     job: &Job,
     source: &str,
 ) -> Result<Result<Built, String>, String> {
+    // fault-site: rust-strong.build-alone.sync-project
     sync_project(root, &places.plain)?;
     let range = usize::from(job.mutant.range.start())..usize::from(job.mutant.range.end());
     let mutated = format!(
@@ -1374,8 +1387,10 @@ fn build_alone(
         &source[range.end..]
     );
     let path = places.plain.join(&job.file);
+    // fault-site: rust-strong.build-alone.write
     crate::fault_fs::write(&path, mutated)
         .map_err(|error| format!("{}: {error}", path.display()))?;
+    // fault-site: rust-strong.build-alone.canonicalize
     let workspace = crate::fault_fs::canonicalize(&places.plain)
         .map_err(|error| format!("{}: {error}", places.plain.display()))?;
     let mut project = crate::rust_project::PreparedRustProject::plain(workspace);
@@ -1450,6 +1465,7 @@ impl Nextest {
         ];
         let (kept, build) = Self::options(invocation);
         let metadata = target.join("supercov-nextest");
+        // fault-site: rust-strong.prepare.create-dir-all
         crate::fault_fs::create_dir_all(&metadata)
             .map_err(|e| format!("{}: {e}", metadata.display()))?;
         let binaries = metadata.join("binaries.json");
@@ -1476,6 +1492,7 @@ impl Nextest {
                 String::from_utf8_lossy(&listed.stderr).trim()
             ));
         }
+        // fault-site: rust-strong.prepare.write-1
         crate::fault_fs::write(&binaries, &listed.stdout)
             .map_err(|e| format!("{}: {e}", binaries.display()))?;
         let described = crate::child_signal_guard::output(
@@ -1490,6 +1507,7 @@ impl Nextest {
                 .current_dir(&project.workspace_root),
         )
         .map_err(|error| format!("cargo metadata: {error}"))?;
+        // fault-site: rust-strong.prepare.write-2
         crate::fault_fs::write(&cargo, &described.stdout)
             .map_err(|e| format!("{}: {e}", cargo.display()))?;
         let parsed: Value = serde_json::from_slice(&listed.stdout)
@@ -1499,6 +1517,7 @@ impl Nextest {
             .into_iter()
             .flatten()
             .filter_map(|(id, binary)| {
+                // fault-site: rust-strong.prepare.canonicalize
                 let path = crate::fault_fs::canonicalize(binary["binary-path"].as_str()?).ok()?;
                 Some((path, id.clone()))
             })
@@ -1548,6 +1567,7 @@ impl Nextest {
     fn command(&self, executable: &Path, name: &str) -> Option<Command> {
         let id = self
             .binary_ids
+            // fault-site: rust-strong.command
             .get(&crate::fault_fs::canonicalize(executable).ok()?)?;
         let mut command = Command::new(&self.program);
         command
@@ -1729,6 +1749,7 @@ fn timed_with_streams(command: &mut Command, limit: Duration) -> (Ran, String, S
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // fault-site: rust-strong.timed-with-streams
         .launch();
     let Ok(mut child) = child else {
         return (
@@ -2432,17 +2453,10 @@ mod tests {
         // A build the halving starts that cannot be made ends the pass: the
         // one with no suspect (the fourth), then the first of the halves.
         // Each build syncs its copy from one call, a directory at a time:
-        // the project's own four (itself, `src`, `tests`, `bin`). The needle
-        // is the call alone: a measured build wraps the `?` around it.
-        let text = include_str!("rust_strong.rs");
-        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
-        let sync = body[..body.find("sync_project(root, &places.switched)").unwrap()]
-            .matches('\n')
-            .count()
-            + 1;
+        // the project's own four (itself, `src`, `tests`, `bin`).
         for build in [4, 5] {
             let place = format!(
-                "fs.create_dir_all#rust_strong.rs:{sync}@{}",
+                "fs.create_dir_all#rust-strong.switched-build@{}",
                 4 * (build - 1) + 1
             );
             request.results = root.join(format!("halving-{build}.jsonl"));
@@ -2784,17 +2798,9 @@ mod tests {
             "{summary}"
         );
         // Where nextest's listing of the build cannot be kept, the pass ends.
-        let text = include_str!("rust_strong.rs");
-        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
-        let metadata = body[..body
-            .find("crate::fault_fs::create_dir_all(&metadata)")
-            .unwrap()]
-            .matches('\n')
-            .count()
-            + 1;
         request.results = root.join("unkept.jsonl");
-        let place = format!("fs.create_dir_all#rust_strong.rs:{metadata}");
-        let failed = crate::fault::during(&place, || run_strong_rust(&request, &mut Vec::new()));
+        let place = "fs.create_dir_all#rust-strong.prepare.create-dir-all";
+        let failed = crate::fault::during(place, || run_strong_rust(&request, &mut Vec::new()));
         assert!(failed.is_err(), "{place}: {failed:?}");
         // The build of a mutant on its own (the constant's) that nextest
         // cannot list ends the pass too.
@@ -2823,18 +2829,8 @@ mod tests {
             .clone()]);
         one["mutants"][0]["candidates"] = json!([{"test": 0}]);
         std::fs::write(&request.plan, serde_json::to_vec(&one).unwrap()).unwrap();
-        // Found in the code before the tests, by the call alone: a measured
-        // build wraps the `?` around it, and the needle is in this test too.
-        let text = include_str!("rust_strong.rs");
-        let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
-        let place = format!(
-            "fs.canonicalize#rust_strong.rs:{}@2",
-            body[..body.find("fault_fs::canonicalize(executable)").unwrap()]
-                .matches('\n')
-                .count()
-                + 1
-        );
-        crate::fault::during(&place, || run_strong_rust(&request, &mut Vec::new())).unwrap();
+        let place = "fs.canonicalize#rust-strong.command@2";
+        crate::fault::during(place, || run_strong_rust(&request, &mut Vec::new())).unwrap();
         std::fs::write(&request.plan, serde_json::to_vec(&plan).unwrap()).unwrap();
         assert!(
             verdicts(&request)
@@ -3116,26 +3112,13 @@ mod tests {
 
         // Its plan unread and unwritten, and a Cargo that does not start or
         // fails before compiling.
-        let text = include_str!("rust_strong.rs");
-        let body = &text[text.find("pub(crate) fn switch_wasm_workspace(").unwrap()
-            ..text.find("fn wasm_check(").unwrap()];
-        let offset = text[..text.find("pub(crate) fn switch_wasm_workspace(").unwrap()]
-            .lines()
-            .count();
-        for (operation, pattern) in [
-            ("read", "crate::fault_fs::read(plan_path)"),
-            ("write", "crate::fault_fs::write("),
+        for site in [
+            "fs.read#rust-strong.switch-wasm.read",
+            "fs.write#rust-strong.switch-wasm.write",
         ] {
-            let line = offset
-                + body
-                    .lines()
-                    .position(|line| line.contains(pattern))
-                    .unwrap()
-                + 1;
             std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
             std::fs::write(copy.join("web/rust/src/lib.rs"), &source).unwrap();
-            let site = format!("fs.{operation}#rust_strong.rs:{line}");
-            let failed = crate::fault::during(&site, || {
+            let failed = crate::fault::during(site, || {
                 switch_wasm_workspace(
                     &root,
                     "web/rust",
@@ -3149,16 +3132,10 @@ mod tests {
             assert!(failed.unwrap_err().contains("wasm-plan.json"), "{site}");
         }
         // A scratch copy that cannot be made ends the switch.
-        let scratch = offset
-            + body
-                .lines()
-                .position(|line| line.contains("sync_project(&source_root, &checked)"))
-                .unwrap()
-            + 1;
         std::fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
         std::fs::write(copy.join("web/rust/src/lib.rs"), &source).unwrap();
-        let site = format!("fs.create_dir_all#rust_strong.rs:{scratch}");
-        let failed = crate::fault::during(&site, || {
+        let site = "fs.create_dir_all#rust-strong.switch-wasm.sync-project";
+        let failed = crate::fault::during(site, || {
             switch_wasm_workspace(
                 &root,
                 "web/rust",
@@ -3359,9 +3336,9 @@ mod tests {
         assert!(said.contains("to build on their own"), "{said}");
 
         // Each place the pass reads, writes or starts something, failing:
-        // `sync_project`'s operations fail where it is called from. Every
-        // needle is a call as written, which a measured build keeps on its
-        // line though it wraps a `?` around it.
+        // `sync_project`'s operations fail where it is called from. Each such
+        // call is named by the comment above it, which every new one needs
+        // too, to be failed here.
         let text = include_str!("rust_strong.rs");
         let body = &text[..text.find("#[cfg(test)]\nmod tests").unwrap()];
         // The line a needle is on, wherever on it the needle starts.
@@ -3375,10 +3352,24 @@ mod tests {
                 .unwrap()
                 .lines()
                 .count();
+        // Each site with the line it is on: under nextest, only the places
+        // nextest reaches are failed.
         let mut sites = Vec::new();
-        for (number, line) in body.lines().enumerate() {
-            let place = format!("rust_strong.rs:{}", number + 1);
-            if line.contains("sync_project(") && !line.contains("fn sync_project") {
+        let lines = body.lines().collect::<Vec<_>>();
+        for (number, line) in lines.iter().enumerate() {
+            let synced = line.contains("sync_project(") && !line.contains("fn sync_project");
+            let called = !(sync_start..=sync_end).contains(&(number + 1))
+                && ["crate::fault_fs::", ".launch()"]
+                    .iter()
+                    .any(|pattern| line.contains(pattern));
+            if !synced && !called {
+                continue;
+            }
+            let name = lines[number - 1]
+                .trim()
+                .strip_prefix("// fault-site: ")
+                .unwrap_or_else(|| panic!("line {}, {line:?}, has no fault-site name", number + 1));
+            if synced {
                 // The copy's first directory, the first entry read, a
                 // directory inside, and a file written.
                 for operation in [
@@ -3390,42 +3381,34 @@ mod tests {
                     "write",
                 ] {
                     let (operation, nth) = operation.split_once("#").unwrap_or((operation, ""));
-                    sites.push(format!("fs.{operation}#{place}{nth}"));
+                    sites.push((number + 1, format!("fs.{operation}#{name}{nth}")));
                 }
             }
-            if (sync_start..=sync_end).contains(&(number + 1)) {
-                continue;
-            }
-            for (pattern, kind) in [("crate::fault_fs::", "fs."), (".launch()", "spawn")] {
-                if let Some(at) = line.find(pattern) {
-                    let operation = line[at + pattern.len()..]
-                        .split('(')
-                        .next()
-                        .unwrap_or_default();
-                    sites.push(if kind == "spawn" {
-                        format!("spawn#{place}")
-                    } else {
-                        format!("fs.{operation}#{place}")
-                    });
-                }
+            if called {
+                let site = match line.find("crate::fault_fs::") {
+                    Some(at) => {
+                        let operation = line[at + "crate::fault_fs::".len()..]
+                            .split('(')
+                            .next()
+                            .unwrap_or_default();
+                        format!("fs.{operation}#{name}")
+                    }
+                    None => format!("spawn#{name}"),
+                };
+                sites.push((number + 1, site));
             }
         }
         // Commands run to their output, by their order in a pass; `rustc
         // --print`; and the switched copy written.
-        let guard = include_str!("child_signal_guard.rs");
-        let output = line_of(guard, "pub fn output(") + 5;
-        let runner = include_str!("rust_test_runner.rs");
-        let printed = line_of(runner, "Command::new(\"rustc\")") + 4;
         for nth in 1..=8 {
-            sites.push(format!("spawn#child_signal_guard.rs:{output}@{nth}"));
+            sites.push((0, format!("spawn#child-signal-guard.output@{nth}")));
         }
         for nth in 1..=3 {
-            sites.push(format!("spawn#rust_test_runner.rs:{printed}@{nth}"));
+            sites.push((0, format!("spawn#rust-test-runner.rustc-print-path@{nth}")));
         }
-        let project = include_str!("rust_project.rs");
-        sites.push(format!(
-            "fs.write#rust_project.rs:{}",
-            line_of(project, "fs::write(&path, &file_switched.code)")
+        sites.push((
+            0,
+            "fs.write#rust-project.prepare-rust-strong-project.write-1".to_owned(),
         ));
         assert!(sites.len() > 10, "{sites:?}");
         // One copy for every fault, its plan without the mutant that runs to
@@ -3455,13 +3438,10 @@ mod tests {
                 .count();
         let nextest_sites = sites
             .iter()
-            .filter(|site| {
-                site.split_once("rust_strong.rs:")
-                    .and_then(|(_, line)| line.split('@').next()?.parse::<usize>().ok())
-                    .is_some_and(|line| (nextest_start..=nextest_end).contains(&line))
-            })
-            .cloned()
+            .filter(|(line, _)| (nextest_start..=nextest_end).contains(line))
+            .map(|(_, site)| site.clone())
             .collect::<Vec<_>>();
+        let sites = sites.into_iter().map(|(_, site)| site).collect::<Vec<_>>();
         assert!(nextest_sites.len() >= 5, "{nextest_sites:?}");
         for (command, sites) in [
             (&["cargo", "test"][..], &sites),

@@ -386,6 +386,7 @@ pub(crate) fn wasm_target_cfg(
     let output = std::process::Command::new("rustc")
         .args(["--print", "cfg", "--target", "wasm32-unknown-unknown"])
         .current_dir(crate_directory)
+        // fault-site: rust-worker.wasm-target-cfg
         .launch_output()
         .ok()?;
     target_cfg_of(&output)
@@ -848,6 +849,7 @@ struct Window {
 }
 
 fn read_windows(directory: &Path) -> Result<Vec<Window>, String> {
+    // fault-site: rust-worker.read-windows.read-dir
     let mut files = fs::read_dir(directory)
         .map(|entries| {
             entries
@@ -864,6 +866,7 @@ fn read_windows(directory: &Path) -> Result<Vec<Window>, String> {
     let mut windows = Vec::new();
     for file in &files {
         let text =
+            // fault-site: rust-worker.read-windows.read-to-string
             fs::read_to_string(file).map_err(|error| format!("{}: {error}", file.display()))?;
         // A line cut short by Supercov being stopped mid-write is skipped.
         for line in text.lines() {
@@ -1819,6 +1822,7 @@ pub fn materialize_worker_windows(
     let mut crates = std::collections::BTreeSet::new();
     for (number, file) in files.iter().enumerate() {
         let text =
+            // fault-site: rust-worker.materialize-worker-windows
             fs::read_to_string(file).map_err(|error| format!("{}: {error}", file.display()))?;
         for (line, value) in text
             .lines()
@@ -1860,6 +1864,7 @@ pub(crate) fn cargo_workspace_root(directory: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
         .current_dir(directory)
+        // fault-site: rust-worker.cargo-workspace-root
         .launch_output()
         .ok()?;
     if !output.status.success() {
@@ -3429,15 +3434,15 @@ mod tests {
             "[build]\ncommand = \"worker-build\"\n",
         )
         .unwrap();
-        let rustc = "spawn#rust_worker.rs:389";
+        let rustc = "spawn#rust-worker.wasm-target-cfg";
         assert!(crate::fault::during(rustc, || wasm_target_cfg(&package)).is_none());
         assert!(
             crate::fault::during(rustc, || worker_build_cfg(&package, &BTreeMap::new())).is_none()
         );
         assert_eq!(
-            crate::fault::during("spawn#rust_worker.rs:1863", || cargo_workspace_root(
-                &package
-            )),
+            crate::fault::during("spawn#rust-worker.cargo-workspace-root", || {
+                cargo_workspace_root(&package)
+            }),
             None
         );
         let refused = crate::fault::during("free-port", free_port).unwrap_err();

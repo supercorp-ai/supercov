@@ -30,6 +30,7 @@ pub fn decided_verdict(mutant: &PlannedMutant) -> Option<Verdict> {
 /// killed while it saves leaves the last whole save.
 pub fn save(path: &Path, document: &StrongVerdicts) -> Result<(), String> {
     let partial = path.with_extension("json.partial");
+    // fault-site: strong-verdicts.save
     crate::fault_fs::write(
         &partial,
         serde_json::to_vec_pretty(document).expect("plain data serializes"),
@@ -290,6 +291,7 @@ mod tests {
             statement: None,
             function: None,
             function_hit_by: BTreeMap::new(),
+            narrowed: None,
         }
     }
 

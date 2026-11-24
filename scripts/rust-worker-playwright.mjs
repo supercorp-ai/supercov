@@ -155,25 +155,25 @@ try {
   assert.doesNotMatch(unselected.stderr, /Rust Worker coverage|panicked/u, unselected.stderr);
   // Nor does one whose Worker ran but whose tests' journals cannot be
   // listed: there is no test to credit what it ran to.
-  const unjournaled = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#served_tests.rs:181' });
-  assert.ok(unjournaled.stderr.includes('test fault at fs (served_tests.rs:181'), unjournaled.stderr);
+  const unjournaled = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#served-tests.read-journals' });
+  assert.ok(unjournaled.stderr.includes('test fault at fs (served-tests.read-journals'), unjournaled.stderr);
   assert.doesNotMatch(unjournaled.stderr, /Rust Worker coverage|panicked/u, unjournaled.stderr);
 
   // The Worker run that cannot be published -- its work directory not
   // made -- ends the run, saying where, and keeps its evidence.
-  const unpublished = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.create_dir_all#rust_wasm_evidence.rs:377' });
+  const unpublished = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.create_dir_all#rust-wasm-evidence.publish' });
   assert.notEqual(unpublished.status, 0, unpublished.stderr);
-  assert.ok(unpublished.stderr.includes('test fault at fs (rust_wasm_evidence.rs:377'), unpublished.stderr);
+  assert.ok(unpublished.stderr.includes('test fault at fs (rust-wasm-evidence.publish'), unpublished.stderr);
   assert.doesNotMatch(unpublished.stderr, /panicked/u, unpublished.stderr);
 
   // A Worker whose windows cannot be listed read none, and with no
   // JavaScript source nothing is published; a window file that cannot be
   // read keeps the run's evidence and says so.
-  const unlisted = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#rust_worker.rs:851' });
+  const unlisted = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_dir#rust-worker.read-windows.read-dir' });
   assert.notEqual(unlisted.status, 0, unlisted.stderr);
-  assert.ok(unlisted.stderr.includes('test fault at fs (rust_worker.rs:851'), unlisted.stderr);
+  assert.ok(unlisted.stderr.includes('test fault at fs (rust-worker.read-windows.read-dir'), unlisted.stderr);
   assert.match(unlisted.stderr, /there was nothing to measure, and no run was published/u, unlisted.stderr);
-  const unread = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust_worker.rs:867' });
+  const unread = run(root, binary, ['--', 'npx', 'playwright', 'test'], { SUPERCOV_TEST_FAULT: 'fs.read_to_string#rust-worker.read-windows.read-to-string' });
   assert.notEqual(unread.status, 0, unread.stderr);
   assert.match(unread.stderr, /Rust Worker server's run could not be published/u, unread.stderr);
   assert.match(unread.stderr, /their evidence is kept at/u, unread.stderr);

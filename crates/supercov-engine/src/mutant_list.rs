@@ -454,6 +454,12 @@ pub struct CandidateMutant {
     /// test's reach (`clock`, `random`): a hint that changes no status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untestable: Option<StaticNote>,
+    /// A module-level mutant inside a literal a top-level declaration makes,
+    /// where nothing but reads of the literal can carry its value
+    /// (`js_value_reads`): the points a read of it hits, which narrow its
+    /// candidates to the tests that read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<ReadLink>,
     /// Strong mode (`js_schemata`): its switch is evaluated while the module
     /// loads, so a strong pass runs whole files for it.
     #[serde(default, rename = "static", skip_serializing_if = "std::ops::Not::not")]
@@ -462,6 +468,17 @@ pub struct CandidateMutant {
     /// `function-source`, `with-statement`, `node-not-found`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unplaceable: Option<String>,
+}
+
+/// The points of a module-level value's reads (`js_value_reads`): `read`
+/// is hit by a read of the mutant's place, `escape` by such a read made while
+/// a module loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadLink {
+    pub read: String,
+    pub escape: String,
 }
 
 /// A rule's stable code and the sentence that says why it applies.

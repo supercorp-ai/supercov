@@ -490,6 +490,7 @@ fn python_parse_with(source: &str, pyenv_version: Option<&str>) -> Option<Option
     if let Some(version) = pyenv_version {
         command.env("PYENV_VERSION", version);
     }
+    // fault-site: quality-candidates.python-parse-with
     let mut child = command.launch().ok()?;
     let _ = child
         .stdin

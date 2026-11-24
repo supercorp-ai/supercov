@@ -57,6 +57,7 @@ mod js_mutants;
 mod js_regex_mutants;
 mod js_schemata;
 mod js_static_mutants;
+mod js_value_reads;
 mod js_weak_mutation;
 pub mod jvm_instrumenter;
 pub mod jvm_project;

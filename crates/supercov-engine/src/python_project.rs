@@ -122,6 +122,7 @@ fn walk(
     files: &mut PythonFiles,
     all_python: &mut Vec<String>,
 ) -> Result<(), String> {
+    // fault-site: python-project.walk
     let mut entries = fs::read_dir(directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -266,6 +267,7 @@ fn prepare(
     let mut unparseable = Vec::new();
     for relative in &files.sources {
         let path = root.join(relative);
+        // fault-site: python-project.prepare
         let source = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         let Ok(source) = String::from_utf8(source) else {
             unparseable.push((relative.clone(), "source is not valid UTF-8".to_owned()));

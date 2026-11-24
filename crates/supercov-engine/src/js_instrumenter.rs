@@ -4352,7 +4352,15 @@ impl<'a> Visit<'a> for EqualityValueSites {
 }
 
 /// The runtime's probe helpers, in the order a file imports them.
-const PROBE_HELPERS: [&str; 5] = ["compareV2", "arithV2", "assignV2", "methodV2", "valueV2"];
+const PROBE_HELPERS: [&str; 7] = [
+    "compareV2",
+    "arithV2",
+    "assignV2",
+    "methodV2",
+    "valueV2",
+    "trackV2",
+    "resumeV2",
+];
 
 /// The probes' helpers, each named the first time a site of its kind is
 /// probed. Named with the file's other helpers' suffix counter and after
@@ -5863,6 +5871,17 @@ fn instrument_candidate_with_binding(
             ),
         )
     });
+    // The literals module-level mutants are read through, found on the
+    // program as written, where the probes are placed: a run without them
+    // records no read, and its mutants are linked to none.
+    let value_reads = match &mutant_facts {
+        Some((ledger, _)) if probes_enabled() => {
+            crate::js_value_reads::analyze(&parsed.program, source, file, ledger)
+        }
+        _ => crate::js_value_reads::ValueReads::default(),
+    };
+    let top_level_awaits =
+        probes_enabled() && crate::js_value_reads::awaits_at_top_level(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
         &allocator,
         &mut parsed.program,
@@ -6058,6 +6077,9 @@ fn instrument_candidate_with_binding(
     let try_targets = extra.allocate(&extended_analysis.try_targets, |target| {
         vec![target.first_id.clone(), target.second_id.clone()]
     });
+    // The reads' points, last: no other place moves for them.
+    let reads_base = extra.next();
+    extra.ids.extend(value_reads.ids.iter().cloned());
     let statement_targets = point_analysis
         .statement_targets
         .into_iter()
@@ -6275,7 +6297,29 @@ fn instrument_candidate_with_binding(
     if probes_enabled() {
         infection_transformer.visit_program(&mut parsed.program);
     }
-    let probe_helpers = infection_transformer.helpers.named;
+    let mut helpers = infection_transformer.helpers;
+    if !value_reads.nodes.is_empty() {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ReadTransformer {
+            ast,
+            file: probe_file_v2.clone(),
+            helper: &mut name,
+            base: reads_base,
+            nodes: &value_reads.nodes,
+            done: HashSet::default(),
+        }
+        .visit_program(&mut parsed.program);
+    }
+    if top_level_awaits {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ResumeTransformer {
+            ast,
+            file: probe_file_v2.clone(),
+            helper: &mut name,
+        }
+        .visit_program(&mut parsed.program);
+    }
+    let probe_helpers = helpers.named;
     let mutants = mutant_facts.map_or_else(Vec::new, |(ledger, facts)| {
         crate::js_mutant_links::link(
             file,
@@ -6288,6 +6332,7 @@ fn instrument_candidate_with_binding(
                 branches: &branches,
                 comparisons: &comparison_transformer.placed,
                 probes: &infection_transformer.placed,
+                reads: &value_reads.links,
             },
         )
     });
@@ -6415,6 +6460,26 @@ fn instrument_candidate_with_binding(
             false,
         )),
     );
+    // Where the probes are placed, the end of the module's top level: a
+    // read of a module-level value until then is one made as modules load
+    // (`js_value_reads`), from its registration on.
+    if probes_enabled() {
+        parsed.program.body.push(ast.statement_expression(
+            Span::default(),
+            ast.expression_call(
+                Span::default(),
+                Expression::from(ast.member_expression_static(
+                    Span::default(),
+                    ast.expression_identifier(Span::default(), ast.ident(&probe_file_v2)),
+                    ast.identifier_name(Span::default(), "loaded"),
+                    false,
+                )),
+                NONE,
+                ast.vec(),
+                false,
+            ),
+        ));
+    }
     let mut runtime_imports = vec![
         ("mcdcBegin", &mcdc_begin),
         ("mcdcCondition", &mcdc_condition),
@@ -6650,6 +6715,7 @@ fn instrument_strong<'a>(
             branches: &[],
             comparisons: &[],
             probes: &[],
+            reads: &HashMap::default(),
         },
     );
     for (mutant, strong) in mutants.iter_mut().zip(placed) {
@@ -12538,7 +12604,7 @@ pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usiz
     (line, column)
 }
 
-fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
+pub(crate) fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
     let start = utf16_offset(source, span.start as usize);
     let end = utf16_offset(source, span.end as usize);
     let digest = Sha256::digest(format!("{file}:{kind}:{start}:{end}:{suffix}").as_bytes());
@@ -15896,7 +15962,8 @@ export function shapes(n: number): unknown {
 
     /// `SUPERCOV_MUTANTS=0` turns the probes and the mutants off; they are
     /// on otherwise, and a file with no site of a kind imports nothing for
-    /// it, its every name as it was with them off.
+    /// it, its every name as it was with them off; a file with none is as
+    /// with them off but for the call that ends its top level.
     #[test]
     fn probes_are_on_unless_turned_off_and_only_where_a_file_has_sites() {
         let instrumented = |on: bool, source: &str| {
@@ -15908,7 +15975,9 @@ export function shapes(n: number): unknown {
         // No comparison, arithmetic, method or arrow site.
         let siteless = "export function f(a: boolean, b: boolean) {\n  if (a && b) {\n    return 'both';\n  }\n  const o = a ? { x: 1 } : null;\n  return o?.x;\n}\n";
         let (on, off) = (instrumented(true, siteless), instrumented(false, siteless));
-        assert_eq!(on.code, off.code);
+        // But for the end of the module's top level, marked for the reads
+        // of module-level values (`js_value_reads`).
+        assert_eq!(on.code, format!("{}__supercovFile7.loaded();\n", off.code));
         assert!(!on.mutants.is_empty());
         assert!(off.mutants.is_empty());
         // A file with only arithmetic imports its helper alone, and no other

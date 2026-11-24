@@ -75,6 +75,7 @@ fn learn_through_cargo(
 ) -> Result<WasmPackTest, String> {
     let cargo = which("cargo").ok_or("no `cargo` on PATH for `wasm-pack test`")?;
     let bin = scratch.join("wasm-pack-cargo");
+    // fault-site: rust-wasm-pack.learn-through-cargo
     fs::create_dir_all(&bin).map_err(|error| format!("{}: {error}", bin.display()))?;
     let record = scratch.join("wasm-pack-test.txt");
     let _ = fs::remove_file(&record);
@@ -186,7 +187,9 @@ exec {cargo} "$@"
             cargo = quote(cargo),
         );
         let path = bin.join("cargo");
+        // fault-site: rust-wasm-pack.write-cargo.write
         fs::write(&path, script).map_err(|error| format!("{}: {error}", path.display()))?;
+        // fault-site: rust-wasm-pack.write-cargo.set-permissions
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
             .map_err(|error| format!("{}: {error}", path.display()))?;
     }
@@ -231,9 +234,9 @@ mod tests {
         let scratch = root.join("scratch");
         assert!(learned("fs.metadata", &scratch).contains("no `cargo` on PATH"));
         for fault in [
-            "fs.create_dir_all#rust_wasm_pack.rs:78",
-            "fs.write#rust_wasm_pack.rs:189",
-            "fs.set_permissions#rust_wasm_pack.rs:190",
+            "fs.create_dir_all#rust-wasm-pack.learn-through-cargo",
+            "fs.write#rust-wasm-pack.write-cargo.write",
+            "fs.set_permissions#rust-wasm-pack.write-cargo.set-permissions",
         ] {
             assert!(
                 learned(fault, &scratch).contains("wasm-pack-cargo"),

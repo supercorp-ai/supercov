@@ -871,6 +871,7 @@ pub fn coverage_covers_query_cached(
     let file = &cache.files[options.file];
     let (metadata, decisions) = (&file.metadata, &file.decisions);
     let no_alternatives = Vec::new();
+    // fault-site: coverage-query.coverage-covers-query-cached
     let anchors = index.anchors(options.view, options.file, options.line)?;
     let tests_by_id = tests
         .iter()
@@ -1422,9 +1423,15 @@ pub fn coverage_test_query(
             decisions: phase.decisions,
         })
         .collect::<Vec<_>>();
+    // A module-level value's reads are the strong plan's, not coverage's.
+    let own_hits = test
+        .hits
+        .iter()
+        .filter(|id| !crate::js_value_reads::is_read_point(id))
+        .collect::<Vec<_>>();
     let totals = CoverageTestTotals {
         lines: test.lines.len(),
-        hits: test.hits.len(),
+        hits: own_hits.len(),
         decisions: test.decisions.len(),
         phases: all_phases.len(),
     };
@@ -1440,19 +1447,17 @@ pub fn coverage_test_query(
         .take(options.limit)
         .cloned()
         .collect::<Vec<_>>();
-    let hits = test
-        .hits
+    let hits = own_hits
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .cloned()
+        .map(|id| (*id).clone())
         .collect::<Vec<_>>();
-    let hit_details = test
-        .hits
+    let hit_details = own_hits
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|id| hit_detail(id, metadata.get(id)))
+        .map(|id| hit_detail(id, metadata.get(*id)))
         .collect::<Vec<_>>();
     let test_decisions = test
         .decisions
@@ -1681,6 +1686,7 @@ pub fn coverage_decision_query(
         && let Some((file, line, column)) = selector_location(options.selector)
     {
         matches = index
+            // fault-site: coverage-query.coverage-decision-query
             .decision_details(options.view)?
             .into_iter()
             .filter(|decision| {
@@ -2225,6 +2231,7 @@ fn not_measured_files(
     file: Option<&str>,
 ) -> Result<BTreeMap<String, String>, QueryError> {
     Ok(index
+        // fault-site: coverage-query.not-measured-files
         .scope_entries(view)?
         .into_iter()
         .filter(|entry| entry.status == "excluded" && file.is_none_or(|file| entry.file == file))
@@ -2298,6 +2305,7 @@ impl FileDetailSource {
     }
 
     pub fn read(index: &CoverageIndex<'_>, view: CoverageViewId) -> Result<Self, QueryError> {
+        // fault-site: coverage-query.read
         let tests = index.test_details(view)?;
         let mut tests_by_file = HashMap::<String, Vec<String>>::new();
         for test in &tests {
@@ -2844,6 +2852,7 @@ fn diff_snapshot(
     };
     // The filter's own projection; a run without its tests covered nothing.
     let percentages = match selected {
+        // fault-site: coverage-query.diff-snapshot.summary
         None => of(index.summary(view)?),
         Some(selected) if selected.is_empty() => [0.0; 3],
         Some(_) => of(index.projection(view, kind, runner)?.summary),
@@ -2858,6 +2867,7 @@ fn diff_snapshot(
         .map(|line| format!("{}:{}", line.file, line.line))
         .collect();
     let branches = index
+        // fault-site: coverage-query.diff-snapshot.hit-metadata
         .hit_metadata(view)?
         .into_iter()
         .filter(|metadata| {
@@ -2952,6 +2962,7 @@ pub fn coverage_diff_query(
     // refused, and one only a run has compares that run with nothing.
     // A filter that names no test is the one thing selecting refuses.
     let select = |index: &CoverageIndex<'_>| {
+        // fault-site: coverage-query.coverage-diff-query
         let tests = index.test_summaries(options.view)?;
         Ok::<_, QueryError>(selected_test_ids(&tests, options.kind, options.runner).ok())
     };
@@ -3276,6 +3287,7 @@ pub fn coverage_summary_query(
     )?;
     let coverage_by_tests = if options.kind.is_none() && options.runner.is_none() {
         index
+            // fault-site: coverage-query.coverage-summary-query.dimensions
             .dimensions(options.view, CoverageDimension::Tests)?
             .into_iter()
             .next()
@@ -3401,6 +3413,7 @@ pub fn coverage_summary_query(
         test_outcomes: projection.test_outcomes,
         unclassified_source: match &projection.source_scope {
             Some(scope) if scope.ambiguous > 0 => {
+                // fault-site: coverage-query.coverage-summary-query.unclassified-source
                 unclassified_source(&scope.roots, &index.scope_entries(options.view)?)
             }
             _ => None,
@@ -3554,6 +3567,7 @@ pub fn coverage_areas_query(
         add_dimensions(&mut area.covered, &file.covered);
     }
     for (position, kind) in kinds.iter().enumerate() {
+        // fault-site: coverage-query.coverage-areas-query.file-gaps-1
         for file in index.file_gaps(options.view, Some(kind), None)? {
             let area = areas
                 .get_mut(&area_directory(&file.file, options.depth))
@@ -3562,6 +3576,7 @@ pub fn coverage_areas_query(
         }
     }
     if !kinds.is_empty() {
+        // fault-site: coverage-query.coverage-areas-query.file-gaps-2
         let tested = index.file_gaps(options.view, Some(crate::coverage_index::ALL_TESTS), None)?;
         if !tested.is_empty() {
             // A tested file is in an area, so there are some.
@@ -3813,6 +3828,7 @@ fn filtered_dimensions(
     kind: Option<&str>,
     runner: Option<&str>,
 ) -> Result<Vec<IndexedDimensionCoverage>, QueryError> {
+    // fault-site: coverage-query.filtered-dimensions
     let values = index.dimensions(view, dimension)?;
     if kind.is_none() && runner.is_none() {
         return Ok(values);
@@ -3956,11 +3972,13 @@ pub fn coverage_file_decisions_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
+    // fault-site: coverage-query.coverage-file-decisions-query.decision-gaps
     let all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
     if (options.kind.is_some() || options.runner.is_some()) && all.is_empty() {
         // A file with no decisions is valid, so consult the file projection to
         // distinguish it from a nonexistent test provenance projection.
         if index
+            // fault-site: coverage-query.coverage-file-decisions-query.file-gaps
             .file_gaps(options.view, options.kind, options.runner)?
             .is_empty()
         {
@@ -4006,6 +4024,7 @@ pub fn coverage_file_decisions_query(
     let selected = if options.kind.is_some() || options.runner.is_some() {
         // A kind or runner no test has made no decision gaps, refused above.
         tests_selected(
+            // fault-site: coverage-query.coverage-file-decisions-query.test-summaries
             &index.test_summaries(options.view)?,
             options.kind,
             options.runner,
@@ -6118,6 +6137,10 @@ mod tests {
             },
         )]);
         report.view.tests[0].hits.push("unknown-hit".into());
+        // A module-level value's read is the strong plan's, not a hit to show.
+        report.view.tests[0]
+            .hits
+            .push("read:0123456789abcdef".into());
         let root = crate::test_directory::TestDirectory::adopt({
             let root = std::env::temp_dir().join(format!(
                 "supercov-unknown-hit-{}-{}",
@@ -6169,6 +6192,18 @@ mod tests {
             .expect("the unknown hit is listed");
         assert_eq!(unknown.obligation, "unknown");
         assert_eq!(unknown.file, None);
+        assert!(
+            detail.tests[0]
+                .hit_details
+                .iter()
+                .all(|hit| !hit.id.starts_with("read:"))
+        );
+        assert!(
+            detail.tests[0]
+                .hits
+                .iter()
+                .all(|hit| !hit.starts_with("read:"))
+        );
     }
 
     #[test]

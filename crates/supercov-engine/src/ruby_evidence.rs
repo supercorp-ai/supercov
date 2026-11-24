@@ -340,6 +340,7 @@ struct Evidence {
 
 fn read_evidence_directory(directory: &Path, run_id: &str) -> Result<Evidence, RubyEvidenceError> {
     let mut evidence = Evidence::default();
+    // fault-site: ruby-evidence.read-evidence-directory
     let mut files = match fs::read_dir(directory) {
         Ok(entries) => entries
             .collect::<Result<Vec<_>, _>>()

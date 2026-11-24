@@ -330,33 +330,6 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
     let Some(go) = go_binary() else {
         return;
     };
-    let source =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/go_strong.rs"))
-            .unwrap();
-    // The line a statement is on, by its text: the first line holding its
-    // expression, without the binding before it or the `?;` after it, as
-    // a measured build's probes leave every line where it was but wrap
-    // what is on it.
-    let lines = source.lines().collect::<Vec<_>>();
-    let core = |snippet: &'static str| {
-        let bound = snippet
-            .strip_prefix("let ")
-            .and_then(|rest| rest.split_once(" = "))
-            .map_or(snippet, |(_, value)| value);
-        bound
-            .strip_suffix("?;")
-            .or_else(|| bound.strip_suffix(';'))
-            .unwrap_or(bound)
-    };
-    let line_from = |from: usize, snippet: &'static str| {
-        from + lines[from..]
-            .iter()
-            .position(|line| line.contains(core(snippet)))
-            .unwrap_or_else(|| panic!("no line {snippet} after line {from}"))
-            + 1
-    };
-    let line = |snippet: &'static str| line_from(0, snippet);
-    let after = |anchor: &'static str, snippet: &'static str| line_from(line(anchor), snippet);
     let (constant, constant_index) = mutant("Limit = ", "+", "ArithmeticOperator", "-");
     let (boundary, boundary_index) = mutant("if n > Limit", ">", "EqualityOperator", "<=");
     let (vetted, vetted_index) = mutant("x != 1 &&", "&&", "LogicalOperator", "||");
@@ -367,203 +340,52 @@ fn each_step_of_the_go_pass_that_fails_ends_it() {
             planned(&vetted, vetted_index, &[(2, "infected")]),
         ]
     };
-    let at = |site: &str, line: usize| format!("{site}#go_strong.rs:{line}");
     for (fault, ends) in [
+        ("fs.read#go-strong.open.read", true),
+        ("fs.open_with#go-strong.open.open-with", true),
+        ("fs.create_dir_all#go-strong.run-go-strong", true),
+        ("fs.read_to_string#go-strong.read-files", true),
+        ("fs.create_dir_all#go-strong.helper.create-dir-all", true),
+        ("fs.write#go-strong.helper.write-1", true),
+        ("fs.write#go-strong.helper.write-2", true),
+        ("spawn#go-strong.helper.launch-registered", true),
+        ("spawn#go-strong.run-helper", true),
+        ("fs.remove_dir_all#go-strong.run-mutants", true),
         (
-            at(
-                "fs.read",
-                line("let bytes = fs::read(request.plan).map_err(failed(request.plan))?;"),
-            ),
+            "fs.create_dir_all#go-strong.copy-project.create-dir-all",
             true,
         ),
-        (
-            at(
-                "fs.open_with",
-                line(
-                    "let results = fs::open_with(&options, request.results).map_err(failed(request.results))?;",
-                ),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.create_dir_all",
-                after(
-                    "pub fn run_go_strong(",
-                    "fs::create_dir_all(directory).map_err(failed(directory))",
-                ),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.read_to_string",
-                line("let source = fs::read_to_string(&path).map_err(failed(&path))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.create_dir_all",
-                line("fs::create_dir_all(&source).map_err(failed(&source))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.write",
-                line(
-                    "fs::write(source.join(\"main.go\"), HELPER_SOURCE).map_err(failed(&source))?;",
-                ),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.write",
-                line(
-                    "fs::write(source.join(\"go.mod\"), HELPER_MODULE).map_err(failed(&source))?;",
-                ),
-            ),
-            true,
-        ),
-        (
-            at(
-                "spawn",
-                after(".env(\"CGO_ENABLED\", \"0\")", ".launch_registered()"),
-            ),
-            true,
-        ),
-        (at("spawn", after("fn run_helper(", ".launch()")), true),
-        (
-            at(
-                "fs.remove_dir_all",
-                line("fs::remove_dir_all(&pass.workspace).map_err(failed(&pass.workspace))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.create_dir_all",
-                line("fs::create_dir_all(destination).map_err(failed(destination))?;"),
-            ),
-            true,
-        ),
-        (at("fs.read_dir", line("fs::read_dir(source)")), true),
-        (
-            at(
-                "fs.file_type",
-                line("let kind = fs::file_type(&entry).map_err(failed(&path))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.read_link",
-                line("let link = fs::read_link(path).map_err(failed(path))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.symlink",
-                line("fs::symlink(&link, target).map_err(failed(target))"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.copy",
-                line("fs::copy(&path, &target).map(drop).map_err(failed(&path))"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.create_dir_all",
-                line("fs::create_dir_all(&runtime).map_err(failed(&runtime))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.write",
-                line("fs::write(runtime.join(name), contents).map_err(failed(&runtime))"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "fs.write",
-                line("fs::write(&path, &text).map_err(failed(&path))?;"),
-            ),
-            true,
-        ),
-        (
-            at(
-                "spawn",
-                after(".arg(\"-gcflags=-e\")", ".launch_registered()"),
-            ),
-            true,
-        ),
+        ("fs.read_dir#go-strong.copy-project.read-dir", true),
+        ("fs.file_type#go-strong.copy-project.file-type", true),
+        ("fs.read_link#go-strong.copy-link.read-link", true),
+        ("fs.symlink#go-strong.copy-link.symlink", true),
+        ("fs.copy#go-strong.copy-project.copy", true),
+        ("fs.create_dir_all#go-strong.runtimes.create-dir-all", true),
+        ("fs.write#go-strong.runtimes.write", true),
+        ("fs.write#go-strong.render.write", true),
+        ("spawn#go-strong.render.launch-registered", true),
         // Vet that cannot run finds nothing; a test binary that cannot be
         // built or started runs nothing.
-        (
-            at(
-                "spawn",
-                after(
-                    ".args([\"vet\", \"-atomic\", \"-bools\"])",
-                    ".launch_registered()",
-                ),
-            ),
-            false,
-        ),
-        (
-            at("spawn", after("fn build_package(", ".launch_registered()")),
-            false,
-        ),
-        (
-            at("spawn", after("fn run_binary(", "command.launch() else {")),
-            false,
-        ),
+        ("spawn#go-strong.vet-one", false),
+        ("spawn#go-strong.build-package", false),
+        ("spawn#go-strong.run-binary", false),
         // A vet overlay, and a solo build, that cannot be written: vet finds
         // nothing, and the mutant's error.
         (
-            format!(
-                "{}@2",
-                at(
-                    "fs.create_dir_all",
-                    line("fs::create_dir_all(directory).map_err(failed(directory))?;"),
-                )
-            ),
+            "fs.create_dir_all#go-strong.write-overlay.create-dir-all@2",
             false,
         ),
         (
-            at(
-                "fs.create_dir_all",
-                line("fs::create_dir_all(directory).map_err(failed(directory))?;"),
-            ),
+            "fs.create_dir_all#go-strong.write-overlay.create-dir-all",
             false,
         ),
-        (
-            at(
-                "fs.write",
-                line("fs::write(&replaced, contents).map_err(failed(&replaced))?;"),
-            ),
-            false,
-        ),
-        (
-            at(
-                "fs.write",
-                line("fs::write(&overlay, document.to_string()).map_err(failed(&overlay))?;"),
-            ),
-            false,
-        ),
+        ("fs.write#go-strong.write-overlay.write-1", false),
+        ("fs.write#go-strong.write-overlay.write-2", false),
     ] {
         let pass = Pass::new("faults", &go, mutants());
         // A copy left from before, so its removal is reached.
         std::fs::create_dir_all(pass.plan.with_file_name("workspace")).unwrap();
-        let result = pass.run(&fault);
+        let result = pass.run(fault);
         assert_eq!(result.is_err(), ends, "{fault}: {result:?}");
     }
 }

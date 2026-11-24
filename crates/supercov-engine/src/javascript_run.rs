@@ -761,6 +761,7 @@ fn run_javascript(
         );
     }
     cleanup.mark_state_written();
+    // fault-site: javascript-run.run-javascript.write-run-state
     write_run_state(
         &root,
         &RunState {
@@ -1015,6 +1016,7 @@ fn run_javascript(
             let mut files = files.into_iter().collect::<Vec<_>>();
             files.sort();
             let path = strong.switched_files_path();
+            // fault-site: javascript-run.run-javascript.write-1
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&files).expect("plain data serializes"),
@@ -1113,6 +1115,7 @@ fn run_javascript(
             .collect::<BTreeMap<_, _>>(),
     });
     let settings_path = frontend.preload_path.with_file_name("run.json");
+    // fault-site: javascript-run.run-javascript.write-2
     crate::fault_fs::write(
         &settings_path,
         serde_json::to_vec(&settings).expect("plain data serializes"),
@@ -1196,6 +1199,7 @@ fn run_javascript(
                     reason: error.to_string(),
                 })?;
             }
+            // fault-site: javascript-run.run-javascript.update-run-state-1
             update_run_state(&root, &run_id, RunStateStatus::Testing, &started_at, None).map_err(
                 |error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
@@ -1257,6 +1261,7 @@ fn run_javascript(
         );
     }
     if let Some(signal) = execution.interrupted_signal {
+        // fault-site: javascript-run.run-javascript.interrupt-run-state
         interrupt_run_state(&root, &run_id, &started_at, signal.name())
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
@@ -1286,6 +1291,7 @@ fn run_javascript(
             options,
             diagnostics,
         )?;
+        // fault-site: javascript-run.run-javascript.update-run-state-2
         update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
             .map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
@@ -1395,6 +1401,7 @@ fn run_javascript(
         }
         let _ = std::fs::remove_file(&missing_loads);
     }
+    // fault-site: javascript-run.run-javascript.update-run-state-3
     update_run_state(
         &root,
         &run_id,
@@ -1511,6 +1518,7 @@ fn run_javascript(
             match publish(server_metadata, diagnostics) {
                 Ok(run) if nth == 0 => published = Some(run),
                 Ok((directory, _)) => {
+                    // fault-site: javascript-run.run-javascript.finalize-published-run-1
                     finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                     server_runs.push((language.to_owned(), directory));
                 }
@@ -1527,8 +1535,10 @@ fn run_javascript(
                 }
             }
         }
+        // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-1
         remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
             .map_err(|error| error.to_string())?;
+        // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-2
         remove_stored_tree_deferred(&root, &server_evidence_root)
             .map_err(|error| error.to_string())?;
         if published.is_none()
@@ -1555,6 +1565,7 @@ fn run_javascript(
             cleanup.mark_terminal();
             return Err(message.into());
         };
+        // fault-site: javascript-run.run-javascript.update-run-state-4
         update_run_state(
             &root,
             &run_id,
@@ -1567,6 +1578,7 @@ fn run_javascript(
             None,
         )
         .map_err(|error| error.to_string())?;
+        // fault-site: javascript-run.run-javascript.finalize-published-run-2
         finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
         cleanup.mark_terminal();
         return Ok(Finished::published(Box::new(DirectJavascriptRunResult {
@@ -1674,8 +1686,10 @@ fn run_javascript(
     });
     std::thread::spawn(move || drop(entries));
     let raw = raw.map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-3
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.remove-stored-tree-deferred-4
     remove_stored_tree_deferred(&root, &server_evidence_root).map_err(|error| error.to_string())?;
     let evidence_publication_ms = elapsed_ms(publication_started);
     let timings = RunTimings {
@@ -1740,6 +1754,7 @@ fn run_javascript(
             });
         match published {
             Ok(Some((directory, _))) => {
+                // fault-site: javascript-run.run-javascript.finalize-published-run-3
                 finalize_published_run(&root, &id).map_err(|error| error.to_string())?;
                 server_runs.push((language.to_owned(), directory));
                 companions.push(crate::run_store::CompanionRun {
@@ -1777,8 +1792,10 @@ fn run_javascript(
     } else {
         RunStateStatus::Failed
     };
+    // fault-site: javascript-run.run-javascript.update-run-state-5
     update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
+    // fault-site: javascript-run.run-javascript.finalize-published-run-4
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
     cleanup.mark_terminal();
     Ok(Finished::published(Box::new(DirectJavascriptRunResult {
@@ -3024,6 +3041,7 @@ fn run_strong_restarts(
                 .results
                 .with_file_name(format!("restart-{number}.log"));
             number += 1;
+            // fault-site: javascript-run.run-strong-restarts
             crate::fault_fs::write(
                 &path,
                 serde_json::to_vec(&job).expect("plain data serializes"),

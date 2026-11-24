@@ -638,6 +638,7 @@ fn run_pass(
                         if failures > MAX_FAILURES {
                             // Only the pass that sends requests has one fail,
                             // and it keeps its answers.
+                            // fault-site: assertions-command.run-pass.save-1
                             cache.save()?;
                             return Err(format!("stopped after {failures} failed requests: {e}"));
                         }
@@ -656,6 +657,7 @@ fn run_pass(
                 Ok(())
             })?;
         if asking.keep {
+            // fault-site: assertions-command.run-pass.save-2
             cache.save()?;
         }
         after_round(sent.requests, (0..n).filter(|&s| pass.undecided(s)).count());
@@ -948,6 +950,7 @@ fn assess_changed(
                 cache.answers.insert(keys[&(s, *t)].clone(), p);
             });
         });
+        // fault-site: assertions-command.assess-changed
         cache.save()?;
         // Not one answer: nothing for `tests affected` to go on.
         if failed == plan.len() {

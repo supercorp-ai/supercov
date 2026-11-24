@@ -60,7 +60,9 @@ Each probe's runtime helper (`compareV2`, `arithV2`, `assignV2`, `methodV2`,
 after every other name the file's allocator gives. A file with no site of a
 kind imports nothing for it, and the names of everything else in it are those
 it has with the probes off: a file with no site at all is instrumented byte
-for byte as with the probes off.
+for byte as with the probes off, but for one call that ends its top level
+(`__supercovFile.loaded()`), which tells reads of module-level values made
+as modules load from later ones (`strong-mutation.md`, Module-level values).
 
 ### Ids and descriptors
 
