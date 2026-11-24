@@ -617,7 +617,9 @@ On an unchanged checkout that run is made, not measured
 not a merge, whose command passed and that recorded its mutants' values, is
 copied under a new id and start, without its verdicts and its query index.
 Its evidence and every record published from it stand for the new run,
-which differs only in its id; it supersedes the runs of its command a run
+which differs only in its id. The evidence still names the run it was
+recorded under as its scope, which the new run's `measuredAs` gives, and
+every analysis of it reads that id; it supersedes the runs of its command a run
 measured now would, keeps every verdict the restored runs hold (they were
 measured on the same files), and the round's runs merge as shards of one
 suite. Where no such run is restored (the latest run's command failed, or
