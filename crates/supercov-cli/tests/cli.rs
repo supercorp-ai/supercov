@@ -24758,16 +24758,18 @@ fn a_playwright_mutant_tries_its_cheap_candidates_before_its_slow_one() {
     assert!(said.contains(" left in this round"), "{context}");
 }
 
-/// A test's first run in an invocation takes a mutant: a test whose mutants
-/// live needs no run without one, and a failure is judged by the control
-/// after it. Here the app's server fails the first page it serves in a
-/// strong pass (a cold cache), so the first attempt of the page's only
-/// mutant, a log line nothing reads, fails before any control has passed on
-/// that server. That failure decides nothing: the control after it passes,
-/// the mutant runs the test again, and survives, where a kill confirmed by
-/// that control would have been false. The server served the page once
-/// without a mutant, the control; a baseline first would have been a second
-/// (failing on the cold server, then run again).
+/// A test's first run in an invocation takes a mutant where the mutant
+/// already lived through a candidate: a test whose mutants live needs no run
+/// without one, and a failure is judged by the control after it. Here the
+/// app's server fails the first request to each page in a strong pass (a
+/// cold cache), and the only mutant is a log line nothing reads, with two
+/// candidates in two files. The first file's test runs without it first
+/// (no candidate let it live yet, so a cold failure is likely): the cold
+/// page fails that run, the next passes, and then the mutant lives. The
+/// second file's test takes the mutant at once, and fails on its cold page;
+/// that failure decides nothing: the control after it passes, the test runs
+/// the mutant again, and it survives, where a kill confirmed by that control
+/// would have been false.
 #[cfg(unix)]
 #[test]
 fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
@@ -24806,12 +24808,14 @@ fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
     let served = project.root.with_extension("served.jsonl");
     project.write(
         "support/server.js",
-        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\n// A strong pass's server fails the first page it serves: a cold cache.\nlet cold = Boolean(process.env.SUPERCOV_STRONG_PLAN);\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  if (path === \"/\") {\n    appendFileSync(process.env.SERVED_LOG, JSON.stringify({ mutant: scope.get(\"m\"), cold }) + \"\\n\");\n    if (cold) {\n      cold = false;\n      response.statusCode = 503;\n      return response.end(\"warming up\");\n    }\n  }\n  const file = path === \"/\" ? \"index.html\" : path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
+        "import http from \"node:http\";\nimport { appendFileSync, readFileSync } from \"node:fs\";\n// A strong pass's server fails the first request to each page: a cold cache.\nconst warm = new Set();\nhttp.createServer((request, response) => {\n  const path = new URL(request.url, \"http://local\").pathname;\n  if (path === \"/health\") return response.end(\"ok\");\n  const cookie = /(?:^|;\\s*)__supercov_scope=([^;]*)/.exec(request.headers.cookie ?? \"\");\n  const scope = new URLSearchParams(request.headers[\"x-supercov-scope\"] ?? (cookie ? decodeURIComponent(cookie[1]) : \"\"));\n  if (path.endsWith(\".html\")) {\n    const cold = Boolean(process.env.SUPERCOV_STRONG_PLAN) && !warm.has(path);\n    warm.add(path);\n    appendFileSync(process.env.SERVED_LOG, JSON.stringify({ path, mutant: scope.get(\"m\"), cold }) + \"\\n\");\n    if (cold) {\n      response.statusCode = 503;\n      return response.end(\"warming up\");\n    }\n  }\n  const file = path.slice(1);\n  response.setHeader(\"content-type\", file.endsWith(\".js\") ? \"text/javascript\" : \"text/html\");\n  response.end(readFileSync(new URL(`../public/${file}`, import.meta.url)));\n}).listen(Number(process.env.PORT));\n",
     );
-    project.write(
-        "public/index.html",
-        "<!doctype html><body><p id=\"out\">Ready</p><script src=\"/app.js\"></script></body>\n",
-    );
+    for page in ["first", "second"] {
+        project.write(
+            &format!("public/{page}.html"),
+            "<!doctype html><body><p id=\"out\">Ready</p><script src=\"/app.js\"></script></body>\n",
+        );
+    }
     project.write("public/app.js", "console.log(\"shown\");\n");
     project.write(
         "playwright.config.js",
@@ -24820,10 +24824,13 @@ fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
             served.display().to_string()
         ),
     );
-    project.write(
-        "tests/page.spec.js",
-        "import { test, expect } from \"@playwright/test\";\ntest(\"shows the page\", async ({ page }) => {\n  const response = await page.goto(\"/\");\n  expect(response.status()).toBe(200);\n  await expect(page.locator(\"#out\")).toHaveText(\"Ready\");\n});\n",
-    );
+    // One test a file: a worker runs the first file's before the second's.
+    for (at, page) in [(1, "first"), (2, "second")] {
+        project.write(
+            &format!("tests/{at}-{page}.spec.js"),
+            &format!("import {{ test, expect }} from \"@playwright/test\";\ntest(\"shows the {page} page\", async ({{ page }}) => {{\n  const response = await page.goto(\"/{page}.html\");\n  expect(response.status()).toBe(200);\n  await expect(page.locator(\"#out\")).toHaveText(\"Ready\");\n}});\n"),
+        );
+    }
     project.git(&["init", "-q"]);
     project.commit("strong playwright cold");
     let roots = ("SUPERCOV_SOURCE_ROOTS", "public");
@@ -24862,37 +24869,44 @@ fn a_playwright_test_takes_a_mutant_first_and_a_cold_failure_runs_again() {
         })
         .collect::<Vec<_>>();
     assert_eq!(logged.len(), 1, "{context}");
-    // Its first attempt failed on the cold server, and said it runs again.
+    // The second page's attempt failed cold, and said it runs again.
     assert!(
         said.contains("before any control here: runs again after one"),
         "{context}"
     );
-    // Run again once the control passed: it lives, and survives.
+    // Both candidates let it live: it survives.
     assert_eq!(logged[0]["strong"]["status"], "survived", "{context}");
-    assert_eq!(logged[0]["strong"]["tests"], 1, "{context}");
-    // The page was served with the mutant first, cold; then once without
-    // it, the control; then with it again.
+    assert_eq!(logged[0]["strong"]["tests"], 2, "{context}");
     let runs = pages
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    let kinds = runs
-        .iter()
-        .map(|run| {
-            (
-                run["mutant"].as_str().unwrap_or("").to_owned(),
-                run["cold"] == true,
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(kinds.len(), 3, "{context}");
-    assert!(
-        kinds[0].0.starts_with("public/app.js#") && kinds[0].1,
+    let served = |path: &str| {
+        runs.iter()
+            .filter(|run| run["path"] == path)
+            .map(|run| {
+                let mutant = run["mutant"].as_str().unwrap_or("");
+                let with = if mutant == "-" {
+                    "control"
+                } else if mutant.starts_with("public/app.js#") {
+                    "mutant"
+                } else {
+                    "other"
+                };
+                (with, run["cold"] == true)
+            })
+            .collect::<Vec<_>>()
+    };
+    // The first page: without the mutant, cold, and again, then with it.
+    assert_eq!(
+        served("/first.html"),
+        [("control", true), ("control", false), ("mutant", false)],
         "{context}"
     );
-    assert_eq!(kinds[1], ("-".to_owned(), false), "{context}");
-    assert!(
-        kinds[2].0.starts_with("public/app.js#") && !kinds[2].1,
+    // The second: with the mutant, cold; the control; with it again.
+    assert_eq!(
+        served("/second.html"),
+        [("mutant", true), ("control", false), ("mutant", false)],
         "{context}"
     );
 }
@@ -25249,7 +25263,7 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
         "import { test, expect } from \"@playwright/test\";\ntest.describe.configure({ mode: \"serial\" });\nfor (const step of [1, 2, 3, 4]) {\n  test(`serial ${step}`, async ({ page }) => {\n    await page.goto(\"/\");\n    await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n  });\n}\n",
     );
     project.write(
-        "tests/other.spec.js",
+        "tests/zz-other.spec.js",
         "import { test, expect } from \"@playwright/test\";\ntest(\"other\", async ({ page }) => {\n  await page.goto(\"/\");\n  await expect(page.locator(\"#state\")).toHaveText(\"Active\");\n});\n",
     );
     // Two slots, each a `playwright test` of its own share with its own
@@ -25258,7 +25272,7 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
     project.write(
         "harness.mjs",
         &format!(
-            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/other.spec.js\"]];\nconst codes = await Promise.all(slots.map(([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{ for (const line of String(chunk).split(\"\\n\")) if (line.trim()) console.log(`[slot ${{at + 1}}] ${{line}}`); }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => done(code ?? 1));\n  }});\n}}));\nprocess.exit(Math.max(...codes));\n",
+            "import {{ spawn, spawnSync }} from \"node:child_process\";\nconst slots = [[{}, \"tests/serial.spec.js\"], [{}, \"tests/zz-other.spec.js\"]];\nconst codes = await Promise.all(slots.map(([port, file], at) => {{\n  const env = {{ ...process.env, SLOT_PORT: String(port) }};\n  const listed = spawnSync(\"npx\", [\"playwright\", \"test\", \"--list\", file], {{ env, encoding: \"utf8\" }});\n  for (const line of listed.stdout.split(\"\\n\")) if (line.includes(\".spec.js\")) console.log(`[list ${{at + 1}}] ${{line}}`);\n  return new Promise((done) => {{\n    const child = spawn(\"npx\", [\"playwright\", \"test\", file], {{ env }});\n    const say = (chunk) => {{ for (const line of String(chunk).split(\"\\n\")) if (line.trim()) console.log(`[slot ${{at + 1}}] ${{line}}`); }};\n    child.stdout.on(\"data\", say);\n    child.stderr.on(\"data\", say);\n    child.on(\"close\", (code) => done(code ?? 1));\n  }});\n}}));\nprocess.exit(Math.max(...codes));\n",
             ports[0], ports[1]
         ),
     );
@@ -25303,6 +25317,17 @@ fn a_playwright_serial_file_is_spread_over_the_harness_s_slots() {
         .filter(|line| line.contains(": \"serial "))
         .count();
     assert!(serial_in_second >= 1, "{context}");
+    // Its own file's mutants had lived through no candidate yet, so there
+    // it took only such mutants of the serial file: each at most once (the
+    // file sorts first, so it ran there first).
+    for at in 1..=3 {
+        let taken = said
+            .lines()
+            .filter(|line| line.starts_with(&format!("[slot 2] [supercov] public/log.js:{at}:")))
+            .filter(|line| line.contains(": \"serial "))
+            .count();
+        assert!(taken <= 1, "{at}\n{context}");
+    }
     // Its list was the slot's own file alone.
     assert!(said.contains("[list 2] "), "{context}");
     assert!(

@@ -478,6 +478,7 @@ mod tests {
             whole_files: Vec::new(),
             server_wide: None,
             server_ran: false,
+            passed_before: 0,
             covering: 0,
             statement: None,
             function: None,
