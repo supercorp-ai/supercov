@@ -1922,6 +1922,23 @@ mod tests {
         );
     }
 
+    /// A server module's top level that a request naming no test ran, while
+    /// no test of its server ran: the module made it once, for every later
+    /// request, so the mutant needs the server started with it.
+    #[test]
+    fn module_level_code_a_request_no_test_named_ran_needs_the_server_started_with_it() {
+        let module_level = mutant(serde_json::json!({"statement": "s"}));
+        let mut background = record("background", "background", None, &[]);
+        background.server = vec![server_hit(
+            "s",
+            Some(crate::coverage_report::REQUEST_OUTSIDE_TESTS),
+        )];
+        assert_eq!(
+            server_wide(&background, &server_runs(&background), &module_level),
+            Some(ServerWide::ModuleLevel)
+        );
+    }
+
     /// Module-level code a server ran for a test is the server module's top
     /// level, which runs once for every later request.
     #[test]

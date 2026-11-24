@@ -708,11 +708,13 @@ fn credit_by_time(
                 .map(|[start, end]| (start, end, attempt.clone()))
                 .or_else(|| {
                     let start = raw.phases.iter().map(|phase| phase.started_at_ms).min()?;
+                    // Phases there are, as `start` says.
                     let end = raw
                         .phases
                         .iter()
                         .map(|phase| phase.ended_at_ms.unwrap_or(phase.started_at_ms))
-                        .max()?;
+                        .max()
+                        .expect("a test with a phase's start has its end");
                     Some((start, end, attempt))
                 })
         })
