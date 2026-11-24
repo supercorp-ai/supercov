@@ -17676,7 +17676,7 @@ fn a_javascript_run_whose_record_step_fails_says_so() {
         "fs.create_dir_all#lifecycle.rs:1434",
         "fs.create_dir_all#javascript_run.rs:764",
         "fs.write#javascript_run.rs:1116",
-        "fs.canonicalize#process_supervision.rs:1917",
+        "fs.canonicalize#process_supervision.rs:1924",
         "fs.create_dir_all#javascript_run.rs:1199",
         "fs.create_dir_all#javascript_run.rs:1398",
         "fs.read_dir#evidence_archive.rs:263",
@@ -26232,12 +26232,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1998",
+            "fs.write#mutants_test_command.rs:2007",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1998"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:2007"),
         "{}",
         unwritten.stderr()
     );

@@ -590,21 +590,7 @@ fn answer(selector: &str, options: &Options) -> Result<Value, Stop> {
     // it has not passed with yet run. One that passed every candidate
     // survived.
     let resumed = supercov_engine::strong_verdicts::resume(&mut plan, &progress);
-    for whole in resumed
-        .iter()
-        .filter(|mutant| mutant.passed == mutant.candidates)
-    {
-        saved.insert(
-            whole.id.clone(),
-            Verdict {
-                status: "survived".into(),
-                killed_by: None,
-                tests: whole.passed as u64,
-                duration_ms: 0,
-                reason: None,
-            },
-        );
-    }
+    saved.extend(passed_every_candidate(&resumed));
     settle_progress(&mut progress, &saved);
     plan.mutants
         .retain(|mutant| !saved.contains_key(&mutant.id));
@@ -1217,6 +1203,29 @@ fn saved_document(run: &StoredRun) -> Option<StrongVerdicts> {
     std::fs::read(results_path(run))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StrongVerdicts>(&bytes).ok())
+}
+
+/// The verdicts of the resumed mutants every candidate of which passed in
+/// earlier passes: each survived, against all its candidates.
+fn passed_every_candidate(
+    resumed: &[supercov_engine::strong_verdicts::Resumed],
+) -> Vec<(String, Verdict)> {
+    resumed
+        .iter()
+        .filter(|mutant| mutant.passed == mutant.candidates)
+        .map(|mutant| {
+            (
+                mutant.id.clone(),
+                Verdict {
+                    status: "survived".into(),
+                    killed_by: None,
+                    tests: mutant.passed as u64,
+                    duration_ms: 0,
+                    reason: None,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Adds `more` to `progress`: the candidates each mutant passed, together.
@@ -2992,6 +3001,15 @@ mod tests {
             candidates,
         };
         assert_eq!(resumed_line(&[]), None);
+        // One every candidate let live before survived, against all of them;
+        // one with candidates left runs them.
+        let survived = passed_every_candidate(&[resumed("done", 3, 3), resumed("open", 1, 3)]);
+        assert_eq!(survived.len(), 1);
+        assert_eq!(survived[0].0, "done");
+        assert_eq!(
+            (survived[0].1.status.as_str(), survived[0].1.tests),
+            ("survived", 3)
+        );
         let four = [
             resumed("a", 11, 15),
             resumed("b", 2, 4),

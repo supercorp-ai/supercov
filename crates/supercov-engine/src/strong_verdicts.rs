@@ -363,6 +363,8 @@ mod tests {
             ("decided", &["t1"]),
             ("gone", &["t1"]),
             ("page", &["p1"]),
+            // A test that is no candidate of it now: nothing comes off.
+            ("untouched", &["t9"]),
         ]);
         assert_eq!(
             resume(&mut plan, &passed),
@@ -425,6 +427,8 @@ mod tests {
                 mutant("killed", "src/a.js", &[0, 1], &[]),
                 mutant("changed", "src/b.js", &[0, 1], &[]),
                 mutant("whole", "src/a.js", &[0], &["t/b.spec.js"]),
+                // Every run recorded its file with other bytes: none lends.
+                mutant("elsewhere", "src/c.js", &[0, 1], &[]),
             ],
         };
         let first_progress = progress(&[
@@ -433,18 +437,23 @@ mod tests {
             ("killed", &["t1"]),
             ("changed", &["t1"]),
             ("whole", &["t1"]),
+            ("elsewhere", &["t1"]),
         ]);
-        let second_progress = progress(&[("open", &["t2", "t3"]), ("changed", &["t2"])]);
+        let second_progress = progress(&[
+            ("open", &["t2", "t3"]),
+            ("changed", &["t2"]),
+            ("elsewhere", &["t2"]),
+        ]);
         let first = verdicts(&[("erred", "error")]);
         let second = verdicts(&[("killed", "killed")]);
         let (first_tests, second_tests) = (ids(&["t1", "t2", "t3", "t9"]), ids(&["t1", "t2"]));
-        let (none, changed) = (BTreeSet::new(), ids(&["src/b.js"]));
+        let (first_changed, changed) = (ids(&["src/c.js"]), ids(&["src/b.js", "src/c.js"]));
         let lent = [
             Lent {
                 verdicts: &first,
                 progress: &first_progress,
                 tests: &first_tests,
-                other_bytes: &none,
+                other_bytes: &first_changed,
             },
             Lent {
                 verdicts: &second,

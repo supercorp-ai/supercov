@@ -1796,11 +1796,18 @@ fn signal_process_group(child: &mut Child, signal: i32) {
 /// next pass ("is already used").
 #[cfg(unix)]
 fn detached_groups(child: &Child) -> std::collections::BTreeSet<i32> {
-    let own = child.id() as i32;
-    // SAFETY: neither call takes a pointer; a process gone since the tree
-    // was read has no group (-1), and is left out.
+    groups_apart(&descendant_process_tree(child.id()), child.id() as i32)
+}
+
+/// The process groups of `processes` other than `own` and this process's
+/// own (which a signal must never reach): a process gone since the list
+/// was read has no group, and is left out.
+#[cfg(unix)]
+fn groups_apart(processes: &[ProcessSnapshot], own: i32) -> std::collections::BTreeSet<i32> {
+    // SAFETY: neither call takes a pointer; `getpgid` of a process that is
+    // gone fails (-1).
     let ours = unsafe { libc::getpgrp() };
-    descendant_process_tree(child.id())
+    processes
         .iter()
         .map(|process| unsafe { libc::getpgid(process.pid as i32) })
         .filter(|group| *group > 0 && *group != own && *group != ours)
@@ -2854,6 +2861,45 @@ mod tests {
         }
         assert!(!alive(), "the detached process {pid} outlived the command");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Of a list of processes, the groups apart: not the command's own, not
+    /// this process's (a signal there would end Supercov), and none for a
+    /// process that is gone.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_groups_apart_from_the_command_and_supercov_are_signalled() {
+        use std::os::unix::process::CommandExt;
+        let spawn = || {
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let (mut own, mut apart) = (spawn(), spawn());
+        let snapshot = |pid: u32| ProcessSnapshot {
+            pid,
+            parent_pid: std::process::id(),
+            state: None,
+            cpu_tenths: None,
+            executable: "sleep".into(),
+        };
+        let processes = [
+            snapshot(own.id()),
+            snapshot(apart.id()),
+            snapshot(std::process::id()),
+            // No such process.
+            snapshot(0x7fff_fff0),
+        ];
+        assert_eq!(
+            groups_apart(&processes, own.id() as i32),
+            [apart.id() as i32].into()
+        );
+        for child in [&mut own, &mut apart] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     #[cfg(windows)]
