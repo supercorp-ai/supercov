@@ -22324,6 +22324,162 @@ fn a_strong_pass_split_across_runs_merges_and_is_kept_after_an_edit() {
     assert_eq!(again["summary"]["ran"], 0, "{again}");
 }
 
+/// A split strong pass continued in a second round on the same commit: each
+/// job restores the first round's runs and runs `supercov mutants --shard
+/// k/n -- <command>`. Each job measures a run of its own, keeping the first
+/// round's verdicts, rather than saving into the latest restored run, a copy
+/// of which every job held: those copies shared one id and could not be
+/// merged. The last job's `supercov merge` takes the second round's runs,
+/// keeps the union of their verdicts, a kill over a survival where they
+/// differ, and says how many came from each. A run named twice is refused,
+/// saying why and what to do.
+#[cfg(unix)]
+#[test]
+fn a_continuation_round_of_a_split_pass_merges_each_job_s_run() {
+    let project = vitest_mutants_project("strong-shards-continued");
+    project.write(
+        "src/tax.js",
+        "export function tax(sum) {\n  return sum >= 10 ? sum * 0.2 : 0;\n}\n",
+    );
+    project.write(
+        "test/tax.test.js",
+        "import { expect, it } from \"vitest\";\nimport { tax } from \"../src/tax.js\";\nit(\"taxes\", () => expect(tax(20)).toBe(4));\n",
+    );
+    project.commit("tax");
+    let runs = project.root.join(".supercov/runs");
+    let away = project.root.join(".supercov/elsewhere");
+    // A job on a machine of its own: the store holds what it restored and
+    // nothing another job of its round made.
+    let job = |shard: &str, more: &[&str], hidden: Option<&str>| {
+        if let Some(hidden) = hidden {
+            std::fs::rename(runs.join(hidden), &away).unwrap();
+        }
+        let mut args = vec!["mutants", "--shard", shard, "--json"];
+        args.extend(more);
+        args.extend(["--", "npx", "vitest", "run"]);
+        let ran = project.supercov(&args);
+        if let Some(hidden) = hidden {
+            std::fs::rename(&away, runs.join(hidden)).unwrap();
+        }
+        (ran.json(), ran.stderr())
+    };
+    // The first round leaves tax.js's mutants for the next.
+    let (first_a, _) = job("1/2", &["--file", "src/cart.js"], None);
+    let a1 = first_a["run"].as_str().unwrap().to_owned();
+    let (first_b, _) = job("2/2", &["--file", "src/cart.js"], Some(a1.as_str()));
+    let b1 = first_b["run"].as_str().unwrap().to_owned();
+    assert_ne!(a1, b1);
+    let decided = |reply: &serde_json::Value| reply["summary"]["ran"].as_u64().unwrap();
+    assert!(
+        decided(&first_a) > 0 && decided(&first_b) > 0,
+        "{first_a}\n{first_b}"
+    );
+
+    // A plan writes nothing, and reads the latest run as it is.
+    let plan = project.supercov(&[
+        "mutants", "--shard", "1/2", "--plan", "--", "npx", "vitest", "run",
+    ]);
+    assert_eq!(plan.code(), 0, "{}", plan.stderr());
+    assert!(
+        !plan.stderr().contains("measuring first"),
+        "{}",
+        plan.stderr()
+    );
+    assert_eq!(project.latest(), b1);
+
+    // The second round, on the unchanged checkout, with both runs restored:
+    // each job measures its own run and keeps both shards' verdicts.
+    let (second_a, said) = job("1/2", &[], None);
+    assert!(
+        said.contains("measuring first (a shard saves its verdicts into a run of its own, which the last job merges with the other shards' runs): npx vitest run"),
+        "{said}"
+    );
+    let a2 = second_a["run"].as_str().unwrap().to_owned();
+    let (second_b, _) = job("2/2", &[], Some(a2.as_str()));
+    let b2 = second_b["run"].as_str().unwrap().to_owned();
+    let restored = [a1.as_str(), b1.as_str()];
+    assert!(
+        a2 != b2 && !restored.contains(&a2.as_str()) && !restored.contains(&b2.as_str()),
+        "{a1} {b1} {a2} {b2}"
+    );
+    let carried = |reply: &serde_json::Value| reply["carried"]["mutants"].as_u64().unwrap();
+    for reply in [&second_a, &second_b] {
+        assert_eq!(
+            reply["carried"]["from"],
+            serde_json::json!([b1, a1]),
+            "{reply}"
+        );
+        assert_eq!(
+            carried(reply),
+            decided(&first_a) + decided(&first_b),
+            "{reply}"
+        );
+    }
+    assert!(
+        decided(&second_a) > 0 && decided(&second_b) > 0,
+        "{second_a}\n{second_b}"
+    );
+
+    // The two jobs' runs disagree on a verdict both kept from the first
+    // round: the first run the merge reads let it survive, the other
+    // killed it.
+    let verdicts_of = |run: &str| format!(".supercov/runs/{run}/strong-mutation.json");
+    let mut of_b2 =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&b2))).unwrap();
+    let mut of_a2 =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&a2))).unwrap();
+    let contested = of_b2["mutants"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(id, verdict)| {
+            id.starts_with("src/cart.js:")
+                && verdict["status"] == "killed"
+                && of_a2["mutants"][id.as_str()] == **verdict
+        })
+        .map(|(id, _)| id.clone())
+        .expect("a kill both jobs kept from the first round");
+    of_b2["mutants"][&contested]["status"] = serde_json::json!("survived");
+    project.write(&verdicts_of(&b2), &of_b2.to_string());
+    of_a2["mutants"][&contested]["status"] = serde_json::json!("killed");
+    project.write(&verdicts_of(&a2), &of_a2.to_string());
+
+    // The last job: the second round's runs replace the first's, and the
+    // merge keeps every verdict of both.
+    let merged = project.supercov(&["merge"]).succeeds();
+    contains_all(&merged, &["merging 2 runs", &a2, &b2]);
+    let merged_id = project.latest();
+    let kept =
+        serde_json::from_str::<serde_json::Value>(&project.read(&verdicts_of(&merged_id))).unwrap();
+    let kept = kept["mutants"].as_object().unwrap();
+    assert_eq!(kept[&contested]["status"], "killed", "{merged}");
+    let total = kept.len();
+    // Each run counts what was taken from it: b2, read first, the first
+    // round's verdicts and its share, a2 its share and the contested kill.
+    let from_b2 = carried(&second_b) - 1 + decided(&second_b);
+    let from_a2 = decided(&second_a) + 1;
+    let planned = total as u64 - from_b2 - from_a2;
+    assert!(
+        merged.contains(&format!(
+            "[supercov] {total} strong verdict(s) kept from runs {b2}, {a2}: {from_b2} from {b2}, {from_a2} from {a2}, {planned} the merged run's plan decides\n"
+        )),
+        "{merged}"
+    );
+    let left = project
+        .supercov(&["runs", "latest", "mutants", "test", "--plan", "--json"])
+        .json();
+    assert_eq!(left["summary"]["toRun"], 0, "{left}");
+
+    // Copies of one run cannot be merged: said, with what to do instead.
+    let twice = project.supercov(&["merge", &b2, &b2]).exits(2);
+    assert!(
+        twice.contains(&format!(
+            "Each merged run must be unique: {b2} is named more than once. Copies of one run"
+        )) && twice.contains("Run that round again and merge its jobs' runs"),
+        "{twice}"
+    );
+}
+
 /// A Vitest project like `mutants_project`'s, with the repository's
 /// node_modules.
 #[cfg(unix)]
@@ -25253,12 +25409,12 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
         &tax_pass,
         &[(
             "SUPERCOV_TEST_FAULT",
-            "fs.write#mutants_test_command.rs:1619",
+            "fs.write#mutants_test_command.rs:1627",
         )],
     );
     assert_eq!(unwritten.code(), 1, "{}", unwritten.stderr());
     assert!(
-        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1619"),
+        fired_at(&unwritten.stderr(), "mutants_test_command.rs:1627"),
         "{}",
         unwritten.stderr()
     );
@@ -25506,7 +25662,7 @@ fn mutants_test_narrows_shares_and_gates_what_it_asks_about() {
     let unmeasured = project
         .supercov_with(
             &["mutants", "--json"],
-            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:346")],
+            &[("SUPERCOV_TEST_FAULT", "spawn#mutants_test_command.rs:354")],
         )
         .exits(2);
     assert!(

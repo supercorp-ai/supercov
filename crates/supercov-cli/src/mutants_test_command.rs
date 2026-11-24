@@ -245,13 +245,14 @@ for Go and mutant for Ruby), runs each against only the tests that run its
 code, and saves the verdicts (killed, survived, timeout) into the run.
 It reads the latest run, and measures one first, with the latest run's test
 command or the one after --, when there is none, the checkout changed since,
-or it is a plain run (supercov -- <tests>), which does nothing for mutants
-and costs nothing more for them. Its own run records the values the mutants'
-expressions take, which spares the strong pass the tests that cannot tell a
-mutant apart; while the checkout is unchanged, the next supercov mutants
-reads that run again. After an edit, a mutant keeps its verdict where
-neither its file nor any test that could kill it changed, and could reach
-nothing that changed.
+it is a plain run (supercov -- <tests>), which does nothing for mutants
+and costs nothing more for them, or --shard is given: a shard saves its
+verdicts into a run of its own, never one restored from another job. Its
+own run records the values the mutants' expressions take, which spares the
+strong pass the tests that cannot tell a mutant apart; while the checkout is
+unchanged, the next supercov mutants reads that run again. After an edit, a
+mutant keeps its verdict where neither its file nor any test that could kill
+it changed, and could reach nothing that changed.
 
 Options are those of `supercov runs <run-id> mutants test`; the ones asked
 most:
@@ -311,7 +312,12 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
         && latest.as_ref().is_some_and(|run| {
             supercov_engine::strong_plan::run_recorded_mutant_values(&run.evidence_path)
         });
-    if !valued {
+    // A shard's verdicts go into a run of its own. On an unchanged checkout
+    // the latest run can be one restored from an earlier round, and every
+    // job of this round would save into its own copy of it: copies of one
+    // run share its id, and no merge can add them up.
+    let own_run = options.shard.is_some() && !options.plan;
+    if !valued || own_run {
         let Some(command) = given
             .clone()
             .or_else(|| latest.as_ref().map(|run| run.metadata.command.clone()))
@@ -328,8 +334,10 @@ pub fn mutants_command(args: Vec<String>) -> ExitCode {
                 "no run yet"
             } else if stale {
                 "the checkout changed since the latest run"
-            } else {
+            } else if !valued {
                 "the latest run recorded no values for its mutants"
+            } else {
+                "a shard saves its verdicts into a run of its own, which the last job merges with the other shards' runs"
             },
             command.join(" ")
         );

@@ -104,7 +104,10 @@ summary gives the mutation score, every verdict counted, and ends with the
 mutants the tests let survive.
 
 - **Unchanged checkout.** The next `supercov mutants` reads the same run again
-  and runs nothing it already decided.
+  and runs nothing it already decided. With `--shard` it measures a run of its
+  own all the same, as after an edit, so that each job's share is saved into a
+  run no other job writes (see
+  [A pass split across jobs](#a-pass-split-across-jobs)).
 - **After an edit.** It measures the checkout again and keeps an earlier
   verdict for each mutant whose file is as it was and whose candidate tests,
   and their test files, nothing changed could reach, as `runs latest tests
@@ -248,12 +251,20 @@ and stays the same while that code does.
 
 A large application suite's strong pass can be split across machines. Each
 job measures the whole suite and runs its share of the mutants; a last job
-merges the runs, and the merged run holds every job's verdicts:
+merges the runs, and the merged run holds every job's verdicts. A pass whose
+budgets leave mutants undecided goes on in another round, the same workflow run
+again on the same commit, and later commits go on from where the last round
+ended:
 
 ```yaml
 # Each of four jobs (matrix.shard 1 to 4):
 - uses: actions/cache/restore@v4
-  with: { path: .supercov/runs, key: "mutants-${{ github.sha }}", restore-keys: "mutants-" }
+  with:
+    path: .supercov/runs
+    key: mutants-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    restore-keys: |
+      mutants-${{ github.sha }}-
+      mutants-
 - run: npx supercov mutants --shard ${{ matrix.shard }}/4 --budget 2400 -- npm test
 - uses: actions/upload-artifact@v4
   with: { name: "mutants-${{ matrix.shard }}", path: .supercov/runs, include-hidden-files: true }
@@ -262,10 +273,15 @@ merges the runs, and the merged run holds every job's verdicts:
   with: { pattern: "mutants-*", path: .supercov/runs, merge-multiple: true }
 - run: npx supercov merge
 - run: npx supercov runs latest mutants --status survived
-- run: npx supercov runs clean --keep 5 # the four jobs' runs and their merge
+- run: npx supercov runs clean --keep 5 # this round's four runs and their merge
 - uses: actions/cache/save@v4
-  with: { path: .supercov/runs, key: "mutants-${{ github.sha }}" }
+  with:
+    path: .supercov/runs
+    key: mutants-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 ```
+
+The cache key names the round, so each round saves its own; a round restores
+the latest one saved for its commit, or else the latest one saved.
 
 `supercov mutants --shard k/n -- <command>` is `supercov -- <command>` with
 the mutants' probes on, then `runs latest mutants test --shard k/n`, keeping
@@ -294,11 +310,28 @@ merge ([CLI reference](cli.md#combine-shards)).
   that run has no verdict for it, as a unit run merged with an end-to-end run
   can, the mutant is left undecided, and a pass over the merged run runs it.
   Verdicts of another mutant set are not kept, and the merge says whose.
+- **Another round.** On the commit the restored runs measured, each job still
+  measures a run of its own: `supercov mutants --shard` never saves into a run
+  it restored, of which every job of the round holds a copy. It keeps every
+  verdict the restored runs hold (`429 verdict(s) kept from runs r4, r3, r2,
+  r1`), and the shares are of what is left. Each job's run replaces the
+  restored ones of its command, so the last job's `supercov merge` takes this
+  round's runs, whose verdicts hold the earlier rounds'. It says how many
+  verdicts came from each run (`1265 strong verdict(s) kept from runs r8, r7,
+  r6, r5: 802 from r8, 151 from r7, 160 from r6, 140 from r5, 12 the merged
+  run's plan decides`): a verdict two runs hold alike, as every job's copy of
+  the earlier rounds' verdicts, counts for the first run named.
 - **The next pass.** The restored runs lend their verdicts on a later
   commit: each job keeps every verdict nothing changed could move, from
   whichever earlier job's run holds it, and the shares are of what is left.
   Keep the merged run's parts with it: a merged run's `tests affected` is
   answered from them.
+- **Copies of one run.** Up to 4.29.5, `supercov mutants --shard` on a
+  checkout unchanged since the runs it restored saved into the latest of them,
+  so every job of a second round wrote its share into a copy of one run. The
+  copies share an id, one directory of `.supercov/runs` holds one of them, and
+  `supercov merge` refuses a run named more than once, saying so. Run that
+  round again: each job now measures a run of its own.
 
 ### Runners without a driver
 

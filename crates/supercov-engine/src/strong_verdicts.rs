@@ -50,17 +50,23 @@ pub struct Lent<'a> {
 }
 
 /// The merged run's verdicts, by mutant id, from those of the runs merged
-/// (`docs/design/mutants.md`, Merged runs). Only the mutants of the merged
-/// plan have one. A mutant the plan decides takes the plan's verdict. Of the
-/// rest, a kill in any run is a kill (killed before timeout), and a mutant
-/// that did not compile in one did not in any. Survived stands only where
-/// every test of the merged suite that could kill it (its candidates, and
-/// the tests of the files it runs whole) is one a run that let it survive
-/// measured: a test only another run had, which reached it with no verdict
-/// for it, leaves it undecided, and a later pass runs it. An error stands
-/// only where no run holds anything else.
-pub fn merged_verdicts(plan: &StrongPlan, lent: &[Lent<'_>]) -> BTreeMap<String, Verdict> {
+/// (`docs/design/mutants.md`, Merged runs), and how many of them each run
+/// lent: a verdict two runs hold alike is counted for the first, in the
+/// order given. Only the mutants of the merged plan have one. A mutant the
+/// plan decides takes the plan's verdict, lent by no run. Of the rest, a
+/// kill in any run is a kill (killed before timeout), and a mutant that did
+/// not compile in one did not in any. Survived stands only where every test
+/// of the merged suite that could kill it (its candidates, and the tests of
+/// the files it runs whole) is one a run that let it survive measured: a
+/// test only another run had, which reached it with no verdict for it,
+/// leaves it undecided, and a later pass runs it. An error stands only where
+/// no run holds anything else.
+pub fn merged_verdicts(
+    plan: &StrongPlan,
+    lent: &[Lent<'_>],
+) -> (BTreeMap<String, Verdict>, Vec<usize>) {
     let mut merged = BTreeMap::new();
+    let mut taken = vec![0; lent.len()];
     for mutant in &plan.mutants {
         if let Some(verdict) = decided_verdict(mutant) {
             merged.insert(mutant.id.clone(), verdict);
@@ -68,27 +74,28 @@ pub fn merged_verdicts(plan: &StrongPlan, lent: &[Lent<'_>]) -> BTreeMap<String,
         }
         let held = lent
             .iter()
-            .filter(|run| !run.other_bytes.contains(&mutant.file))
-            .filter_map(|run| Some((run, run.verdicts.get(&mutant.id)?)))
+            .enumerate()
+            .filter(|(_, run)| !run.other_bytes.contains(&mutant.file))
+            .filter_map(|(index, run)| Some((index, run, run.verdicts.get(&mutant.id)?)))
             .collect::<Vec<_>>();
         let first_of = |status: &str| {
             held.iter()
-                .find(|(_, verdict)| verdict.status == status)
-                .map(|(_, verdict)| (*verdict).clone())
+                .find(|(.., verdict)| verdict.status == status)
+                .map(|(index, _, verdict)| (*index, (*verdict).clone()))
         };
-        if let Some(definite) = ["killed", "timeout", "unviable"]
+        let survived_in = held
+            .iter()
+            .filter(|(.., verdict)| verdict.status == "survived")
+            .map(|(_, run, _)| run.tests)
+            .collect::<Vec<_>>();
+        let kept = if let Some(definite) = ["killed", "timeout", "unviable"]
             .into_iter()
             .find_map(first_of)
         {
-            merged.insert(mutant.id.clone(), definite);
-            continue;
-        }
-        let survived_in = held
-            .iter()
-            .filter(|(_, verdict)| verdict.status == "survived")
-            .map(|(run, _)| run.tests)
-            .collect::<Vec<_>>();
-        if !survived_in.is_empty() {
+            Some(definite)
+        } else if survived_in.is_empty() {
+            first_of("error")
+        } else {
             let whole = plan.tests.iter().filter(|test| {
                 test.file
                     .as_ref()
@@ -103,14 +110,14 @@ pub fn merged_verdicts(plan: &StrongPlan, lent: &[Lent<'_>]) -> BTreeMap<String,
             let all_measured = could_kill
                 .iter()
                 .all(|test| survived_in.iter().any(|tests| tests.contains(&test.id)));
-            if all_measured {
-                merged.extend(first_of("survived").map(|verdict| (mutant.id.clone(), verdict)));
-            }
-            continue;
+            all_measured.then(|| first_of("survived")).flatten()
+        };
+        if let Some((index, verdict)) = kept {
+            taken[index] += 1;
+            merged.insert(mutant.id.clone(), verdict);
         }
-        merged.extend(first_of("error").map(|verdict| (mutant.id.clone(), verdict)));
     }
-    merged
+    (merged, taken)
 }
 
 #[cfg(test)]
@@ -206,7 +213,7 @@ mod tests {
         let killed = verdicts(&[("survived", "killed")]);
         let tests = ids(&["t1"]);
         let none = BTreeSet::new();
-        let merged = merged_verdicts(
+        let (merged, taken) = merged_verdicts(
             &plan,
             &[Lent {
                 verdicts: &killed,
@@ -222,6 +229,8 @@ mod tests {
                 ("survived", "survived")
             ]
         );
+        // The plan's verdicts are lent by no run.
+        assert_eq!(taken, [0]);
         assert!(merged.values().all(|verdict| verdict.tests == 0
             && verdict.duration_ms == 0
             && verdict.killed_by.is_none()
@@ -232,7 +241,7 @@ mod tests {
         );
         // A plan of no mutant keeps nothing.
         plan.mutants.clear();
-        assert!(merged_verdicts(&plan, &[]).is_empty());
+        assert_eq!(merged_verdicts(&plan, &[]), (BTreeMap::new(), Vec::new()));
     }
 
     /// Two shards of one suite, each with half the verdicts, merge to all
@@ -244,7 +253,7 @@ mod tests {
         let plan = StrongPlan {
             mutant_set: "set".into(),
             tests: vec![test("t1", "t/a.test.js"), test("t2", "t/b.test.js")],
-            mutants: ["a", "b", "c", "d", "e", "f", "g", "h"]
+            mutants: ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
                 .iter()
                 .map(|id| mutant(id, "src/a.js", &[0, 1], &[]))
                 .collect(),
@@ -257,6 +266,7 @@ mod tests {
             ("f", "error"),
             ("g", "unviable"),
             ("gone", "killed"),
+            ("i", "killed"),
         ]);
         let second = verdicts(&[
             ("c", "timeout"),
@@ -264,10 +274,11 @@ mod tests {
             ("e", "survived"),
             ("g", "survived"),
             ("h", "no-coverage"),
+            ("i", "killed"),
         ]);
         let tests = ids(&["t1", "t2"]);
         let none = BTreeSet::new();
-        let merged = merged_verdicts(
+        let (merged, taken) = merged_verdicts(
             &plan,
             &[
                 Lent {
@@ -292,9 +303,14 @@ mod tests {
                 ("e", "survived"),
                 ("f", "error"),
                 ("g", "unviable"),
+                ("i", "killed"),
             ]
         );
         assert_eq!(merged["a"].killed_by.as_deref(), Some("a test"));
+        // Each verdict is counted for the run it was taken from: a, b, f
+        // and g the first's, c, d and e the second's, and i, which both
+        // hold alike, the first's.
+        assert_eq!(taken, [5, 3]);
     }
 
     /// A unit run and an integration run: a survival in one stands only
@@ -339,7 +355,7 @@ mod tests {
         let (unit_tests, e2e_tests) = (ids(&["unit", "fileless"]), ids(&["e2e"]));
         let (same, changed) = (BTreeSet::new(), ids(&["src/b.js"]));
         for plan in [&plan, &no_file] {
-            let merged = merged_verdicts(
+            let (merged, taken) = merged_verdicts(
                 plan,
                 &[
                     Lent {
@@ -362,6 +378,7 @@ mod tests {
                     ("whole-unit", "survived"),
                 ]
             );
+            assert_eq!(taken, [2, 1]);
         }
     }
 

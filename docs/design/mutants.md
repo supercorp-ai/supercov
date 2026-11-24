@@ -597,6 +597,29 @@ verdicts are of a set the merged run does not list are skipped, not refused,
 since their coverage still merges and a pass over the merged run runs what
 they would have lent.
 
+The merge says how many verdicts it took from each run. A verdict is counted
+for the run it was taken from: of the runs that hold the winning status, the
+first in the order the runs are merged (newest first when none is named). A
+verdict the merged plan decides is counted apart. Shards of a later round each
+hold the earlier rounds' verdicts alike, so the first run counts those and
+each other run what its own share added.
+
+A shard never saves into a run another job may also save into. A run's
+verdicts are one file in its directory, keyed by the run's id, so copies of one
+run that several jobs wrote land on one path when their stores are put
+together, and all but one are lost; the merge refuses a run named twice
+rather than guess. `supercov mutants --shard` therefore measures a run of its
+own even where the checkout is unchanged since the latest run (a run restored
+from an earlier round, which every job of the round holds). The new run
+supersedes the restored runs of its command, keeps their verdicts as after an
+edit, and the round's runs merge as shards of one suite. The cost is one
+measured run of the suite per job and round, which a round without restored
+runs pays already. The alternative, merging copies of one run by unioning
+their verdicts, would need every job's copy downloaded apart and named by path,
+and a check that their evidence is the same; the documented flow, which
+downloads every job's store into one, would still lose all but one copy.
+`--plan` writes nothing, and reads the latest run as it is.
+
 ## What stays out
 
 - A weak verdict that compares what the original and the mutated regex
