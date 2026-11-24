@@ -61,15 +61,11 @@ jobs:
         with:
           tool: cargo-nextest@0.9.140
       # What the JVM tests' Maven and Gradle fetch, kept: fetched every run, a
-      # plugin Maven Central did not serve failed a test on 2026-11-05.
-      - uses: actions/cache@v4
+      # plugin Maven Central did not serve failed a test on 2026-11-05. And
+      # their own retries turned up for what is still fetched.
+      - uses: ./.github/actions/jvm-dependencies
         with:
-          path: |
-            ~/.m2/repository
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: jvm-check-${{ runner.os }}-${{ hashFiles('crates/supercov-cli/tests/*.rs', 'crates/supercov-engine/tests/jvm_*.rs') }}
-          restore-keys: jvm-check-${{ runner.os }}-
+          step: restore
       - run: npm ci
       # Formatting and clippy are the same on every Node: the lint job's.
       - run: cargo nextest run --workspace --no-fail-fast --partition hash:${{ matrix.part }}/2
@@ -77,6 +73,12 @@ jobs:
       # the first half.
       - if: matrix.part == 1
         run: cargo test --workspace --doc && npm run check:tooling
+      # What this run fetched, kept for the next, even after a failure; by
+      # one Node of the three, which fetch the same.
+      - if: ${{ !cancelled() && matrix.node == 24 }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -233,6 +235,11 @@ jobs:
           key: apt-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
           prefix: apt-chromium-${{ runner.os }}-${{ runner.arch }}-
       - run: npx playwright install chromium
+      # What the Java scripts' Maven builds fetch, kept; Maven Central refused
+      # a plugin with HTTP 429 on 2026-11-23 and failed a group.
+      - uses: ./.github/actions/jvm-dependencies
+        with:
+          step: restore
       - run: node scripts/engine-integrations-group.mjs ${{ matrix.group }} 4
         env:
           SUPERCOV_REQUIRE_LLVM_TOOLS: "1"
@@ -242,6 +249,10 @@ jobs:
         run: cargo test -p supercov --test cli a_browser_worker_bootstraps_when_playwright_is_launched_by_a_unit_test
         env:
           SUPERCOV_REQUIRE_BROWSER: "1"
+      - if: ${{ !cancelled() }}
+        uses: ./.github/actions/jvm-dependencies
+        with:
+          step: save
       # A failure here ends this commit's other runs too: no waiting on them.
       - if: failure() && github.event_name == 'pull_request'
         uses: ./.github/actions/stop-on-failure
@@ -447,7 +458,9 @@ jobs:
           tool: wasm-bindgen@0.2.129,wasm-pack@0.15.0
       - name: Install wasmtime 49.0.3
         run: |
-          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          curl -q -sSfL --retry 6 --retry-all-errors --retry-delay 10 https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.3/wasmtime-v49.0.3-x86_64-linux.tar.xz -o "$RUNNER_TEMP/wasmtime.tar.xz" \
+            || { echo "SUPERCOV_INFRA_FAILURE=wasmtime could not be fetched" >> "$GITHUB_ENV"; exit 1; }
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-v49.0.3-x86_64-linux" >> "$GITHUB_PATH"
       - run: cargo build -p supercov
       - run: node scripts/rust-wasm-hosts.mjs
