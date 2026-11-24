@@ -698,6 +698,9 @@ pub(crate) struct Evidence<'e> {
     pub branches: &'e [CandidateBranch],
     pub comparisons: &'e [(Span, String)],
     pub probes: &'e [String],
+    /// The read points of module-level mutants, by the mutated span
+    /// (`js_value_reads`).
+    pub reads: &'e HashMap<SpanKey, crate::mutant_list::ReadLink>,
 }
 
 /// The mutants of `file`, each with its links.
@@ -890,6 +893,7 @@ pub(crate) fn link(
                 arrow,
                 equivalent,
                 untestable,
+                reads: evidence.reads.get(&at).cloned(),
                 is_static: false,
                 unplaceable: None,
             }
@@ -1695,6 +1699,7 @@ mod tests {
             branches: &output.branches,
             comparisons: &[],
             probes: &[],
+            reads: &HashMap::default(),
         };
         let decision_of = |linked: &[CandidateMutant], original: &str| {
             linked

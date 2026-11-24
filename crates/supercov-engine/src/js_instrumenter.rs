@@ -4352,7 +4352,15 @@ impl<'a> Visit<'a> for EqualityValueSites {
 }
 
 /// The runtime's probe helpers, in the order a file imports them.
-const PROBE_HELPERS: [&str; 5] = ["compareV2", "arithV2", "assignV2", "methodV2", "valueV2"];
+const PROBE_HELPERS: [&str; 7] = [
+    "compareV2",
+    "arithV2",
+    "assignV2",
+    "methodV2",
+    "valueV2",
+    "trackV2",
+    "resumeV2",
+];
 
 /// The probes' helpers, each named the first time a site of its kind is
 /// probed. Named with the file's other helpers' suffix counter and after
@@ -5863,6 +5871,17 @@ fn instrument_candidate_with_binding(
             ),
         )
     });
+    // The literals module-level mutants are read through, found on the
+    // program as written, where the probes are placed: a run without them
+    // records no read, and its mutants are linked to none.
+    let value_reads = match &mutant_facts {
+        Some((ledger, _)) if probes_enabled() => {
+            crate::js_value_reads::analyze(&parsed.program, source, file, ledger)
+        }
+        _ => crate::js_value_reads::ValueReads::default(),
+    };
+    let top_level_awaits =
+        probes_enabled() && crate::js_value_reads::awaits_at_top_level(&parsed.program);
     let optional_analysis = collect_optional_member_branches(
         &allocator,
         &mut parsed.program,
@@ -6058,6 +6077,9 @@ fn instrument_candidate_with_binding(
     let try_targets = extra.allocate(&extended_analysis.try_targets, |target| {
         vec![target.first_id.clone(), target.second_id.clone()]
     });
+    // The reads' points, last: no other place moves for them.
+    let reads_base = extra.next();
+    extra.ids.extend(value_reads.ids.iter().cloned());
     let statement_targets = point_analysis
         .statement_targets
         .into_iter()
@@ -6275,7 +6297,28 @@ fn instrument_candidate_with_binding(
     if probes_enabled() {
         infection_transformer.visit_program(&mut parsed.program);
     }
-    let probe_helpers = infection_transformer.helpers.named;
+    let mut helpers = infection_transformer.helpers;
+    if !value_reads.nodes.is_empty() {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ReadTransformer {
+            ast,
+            file: probe_file_v2.clone(),
+            helper: &mut name,
+            base: reads_base,
+            nodes: &value_reads.nodes,
+            done: HashSet::default(),
+        }
+        .visit_program(&mut parsed.program);
+    }
+    if top_level_awaits {
+        let mut name = |export| helpers.name(export);
+        crate::js_value_reads::ResumeTransformer {
+            ast,
+            helper: &mut name,
+        }
+        .visit_program(&mut parsed.program);
+    }
+    let probe_helpers = helpers.named;
     let mutants = mutant_facts.map_or_else(Vec::new, |(ledger, facts)| {
         crate::js_mutant_links::link(
             file,
@@ -6288,6 +6331,7 @@ fn instrument_candidate_with_binding(
                 branches: &branches,
                 comparisons: &comparison_transformer.placed,
                 probes: &infection_transformer.placed,
+                reads: &value_reads.links,
             },
         )
     });
@@ -6650,6 +6694,7 @@ fn instrument_strong<'a>(
             branches: &[],
             comparisons: &[],
             probes: &[],
+            reads: &HashMap::default(),
         },
     );
     for (mutant, strong) in mutants.iter_mut().zip(placed) {
@@ -12538,7 +12583,7 @@ pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usiz
     (line, column)
 }
 
-fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
+pub(crate) fn stable_id(source: &str, file: &str, kind: &str, span: Span, suffix: &str) -> String {
     let start = utf16_offset(source, span.start as usize);
     let end = utf16_offset(source, span.end as usize);
     let digest = Sha256::digest(format!("{file}:{kind}:{start}:{end}:{suffix}").as_bytes());

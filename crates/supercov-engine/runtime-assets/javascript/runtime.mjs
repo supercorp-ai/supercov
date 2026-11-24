@@ -2319,6 +2319,11 @@ function probeDecisionName(file, place) {
 }
 function registerProbeV2(definition) {
   var _a8, _b;
+  // The module registering is loading: see trackV2.
+  try {
+    markModuleLoading();
+  } catch {
+  }
   const pointCount = definition.points;
   const file = {
     key: definition.key,
@@ -2724,6 +2729,171 @@ function valueV2(site, value) {
   } catch {
   }
   return value;
+}
+// Module-level values (docs/design/strong-mutation.md, "Module-level
+// values"). An object or array literal a module's top level makes, holding a
+// module-level mutant, is read through a proxy: each read is a hit of a point
+// of the literal -- one for any read, one for each key a mutant is under --
+// credited as every hit is, to the test whose work read it. A read while a
+// module loads is a hit of the literal's other points, its escapes: what that
+// read took (a copy, a lookup table built from it) outlives the read, and the
+// plan then takes every test that loaded the module, as without the proxies.
+// The state is on the global object, so copies of this runtime in one realm
+// agree on whether a module is loading.
+const valueReadStateKey = Symbol.for("supercov.valueReads");
+const capturedQueueMicrotask = typeof queueMicrotask === "function" ? queueMicrotask : void 0;
+function valueReadState() {
+  let reads = globalThis[valueReadStateKey];
+  if (reads === void 0) {
+    reads = { loading: false, resetQueued: false, targets: /* @__PURE__ */ new WeakMap(), cloneWrapped: false };
+    try {
+      Object.defineProperty(globalThis, valueReadStateKey, { __proto__: null, value: reads, configurable: true });
+    } catch {
+      return reads;
+    }
+  }
+  return reads;
+}
+// A module is loading from its registration until the code that loaded it
+// gives up the thread: module graphs evaluate synchronously, and the first
+// microtask after runs once they are done. A module's top-level await gives
+// it up too, and `resumeV2` marks the module loading again where it resumes.
+function markModuleLoading() {
+  const reads = valueReadState();
+  reads.loading = true;
+  if (reads.resetQueued)
+    return;
+  reads.resetQueued = true;
+  const reset = () => {
+    reads.loading = false;
+    reads.resetQueued = false;
+  };
+  if (capturedQueueMicrotask !== void 0)
+    capturedQueueMicrotask(reset);
+  else
+    Promise.resolve().then(reset);
+}
+function resumeV2(value) {
+  try {
+    markModuleLoading();
+  } catch {
+  }
+  return value;
+}
+// `file`'s points from `base`: any read, any read while loading, then a read
+// and a read while loading for each of `keys`.
+function trackV2(file, base, keys, value) {
+  if (value === null || typeof value !== "object" && typeof value !== "function")
+    return value;
+  let reads;
+  try {
+    reads = valueReadState();
+    wrapStructuredClone(reads);
+  } catch {
+    return value;
+  }
+  const places = /* @__PURE__ */ new Map();
+  for (let place = 0; place < keys.length; place += 1)
+    places.set(keys[place], place);
+  const note = (key) => {
+    try {
+      const place = typeof key === "string" ? places.get(key) : void 0;
+      const loading = reads.loading ? 1 : 0;
+      file.hit(base + loading);
+      if (place !== void 0)
+        file.hit(base + 2 + 2 * place + loading);
+    } catch {
+    }
+  };
+  const proxy = new Proxy(value, {
+    __proto__: null,
+    get(target, key, receiver) {
+      note(key);
+      return Reflect.get(target, key, receiver);
+    },
+    has(target, key) {
+      note(key);
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      note(key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    ownKeys(target) {
+      note(void 0);
+      return Reflect.ownKeys(target);
+    },
+    set(target, key, assigned, receiver) {
+      note(key);
+      return Reflect.set(target, key, assigned, receiver === proxy ? target : receiver);
+    },
+    defineProperty(target, key, descriptor) {
+      note(key);
+      return Reflect.defineProperty(target, key, descriptor);
+    },
+    deleteProperty(target, key) {
+      note(key);
+      return Reflect.deleteProperty(target, key);
+    }
+  });
+  reads.targets.set(proxy, value);
+  return proxy;
+}
+// structuredClone refuses a proxy. A value the program clones, which holds
+// a tracked literal, is cloned as a copy read through it: every value the
+// clone holds is read, as the clone reads it without the proxies.
+function wrapStructuredClone(reads) {
+  if (reads.cloneWrapped)
+    return;
+  reads.cloneWrapped = true;
+  const native = globalThis.structuredClone;
+  if (typeof native !== "function")
+    return;
+  const cloning = function structuredClone(value, options) {
+    try {
+      return arguments.length > 1 ? native(value, options) : native(value);
+    } catch (error) {
+      const copies = /* @__PURE__ */ new Map();
+      let held = false;
+      const copy = (inner) => {
+        if (inner === null || typeof inner !== "object")
+          return inner;
+        if (copies.has(inner))
+          return copies.get(inner);
+        const tracked = reads.targets.has(inner);
+        held || (held = tracked);
+        if (!tracked && !Array.isArray(inner) && Object.getPrototypeOf(inner) !== Object.prototype && !(inner instanceof Map) && !(inner instanceof Set))
+          return inner;
+        if (inner instanceof Map) {
+          const made2 = /* @__PURE__ */ new Map();
+          copies.set(inner, made2);
+          for (const [key, entry] of inner)
+            made2.set(copy(key), copy(entry));
+          return made2;
+        }
+        if (inner instanceof Set) {
+          const made2 = /* @__PURE__ */ new Set();
+          copies.set(inner, made2);
+          for (const entry of inner)
+            made2.add(copy(entry));
+          return made2;
+        }
+        const made = Array.isArray(inner) ? new Array(inner.length) : {};
+        copies.set(inner, made);
+        for (const key of Object.keys(inner))
+          made[key] = copy(inner[key]);
+        return made;
+      };
+      const unwrapped = copy(value);
+      if (!held)
+        throw error;
+      return arguments.length > 1 ? native(unwrapped, options) : native(unwrapped);
+    }
+  };
+  try {
+    Object.defineProperty(globalThis, "structuredClone", { __proto__: null, value: cloning, writable: true, configurable: true, enumerable: false });
+  } catch {
+  }
 }
 // Strong mutation (mutant schemata). A file instrumented in strong mode has
 // every listed mutant behind a switch and reads one record from here when
@@ -3445,6 +3615,8 @@ const directRuntimeApi = {
   assignV2,
   methodV2,
   valueV2,
+  trackV2,
+  resumeV2,
   strongSlot,
   setActiveMutant,
   clearActiveMutant,
@@ -3527,6 +3699,8 @@ export {
   assignV2,
   methodV2,
   valueV2,
+  trackV2,
+  resumeV2,
   strongSlot,
   setActiveMutant,
   clearActiveMutant,

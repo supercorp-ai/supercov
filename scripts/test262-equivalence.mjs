@@ -173,6 +173,8 @@ function runtimePrelude(transformed) {
     assignV2: "function(site,current,value){return value;}",
     methodV2: "function(site,receiver){return receiver;}",
     valueV2: "function(site,value){return value;}",
+    trackV2: "function(file,base,keys,value){return value;}",
+    resumeV2: "function(value){return value;}",
     strongSlot: "function(){return {a:-1,h:function(){}};}",
   };
   if (!importMatch) {

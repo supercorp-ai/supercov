@@ -1422,9 +1422,15 @@ pub fn coverage_test_query(
             decisions: phase.decisions,
         })
         .collect::<Vec<_>>();
+    // A module-level value's reads are the strong plan's, not coverage's.
+    let own_hits = test
+        .hits
+        .iter()
+        .filter(|id| !crate::js_value_reads::is_read_point(id))
+        .collect::<Vec<_>>();
     let totals = CoverageTestTotals {
         lines: test.lines.len(),
-        hits: test.hits.len(),
+        hits: own_hits.len(),
         decisions: test.decisions.len(),
         phases: all_phases.len(),
     };
@@ -1440,19 +1446,17 @@ pub fn coverage_test_query(
         .take(options.limit)
         .cloned()
         .collect::<Vec<_>>();
-    let hits = test
-        .hits
+    let hits = own_hits
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .cloned()
+        .map(|id| (*id).clone())
         .collect::<Vec<_>>();
-    let hit_details = test
-        .hits
+    let hit_details = own_hits
         .iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|id| hit_detail(id, metadata.get(id)))
+        .map(|id| hit_detail(id, metadata.get(*id)))
         .collect::<Vec<_>>();
     let test_decisions = test
         .decisions

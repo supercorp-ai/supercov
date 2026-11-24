@@ -222,6 +222,12 @@ const probeHelpers = {
   valueV2(_site, value) {
     return value;
   },
+  trackV2(_file, _base, _keys, value) {
+    return value;
+  },
+  resumeV2(value) {
+    return value;
+  },
   strongSlot() {
     return { a: -1, h() {} };
   },
@@ -414,6 +420,8 @@ async function runBrowser(name) {
               assignV2(_site, _current, value) { return value; },
               methodV2(_site, receiver) { return receiver; },
               valueV2(_site, value) { return value; },
+              trackV2(_file, _base, _keys, value) { return value; },
+              resumeV2(value) { return value; },
               strongSlot() { return { a: -1, h() {} }; },
               selectShortV2(_file, _first, value) { return value; },
               selectRightV2(_file, _first, value) { return value; },

@@ -134,6 +134,7 @@ type CandidateMutant, written and read = closed {
   arrow?: ArrowLink | null
   equivalent?: StaticNote | null
   untestable?: StaticNote | null
+  reads?: ReadLink | null
   static?: boolean
   unplaceable?: string | null
 }
@@ -551,6 +552,11 @@ type RawTestResult, read = closed {
   server?: [ServerRecord]
   span?: [int; 2] | null
   durationMs?: uint | null
+}
+
+type ReadLink, written and read = closed {
+  read: string
+  escape: string
 }
 
 type RecordedDecision, read = {
